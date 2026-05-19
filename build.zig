@@ -1,5 +1,14 @@
 const std = @import("std");
 
+fn versionFromZon(comptime zon: []const u8) []const u8 {
+    const needle = ".version = \"";
+    const idx = (std.mem.indexOf(u8, zon, needle) orelse
+        @compileError("version field not found in build.zig.zon")) + needle.len;
+    const end = std.mem.indexOfScalarPos(u8, zon, idx, '"') orelse
+        @compileError("version field not terminated in build.zig.zon");
+    return zon[idx..end];
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -17,6 +26,9 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version_string", b.fmt("zidl {s}", .{comptime versionFromZon(@embedFile("build.zig.zon"))}));
+
     const exe = b.addExecutable(.{
         .name = "zidl",
         .root_module = b.createModule(.{
@@ -25,6 +37,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "zidl", .module = mod },
+                .{ .name = "build_options", .module = build_options.createModule() },
             },
         }),
     });

@@ -1,0 +1,26 @@
+# Zig build artifacts
+.zig-cache/
+zig-out/
+
+# OMG specification PDFs (large binaries / reference material)
+specs/
+
+# Editor and tool artifacts
+*.swp
+*.swo
+
+# AI agent files
+CLAUDE.md
+.claude/
+.codex
+.cursorrules
+.cursor/
+.aider*
+.continue/
+.github/copilot-instructions.md
+
+# zidl build and test artifacts
+build-tmp/
+
+# Compiled object files
+*.o
