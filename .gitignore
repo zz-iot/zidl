@@ -11,6 +11,7 @@ specs/
 
 # AI agent files
 CLAUDE.md
+.agents/
 .claude/
 .codex
 .cursorrules
