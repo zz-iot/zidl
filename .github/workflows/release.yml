@@ -1,0 +1,315 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version prefix (semver, e.g. 0.1.0)'
+        required: true
+        type: string
+      dry_run:
+        description: 'Dry run — run tests and build but skip version bump, tag, and release'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  # ── Validate inputs and compute the full version tag ──────────────────────
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    outputs:
+      zig_version: ${{ steps.ver.outputs.zig_version }}
+      full_version: ${{ steps.ver.outputs.full_version }}
+      tag: ${{ steps.ver.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute version tag
+        id: ver
+        run: |
+          ZIG_VER=$(grep 'minimum_zig_version' build.zig.zon | sed 's/.*"\(.*\)".*/\1/')
+          FULL_VERSION="${{ inputs.version }}-zig.${ZIG_VER}"
+          TAG="v${FULL_VERSION}"
+          echo "zig_version=${ZIG_VER}"   >> $GITHUB_OUTPUT
+          echo "full_version=${FULL_VERSION}" >> $GITHUB_OUTPUT
+          echo "tag=${TAG}"               >> $GITHUB_OUTPUT
+          echo "Tag will be: ${TAG}"
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ steps.ver.outputs.zig_version }}
+
+      - name: Verify Zig version matches minimum_zig_version
+        run: |
+          ACTUAL=$(zig version)
+          EXPECTED="${{ steps.ver.outputs.zig_version }}"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "ERROR: runner Zig is ${ACTUAL}, build.zig.zon requires ${EXPECTED}"
+            exit 1
+          fi
+          echo "Zig version verified: ${ACTUAL}"
+
+      - name: Check tag does not already exist
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "${TAG}"; then
+            echo "ERROR: tag ${TAG} already exists on origin"
+            exit 1
+          fi
+
+  # ── Full test suite (same matrix as CI) ───────────────────────────────────
+  test:
+    name: ${{ matrix.name }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+          - name: Linux ARM64
+            os: ubuntu-24.04-arm
+          - name: macOS ARM64
+            os: macos-latest
+          - name: Windows x86_64
+            os: windows-latest
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ needs.prepare.outputs.zig_version }}
+
+      - name: Verify Zig version
+        shell: bash
+        run: |
+          ACTUAL=$(zig version)
+          EXPECTED="${{ needs.prepare.outputs.zig_version }}"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "ERROR: runner Zig is ${ACTUAL}, expected ${EXPECTED}"
+            exit 1
+          fi
+
+      - name: Check formatting
+        if: matrix.os == 'ubuntu-latest'
+        run: zig fmt --check src/ packages/ tools/ test/xrce-microzig/
+
+      - name: Test (main)
+        run: zig build test
+
+      - name: Test (zidl-rt)
+        run: zig build test
+        working-directory: packages/zidl-rt
+
+      - name: Test (zidl-cdr)
+        run: zig build test
+        working-directory: packages/zidl-cdr
+
+      - name: Integration tests
+        run: zig build integration-test
+
+      - name: Interop tests
+        run: zig build interop-test
+
+      - name: Generate XRCE MicroZig fixture
+        if: matrix.os == 'ubuntu-latest'
+        run: zig build run -- -b zig --profile xrce --zig-version 0.15.1 -o test/xrce-microzig/generated test/xrce-microzig/types.idl
+
+      - name: Install Zig 0.15.1
+        if: matrix.os == 'ubuntu-latest'
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.1"
+
+      - name: Test XRCE MicroZig fixture
+        if: matrix.os == 'ubuntu-latest'
+        run: zig build test
+        working-directory: test/xrce-microzig
+
+  # ── Build release artifacts ────────────────────────────────────────────────
+  # Cross-compiling all targets from a single Linux runner is feasible for a
+  # pure text-processing CLI with no platform framework dependencies.
+  # If macOS cross-compilation proves problematic (SDK headers), switch the
+  # macos-aarch64 target to a native macos-latest runner in a separate job.
+  build:
+    name: Build artifacts
+    needs: [prepare, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ needs.prepare.outputs.zig_version }}
+
+      # Bump version files before building so the binary's --version output
+      # matches the release tag. This is a local edit only — the commit happens
+      # in the publish job after artifacts are verified.
+      - name: Apply version bump
+        env:
+          FULL_VERSION: ${{ needs.prepare.outputs.full_version }}
+        run: |
+          for zon in \
+            build.zig.zon \
+            packages/zidl-rt/build.zig.zon \
+            packages/zidl-cdr/build.zig.zon \
+            packages/zidl-xtypes/build.zig.zon
+          do
+            sed -i 's/\.version = "[^"]*"/.version = "'"${FULL_VERSION}"'"/' "$zon"
+          done
+
+      - name: Build binaries
+        run: |
+          zig build -Dtarget=x86_64-linux-musl  -Doptimize=ReleaseSafe --prefix dist/linux-x86_64
+          zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSafe --prefix dist/linux-aarch64
+          zig build -Dtarget=aarch64-macos      -Doptimize=ReleaseSafe --prefix dist/macos-aarch64
+          zig build -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseSafe --prefix dist/windows-x86_64
+
+      - name: Package binaries
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          cd dist
+          tar czf "zidl-${TAG}-linux-x86_64.tar.gz"  -C linux-x86_64/bin  zidl
+          tar czf "zidl-${TAG}-linux-aarch64.tar.gz" -C linux-aarch64/bin zidl
+          tar czf "zidl-${TAG}-macos-aarch64.tar.gz" -C macos-aarch64/bin zidl
+          zip -j  "zidl-${TAG}-windows-x86_64.zip"   windows-x86_64/bin/zidl.exe
+
+      - name: Package zidl-cdr source
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          tar czf "dist/zidl-cdr-${TAG}.tar.gz" \
+            --transform "s|^packages/zidl-cdr|zidl-cdr-${TAG}|" \
+            packages/zidl-cdr/include \
+            packages/zidl-cdr/src \
+            packages/zidl-cdr/build.zig \
+            packages/zidl-cdr/build.zig.zon
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist/zidl-*
+          retention-days: 1
+
+  # ── Version bump, tag, and GitHub release ─────────────────────────────────
+  publish:
+    name: Publish
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.dry_run }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Fetch full history so the changelog git log range works
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist/
+
+      - name: Bump version in build.zig.zon files
+        env:
+          FULL_VERSION: ${{ needs.prepare.outputs.full_version }}
+        run: |
+          for zon in \
+            build.zig.zon \
+            packages/zidl-rt/build.zig.zon \
+            packages/zidl-cdr/build.zig.zon \
+            packages/zidl-xtypes/build.zig.zon
+          do
+            sed -i 's/\.version = "[^"]*"/.version = "'"${FULL_VERSION}"'"/' "$zon"
+          done
+
+      - name: Commit and push version bump
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add \
+            build.zig.zon \
+            packages/zidl-rt/build.zig.zon \
+            packages/zidl-cdr/build.zig.zon \
+            packages/zidl-xtypes/build.zig.zon
+          git commit -m "release: ${TAG}"
+          git push
+
+      - name: Create and push tag
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          git tag "${TAG}"
+          git push origin "${TAG}"
+
+      - name: Generate changelog
+        id: changelog
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            LOG=$(git log "${PREV_TAG}..HEAD~1" --pretty=format:"- %s" --no-merges)
+          else
+            LOG=$(git log HEAD~1 --pretty=format:"- %s" --no-merges)
+          fi
+          {
+            echo "log<<EOF"
+            echo "$LOG"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          ZIG_VERSION: ${{ needs.prepare.outputs.zig_version }}
+          CHANGELOG: ${{ steps.changelog.outputs.log }}
+        run: |
+          gh release create "${TAG}" \
+            --title "${TAG}" \
+            --notes "## Changes
+          ${CHANGELOG}
+
+          ## Zig compatibility
+          Built with and requires Zig \`${ZIG_VERSION}\`.
+
+          ## Using zidl as a Zig package
+          \`\`\`
+          zig fetch --save https://github.com/\${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz
+          \`\`\`" \
+            dist/zidl-*.tar.gz \
+            dist/zidl-*.zip
+
+      - name: Bump to post-release dev version
+        env:
+          FULL_VERSION: ${{ needs.prepare.outputs.full_version }}
+        run: |
+          for zon in \
+            build.zig.zon \
+            packages/zidl-rt/build.zig.zon \
+            packages/zidl-cdr/build.zig.zon \
+            packages/zidl-xtypes/build.zig.zon
+          do
+            sed -i 's/\.version = "[^"]*"/.version = "'"${FULL_VERSION}-dev"'"/' "$zon"
+          done
+          git add \
+            build.zig.zon \
+            packages/zidl-rt/build.zig.zon \
+            packages/zidl-cdr/build.zig.zon \
+            packages/zidl-xtypes/build.zig.zon
+          git commit -m "chore: begin post-${{ needs.prepare.outputs.tag }} development"
+          git push

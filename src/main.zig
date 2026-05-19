@@ -24,8 +24,9 @@
 const std = @import("std");
 const Io = std.Io;
 const zidl = @import("zidl");
+const build_options = @import("build_options");
 
-const version_string = "zidl 0.1.0-dev";
+const version_string = build_options.version_string;
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
