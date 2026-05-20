@@ -1090,35 +1090,8 @@ const CdrGenerator = struct {
                 const member_id: u32 = memberIdAtC(m, idx);
                 const mu: u8 = if (m.annotations.must_understand) 1 else 0;
                 if (m.annotations.is_optional) {
-                    // Optional: wrap in an if + EMHEADER only when value is present.
-                    try self.printI("if (_v->has_{s}) {{\n", .{m.name});
-                    self.indent_depth += 1;
-                    if (lcForCTypeRef(m.type_ref, m.dimensions)) |lc| {
-                        try self.printI("_rc = zidl_cdr_write_emheader(_w, {d}, {d}, {d});\n", .{ member_id, mu, lc });
-                        try self.writeI("if (_rc) return _rc;\n");
-                        const access = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
-                        defer self.alloc.free(access);
-                        if (m.dimensions.len > 0) {
-                            try self.emitWriteArray(m.type_ref, access, m.dimensions, 0);
-                        } else {
-                            try self.emitWriteForTypeRef(m.type_ref, m.name, access);
-                        }
-                    } else {
-                        try self.printI("size_t _em{d}; size_t _es{d};\n", .{ idx, idx });
-                        try self.printI("_rc = zidl_cdr_reserve_emheader(_w, {d}, {d}, &_em{d});\n", .{ member_id, mu, idx });
-                        try self.writeI("if (_rc) return _rc;\n");
-                        try self.printI("_es{d} = _w->len;\n", .{idx});
-                        const access = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
-                        defer self.alloc.free(access);
-                        if (m.dimensions.len > 0) {
-                            try self.emitWriteArray(m.type_ref, access, m.dimensions, 0);
-                        } else {
-                            try self.emitWriteForTypeRef(m.type_ref, m.name, access);
-                        }
-                        try self.printI("zidl_cdr_patch_emheader(_w, _em{d}, _es{d});\n", .{ idx, idx });
-                    }
-                    self.indent_depth -= 1;
-                    try self.writeI("}\n");
+                    // @optional in C is deferred: no has_ field is emitted in the struct.
+                    try self.printI("/* TODO: @optional {s} */\n", .{m.name});
                     continue;
                 }
                 const access = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
@@ -1201,15 +1174,8 @@ const CdrGenerator = struct {
                 try self.printI("case {d}: {{\n", .{member_id});
                 self.indent_depth += 1;
                 if (m.annotations.is_optional) {
-                    // Optional: set presence flag then read value.
-                    try self.printI("_v->has_{s} = 1;\n", .{m.name});
-                    const lval = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
-                    defer self.alloc.free(lval);
-                    if (m.dimensions.len > 0) {
-                        try self.emitReadArray(m.type_ref, m.name, lval, m.dimensions, 0);
-                    } else {
-                        try self.emitReadForTypeRef(m.type_ref, m.name, lval);
-                    }
+                    // @optional in C is deferred: no has_ field is emitted in the struct.
+                    try self.printI("/* TODO: @optional {s} */\n", .{m.name});
                 } else {
                     const lval = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
                     defer self.alloc.free(lval);

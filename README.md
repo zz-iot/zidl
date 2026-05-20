@@ -1,6 +1,6 @@
 # zidl — An OMG IDL Parser and Code Generator
 
-A fully-featured, spec-compliant OMG IDL 4.2 parser and code generator written in Zig.
+A spec-compliant OMG IDL 4.2 parser and code generator written in Zig.
 zidl generates language bindings and type support (CDR serialization, TypeObject/TypeIdentifier)
 for all supported targets.
 
@@ -8,18 +8,17 @@ for all supported targets.
 
 - Parse IDL 4.2 per OMG formal/18-01-05
 - Generate correct output for (in priority order):
-  - Zig — type definitions + CDR serialization + TypeObject/TypeIdentifier (primary target)
-  - C — type definitions + serialization (embedded FFI and standalone use)
-  - C++11 — type definitions + serialization (formal/25-03-03 v1.0, IDL4-native)
-  - Java — type definitions + serialization (formal/21-08-01 v1.0, desktop/server only)
-  - Python 3.10+ — type definitions + inline CDR serialization (no companion runtime package)
-  - C# / .NET — type definitions + inline CDR serialization targeting `netstandard2.1`
-  - Rust — type definitions + CDR serialization via `zidl-rs` (pure mode) or zero-copy FFI into
-    a Zig DDS runtime (zig-ffi mode); `no_std + alloc` compatible
+  - Zig — type definitions + CDR serialization + TypeObject/TypeIdentifier (primary target, implemented)
+  - C — type definitions + serialization (embedded FFI and standalone use, implemented)
+  - C++11 — type definitions + serialization (formal/25-03-03 v1.0, IDL4-native, implemented)
+  - Java — type definitions + serialization (formal/21-08-01 v1.0, desktop/server only, implemented)
+  - Python 3.10+ — planned
+  - C# / .NET — planned
+  - Rust — planned
 - Generate DCPS abstract API from IDL for bootstrapping a Zig DDS runtime (`--generate-interfaces`)
 - Extensible backend interface so new mappings can be added cleanly
 - Hand-written recursive descent parser (no parser generator, no combinator library)
-- Ship companion runtime packages (`zidl-rt`, `zidl-xtypes`, `zidl-cdr`, `zidl-rs`, `zidl-types-rs`)
+- Ship companion runtime packages (`zidl-rt`, `zidl-xtypes`, `zidl-cdr`)
 
 ## Build
 
@@ -45,6 +44,8 @@ zig build -Doptimize=ReleaseFast  # optimised release build
 | `--no-typeobject-support` | Suppress TypeObject/TypeIdentifier output |
 | `--generate-interfaces` | Emit DDS API binding layer for IDL `interface` declarations |
 | `--split-files` | One file per type instead of single output file |
+| `--single-file` | Single monolithic output file (default) |
+| `--type-prefix <pfx>` | Prefix prepended to all generated type names (all backends) |
 | `--pragma-once` | C/C++: `#pragma once` instead of `#ifndef` guards |
 | `--extern-c` | C: wrap header in `extern "C" {}` for C++ inclusion |
 | `--cpp-namespace <ns>` | C++: wrap all output in an outer namespace |

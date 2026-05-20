@@ -50,7 +50,8 @@ const zidl_rt = @import("zidl_rt");   // omitted with --no-typesupport
 | `@optional T` | `?T` | default = `null` |
 | `any` / `Object` / `ValueBase` | `*anyopaque` | |
 | `fixed<D,S>` | `f64` | approximate |
-| `map<K,V>` | `std.ArrayHashMapUnmanaged(K, V, …)` | |
+| `map<K,V>` (non-string key) | `std.AutoArrayHashMapUnmanaged(K, V)` | |
+| `map<string,V>` | `std.StringArrayHashMapUnmanaged(V)` | |
 | Named struct | `T` (direct, by value) | |
 | Named enum | `T` (non-exhaustive Zig enum) | |
 
@@ -297,20 +298,14 @@ See `docs/xtypes_typeobject.md` for the full encoding format.
 
 ---
 
-## `@verbatim` Injection
+## `@verbatim` Injection (not yet implemented)
 
-The Zig backend checks raw annotations on each type declaration for `@verbatim`
-with `language == "zig"` or `language == "*"`, and injects the `text` parameter
-at the appropriate `placement` position:
-
-| `placement` | Position in output |
-|---|---|
-| `BEGIN_FILE` | Before first declaration |
-| `BEFORE_DECLARATION` | Immediately before this type |
-| `BEGIN_DECLARATION` | Inside the type body, before members |
-| `END_DECLARATION` | Inside the type body, after members |
-| `AFTER_DECLARATION` | Immediately after this type |
-| `END_FILE` | After last declaration |
+`@verbatim` annotations are parsed and preserved in the IR as raw annotations
+(accessible via `TypeAnnotations.raw`), but the Zig backend does not yet read
+or emit them. The planned placement positions are `BEGIN_FILE`,
+`BEFORE_DECLARATION`, `BEGIN_DECLARATION`, `END_DECLARATION`,
+`AFTER_DECLARATION`, and `END_FILE`, filtered by `language == "zig"` or
+`language == "*"`.
 
 ---
 

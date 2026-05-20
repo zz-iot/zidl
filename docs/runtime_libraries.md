@@ -291,8 +291,10 @@ int  zidl_cdr_write_emheader(ZidlCdrWriter *w, uint32_t member_id,
 int  zidl_cdr_reserve_emheader(ZidlCdrWriter *w, uint32_t member_id,
                                bool must_understand, size_t *out_nextint_off);
      // reserves 4-byte EMHEADER + 4-byte NEXTINT placeholder
-void zidl_cdr_patch_emheader(ZidlCdrWriter *w, size_t nextint_off);
-     // fills in NEXTINT based on bytes written since reserve
+void zidl_cdr_patch_emheader(ZidlCdrWriter *w, size_t nextint_off,
+                              size_t payload_start);
+     // fills in NEXTINT with (w->len - payload_start); payload_start is the
+     // buffer offset immediately after the NEXTINT placeholder was written
 
 // Conditional DHEADER (XCDR1+XCDR2 combined backends):
 int  zidl_cdr_reserve_dheader_maybe(ZidlCdrWriter *w, size_t *out_offset);
@@ -384,7 +386,7 @@ int zidl_cdr_seek_to(ZidlCdrReader *r, size_t abs_pos);
 
 ### ZidlEmHeader
 
-Used with `@mutable` types (EMHEADER decode — write not yet implemented):
+Populated by `zidl_cdr_read_emheader` when reading `@mutable` types:
 
 ```c
 typedef struct {

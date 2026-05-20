@@ -110,6 +110,11 @@ Every backend receives the same `Options` struct:
 | `jni_library` | `[]const u8` | Java `System.loadLibrary()` name |
 | `profile` | `Profile` | `.full` or `.xrce` |
 | `split_files` | `bool` | One file per type/module vs monolithic |
+| `pragma_once` | `bool` | C/C++: emit `#pragma once` instead of `#ifndef` guards |
+| `extern_c` | `bool` | C: wrap header in `extern "C" {}` for C++ inclusion |
+| `cpp_namespace` | `[]const u8` | C++: outer namespace wrapping all output |
+| `pl_cdr` | `bool` | Zig: generate `serializePlCdr`/`deserializeFromPlCdr` for `@mutable` types |
+| `zig_version` | `ZigVersion` | Zig backend output compatibility: `.@"0.16.0"` or `.@"0.15.1"` |
 
 ---
 
@@ -135,10 +140,11 @@ Backends read the typed fields; they never see these as `RawAnnotation`:
 ### Raw Annotations
 
 Everything else is preserved as `RawAnnotation` in the appropriate `raw` slice.
-Backends inspect raw annotations by name:
+Backends can inspect raw annotations by name. No shipped backend currently does so,
+but the intended pattern (e.g. for a future `@verbatim` implementation) is:
 
 ```zig
-// Example: handling @verbatim in a backend
+// Planned pattern: handling @verbatim in a backend
 for (type_decl_annotations.raw) |ann| {
     if (std.mem.eql(u8, ann.name, "verbatim")) {
         var lang: []const u8 = "*";
@@ -179,7 +185,10 @@ when `--profile xrce` is set. It enforces:
 
 - All structs/unions must be `@final`.
 - All sequences must be bounded (`sequence<T, N>`).
+- All strings must be bounded (`string<N>`).
 - No `map<K,V>` members.
+- No `@optional` members.
+- No `wstring` members.
 
 Backends themselves do not need to re-validate. They may read `opts.profile`
 to suppress features unavailable in XRCE (e.g. DHEADER emission, TypeObject).

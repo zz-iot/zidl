@@ -85,7 +85,7 @@ inline int MyStruct_compute_key_hash(const MyStruct &v, uint8_t hash[16]) { ... 
 } // namespace MyModule
 ```
 
-Use `--pragma-once` to emit `#pragma once` (the default) or omit it for `#ifndef` guards.
+Use `--pragma-once` to emit `#pragma once` instead of the default `#ifndef` guards.
 Use `--cpp-namespace <ns>` to wrap all output in an outer namespace.
 
 ---
@@ -121,19 +121,14 @@ int Foo_compute_key_hash(const Foo &v, uint8_t hash[16]);
 
 ---
 
-## `@verbatim` Injection
+## `@verbatim` Injection (not yet implemented)
 
-The C++ backend honors `@verbatim` annotations with `language = "c++"` or `language = "*"`
-at the following placement positions:
-
-| Placement | Where injected |
-|---|---|
-| `BEGIN_FILE` | Before all declarations |
-| `BEFORE_DECLARATION` | Before the type declaration |
-| `BEGIN_DECLARATION` | Inside the type (before first member) |
-| `END_DECLARATION` | Inside the type (after last member) |
-| `AFTER_DECLARATION` | After the type declaration |
-| `END_FILE` | After all declarations |
+`@verbatim` annotations are parsed and preserved in the IR as raw annotations
+(accessible via `TypeAnnotations.raw`), but the C++ backend does not yet read
+or emit them. The planned placement positions are `BEGIN_FILE`,
+`BEFORE_DECLARATION`, `BEGIN_DECLARATION`, `END_DECLARATION`,
+`AFTER_DECLARATION`, and `END_FILE`, filtered by `language == "c++"` or
+`language == "*"`.
 
 ---
 
@@ -152,7 +147,7 @@ Add `packages/zidl-cdr/include` to your include paths.
 
 | Option | Effect |
 |---|---|
-| `--pragma-once` | Emit `#pragma once` (default) instead of `#ifndef` guards |
+| `--pragma-once` | Emit `#pragma once` instead of `#ifndef` guards |
 | `--header-guard-prefix <pfx>` | Prefix for `#ifndef` include guards |
 | `--cpp-namespace <ns>` | Wrap all output in an outer namespace |
 | `--export-macro <macro>` | DLL export macro for topic descriptor declarations |

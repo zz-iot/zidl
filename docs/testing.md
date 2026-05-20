@@ -11,7 +11,7 @@ zig build test
 ```
 
 Runs:
-- **Library unit tests** (672): parser, lexer, preprocessor, semantic analysis, IR builder, backend codegen, and backend interface utilities.
+- **Library unit tests** (678): parser, lexer, preprocessor, semantic analysis, IR builder, backend codegen, and backend interface utilities.
 - **CLI unit test** (1): smoke test of the CLI entry point.
 - **Zig integration tests** (8): compile the committed `test/golden/zig/types.zig` against `zidl-rt` and run CDR round-trip and vtable tests.
 - **Golden output comparison**: regenerates all backends into `build-tmp/golden-check/` and compares byte-for-byte against `test/golden/`. Any added, removed, or changed file is a failure.

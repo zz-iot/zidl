@@ -173,4 +173,4 @@ zig build integration-test   # runs all integration tests including Java if java
 |---|---|
 | `bitset` CDR serialization | Emits `// TODO: bitset` — no standard Java CDR mapping defined |
 | `any` / `object` / `value_base` member access | Emits `// TODO: any/object` comment |
-| `@mutable` EMHEADER CDR | Not implemented |
+| PL_CDR (RTPS ParameterList) | Not implemented (Zig `--pl-cdr` only) |

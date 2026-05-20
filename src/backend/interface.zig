@@ -101,9 +101,9 @@ pub const Options = struct {
     /// Empty string (default) adds no extra namespace layer.
     cpp_namespace: []const u8 = "",
     /// Generate additional `serializePlCdr` / `deserializeFromPlCdr` methods
-    /// (Zig) or `Foo_serialize_pl_cdr` / `Foo_deserialize_pl_cdr` functions
-    /// (C/C++) for `@mutable` types.  Enables RTPS ParameterList wire format
-    /// for DDS discovery types.  Requires `no_typesupport == false`.
+    /// for `@mutable` types (Zig backend only; C/C++ backends do not yet emit
+    /// PL_CDR functions).  Enables RTPS ParameterList wire format for DDS
+    /// discovery types.  Requires `no_typesupport == false`.
     pl_cdr: bool = false,
     /// Zig backend only: generated source compatibility target. zidl itself may
     /// run on a newer Zig toolchain while emitting code for MicroZig-era Zig.

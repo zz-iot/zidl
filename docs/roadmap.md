@@ -18,8 +18,10 @@ zidl itself still builds with Zig 0.16.0; the 0.15.1 target is for generated Zig
 `zidl-rt` consumers.
 
 Remaining work:
-1. Add a committed compile fixture that generates XRCE-profile Zig and checks it with the
-   Zig 0.15.1 toolchain.
+1. ~~Add a committed compile fixture that generates XRCE-profile Zig and checks it with the
+   Zig 0.15.1 toolchain.~~ **Done** — `test/xrce-microzig/` exists with a committed
+   `types.idl`, generated `types.zig`, and `test.zig`; not yet wired into `zig build
+   integration-test`.
 2. Split generated Zig runtime assumptions into a full runtime path and a constrained
    XRCE-client path.
 3. Define the no-heap writer/reader surface expected by MicroZig clients; current generated

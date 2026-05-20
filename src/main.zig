@@ -4,7 +4,7 @@
 //!   zidl [options] <file.idl> [<file.idl>…]
 //!
 //! Options:
-//!   -b <lang>     Backend language: c (default), cpp, cpp, java, zig
+//!   -b <lang>     Backend language: c (default), cpp, java, zig
 //!   -o <dir>      Output directory (default: .)
 //!   -I <dir>      Add include search path (repeatable)
 //!   -D <M>[=V]    Define preprocessor macro (repeatable)

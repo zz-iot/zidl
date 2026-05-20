@@ -30,12 +30,15 @@ All four backends generate the same core set of outputs for every IDL input:
 | `@optional` members | C: deferred; C++/Java/Zig: implemented |
 | CDR `@final` (no framing) | Implemented |
 | CDR `@appendable` (DHEADER) | Implemented |
-| CDR `@mutable` (PL_CDR/EMHEADER) | Zig: `--pl-cdr` flag; C/C++: parsed, not yet emitted |
+| CDR `@mutable` (XCDR2 EMHEADER) | Implemented in all backends |
+| CDR `@mutable` (PL_CDR / RTPS ParameterList) | Zig only, via `--pl-cdr` flag |
 | `--generate-interfaces` DCPS binding layer | Zig/C/Java: implemented; C++: TODO stubs |
 | `--split-files` (one file per type) | Implemented |
 
-**TypeObject/TypeIdentifier** (Zig only): `struct`, `enum`, `bitmask` emit MinimalTypeObject
-streams; `union`, `bitset`, `typedef` emit a TK_NONE placeholder (deferred).
+**TypeObject/TypeIdentifier** (Zig only): the encoder supports `struct`, `enum`,
+`union`, `bitmask`, and `bitset`. A generated `pub const type_object` constant is
+currently emitted only inside `struct` declarations; `typedef`/alias remains deferred
+(emits TK_NONE placeholder). See the [TypeObject table](#typeobject--typeidentifier-zig-only) below.
 
 ---
 
@@ -65,12 +68,14 @@ streams; `union`, `bitset`, `typedef` emit a TK_NONE placeholder (deferred).
 | `long double` | `f128` |
 | `fixed<D,S>` | `f64` |
 | `string` (unbounded) | `[]const u8` |
-| `string<N>` (bounded) | `zidl_rt.BoundedString(N)` |
-| `wstring` | `[]const u16` (`u16` literals unsupported — emits comment) |
-| `sequence<T>` | `[]T` |
+| `string<N>` (bounded) | `zidl_rt.BoundedArray(u8, N)` |
+| `wstring` (unbounded) | `[]const u16` (`u16` literals unsupported — emits comment) |
+| `wstring<N>` (bounded) | `zidl_rt.BoundedArray(u16, N)` |
+| `sequence<T>` | `std.ArrayListUnmanaged(T)` |
 | `sequence<T, N>` | `zidl_rt.BoundedArray(T, N)` |
 | `T[N]` | `[N]T` |
-| `map<K,V>` | `std.AutoHashMap(K, V)` |
+| `map<K,V>` (non-string key) | `std.AutoArrayHashMapUnmanaged(K, V)` |
+| `map<string,V>` | `std.StringArrayHashMapUnmanaged(V)` |
 | `@optional T` | `?T` |
 | `enum` | `enum(u32) { ... }` |
 | `bitmask` | `packed struct(UNN) { ... }` |
@@ -84,7 +89,7 @@ streams; `union`, `bitset`, `typedef` emit a TK_NONE placeholder (deferred).
 | Feature | Status |
 |---|---|
 | `wstring` constants | Emits comment — `[]const u16` literals not supported in Zig |
-| `@mutable` EMHEADER CDR | Only via `--pl-cdr` flag; not the default XCDR2 path |
+| PL_CDR (RTPS ParameterList) | Only via `--pl-cdr` flag; distinct from the default XCDR2 EMHEADER path |
 | TypeObject for `union`, `bitset`, `typedef` | Deferred — emits TK_NONE placeholder |
 | Union discriminant `wstring` / `fixed_pt` type | Emits TODO comment |
 | Sequence element read: array-typedef elements | Emits TODO comment (rare case) |
@@ -170,7 +175,7 @@ streams; `union`, `bitset`, `typedef` emit a TK_NONE placeholder (deferred).
 | `long double` | `long double` |
 | `fixed<D,S>` | `double` |
 | `string` (unbounded) | `std::string` |
-| `string<N>` (bounded) | `zidl::BoundedString<N>` |
+| `string<N>` (bounded) | `std::string` (bound enforced at CDR serialize time) |
 | `wstring` | `std::wstring` |
 | `sequence<T>` | `std::vector<T>` |
 | `T[N]` | `std::array<T, N>` |
@@ -236,7 +241,7 @@ streams; `union`, `bitset`, `typedef` emit a TK_NONE placeholder (deferred).
 |---|---|
 | `bitset` CDR serialization | Emits `// TODO: bitset` (no standard Java mapping defined) |
 | `any` / `object` / `value_base` member access | Emits `// TODO: any/object` |
-| `@mutable` EMHEADER CDR | Not implemented (same as C/C++) |
+| PL_CDR (RTPS ParameterList) | Not implemented (Zig `--pl-cdr` only) |
 
 ---
 
@@ -257,17 +262,20 @@ MD5 dependency per language: `std.crypto.hash.Md5` (Zig), `zidl_md5` in `zidl_cd
 
 ## TypeObject / TypeIdentifier (Zig only)
 
-The Zig backend emits MinimalTypeObject XCDR2 LE streams for all types in the IR.
-These are verified against Cyclone DDS 11.0.1.
+The `zig_typeobject.zig` encoder produces MinimalTypeObject XCDR2 LE streams for
+all five IDL types; streams are verified against Cyclone DDS 11.0.1. However, the
+Zig backend (`zig.zig`) only emits a `pub const type_object` field inside generated
+`struct` declarations — `enum`, `union`, `bitmask`, and `bitset` are encoded by the
+encoder but do not yet receive a generated constant in their output types.
 
-| Type | MinimalTypeObject | EquivalenceHash |
-|---|---|---|
-| `struct` | Implemented | Verified against Cyclone DDS |
-| `enum` | Implemented | Verified against Cyclone DDS |
-| `bitmask` | Implemented | Verified against Cyclone DDS |
-| `union` | Deferred (TK_NONE placeholder) | — |
-| `bitset` | Deferred (TK_NONE placeholder) | — |
-| `typedef` / alias | Deferred (TK_NONE placeholder) | — |
+| Type | MinimalTypeObject encoder | `pub const type_object` emitted | EquivalenceHash |
+|---|---|---|---|
+| `struct` | Implemented | Yes | Verified against Cyclone DDS |
+| `enum` | Implemented | No | — |
+| `bitmask` | Implemented | No | — |
+| `union` | Implemented | No | — |
+| `bitset` | Implemented | No | — |
+| `typedef` / alias | Deferred (TK_NONE placeholder) | No | — |
 
 **EquivalenceHash** (`[14]u8`): on-wire DDS-XTypes type identifier used by Cyclone, FastDDS,
 and other DDS implementations.  

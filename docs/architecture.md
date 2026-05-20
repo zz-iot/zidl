@@ -33,8 +33,9 @@ src/ir/                — clean IR: resolved names, merged modules, typed annot
 src/backend/<lang>.zig — code generation
 ```
 
-Multiple input files are processed as a single logical IDL spec: each file is
-preprocessed independently, then the token streams are concatenated before parsing.
+Multiple input files are each processed as an independent compilation unit:
+the full pipeline (preprocess → parse → semantic → IR → backend) runs once per
+file. Types defined in one input file are not visible to another.
 
 ---
 
