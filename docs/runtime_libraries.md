@@ -165,7 +165,7 @@ Bool reads return `error.InvalidData` for any byte other than 0x00 or 0x01.
 ### PlCdrWriter
 
 `PlCdrWriter` wraps `CdrWriter(.xcdr1)` for RTPS PL_CDR (ParameterList CDR, encap `0x0003`).
-Used for `@mutable` types in DDS discovery (SPDP/SEDP). See `--pl-cdr` CLI option.
+Used for `@mutable` types in DDS discovery (SPDP/SEDP). See `--zig-pl-cdr` CLI option.
 
 ```zig
 // Wire format: (pid:u16 LE, len:u16 LE, value:[len]u8, 4-byte aligned)× + PID_SENTINEL
@@ -291,8 +291,10 @@ int  zidl_cdr_write_emheader(ZidlCdrWriter *w, uint32_t member_id,
 int  zidl_cdr_reserve_emheader(ZidlCdrWriter *w, uint32_t member_id,
                                bool must_understand, size_t *out_nextint_off);
      // reserves 4-byte EMHEADER + 4-byte NEXTINT placeholder
-void zidl_cdr_patch_emheader(ZidlCdrWriter *w, size_t nextint_off);
-     // fills in NEXTINT based on bytes written since reserve
+void zidl_cdr_patch_emheader(ZidlCdrWriter *w, size_t nextint_off,
+                              size_t payload_start);
+     // fills in NEXTINT with (w->len - payload_start); payload_start is the
+     // buffer offset immediately after the NEXTINT placeholder was written
 
 // Conditional DHEADER (XCDR1+XCDR2 combined backends):
 int  zidl_cdr_reserve_dheader_maybe(ZidlCdrWriter *w, size_t *out_offset);
@@ -360,7 +362,7 @@ keys at most 16 bytes are zero-padded; longer keys return MD5.
 
 ### PL_CDR support
 
-Added for `--pl-cdr` (`@mutable` RTPS discovery types):
+Added for `--zig-pl-cdr` (`@mutable` RTPS discovery types):
 
 ```c
 ZIDL_ENCAP_PL_CDR_LE   // 0x0003
@@ -384,7 +386,7 @@ int zidl_cdr_seek_to(ZidlCdrReader *r, size_t abs_pos);
 
 ### ZidlEmHeader
 
-Used with `@mutable` types (EMHEADER decode — write not yet implemented):
+Populated by `zidl_cdr_read_emheader` when reading `@mutable` types:
 
 ```c
 typedef struct {

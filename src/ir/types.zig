@@ -80,7 +80,7 @@ pub const MemberAnnotations = struct {
     must_understand: bool = false,
     /// `@pl_repeated` — serialize as one PID entry per element (RTPS repeated-parameter
     /// encoding).  Only valid on `sequence<T>` members inside `@mutable` structs when
-    /// `--pl-cdr` is in effect.  Validated in the IR builder.
+    /// `--zig-pl-cdr` is in effect.  Validated in the IR builder.
     is_pl_repeated: bool = false,
     raw: []const RawAnnotation = &.{},
 };

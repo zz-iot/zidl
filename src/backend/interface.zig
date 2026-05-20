@@ -63,17 +63,19 @@ pub const Options = struct {
     /// Suppress DDS DataWriter / DataReader / TypeSupport output.
     no_typesupport: bool = false,
     /// Suppress XTYPES TypeObject / TypeIdentifier output.
+    /// All backends; currently only the Zig backend emits TypeObjects.
     no_typeobject_support: bool = false,
     /// Default extensibility when no `@extensibility` annotation is present.
     default_extensibility: ir.Extensibility = .final,
-    /// Prefix for C/C++ include-guard macros (e.g. `"DDSC_"` → `"DDSC_FOO_H"`).
+    /// C, C++ backends: prefix for include-guard macros (e.g. `"DDSC_"` → `"DDSC_FOO_H"`).
     header_guard_prefix: []const u8 = "",
     /// Prefix prepended to every generated user-defined type name.
     /// For example `"DDS_"` turns `MyStruct` into `DDS_MyStruct` and the
     /// CDR functions into `DDS_MyStruct_serialize`, etc.
     /// Empty string (default) preserves existing behaviour.
     type_prefix: []const u8 = "",
-    /// Export macro placed before DDS topic descriptors in C/C++.
+    /// C, C++ backends: DLL export macro prepended to CDR function declarations
+    /// (e.g. `"MYLIB_EXPORT"` → `"MYLIB_EXPORT int Foo_serialize(…);"`).
     export_macro: []const u8 = "",
     /// Java: top-level package prefix (e.g. `"com.example"`).
     java_package: []const u8 = "",
@@ -90,9 +92,9 @@ pub const Options = struct {
     /// top-level IDL module (Zig), or one file per top-level named type (Java).
     /// When false (default), a single monolithic output file is generated.
     split_files: bool = false,
-    /// C/C++: use `#pragma once` instead of `#ifndef`/`#define`/`#endif` include guards.
+    /// C, C++ backends: use `#pragma once` instead of `#ifndef`/`#define`/`#endif` include guards.
     pragma_once: bool = false,
-    /// C only: wrap header content in `#ifdef __cplusplus` / `extern "C"` brackets.
+    /// C backend only: wrap header content in `#ifdef __cplusplus` / `extern "C"` brackets.
     /// Lets the generated `.h` be safely included from C++ translation units without
     /// manual wrapping.
     extern_c: bool = false,
@@ -101,9 +103,9 @@ pub const Options = struct {
     /// Empty string (default) adds no extra namespace layer.
     cpp_namespace: []const u8 = "",
     /// Generate additional `serializePlCdr` / `deserializeFromPlCdr` methods
-    /// (Zig) or `Foo_serialize_pl_cdr` / `Foo_deserialize_pl_cdr` functions
-    /// (C/C++) for `@mutable` types.  Enables RTPS ParameterList wire format
-    /// for DDS discovery types.  Requires `no_typesupport == false`.
+    /// for `@mutable` types (Zig backend only; C/C++ backends do not yet emit
+    /// PL_CDR functions).  Enables RTPS ParameterList wire format for DDS
+    /// discovery types.  Requires `no_typesupport == false`.
     pl_cdr: bool = false,
     /// Zig backend only: generated source compatibility target. zidl itself may
     /// run on a newer Zig toolchain while emitting code for MicroZig-era Zig.

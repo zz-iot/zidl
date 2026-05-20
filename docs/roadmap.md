@@ -18,8 +18,10 @@ zidl itself still builds with Zig 0.16.0; the 0.15.1 target is for generated Zig
 `zidl-rt` consumers.
 
 Remaining work:
-1. Add a committed compile fixture that generates XRCE-profile Zig and checks it with the
-   Zig 0.15.1 toolchain.
+1. ~~Add a committed compile fixture that generates XRCE-profile Zig and checks it with the
+   Zig 0.15.1 toolchain.~~ **Done** — `test/xrce-microzig/` exists with a committed
+   `types.idl`, generated `types.zig`, and `test.zig`; not yet wired into `zig build
+   integration-test`.
 2. Split generated Zig runtime assumptions into a full runtime path and a constrained
    XRCE-client path.
 3. Define the no-heap writer/reader surface expected by MicroZig clients; current generated
@@ -30,6 +32,84 @@ Remaining work:
 6. Keep DDS-XRCE agent/broker work separate from zidl unless codegen needs explicit hooks.
    zidl should generate client-side type support; the agent can live in zzdds or a separate
    repository that consumes zidl output.
+
+---
+
+## Known Gaps and Deferred Work
+
+Existing-backend features that have `// TODO` or deferred markers in the code or
+documentation, are not intentionally omitted, and are not yet tracked elsewhere in
+this roadmap. New language backends have their own sections below.
+
+### Semantic analysis / frontend
+
+- **Const type-checking**: The semantic analyser does not validate that a `const`
+  declaration's initializer is compatible with its declared type
+  (e.g. `const long x = "hello"` is silently accepted). Should be caught and
+  reported as a diagnostic.
+- **Union discriminant type validation**: The IR builder does not check that the
+  discriminant type of a `union` is a valid IDL discriminant type (integer, enum, char,
+  boolean). Invalid discriminant types pass through silently.
+
+### C backend
+
+- **`@optional` members**: Deferred. Requires adding a companion `has_NAME` boolean
+  field to every struct that has an optional member — a non-trivial ABI change.
+  Until implemented, `@optional` members emit a `/* TODO: @optional name */` comment
+  in serialize/deserialize functions, and the struct field itself is omitted.
+- **`@optional` key fields**: Blocked on `@optional` support above. Key serialization
+  emits a `/* TODO */` comment for any `@key` member that is also `@optional`.
+
+### C and C++ backends
+
+- **PL_CDR generation**: `--zig-pl-cdr` is parsed and wired through the CLI but neither
+  the C nor C++ backend emits `serializePlCdr` / `deserializeFromPlCdr` functions.
+  This is the RTPS ParameterList wire format used for DDS discovery types.
+- **`--generate-interfaces` complex-type ABI**: `ImplGenerator.emitImplOp` in both
+  backends emits `/* TODO */` stubs for operations with complex IDL types (structs,
+  sequences, etc.) as parameters or return values. The ABI boundary with the DDS
+  runtime has not been decided.
+
+### All backends (annotation support)
+
+- **`@verbatim` injection**: `@verbatim` annotations are parsed and preserved in the IR
+  as `RawAnnotation` entries, but no backend currently reads or acts on them. The
+  intended behaviour is to inject the annotation's `text` at the placement point
+  (`BEGIN_FILE`, `BEFORE_DECLARATION`, etc.) when the `language` field matches the
+  backend's language id or `"*"`. See `docs/backend_interface.md` for the planned
+  pattern.
+
+### Zig backend
+
+- **Union discriminant edge cases**: `wstring` and `fixed_pt` discriminant types emit a
+  `// TODO: unsupported discriminant` comment in `serialize` / `deserialize` bodies.
+- **Sequence element read with array-typedef element**: A rare edge case where a sequence
+  element type resolves to an array typedef emits a `// TODO` comment in the deserialize
+  path.
+
+### Java backend
+
+- **`any` / `object` / `value_base` member access**: Emits a `// TODO: any/object`
+  comment. These IDL constructs are rarely used in modern DDS profiles; implementation
+  priority is low but they are not intentionally excluded.
+
+### TypeObject encoder (Zig only)
+
+- **`typedef` / alias TypeObjects**: The encoder emits a `TK_NONE` placeholder for all
+  typedef and alias declarations.
+- **`map<K,V>` and `fixed_pt` TypeObjects**: The encoder emits a `TK_NONE` placeholder
+  for map key/value types and `fixed_pt` fields.
+- **Generated `pub const type_object` for non-struct types**: The TypeObject encoder
+  handles `enum`, `union`, `bitmask`, and `bitset`, but the Zig backend only emits
+  a `pub const type_object` field inside `struct` declarations. The other four types
+  need the same constant wired in.
+
+### XRCE / MicroZig (step 1a)
+
+- **Wire `test/xrce-microzig/` into `zig build integration-test`**: The fixture
+  (`test/xrce-microzig/`) is committed and self-contained, but the main `build.zig`
+  does not yet invoke it as part of `zig build integration-test`. Blocked on confirming
+  the 0.15.1 toolchain path is available in CI.
 
 ---
 

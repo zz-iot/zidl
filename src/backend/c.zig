@@ -407,14 +407,16 @@ const Generator = struct {
 
     fn emitStructCdrProtos(self: *Generator, c_name: []const u8, s: *const ir.Struct) !void {
         const has_key = structHasKeyC(s);
+        const em = self.opts.export_macro;
+        const sp: []const u8 = if (em.len > 0) " " else "";
         try self.print("#define {s}_has_key {d}\n", .{ c_name, @intFromBool(has_key) });
-        try self.print("int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ c_name, c_name });
-        try self.print("int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ c_name, c_name });
-        try self.print("int {s}_skip(ZidlCdrReader *_r);\n", .{c_name});
+        try self.print("{s}{s}int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, c_name });
+        try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, c_name });
+        try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         if (has_key) {
-            try self.print("int {s}_serialize_key(ZidlCdrWriter *_w, const {s} *_v);\n", .{ c_name, c_name });
-            try self.print("int {s}_deserialize_key(ZidlCdrReader *_r, {s} *_v);\n", .{ c_name, c_name });
-            try self.print("int {s}_compute_key_hash(const {s} *_v, uint8_t _hash[16]);\n", .{ c_name, c_name });
+            try self.print("{s}{s}int {s}_serialize_key(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, c_name });
+            try self.print("{s}{s}int {s}_deserialize_key(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, c_name });
+            try self.print("{s}{s}int {s}_compute_key_hash(const {s} *_v, uint8_t _hash[16]);\n", .{ em, sp, c_name, c_name });
         }
         try self.write("\n");
     }
@@ -443,10 +445,12 @@ const Generator = struct {
     }
 
     fn emitUnionCdrProtos(self: *Generator, c_name: []const u8) !void {
+        const em = self.opts.export_macro;
+        const sp: []const u8 = if (em.len > 0) " " else "";
         try self.print("#define {s}_has_key 0\n", .{c_name});
-        try self.print("int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ c_name, c_name });
-        try self.print("int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ c_name, c_name });
-        try self.print("int {s}_skip(ZidlCdrReader *_r);\n", .{c_name});
+        try self.print("{s}{s}int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, c_name });
+        try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, c_name });
+        try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         try self.write("\n");
     }
 
@@ -1090,35 +1094,8 @@ const CdrGenerator = struct {
                 const member_id: u32 = memberIdAtC(m, idx);
                 const mu: u8 = if (m.annotations.must_understand) 1 else 0;
                 if (m.annotations.is_optional) {
-                    // Optional: wrap in an if + EMHEADER only when value is present.
-                    try self.printI("if (_v->has_{s}) {{\n", .{m.name});
-                    self.indent_depth += 1;
-                    if (lcForCTypeRef(m.type_ref, m.dimensions)) |lc| {
-                        try self.printI("_rc = zidl_cdr_write_emheader(_w, {d}, {d}, {d});\n", .{ member_id, mu, lc });
-                        try self.writeI("if (_rc) return _rc;\n");
-                        const access = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
-                        defer self.alloc.free(access);
-                        if (m.dimensions.len > 0) {
-                            try self.emitWriteArray(m.type_ref, access, m.dimensions, 0);
-                        } else {
-                            try self.emitWriteForTypeRef(m.type_ref, m.name, access);
-                        }
-                    } else {
-                        try self.printI("size_t _em{d}; size_t _es{d};\n", .{ idx, idx });
-                        try self.printI("_rc = zidl_cdr_reserve_emheader(_w, {d}, {d}, &_em{d});\n", .{ member_id, mu, idx });
-                        try self.writeI("if (_rc) return _rc;\n");
-                        try self.printI("_es{d} = _w->len;\n", .{idx});
-                        const access = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
-                        defer self.alloc.free(access);
-                        if (m.dimensions.len > 0) {
-                            try self.emitWriteArray(m.type_ref, access, m.dimensions, 0);
-                        } else {
-                            try self.emitWriteForTypeRef(m.type_ref, m.name, access);
-                        }
-                        try self.printI("zidl_cdr_patch_emheader(_w, _em{d}, _es{d});\n", .{ idx, idx });
-                    }
-                    self.indent_depth -= 1;
-                    try self.writeI("}\n");
+                    // @optional in C is deferred: no has_ field is emitted in the struct.
+                    try self.printI("/* TODO: @optional {s} */\n", .{m.name});
                     continue;
                 }
                 const access = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
@@ -1201,15 +1178,8 @@ const CdrGenerator = struct {
                 try self.printI("case {d}: {{\n", .{member_id});
                 self.indent_depth += 1;
                 if (m.annotations.is_optional) {
-                    // Optional: set presence flag then read value.
-                    try self.printI("_v->has_{s} = 1;\n", .{m.name});
-                    const lval = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
-                    defer self.alloc.free(lval);
-                    if (m.dimensions.len > 0) {
-                        try self.emitReadArray(m.type_ref, m.name, lval, m.dimensions, 0);
-                    } else {
-                        try self.emitReadForTypeRef(m.type_ref, m.name, lval);
-                    }
+                    // @optional in C is deferred: no has_ field is emitted in the struct.
+                    try self.printI("/* TODO: @optional {s} */\n", .{m.name});
                 } else {
                     const lval = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
                     defer self.alloc.free(lval);
@@ -2817,6 +2787,7 @@ fn testGenFullOpts(source: []const u8, stem: []const u8, extra: struct {
     generate_interfaces: bool = false,
     pragma_once: bool = false,
     extern_c: bool = false,
+    export_macro: []const u8 = "",
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
 
@@ -2842,6 +2813,7 @@ fn testGenFullOpts(source: []const u8, stem: []const u8, extra: struct {
         .generate_interfaces = extra.generate_interfaces,
         .pragma_once = extra.pragma_once,
         .extern_c = extra.extern_c,
+        .export_macro = extra.export_macro,
     };
     try generateHeader(alloc, &ir_spec, opts, &out);
 
@@ -3539,6 +3511,23 @@ test "c_backend extern_c: wraps content in extern C brackets" {
     const open_pos = std.mem.indexOf(u8, s, "extern \"C\" {").?;
     const close_pos = std.mem.indexOf(u8, s, "#ifdef __cplusplus\n}\n#endif").?;
     try testing.expect(close_pos > open_pos);
+}
+
+test "c_backend export_macro: prepended to CDR function declarations in header" {
+    var h = try testGenFullOpts("struct Foo { long x; };", "foo", .{ .export_macro = "MY_EXPORT" });
+    defer h.deinit(testing.allocator);
+    const s = h.items;
+    try testing.expect(has(s, "MY_EXPORT int Foo_serialize("));
+    try testing.expect(has(s, "MY_EXPORT int Foo_deserialize("));
+    try testing.expect(has(s, "MY_EXPORT int Foo_skip("));
+}
+
+test "c_backend export_macro: not emitted when empty (default)" {
+    var h = try testGenFullOpts("struct Foo { long x; };", "foo", .{});
+    defer h.deinit(testing.allocator);
+    const s = h.items;
+    try testing.expect(has(s, "int Foo_serialize("));
+    try testing.expect(!has(s, " int Foo_serialize(")); // no leading space from empty macro
 }
 
 test "c_backend pragma_once split: per-type header uses pragma once" {

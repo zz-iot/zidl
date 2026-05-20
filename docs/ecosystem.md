@@ -94,9 +94,12 @@ zidl-internal convention, not transmitted. Useful for out-of-band tooling (type
 registries, schema databases) that needs a stronger identifier than the 14-byte
 EquivalenceHash.
 
-**What's deferred**: TypeObject for `union`, `bitmask`, `bitset` (currently emits
-TK_NONE placeholder); `typedef`/alias TypeObjects; MUTABLE type support in TypeObject
-and CDR serialization. See [`features.md`](features.md).
+**What's deferred**: The `zig_typeobject.zig` encoder handles all five IDL types
+(`struct`, `enum`, `union`, `bitmask`, `bitset`), but the Zig backend only emits a
+`pub const type_object` field inside generated `struct` declarations — `enum`,
+`union`, `bitmask`, and `bitset` are encoded but do not yet get a generated constant.
+`typedef`/alias TypeObjects remain deferred (encoder emits TK_NONE placeholder). See
+[`features.md`](features.md).
 
 ---
 

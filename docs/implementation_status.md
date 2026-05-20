@@ -7,7 +7,7 @@
 > current feature coverage, see [`features.md`](features.md).
 
 Current verification inventory:
-- `zig build test`: 681 tests passed (672 library tests, 1 CLI test, 8 Zig integration tests) plus golden-output comparison.
+- `zig build test`: 687 tests passed (678 library tests, 1 CLI test, 8 Zig integration tests) plus golden-output comparison.
 - `zig build integration-test`: compile-and-run integration for generated C, C++, and Java code.
 - `zig build interop-test`: 10 committed CDR interop vector tests.
 - `packages/zidl-rt`: 61 Zig runtime tests.
@@ -47,7 +47,8 @@ Current verification inventory:
 - Structs: plain `struct` with public member fields, default member initializers.
 - Inheritance: `: public Base`.
 - Sequences: `std::vector<T>`.
-- Strings: `std::string` (unbounded) / `zidl::BoundedString<N>` (bounded).
+- Strings: `std::string` for both unbounded and bounded variants (bound enforced
+  at CDR serialize time; no separate C++ bounded-string type is generated).
 - Enums: `enum class Foo : uint32_t { … }`.
 - Optional members: `std::optional<T>`.
 - Serialize/deserialize declared as free functions `zidl_serialize(w, v)` /
@@ -55,8 +56,9 @@ Current verification inventory:
 - Keyed structs emit C ABI helpers `Foo_serialize_key`, `Foo_deserialize_key`,
   and `Foo_compute_key_hash` using the same canonical PLAIN_CDR2 big-endian key
   hash rule as C.
-- `@verbatim` injection at `BEGIN_FILE`, `BEFORE_DECLARATION`, etc. if
-  `language == "c++"` or `language == "*"`.
+- `@verbatim` annotations are preserved in the IR as raw annotations but are not
+  yet acted on by the C++ backend (planned: injection at `BEGIN_FILE`,
+  `BEFORE_DECLARATION`, etc. filtered by `language == "c++"` or `language == "*"`).
 
 **Tests:** 72.
 
@@ -91,9 +93,9 @@ Keyed structs emit `serializeKey`, `deserializeKey`, `deserializeKeyInto`, and
 `computeKeyHash`. `computeKeyHash` uses `zidl_rt.KeyHashWriter` for canonical
 PLAIN_CDR2 big-endian key serialization and RTPS key-hash finalization.
 
-**Tests:** 102.
+**Tests:** 104.
 
-### PL_CDR (`--pl-cdr`)
+### PL_CDR (`--zig-pl-cdr`)
 
 When `opts.pl_cdr && struct.extensibility == .mutable`, emits additional functions alongside
 the normal XCDR2 serialize/deserialize:
@@ -145,8 +147,9 @@ CLI entry point. Parses argv, drives preprocessor → parser → semantic → IR
 Validates `--profile xrce` before invoking backends.
 
 Key behavior:
-- Multiple input files are processed as a single logical IDL spec (concatenated
-  after independent preprocessing).
+- Multiple input files are each processed as an independent compilation unit.
+  The full pipeline (preprocess → parse → semantic → IR → backend) runs once per
+  file; types defined in one input file are not visible to another.
 - `-E` flag: preprocess only, emit expanded IDL to stdout, exit.
 - Backend selection: `-b c` / `-b cpp` / `-b java` / `-b zig`.
 - `--split-files`: passed through to backend; semantics are backend-specific.
@@ -157,8 +160,10 @@ Key behavior:
 
 ## src/root.zig
 
-Library root for use as a Zig package. Exports: `parse`, `build`, `validate`,
-`findBackendByLanguageId`.
+Library root for use as a Zig package. Re-exports submodules: `ast`, `lexer`,
+`preprocessor`, `parser`, `semantic`, `ir`, `backend`, `test_corpus`. Also
+has a top-level `test` block that calls `refAllDecls` to ensure every submodule's
+test blocks are discovered by `zig build test`.
 
 ---
 
@@ -219,11 +224,11 @@ integration tests run as part of `zig build test`.
 | C backend: `map<K,V>` | Not supported (`error.MapTypeNotSupportedInCBackend`); no DDS vendor generates C maps; banned in XRCE |
 | C backend: `@optional` | Deferred — requires invasive `has_NAME` bool field alongside each optional, breaking ABI |
 | C backend: `@optional` key fields | Deferred with C `@optional`; generated key code emits a TODO comment for this case |
-| C/C++ backends: PL_CDR codegen | `--pl-cdr` flag is parsed and wired but C/C++ backends do not yet emit PL_CDR functions |
+| C/C++ backends: PL_CDR codegen | `--zig-pl-cdr` flag is parsed and wired but C/C++ backends do not yet emit PL_CDR functions |
 | Zig 0.15.1 / MicroZig output | Partially implemented: `--zig-version 0.15.1` is wired and bounded strings/sequences use fixed-capacity `zidl_rt.BoundedArray`; full freestanding/no-heap runtime path remains planned |
 | `--generate-interfaces` C++: complex-type adaptation | `ImplGenerator.emitImplOp` emits `/* TODO */` stubs — ABI boundary must be decided with DDS runtime |
 | Const type-checking | Not implemented (e.g. `const long x = "hello"` is not caught) |
 | Union discriminant type validation | Not implemented |
 | TypeObject for typedef/alias | Deferred |
-| `@mutable` EMHEADER serialization (XCDR2) | Not implemented in any backend (PL_CDR for Zig only, via `--pl-cdr`) |
+| PL_CDR serialization (RTPS ParameterList) | Zig only via `--zig-pl-cdr`; C/C++ backends do not emit PL_CDR functions |
 | value_dcl / component_dcl / home_dcl / template modules | Parsed, silently dropped + warning diagnostic |

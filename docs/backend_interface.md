@@ -100,16 +100,21 @@ Every backend receives the same `Options` struct:
 | `output_dir` | `[]const u8` | Output directory (empty = cwd) |
 | `input_stem` | `[]const u8` | Basename of input file without extension |
 | `no_typesupport` | `bool` | Suppress CDR serialization output |
-| `no_typeobject_support` | `bool` | Suppress TypeObject/TypeIdentifier output |
+| `no_typeobject_support` | `bool` | Suppress TypeObject/TypeIdentifier output (all backends, currently Zig only) |
 | `default_extensibility` | `ir.Extensibility` | Default for unannotated types (`.final`) |
-| `header_guard_prefix` | `[]const u8` | C/C++ include guard prefix |
+| `header_guard_prefix` | `[]const u8` | Include guard prefix (C, C++ backends) — `--c-header-guard-prefix` |
 | `type_prefix` | `[]const u8` | Prefix for all generated type names |
-| `export_macro` | `[]const u8` | DLL export macro for topic descriptors |
+| `export_macro` | `[]const u8` | DLL export macro for function declarations (C, C++ backends) — `--c-export-macro` |
 | `java_package` | `[]const u8` | Java package prefix |
 | `generate_interfaces` | `bool` | Emit DDS DataWriter/DataReader/TypeSupport |
 | `jni_library` | `[]const u8` | Java `System.loadLibrary()` name |
 | `profile` | `Profile` | `.full` or `.xrce` |
 | `split_files` | `bool` | One file per type/module vs monolithic |
+| `pragma_once` | `bool` | Emit `#pragma once` instead of `#ifndef` guards (C, C++ backends) — `--c-pragma-once` |
+| `extern_c` | `bool` | Wrap header in `extern "C" {}` (C backend) — `--c-extern-c` |
+| `cpp_namespace` | `[]const u8` | C++: outer namespace wrapping all output |
+| `pl_cdr` | `bool` | Generate PL_CDR functions for `@mutable` types (Zig backend) — `--zig-pl-cdr` |
+| `zig_version` | `ZigVersion` | Zig backend output compatibility: `.@"0.16.0"` or `.@"0.15.1"` |
 
 ---
 
@@ -135,10 +140,11 @@ Backends read the typed fields; they never see these as `RawAnnotation`:
 ### Raw Annotations
 
 Everything else is preserved as `RawAnnotation` in the appropriate `raw` slice.
-Backends inspect raw annotations by name:
+Backends can inspect raw annotations by name. No shipped backend currently does so,
+but the intended pattern (e.g. for a future `@verbatim` implementation) is:
 
 ```zig
-// Example: handling @verbatim in a backend
+// Planned pattern: handling @verbatim in a backend
 for (type_decl_annotations.raw) |ann| {
     if (std.mem.eql(u8, ann.name, "verbatim")) {
         var lang: []const u8 = "*";
@@ -179,7 +185,10 @@ when `--profile xrce` is set. It enforces:
 
 - All structs/unions must be `@final`.
 - All sequences must be bounded (`sequence<T, N>`).
+- All strings must be bounded (`string<N>`).
 - No `map<K,V>` members.
+- No `@optional` members.
+- No `wstring` members.
 
 Backends themselves do not need to re-validate. They may read `opts.profile`
 to suppress features unavailable in XRCE (e.g. DHEADER emission, TypeObject).
