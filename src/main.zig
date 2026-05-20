@@ -9,12 +9,18 @@
 //!   -I <dir>      Add include search path (repeatable)
 //!   -D <M>[=V]    Define preprocessor macro (repeatable)
 //!   -E            Preprocess only; print expanded IDL, no code gen
-//!   --no-typesupport         Suppress DataWriter/DataReader/TypeSupport
-//!   --no-typeobject-support  Suppress XTYPES TypeObject/TypeIdentifier
-//!   --header-guard-prefix <pfx>  Prefix for C/C++ include guard macros
-//!   --export-macro <macro>       C/C++ DLL export macro for topic descriptors
-//!   --profile <full|xrce>    Target profile (default: full)
-//!   --zig-version <0.16.0|0.15.1>  Zig backend output compatibility target
+//!   --no-typesupport              Suppress CDR serialize/deserialize (all backends)
+//!   --no-typeobject-support       Suppress TypeObject/TypeIdentifier (all backends)
+//!   --c-header-guard-prefix <pfx> Prefix for include guard macros (C, C++ backends)
+//!   --c-export-macro <macro>      DLL export macro for function declarations (C, C++ backends)
+//!   --c-pragma-once               Use #pragma once instead of #ifndef guards (C, C++ backends)
+//!   --c-extern-c                  Wrap header in extern "C" {} (C backend)
+//!   --cpp-namespace <ns>          Wrap output in an outer namespace (C++ backend)
+//!   --java-package <pkg>          Java package prefix (Java backend)
+//!   --java-jni-library <name>     System.loadLibrary() name for JNI impls (Java backend)
+//!   --zig-pl-cdr                  Generate PL_CDR functions for @mutable types (Zig backend)
+//!   --zig-version <0.16.0|0.15.1> Zig output compatibility target (Zig backend)
+//!   --profile <full|xrce>         Target profile (default: full)
 //!   -h / --help   Show this help
 //!   -v / --version  Show version
 //!
@@ -131,10 +137,10 @@ pub fn main(init: std.process.Init) !void {
             try opts.include_paths.append(arena, arg[2..]);
         } else if (std.mem.startsWith(u8, arg, "-D")) {
             try opts.defines.append(arena, arg[2..]);
-        } else if (std.mem.eql(u8, arg, "--header-guard-prefix")) {
+        } else if (std.mem.eql(u8, arg, "--c-header-guard-prefix")) {
             i += 1;
             if (i >= args.len) {
-                try stderr.print("error: --header-guard-prefix requires an argument\n", .{});
+                try stderr.print("error: --c-header-guard-prefix requires an argument\n", .{});
                 try stderr.flush();
                 std.process.exit(1);
             }
@@ -147,10 +153,10 @@ pub fn main(init: std.process.Init) !void {
                 std.process.exit(1);
             }
             opts.type_prefix = args[i];
-        } else if (std.mem.eql(u8, arg, "--export-macro")) {
+        } else if (std.mem.eql(u8, arg, "--c-export-macro")) {
             i += 1;
             if (i >= args.len) {
-                try stderr.print("error: --export-macro requires an argument\n", .{});
+                try stderr.print("error: --c-export-macro requires an argument\n", .{});
                 try stderr.flush();
                 std.process.exit(1);
             }
@@ -184,10 +190,10 @@ pub fn main(init: std.process.Init) !void {
                 try stderr.flush();
                 std.process.exit(1);
             };
-        } else if (std.mem.eql(u8, arg, "--jni-library")) {
+        } else if (std.mem.eql(u8, arg, "--java-jni-library")) {
             i += 1;
             if (i >= args.len) {
-                try stderr.print("error: --jni-library requires an argument\n", .{});
+                try stderr.print("error: --java-jni-library requires an argument\n", .{});
                 try stderr.flush();
                 std.process.exit(1);
             }
@@ -204,11 +210,11 @@ pub fn main(init: std.process.Init) !void {
             opts.split_files = true;
         } else if (std.mem.eql(u8, arg, "--single-file")) {
             opts.split_files = false;
-        } else if (std.mem.eql(u8, arg, "--pl-cdr")) {
+        } else if (std.mem.eql(u8, arg, "--zig-pl-cdr")) {
             opts.pl_cdr = true;
-        } else if (std.mem.eql(u8, arg, "--pragma-once")) {
+        } else if (std.mem.eql(u8, arg, "--c-pragma-once")) {
             opts.pragma_once = true;
-        } else if (std.mem.eql(u8, arg, "--extern-c")) {
+        } else if (std.mem.eql(u8, arg, "--c-extern-c")) {
             opts.extern_c = true;
         } else if (std.mem.eql(u8, arg, "--cpp-namespace")) {
             i += 1;
@@ -486,26 +492,26 @@ fn printUsage(w: *Io.Writer) !void {
         \\  -I <dir>      Add include search path (repeatable)
         \\  -D <M>[=V]    Define preprocessor macro (repeatable)
         \\  -E            Preprocess only; emit expanded IDL
-        \\  --no-typesupport         Suppress DataWriter/DataReader/TypeSupport
-        \\  --no-typeobject-support  Suppress XTYPES TypeObject/TypeIdentifier
-        \\  --generate-interfaces    Emit vtable structs for IDL interface declarations
-        \\  --header-guard-prefix <pfx>  Prefix for include guard macros (C/C++)
-        \\  --type-prefix <pfx>          Prefix for all generated type names (all backends)
-        \\  --export-macro <macro>       C/C++ DLL export macro
-        \\  --profile <full|xrce>    Target profile (default: full)
-        \\                             xrce: XCDR1 only, @final types, bounded sequences
-        \\  --zig-version <ver>      Zig backend output target: 0.16.0 (default) or 0.15.1
-        \\  --jni-library <name>     Java System.loadLibrary() name for JNI impls (default: zidl_dds_jni)
-        \\  --java-package <pkg>     Java package prefix (e.g. com.example)
-        \\  --split-files            Split output: one file per type (C/C++/Java) or per module (Zig)
-        \\  --single-file            Single monolithic output file (default)
-        \\  --pragma-once            C/C++: use #pragma once instead of #ifndef guards
-        \\  --extern-c               C: wrap header in extern "C" {{}} for C++ inclusion
-        \\  --cpp-namespace <ns>     C++: wrap all output in an outer namespace
-        \\  --pl-cdr                 Generate PL_CDR serialize/deserialize for @mutable types
+        \\  --no-typesupport         Suppress CDR serialize/deserialize (all backends)
+        \\  --no-typeobject-support  Suppress TypeObject/TypeIdentifier (all backends, currently Zig only)
+        \\  --generate-interfaces    Emit DDS DataWriter/DataReader binding layer (all backends)
+        \\  --type-prefix <pfx>      Prefix for all generated type names (all backends)
+        \\  --split-files            One file per type (C/C++/Java) or per module (Zig) (all backends)
+        \\  --single-file            Single monolithic output file — default (all backends)
         \\  --default-extensibility <final|appendable|mutable>
         \\                           Default extensibility when no @extensibility present
-        \\                           (default: final, per IDL4 §8.3.1)
+        \\                           (default: final, per IDL4 §8.3.1) (all backends)
+        \\  --profile <full|xrce>    Target profile: full (default) or xrce (all backends)
+        \\                             xrce: XCDR1 only, @final types, bounded sequences/strings
+        \\  --c-header-guard-prefix <pfx>  Prefix for include guard macros (C, C++ backends)
+        \\  --c-export-macro <macro>       DLL export macro for function declarations (C, C++ backends)
+        \\  --c-pragma-once                Use #pragma once instead of #ifndef guards (C, C++ backends)
+        \\  --c-extern-c                   Wrap header in extern "C" {{}} (C backend)
+        \\  --cpp-namespace <ns>           Wrap all output in an outer namespace (C++ backend)
+        \\  --java-package <pkg>           Package prefix, e.g. com.example (Java backend)
+        \\  --java-jni-library <name>      System.loadLibrary() name for JNI impls (Java backend)
+        \\  --zig-pl-cdr                   Generate PL_CDR functions for @mutable types (Zig backend)
+        \\  --zig-version <0.16.0|0.15.1>  Output compatibility target (Zig backend)
         \\  -h / --help   Show this help
         \\  -v / --version  Show version
         \\

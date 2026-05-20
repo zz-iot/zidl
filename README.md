@@ -41,21 +41,21 @@ zig build -Doptimize=ReleaseFast  # optimised release build
 | `-E` | Preprocess only; emit expanded IDL |
 | `--default-extensibility <final\|appendable\|mutable>` | Default extensibility (spec default: `final`) |
 | `--no-typesupport` | Suppress CDR serialization output |
-| `--no-typeobject-support` | Suppress TypeObject/TypeIdentifier output |
+| `--no-typeobject-support` | Suppress TypeObject/TypeIdentifier output (all backends) |
 | `--generate-interfaces` | Emit DDS API binding layer for IDL `interface` declarations |
 | `--split-files` | One file per type instead of single output file |
 | `--single-file` | Single monolithic output file (default) |
 | `--type-prefix <pfx>` | Prefix prepended to all generated type names (all backends) |
-| `--pragma-once` | C/C++: `#pragma once` instead of `#ifndef` guards |
-| `--extern-c` | C: wrap header in `extern "C" {}` for C++ inclusion |
-| `--cpp-namespace <ns>` | C++: wrap all output in an outer namespace |
 | `--profile <full\|xrce>` | `full` (default) or `xrce` (XCDR1+@final+bounded only) |
-| `--java-package <pkg>` | Java package prefix |
-| `--header-guard-prefix <pfx>` | C/C++ include guard prefix |
-| `--export-macro <macro>` | DLL export macro for topic descriptors |
-| `--jni-library <name>` | `System.loadLibrary()` name for Java JNI bridge |
-| `--pl-cdr` | Generate `serializePlCdr`/`deserializeFromPlCdr` for `@mutable` types |
-| `--zig-version <0.16.0\|0.15.1>` | Zig backend output compatibility target |
+| `--c-header-guard-prefix <pfx>` | Include guard prefix (C, C++ backends) |
+| `--c-export-macro <macro>` | DLL export macro for function declarations (C, C++ backends) |
+| `--c-pragma-once` | `#pragma once` instead of `#ifndef` guards (C, C++ backends) |
+| `--c-extern-c` | Wrap header in `extern "C" {}` (C backend) |
+| `--cpp-namespace <ns>` | Wrap all output in an outer namespace (C++ backend) |
+| `--java-package <pkg>` | Java package prefix (Java backend) |
+| `--java-jni-library <name>` | `System.loadLibrary()` name for JNI bridge (Java backend) |
+| `--zig-pl-cdr` | Generate PL_CDR functions for `@mutable` types (Zig backend) |
+| `--zig-version <0.16.0\|0.15.1>` | Output compatibility target (Zig backend) |
 | `--version` / `--help` | Standard |
 
 ## Documentation

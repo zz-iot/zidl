@@ -95,7 +95,7 @@ PLAIN_CDR2 big-endian key serialization and RTPS key-hash finalization.
 
 **Tests:** 104.
 
-### PL_CDR (`--pl-cdr`)
+### PL_CDR (`--zig-pl-cdr`)
 
 When `opts.pl_cdr && struct.extensibility == .mutable`, emits additional functions alongside
 the normal XCDR2 serialize/deserialize:
@@ -224,11 +224,11 @@ integration tests run as part of `zig build test`.
 | C backend: `map<K,V>` | Not supported (`error.MapTypeNotSupportedInCBackend`); no DDS vendor generates C maps; banned in XRCE |
 | C backend: `@optional` | Deferred — requires invasive `has_NAME` bool field alongside each optional, breaking ABI |
 | C backend: `@optional` key fields | Deferred with C `@optional`; generated key code emits a TODO comment for this case |
-| C/C++ backends: PL_CDR codegen | `--pl-cdr` flag is parsed and wired but C/C++ backends do not yet emit PL_CDR functions |
+| C/C++ backends: PL_CDR codegen | `--zig-pl-cdr` flag is parsed and wired but C/C++ backends do not yet emit PL_CDR functions |
 | Zig 0.15.1 / MicroZig output | Partially implemented: `--zig-version 0.15.1` is wired and bounded strings/sequences use fixed-capacity `zidl_rt.BoundedArray`; full freestanding/no-heap runtime path remains planned |
 | `--generate-interfaces` C++: complex-type adaptation | `ImplGenerator.emitImplOp` emits `/* TODO */` stubs — ABI boundary must be decided with DDS runtime |
 | Const type-checking | Not implemented (e.g. `const long x = "hello"` is not caught) |
 | Union discriminant type validation | Not implemented |
 | TypeObject for typedef/alias | Deferred |
-| PL_CDR serialization (RTPS ParameterList) | Zig only via `--pl-cdr`; C/C++ backends do not emit PL_CDR functions |
+| PL_CDR serialization (RTPS ParameterList) | Zig only via `--zig-pl-cdr`; C/C++ backends do not emit PL_CDR functions |
 | value_dcl / component_dcl / home_dcl / template modules | Parsed, silently dropped + warning diagnostic |

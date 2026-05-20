@@ -165,7 +165,7 @@ Bool reads return `error.InvalidData` for any byte other than 0x00 or 0x01.
 ### PlCdrWriter
 
 `PlCdrWriter` wraps `CdrWriter(.xcdr1)` for RTPS PL_CDR (ParameterList CDR, encap `0x0003`).
-Used for `@mutable` types in DDS discovery (SPDP/SEDP). See `--pl-cdr` CLI option.
+Used for `@mutable` types in DDS discovery (SPDP/SEDP). See `--zig-pl-cdr` CLI option.
 
 ```zig
 // Wire format: (pid:u16 LE, len:u16 LE, value:[len]u8, 4-byte aligned)× + PID_SENTINEL
@@ -362,7 +362,7 @@ keys at most 16 bytes are zero-padded; longer keys return MD5.
 
 ### PL_CDR support
 
-Added for `--pl-cdr` (`@mutable` RTPS discovery types):
+Added for `--zig-pl-cdr` (`@mutable` RTPS discovery types):
 
 ```c
 ZIDL_ENCAP_PL_CDR_LE   // 0x0003

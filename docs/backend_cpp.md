@@ -85,8 +85,9 @@ inline int MyStruct_compute_key_hash(const MyStruct &v, uint8_t hash[16]) { ... 
 } // namespace MyModule
 ```
 
-Use `--pragma-once` to emit `#pragma once` instead of the default `#ifndef` guards.
+Use `--c-pragma-once` to emit `#pragma once` instead of the default `#ifndef` guards.
 Use `--cpp-namespace <ns>` to wrap all output in an outer namespace.
+Use `--c-export-macro <MACRO>` to prepend a DLL export macro to all CDR function declarations.
 
 ---
 
@@ -147,10 +148,10 @@ Add `packages/zidl-cdr/include` to your include paths.
 
 | Option | Effect |
 |---|---|
-| `--pragma-once` | Emit `#pragma once` instead of `#ifndef` guards |
-| `--header-guard-prefix <pfx>` | Prefix for `#ifndef` include guards |
+| `--c-pragma-once` | Emit `#pragma once` instead of `#ifndef` guards |
+| `--c-header-guard-prefix <pfx>` | Prefix for `#ifndef` include guards |
 | `--cpp-namespace <ns>` | Wrap all output in an outer namespace |
-| `--export-macro <macro>` | DLL export macro for topic descriptor declarations |
+| `--c-export-macro <macro>` | DLL export macro prepended to CDR function declarations |
 | `--no-typesupport` | Suppress CDR serialize/deserialize output |
 
 ---
@@ -159,6 +160,6 @@ Add `packages/zidl-cdr/include` to your include paths.
 
 | Feature | Status |
 |---|---|
-| `--pl-cdr` (PL_CDR emit) | Flag parsed but C++ backend does not yet emit PL_CDR functions |
+| `--zig-pl-cdr` (PL_CDR emit) | Flag parsed but C++ backend does not emit PL_CDR functions |
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
 | `--generate-interfaces`: complex-type adaptation | `emitImplOp` emits `/* TODO: adapt C++ types */` stubs (ABI boundary not yet decided) |

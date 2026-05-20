@@ -311,14 +311,16 @@ const Generator = struct {
         defer self.alloc.free(cpp_qname);
 
         const has_key = structHasKeyCpp(s);
+        const em = self.opts.export_macro;
+        const sp: []const u8 = if (em.len > 0) " " else "";
         try self.print("#define {s}_has_key {d}\n", .{ c_name, @intFromBool(has_key) });
-        try self.print("int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ c_name, cpp_qname });
-        try self.print("int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ c_name, cpp_qname });
-        try self.print("int {s}_skip(ZidlCdrReader *_r);\n", .{c_name});
+        try self.print("{s}{s}int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
+        try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
+        try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         if (has_key) {
-            try self.print("int {s}_serialize_key(ZidlCdrWriter *_w, const {s} *_v);\n", .{ c_name, cpp_qname });
-            try self.print("int {s}_deserialize_key(ZidlCdrReader *_r, {s} *_v);\n", .{ c_name, cpp_qname });
-            try self.print("int {s}_compute_key_hash(const {s} *_v, uint8_t _hash[16]);\n", .{ c_name, cpp_qname });
+            try self.print("{s}{s}int {s}_serialize_key(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
+            try self.print("{s}{s}int {s}_deserialize_key(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
+            try self.print("{s}{s}int {s}_compute_key_hash(const {s} *_v, uint8_t _hash[16]);\n", .{ em, sp, c_name, cpp_qname });
         }
         try self.write("\n");
     }
@@ -328,8 +330,10 @@ const Generator = struct {
         defer self.alloc.free(c_name);
         const cpp_qname = try std.fmt.allocPrint(self.alloc, "::{s}", .{e.qualified_name});
         defer self.alloc.free(cpp_qname);
-        try self.print("int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ c_name, cpp_qname });
-        try self.print("int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ c_name, cpp_qname });
+        const em = self.opts.export_macro;
+        const sp: []const u8 = if (em.len > 0) " " else "";
+        try self.print("{s}{s}int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
+        try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         try self.write("\n");
     }
 
@@ -338,9 +342,11 @@ const Generator = struct {
         defer self.alloc.free(c_name);
         const cpp_qname = try std.fmt.allocPrint(self.alloc, "::{s}", .{u.qualified_name});
         defer self.alloc.free(cpp_qname);
-        try self.print("int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ c_name, cpp_qname });
-        try self.print("int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ c_name, cpp_qname });
-        try self.print("int {s}_skip(ZidlCdrReader *_r);\n", .{c_name});
+        const em = self.opts.export_macro;
+        const sp: []const u8 = if (em.len > 0) " " else "";
+        try self.print("{s}{s}int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
+        try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
+        try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         try self.write("\n");
     }
 
@@ -452,9 +458,11 @@ const Generator = struct {
             defer self.alloc.free(c_name);
             const cpp_qname = try std.fmt.allocPrint(self.alloc, "::{s}", .{u.qualified_name});
             defer self.alloc.free(cpp_qname);
+            const em = self.opts.export_macro;
+            const sp: []const u8 = if (em.len > 0) " " else "";
             try self.print("#define {s}_has_key 0\n", .{c_name});
-            try self.print("int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ c_name, cpp_qname });
-            try self.print("int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ c_name, cpp_qname });
+            try self.print("{s}{s}int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
+            try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
             try self.write("\n");
         }
     }
@@ -3106,6 +3114,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra: struct {
     generate_interfaces: bool = false,
     pragma_once: bool = false,
     cpp_namespace: []const u8 = "",
+    export_macro: []const u8 = "",
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
     var ast_arena = std.heap.ArenaAllocator.init(alloc);
@@ -3125,6 +3134,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra: struct {
         .generate_interfaces = extra.generate_interfaces,
         .pragma_once = extra.pragma_once,
         .cpp_namespace = extra.cpp_namespace,
+        .export_macro = extra.export_macro,
     };
     try generateHeader(alloc, &ir_spec, opts, &out);
     return out;
@@ -3960,6 +3970,15 @@ test "cpp_backend pragma_once: replaces ifndef/define/endif guard" {
     try testing.expect(!has(s, "#ifndef"));
     try testing.expect(!has(s, "#define FOO_HPP"));
     try testing.expect(!has(s, "#endif"));
+}
+
+test "cpp_backend export_macro: prepended to CDR function declarations in header" {
+    var h = try testGenOpts("struct Foo { long x; };", "foo", .{ .export_macro = "MY_EXPORT" });
+    defer h.deinit(testing.allocator);
+    const s = h.items;
+    try testing.expect(has(s, "MY_EXPORT int Foo_serialize("));
+    try testing.expect(has(s, "MY_EXPORT int Foo_deserialize("));
+    try testing.expect(has(s, "MY_EXPORT int Foo_skip("));
 }
 
 test "cpp_backend cpp_namespace: wraps output in named namespace" {

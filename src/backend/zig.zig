@@ -325,7 +325,7 @@ const Generator = struct {
             try self.emitField(m.name, m.type_ref, m.dimensions, m.annotations.is_optional);
         }
         // Emit serialize fns when full typesupport is requested, or when
-        // --pl-cdr is set (PL_CDR fns are part of the struct, not TypeSupport).
+        // --zig-pl-cdr is set (PL_CDR fns are part of the struct, not TypeSupport).
         if (!self.opts.no_typesupport or self.opts.pl_cdr) {
             try self.emitStructSerializeFns(s);
         }
@@ -1669,7 +1669,7 @@ const Generator = struct {
             try self.write("    }\n");
         }
 
-        // PL_CDR functions (only for @mutable types when --pl-cdr is set)
+        // PL_CDR functions (only for @mutable types when --zig-pl-cdr is set)
         if (mutable and self.opts.pl_cdr) {
             try self.write("\n");
             try self.ind();
@@ -4142,7 +4142,7 @@ test "zig_backend type_prefix: module name not prefixed" {
 
 // ── PL_CDR generation ─────────────────────────────────────────────────────────
 
-test "zig_backend pl_cdr: not emitted without --pl-cdr" {
+test "zig_backend pl_cdr: not emitted without --zig-pl-cdr" {
     var out = try testGenOpts("@mutable struct S { long x; long y; };", "t", .{
         .no_typeobject_support = true,
     });

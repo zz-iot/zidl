@@ -85,10 +85,11 @@ int MyStruct_compute_key_hash(const MyStruct *v, uint8_t hash[16]);
 ```
 
 Include guards use the pattern `#ifndef <PREFIX>_<NAME>_H` where the prefix is
-set with `--header-guard-prefix`. Default: uppercase file name.
+set with `--c-header-guard-prefix`. Default: uppercase file name.
 
-Use `--pragma-once` to emit `#pragma once` instead of `#ifndef` guards.  
-Use `--extern-c` to wrap the header in `extern "C" {}` for C++ inclusion.
+Use `--c-pragma-once` to emit `#pragma once` instead of `#ifndef` guards.  
+Use `--c-extern-c` to wrap the header in `extern "C" {}` for C++ inclusion.  
+Use `--c-export-macro <MACRO>` to prepend a DLL export macro to all CDR function declarations.
 
 ### Source (`types_cdr.c`)
 
@@ -159,10 +160,10 @@ Add `packages/zidl-cdr/include` to your include paths.
 
 | Option | Effect |
 |---|---|
-| `--header-guard-prefix <pfx>` | Prefix for `#ifndef` include guards |
-| `--pragma-once` | Use `#pragma once` instead of `#ifndef` guards |
-| `--extern-c` | Wrap header in `extern "C" {}` |
-| `--export-macro <macro>` | DLL export macro applied to topic descriptor declarations |
+| `--c-header-guard-prefix <pfx>` | Prefix for `#ifndef` include guards |
+| `--c-pragma-once` | Use `#pragma once` instead of `#ifndef` guards |
+| `--c-extern-c` | Wrap header in `extern "C" {}` |
+| `--c-export-macro <macro>` | DLL export macro prepended to CDR function declarations |
 | `--no-typesupport` | Suppress CDR serialize/deserialize output |
 
 ---
@@ -174,6 +175,6 @@ Add `packages/zidl-cdr/include` to your include paths.
 | `map<K,V>` | Not supported — returns `error.MapTypeNotSupportedInCBackend` |
 | `@optional` members | Deferred — emits `/* TODO: @optional name */` comment |
 | `@optional` key fields | Deferred — key functions emit `/* TODO */` for optional key fields |
-| `--pl-cdr` (PL_CDR emit) | Flag parsed but C backend does not yet emit PL_CDR functions |
+| `--zig-pl-cdr` (PL_CDR emit) | Flag parsed but C backend does not emit PL_CDR functions |
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
 | `--generate-interfaces`: complex-type adaptation | `emitImplOp` emits `/* TODO */` stubs |

@@ -407,14 +407,16 @@ const Generator = struct {
 
     fn emitStructCdrProtos(self: *Generator, c_name: []const u8, s: *const ir.Struct) !void {
         const has_key = structHasKeyC(s);
+        const em = self.opts.export_macro;
+        const sp: []const u8 = if (em.len > 0) " " else "";
         try self.print("#define {s}_has_key {d}\n", .{ c_name, @intFromBool(has_key) });
-        try self.print("int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ c_name, c_name });
-        try self.print("int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ c_name, c_name });
-        try self.print("int {s}_skip(ZidlCdrReader *_r);\n", .{c_name});
+        try self.print("{s}{s}int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, c_name });
+        try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, c_name });
+        try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         if (has_key) {
-            try self.print("int {s}_serialize_key(ZidlCdrWriter *_w, const {s} *_v);\n", .{ c_name, c_name });
-            try self.print("int {s}_deserialize_key(ZidlCdrReader *_r, {s} *_v);\n", .{ c_name, c_name });
-            try self.print("int {s}_compute_key_hash(const {s} *_v, uint8_t _hash[16]);\n", .{ c_name, c_name });
+            try self.print("{s}{s}int {s}_serialize_key(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, c_name });
+            try self.print("{s}{s}int {s}_deserialize_key(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, c_name });
+            try self.print("{s}{s}int {s}_compute_key_hash(const {s} *_v, uint8_t _hash[16]);\n", .{ em, sp, c_name, c_name });
         }
         try self.write("\n");
     }
@@ -443,10 +445,12 @@ const Generator = struct {
     }
 
     fn emitUnionCdrProtos(self: *Generator, c_name: []const u8) !void {
+        const em = self.opts.export_macro;
+        const sp: []const u8 = if (em.len > 0) " " else "";
         try self.print("#define {s}_has_key 0\n", .{c_name});
-        try self.print("int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ c_name, c_name });
-        try self.print("int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ c_name, c_name });
-        try self.print("int {s}_skip(ZidlCdrReader *_r);\n", .{c_name});
+        try self.print("{s}{s}int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, c_name });
+        try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, c_name });
+        try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         try self.write("\n");
     }
 
@@ -2783,6 +2787,7 @@ fn testGenFullOpts(source: []const u8, stem: []const u8, extra: struct {
     generate_interfaces: bool = false,
     pragma_once: bool = false,
     extern_c: bool = false,
+    export_macro: []const u8 = "",
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
 
@@ -2808,6 +2813,7 @@ fn testGenFullOpts(source: []const u8, stem: []const u8, extra: struct {
         .generate_interfaces = extra.generate_interfaces,
         .pragma_once = extra.pragma_once,
         .extern_c = extra.extern_c,
+        .export_macro = extra.export_macro,
     };
     try generateHeader(alloc, &ir_spec, opts, &out);
 
@@ -3505,6 +3511,23 @@ test "c_backend extern_c: wraps content in extern C brackets" {
     const open_pos = std.mem.indexOf(u8, s, "extern \"C\" {").?;
     const close_pos = std.mem.indexOf(u8, s, "#ifdef __cplusplus\n}\n#endif").?;
     try testing.expect(close_pos > open_pos);
+}
+
+test "c_backend export_macro: prepended to CDR function declarations in header" {
+    var h = try testGenFullOpts("struct Foo { long x; };", "foo", .{ .export_macro = "MY_EXPORT" });
+    defer h.deinit(testing.allocator);
+    const s = h.items;
+    try testing.expect(has(s, "MY_EXPORT int Foo_serialize("));
+    try testing.expect(has(s, "MY_EXPORT int Foo_deserialize("));
+    try testing.expect(has(s, "MY_EXPORT int Foo_skip("));
+}
+
+test "c_backend export_macro: not emitted when empty (default)" {
+    var h = try testGenFullOpts("struct Foo { long x; };", "foo", .{});
+    defer h.deinit(testing.allocator);
+    const s = h.items;
+    try testing.expect(has(s, "int Foo_serialize("));
+    try testing.expect(!has(s, " int Foo_serialize(")); // no leading space from empty macro
 }
 
 test "c_backend pragma_once split: per-type header uses pragma once" {

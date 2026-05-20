@@ -132,13 +132,13 @@ When `--generate-interfaces` is set, each IDL `interface` declaration produces a
 ```java
 public class FooImpl {
     static {
-        System.loadLibrary("my_dds_lib");   // from --jni-library my_dds_lib
+        System.loadLibrary("my_dds_lib");   // from --java-jni-library my_dds_lib
     }
     // native method declarations
 }
 ```
 
-Pass the library name with `--jni-library <name>`.
+Pass the library name with `--java-jni-library <name>`.
 
 ---
 
@@ -148,7 +148,7 @@ Pass the library name with `--jni-library <name>`.
 |---|---|
 | `--java-package <pkg>` | Package prefix prepended to IDL module path (e.g. `com.example`) |
 | `--split-files` | One `.java` file per top-level type |
-| `--jni-library <name>` | `System.loadLibrary()` name for `--generate-interfaces` JNI bridge |
+| `--java-jni-library <name>` | `System.loadLibrary()` name for `--generate-interfaces` JNI bridge |
 | `--no-typesupport` | Suppress CDR serialize/deserialize output |
 
 ---
@@ -173,4 +173,4 @@ zig build integration-test   # runs all integration tests including Java if java
 |---|---|
 | `bitset` CDR serialization | Emits `// TODO: bitset` — no standard Java CDR mapping defined |
 | `any` / `object` / `value_base` member access | Emits `// TODO: any/object` comment |
-| PL_CDR (RTPS ParameterList) | Not implemented (Zig `--pl-cdr` only) |
+| PL_CDR (RTPS ParameterList) | Not implemented (Zig `--zig-pl-cdr` only) |

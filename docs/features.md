@@ -31,7 +31,7 @@ All four backends generate the same core set of outputs for every IDL input:
 | CDR `@final` (no framing) | Implemented |
 | CDR `@appendable` (DHEADER) | Implemented |
 | CDR `@mutable` (XCDR2 EMHEADER) | Implemented in all backends |
-| CDR `@mutable` (PL_CDR / RTPS ParameterList) | Zig only, via `--pl-cdr` flag |
+| CDR `@mutable` (PL_CDR / RTPS ParameterList) | Zig only, via `--zig-pl-cdr` flag |
 | `--generate-interfaces` DCPS binding layer | Zig/C/Java: implemented; C++: TODO stubs |
 | `--split-files` (one file per type) | Implemented |
 
@@ -89,7 +89,7 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 | Feature | Status |
 |---|---|
 | `wstring` constants | Emits comment — `[]const u16` literals not supported in Zig |
-| PL_CDR (RTPS ParameterList) | Only via `--pl-cdr` flag; distinct from the default XCDR2 EMHEADER path |
+| PL_CDR (RTPS ParameterList) | Only via `--zig-pl-cdr` flag; distinct from the default XCDR2 EMHEADER path |
 | TypeObject for `union`, `bitset`, `typedef` | Deferred — emits TK_NONE placeholder |
 | Union discriminant `wstring` / `fixed_pt` type | Emits TODO comment |
 | Sequence element read: array-typedef elements | Emits TODO comment (rare case) |
@@ -143,7 +143,7 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 | `map<K,V>` | Not supported (`error.MapTypeNotSupportedInCBackend`) |
 | `@optional` members | Deferred — emits `/* TODO */` comment |
 | `@optional` key fields | Deferred — key serialization emits `/* TODO */` |
-| `--pl-cdr` (PL_CDR emit) | Flag parsed but C backend does not yet emit PL_CDR functions |
+| `--zig-pl-cdr` (PL_CDR emit) | Flag parsed but C backend does not emit PL_CDR functions |
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
 | `--generate-interfaces`: complex-type adaptation | `emitImplOp` emits `/* TODO */` stubs |
 
@@ -192,7 +192,7 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 
 | Feature | Status |
 |---|---|
-| `--pl-cdr` (PL_CDR emit) | Flag parsed but C++ backend does not yet emit PL_CDR functions |
+| `--zig-pl-cdr` (PL_CDR emit) | Flag parsed but C++ backend does not emit PL_CDR functions |
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
 | `--generate-interfaces`: complex-type adaptation | `emitImplOp` emits `/* TODO: adapt C++ types */` stubs |
 
@@ -241,7 +241,7 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 |---|---|
 | `bitset` CDR serialization | Emits `// TODO: bitset` (no standard Java mapping defined) |
 | `any` / `object` / `value_base` member access | Emits `// TODO: any/object` |
-| PL_CDR (RTPS ParameterList) | Not implemented (Zig `--pl-cdr` only) |
+| PL_CDR (RTPS ParameterList) | Not implemented (Zig `--zig-pl-cdr` only) |
 
 ---
 
