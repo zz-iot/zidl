@@ -597,6 +597,19 @@ pub const KeyHashWriter = struct {
         try self.writeU16(0);
     }
 
+    /// No-op: key hash spec (RTPS §9.6.4.8) excludes the DHEADER from the
+    /// hash computation even for @appendable types.
+    pub fn reserveDheaderMaybe(self: *KeyHashWriter) !?usize {
+        _ = self;
+        return null;
+    }
+
+    /// No-op counterpart to reserveDheaderMaybe.
+    pub fn patchDheaderMaybe(self: *KeyHashWriter, offset: ?usize) void {
+        _ = self;
+        _ = offset;
+    }
+
     pub fn final(self: *KeyHashWriter) [16]u8 {
         if (self.len <= self.first16.len) return self.first16;
         var digest: [16]u8 = undefined;

@@ -1545,6 +1545,10 @@ const Generator = struct {
             try self.write("\n");
             try self.ind();
             try self.write("    pub fn serializeKey(writer: anytype, value: @This()) !void {\n");
+            if (appendable) {
+                try self.ind();
+                try self.write("        const _dh = try writer.reserveDheaderMaybe();\n");
+            }
             if (s.base) |base| {
                 if (typeDeclHasKey(base)) {
                     const base_zig = try self.qualNameToZig(ir.typeDeclQualifiedName(base));
@@ -1562,6 +1566,10 @@ const Generator = struct {
                 } else {
                     try self.emitWriteForTypeRef(m.type_ref, access, "        ");
                 }
+            }
+            if (appendable) {
+                try self.ind();
+                try self.write("        writer.patchDheaderMaybe(_dh);\n");
             }
             try self.ind();
             try self.write("    }\n");
@@ -3432,6 +3440,19 @@ test "zig_backend: serialize @key member emits serializeKey" {
     try testing.expect(has(s, "pub fn serializeKey(writer: anytype, value: @This()) !void {"));
     // Key field included in serializeKey
     try testing.expect(has(s, "try writer.writeI32(value.id);"));
+    // @final struct: no DHEADER in serializeKey
+    try testing.expect(!has(s, "const _dh = try writer.reserveDheaderMaybe();"));
+}
+
+test "zig_backend: @appendable keyed struct emits DHEADER in serializeKey" {
+    var out = try testGen("@appendable struct Msg { @key long id; string label; };", "msg");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "pub fn serializeKey(writer: anytype, value: @This()) !void {"));
+    // @appendable: serializeKey must bracket key fields with DHEADER so XCDR2
+    // key-only wire payloads are symmetric with deserializeKeyInto.
+    try testing.expect(has(s, "const _dh = try writer.reserveDheaderMaybe();"));
+    try testing.expect(has(s, "writer.patchDheaderMaybe(_dh);"));
 }
 
 test "zig_backend: keyed struct emits deserializeKey and computeKeyHash" {
