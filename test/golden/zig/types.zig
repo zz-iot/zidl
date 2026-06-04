@@ -167,29 +167,6 @@ pub const Sample = struct {
     pub fn deserializeKeyInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {
         _ = allocator;
         out.id = try reader.readU32();
-        _ = try reader.readBool();
-        _ = try reader.readU8();
-        _ = try reader.readI16();
-        _ = try reader.readU16();
-        _ = try reader.readI32();
-        _ = try reader.readU32();
-        _ = try reader.readI64();
-        _ = try reader.readU64();
-        _ = try reader.readF32();
-        _ = try reader.readF64();
-        try reader.skipString();
-        try reader.skipString();
-        {
-            const _n = try reader.readU32();
-            for (0.._n) |_| {
-                _ = try reader.readI32();
-            }
-        }
-        for (0..3) |_| {
-            _ = try reader.readI32();
-        }
-        _ = try reader.readU32();
-        try Point.skip(reader);
     }
 
     pub fn computeKeyHash(value: @This()) [16]u8 {

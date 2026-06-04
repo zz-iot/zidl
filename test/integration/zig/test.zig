@@ -106,6 +106,22 @@ test "roundtrip: Sample deserializeKey from full sample" {
     try testing.expectEqualStrings("", key.str);
     try testing.expectEqual(@as(usize, 0), key.nums.items.len);
     try testing.expectEqual(@as(i32, 0), key.nested.x);
+    // @final structs have no DHEADER bound; deserializeKeyInto reads only key
+    // fields and leaves the non-key tail in the reader.
+}
+
+test "roundtrip: Sample deserializeKey from key-only payload" {
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(testing.allocator);
+
+    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    try writer.writeEncapHeader();
+    try types.Sample.serializeKey(&writer, .{ .id = 0xDEADBEEF });
+
+    var reader = try zidl_rt.CdrReader.init(buf.items);
+    const key = try types.Sample.deserializeKey(&reader, testing.allocator);
+
+    try testing.expectEqual(@as(u32, 0xDEADBEEF), key.id);
     try testing.expectEqual(@as(usize, 0), reader.remaining());
 }
 

@@ -1652,8 +1652,6 @@ const Generator = struct {
                         const out_expr = try std.fmt.allocPrint(self.alloc, "out.{s}", .{m.name});
                         defer self.alloc.free(out_expr);
                         try self.emitReadMember(m, out_expr, "        ");
-                    } else {
-                        try self.emitSkipMember(m, "        ");
                     }
                 }
                 if (appendable) {
@@ -3462,7 +3460,6 @@ test "zig_backend: keyed struct emits deserializeKey and computeKeyHash" {
     try testing.expect(has(s, "pub fn deserializeKey(reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !@This() {"));
     try testing.expect(has(s, "pub fn deserializeKeyInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {"));
     try testing.expect(has(s, "out.id = try reader.readI32();"));
-    try testing.expect(has(s, "try reader.skipString();"));
     try testing.expect(has(s, "pub fn computeKeyHash(value: @This()) [16]u8 {"));
     try testing.expect(has(s, "var _khw = zidl_rt.KeyHashWriter.init();"));
 }
