@@ -59,6 +59,12 @@ pub const ENCAP_CDR1_BE: u16 = 0x0000;
 pub const ENCAP_CDR2_LE: u16 = 0x0007;
 /// XCDR2 big-endian encap ID → header bytes [0x00, 0x06, 0x00, 0x00]
 pub const ENCAP_CDR2_BE: u16 = 0x0006;
+/// XCDR2 Delimited CDR little-endian → header bytes [0x00, 0x09, 0x00, 0x00]
+/// Used by RTI Connext DDS for @appendable types in XCDR2 mode.
+/// Wire format is identical to CDR2_LE: DHEADER present, handled by skipDheaderIfXcdr2.
+pub const ENCAP_DELIMITED_CDR2_LE: u16 = 0x0009;
+/// XCDR2 Delimited CDR big-endian → header bytes [0x00, 0x08, 0x00, 0x00]
+pub const ENCAP_DELIMITED_CDR2_BE: u16 = 0x0008;
 /// PL_CDR (XCDR1 ParameterList) little-endian → header bytes [0x00, 0x03, 0x00, 0x00]
 pub const ENCAP_PL_CDR_LE: u16 = 0x0003;
 /// PL_CDR (XCDR1 ParameterList) big-endian → header bytes [0x00, 0x02, 0x00, 0x00]
@@ -591,6 +597,19 @@ pub const KeyHashWriter = struct {
         try self.writeU16(0);
     }
 
+    /// No-op: key hash spec (RTPS §9.6.4.8) excludes the DHEADER from the
+    /// hash computation even for @appendable types.
+    pub fn reserveDheaderMaybe(self: *KeyHashWriter) !?usize {
+        _ = self;
+        return null;
+    }
+
+    /// No-op counterpart to reserveDheaderMaybe.
+    pub fn patchDheaderMaybe(self: *KeyHashWriter, offset: ?usize) void {
+        _ = self;
+        _ = offset;
+    }
+
     pub fn final(self: *KeyHashWriter) [16]u8 {
         if (self.len <= self.first16.len) return self.first16;
         var digest: [16]u8 = undefined;
@@ -748,17 +767,19 @@ pub const CdrReader = struct {
     ///   0x0003 → PL_CDR (ParameterList) little-endian (is_pl_cdr=true, xcdr1 alignment)
     ///   0x0006 → XCDR2 big-endian
     ///   0x0007 → XCDR2 little-endian
+    ///   0x0008 → XCDR2 Delimited CDR big-endian  (@appendable, same as 0x0006 here)
+    ///   0x0009 → XCDR2 Delimited CDR little-endian (@appendable, same as 0x0007 here)
     pub fn init(data: []const u8) !CdrReader {
         if (data.len < 4) return error.InvalidEncapsulation;
         const id: u16 = (@as(u16, data[0]) << 8) | @as(u16, data[1]);
         const byte_order: ByteOrder = switch (id) {
-            ENCAP_CDR1_LE, ENCAP_CDR2_LE, ENCAP_PL_CDR_LE => .little,
-            ENCAP_CDR1_BE, ENCAP_CDR2_BE, ENCAP_PL_CDR_BE => .big,
+            ENCAP_CDR1_LE, ENCAP_CDR2_LE, ENCAP_DELIMITED_CDR2_LE, ENCAP_PL_CDR_LE => .little,
+            ENCAP_CDR1_BE, ENCAP_CDR2_BE, ENCAP_DELIMITED_CDR2_BE, ENCAP_PL_CDR_BE => .big,
             else => return error.InvalidEncapsulation,
         };
         const xcdr_version: XcdrVersion = switch (id) {
             ENCAP_CDR1_LE, ENCAP_CDR1_BE, ENCAP_PL_CDR_LE, ENCAP_PL_CDR_BE => .xcdr1,
-            ENCAP_CDR2_LE, ENCAP_CDR2_BE => .xcdr2,
+            ENCAP_CDR2_LE, ENCAP_CDR2_BE, ENCAP_DELIMITED_CDR2_LE, ENCAP_DELIMITED_CDR2_BE => .xcdr2,
             else => unreachable,
         };
         const is_pl_cdr = (id == ENCAP_PL_CDR_LE or id == ENCAP_PL_CDR_BE);

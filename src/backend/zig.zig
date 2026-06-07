@@ -1545,6 +1545,10 @@ const Generator = struct {
             try self.write("\n");
             try self.ind();
             try self.write("    pub fn serializeKey(writer: anytype, value: @This()) !void {\n");
+            if (appendable) {
+                try self.ind();
+                try self.write("        const _dh = try writer.reserveDheaderMaybe();\n");
+            }
             if (s.base) |base| {
                 if (typeDeclHasKey(base)) {
                     const base_zig = try self.qualNameToZig(ir.typeDeclQualifiedName(base));
@@ -1562,6 +1566,10 @@ const Generator = struct {
                 } else {
                     try self.emitWriteForTypeRef(m.type_ref, access, "        ");
                 }
+            }
+            if (appendable) {
+                try self.ind();
+                try self.write("        writer.patchDheaderMaybe(_dh);\n");
             }
             try self.ind();
             try self.write("    }\n");
@@ -1639,13 +1647,35 @@ const Generator = struct {
                         try self.print("        try {s}.skip(reader);\n", .{base_zig});
                     }
                 }
+                // @final structs have no DHEADER bound.  deserializeKeyInto
+                // expects a key-only payload whose bytes are the key fields in
+                // declaration order.  If a non-key member precedes a key member,
+                // the reader position is wrong for any full-payload caller.
+                // Emit a @compileError so the user gets a clear diagnosis.
+                if (!appendable) {
+                    var saw_non_key = false;
+                    for (s.members) |m| {
+                        if (m.annotations.is_key) {
+                            if (saw_non_key) {
+                                try self.ind();
+                                try self.print(
+                                    "        @compileError(\"zidl: @final struct '{s}' has non-leading @key member '{s}'; \" ++\n",
+                                    .{ s.name, m.name },
+                                );
+                                try self.ind();
+                                try self.write("            \"move all @key members before non-key members, or switch to @appendable\");\n");
+                                break;
+                            }
+                        } else {
+                            saw_non_key = true;
+                        }
+                    }
+                }
                 for (s.members) |m| {
                     if (m.annotations.is_key) {
                         const out_expr = try std.fmt.allocPrint(self.alloc, "out.{s}", .{m.name});
                         defer self.alloc.free(out_expr);
                         try self.emitReadMember(m, out_expr, "        ");
-                    } else {
-                        try self.emitSkipMember(m, "        ");
                     }
                 }
                 if (appendable) {
@@ -3432,6 +3462,19 @@ test "zig_backend: serialize @key member emits serializeKey" {
     try testing.expect(has(s, "pub fn serializeKey(writer: anytype, value: @This()) !void {"));
     // Key field included in serializeKey
     try testing.expect(has(s, "try writer.writeI32(value.id);"));
+    // @final struct: no DHEADER in serializeKey
+    try testing.expect(!has(s, "const _dh = try writer.reserveDheaderMaybe();"));
+}
+
+test "zig_backend: @appendable keyed struct emits DHEADER in serializeKey" {
+    var out = try testGen("@appendable struct Msg { @key long id; string label; };", "msg");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "pub fn serializeKey(writer: anytype, value: @This()) !void {"));
+    // @appendable: serializeKey must bracket key fields with DHEADER so XCDR2
+    // key-only wire payloads are symmetric with deserializeKeyInto.
+    try testing.expect(has(s, "const _dh = try writer.reserveDheaderMaybe();"));
+    try testing.expect(has(s, "writer.patchDheaderMaybe(_dh);"));
 }
 
 test "zig_backend: keyed struct emits deserializeKey and computeKeyHash" {
@@ -3441,9 +3484,19 @@ test "zig_backend: keyed struct emits deserializeKey and computeKeyHash" {
     try testing.expect(has(s, "pub fn deserializeKey(reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !@This() {"));
     try testing.expect(has(s, "pub fn deserializeKeyInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {"));
     try testing.expect(has(s, "out.id = try reader.readI32();"));
-    try testing.expect(has(s, "try reader.skipString();"));
     try testing.expect(has(s, "pub fn computeKeyHash(value: @This()) [16]u8 {"));
     try testing.expect(has(s, "var _khw = zidl_rt.KeyHashWriter.init();"));
+}
+
+test "zig_backend: @final struct with non-leading key emits compileError in deserializeKeyInto" {
+    var out = try testGen("struct Msg { string label; @key long id; };", "msg");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // @compileError must appear in the generated deserializeKeyInto body.
+    try testing.expect(has(s, "@compileError(\"zidl: @final struct 'Msg' has non-leading @key member 'id'"));
+    // serializeKey and computeKeyHash are still generated normally.
+    try testing.expect(has(s, "pub fn serializeKey(writer: anytype, value: @This()) !void {"));
+    try testing.expect(has(s, "pub fn computeKeyHash(value: @This()) [16]u8 {"));
 }
 
 test "zig_backend: keyless struct does not emit key helpers" {
