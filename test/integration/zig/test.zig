@@ -77,7 +77,12 @@ test "roundtrip: Sample key serialization" {
     try testing.expect(!types.Frame.has_key);
 }
 
-test "roundtrip: Sample deserializeKey from full sample" {
+// deserializeKeyInto is a key-only-payload reader.  Calling it on a full
+// sample payload only works when ALL key members precede ALL non-key members
+// (so the key bytes appear first in both the full payload and the key-only
+// payload).  Sample.id is declared first, so this test passes; a @final
+// struct with id declared after any non-key member would emit @compileError.
+test "roundtrip: Sample deserializeKey from full sample (key field is leading)" {
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(testing.allocator);
 

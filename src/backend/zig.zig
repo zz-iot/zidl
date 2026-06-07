@@ -1647,6 +1647,30 @@ const Generator = struct {
                         try self.print("        try {s}.skip(reader);\n", .{base_zig});
                     }
                 }
+                // @final structs have no DHEADER bound.  deserializeKeyInto
+                // expects a key-only payload whose bytes are the key fields in
+                // declaration order.  If a non-key member precedes a key member,
+                // the reader position is wrong for any full-payload caller.
+                // Emit a @compileError so the user gets a clear diagnosis.
+                if (!appendable) {
+                    var saw_non_key = false;
+                    for (s.members) |m| {
+                        if (m.annotations.is_key) {
+                            if (saw_non_key) {
+                                try self.ind();
+                                try self.print(
+                                    "        @compileError(\"zidl: @final struct '{s}' has non-leading @key member '{s}'; \" ++\n",
+                                    .{ s.name, m.name },
+                                );
+                                try self.ind();
+                                try self.write("            \"move all @key members before non-key members, or switch to @appendable\");\n");
+                                break;
+                            }
+                        } else {
+                            saw_non_key = true;
+                        }
+                    }
+                }
                 for (s.members) |m| {
                     if (m.annotations.is_key) {
                         const out_expr = try std.fmt.allocPrint(self.alloc, "out.{s}", .{m.name});
@@ -3462,6 +3486,17 @@ test "zig_backend: keyed struct emits deserializeKey and computeKeyHash" {
     try testing.expect(has(s, "out.id = try reader.readI32();"));
     try testing.expect(has(s, "pub fn computeKeyHash(value: @This()) [16]u8 {"));
     try testing.expect(has(s, "var _khw = zidl_rt.KeyHashWriter.init();"));
+}
+
+test "zig_backend: @final struct with non-leading key emits compileError in deserializeKeyInto" {
+    var out = try testGen("struct Msg { string label; @key long id; };", "msg");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // @compileError must appear in the generated deserializeKeyInto body.
+    try testing.expect(has(s, "@compileError(\"zidl: @final struct 'Msg' has non-leading @key member 'id'"));
+    // serializeKey and computeKeyHash are still generated normally.
+    try testing.expect(has(s, "pub fn serializeKey(writer: anytype, value: @This()) !void {"));
+    try testing.expect(has(s, "pub fn computeKeyHash(value: @This()) [16]u8 {"));
 }
 
 test "zig_backend: keyless struct does not emit key helpers" {
