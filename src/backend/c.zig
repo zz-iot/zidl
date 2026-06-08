@@ -2081,27 +2081,90 @@ const CdrGenerator = struct {
     /// Arrays of heap-allocating element types (e.g. string[N]) are noted but
     /// not deep-freed — they are extremely rare as @key members.
     fn emitFreeKeyField(self: *CdrGenerator, m: ir.StructMember) anyerror!void {
+        const lval = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
+        defer self.alloc.free(lval);
         if (m.dimensions.len > 0) {
-            // Array of allocating element type — top-level array is on the stack,
-            // but each element may hold a heap pointer.  Emit a warning comment;
-            // this pattern is unusual enough that we don't generate deep-free code.
-            try self.printI("/* NOTE: @key array field '{s}' may contain heap pointers; manual cleanup required */\n", .{m.name});
+            if (!keyFieldAllocatesC(m.type_ref)) return; // bounded/non-allocating element, nothing to free
+            try self.emitFreeArrayElements(m.type_ref, lval, m.dimensions, 0);
             return;
         }
         switch (m.type_ref) {
             .string => |b| if (b == null) {
-                try self.printI("free((void *)_v->{s});\n", .{m.name});
+                try self.printI("free((void *){s});\n", .{lval});
             },
             .wstring => |b| if (b == null) {
-                try self.printI("free(_v->{s});\n", .{m.name});
+                try self.printI("free({s});\n", .{lval});
             },
-            .sequence => {
-                // Only frees the top-level buffer; elements that themselves
-                // allocate (e.g. sequence<string>) are not deep-freed here.
-                try self.printI("free(_v->{s}._buffer);\n", .{m.name});
+            .sequence => |seq| {
+                // Free individual elements before freeing the buffer.
+                try self.emitFreeSeqElements(seq.element.*, lval);
+                try self.printI("free({s}._buffer);\n", .{lval});
             },
             else => {},
         }
+    }
+
+    /// Emit free loops for an array field whose element type allocates heap memory.
+    /// Recursive to handle multi-dimensional arrays (e.g. string[2][3]).
+    fn emitFreeArrayElements(
+        self: *CdrGenerator,
+        elem_tr: ir.TypeRef,
+        lval: []const u8,
+        dims: []const u64,
+        dim_idx: usize,
+    ) anyerror!void {
+        const idx_var = try std.fmt.allocPrint(self.alloc, "_fai{d}", .{dim_idx});
+        defer self.alloc.free(idx_var);
+        try self.printI("{{ uint32_t {s}; for ({s} = 0; {s} < {d}u; {s}++) {{\n", .{
+            idx_var, idx_var, idx_var, dims[0], idx_var,
+        });
+        self.indent_depth += 1;
+        const elem_lval = try std.fmt.allocPrint(self.alloc, "{s}[{s}]", .{ lval, idx_var });
+        defer self.alloc.free(elem_lval);
+        if (dims.len > 1) {
+            try self.emitFreeArrayElements(elem_tr, elem_lval, dims[1..], dim_idx + 1);
+        } else {
+            switch (elem_tr) {
+                .string => |b| if (b == null) {
+                    try self.printI("free((void *){s});\n", .{elem_lval});
+                },
+                .wstring => |b| if (b == null) {
+                    try self.printI("free({s});\n", .{elem_lval});
+                },
+                else => {},
+            }
+        }
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.writeI("}\n");
+    }
+
+    /// Emit a free loop for the elements of a sequence whose element type allocates.
+    /// Nested sequences (sequence<sequence<T>>) only free the inner buffers, not
+    /// elements of the inner sequences — this is sufficient for all practical key types.
+    fn emitFreeSeqElements(self: *CdrGenerator, elem_tr: ir.TypeRef, seq_lval: []const u8) anyerror!void {
+        if (!keyFieldAllocatesC(elem_tr)) return;
+        try self.writeI("{ uint32_t _fsi;\n");
+        self.indent_depth += 1;
+        try self.printI("for (_fsi = 0; _fsi < {s}._length; _fsi++) {{\n", .{seq_lval});
+        self.indent_depth += 1;
+        switch (elem_tr) {
+            .string => |b| if (b == null) {
+                try self.printI("free((void *){s}._buffer[_fsi]);\n", .{seq_lval});
+            },
+            .wstring => |b| if (b == null) {
+                try self.printI("free({s}._buffer[_fsi]);\n", .{seq_lval});
+            },
+            .sequence => {
+                // Inner sequence: free its buffer (elements of elements not deep-freed).
+                try self.printI("free({s}._buffer[_fsi]._buffer);\n", .{seq_lval});
+            },
+            else => {},
+        }
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
     }
 
     fn emitReadMember(self: *CdrGenerator, m: ir.StructMember) anyerror!void {
@@ -3646,13 +3709,41 @@ test "c_backend cdr: compute_key_hash_from_cdr frees @key unbounded string" {
     try testing.expect(has(s, "if (_rc) goto _kh_cleanup;"));
 }
 
-test "c_backend cdr: compute_key_hash_from_cdr with @key sequence frees buffer" {
+test "c_backend cdr: compute_key_hash_from_cdr with @key sequence<long> frees buffer only" {
+    // Primitive element sequence: only the buffer needs freeing, no element loop.
     var c_src = try testGenCdr("@final struct Msg { @key sequence<long> ids; long value; };", "msg");
     defer c_src.deinit(testing.allocator);
     const s = c_src.items;
     try testing.expect(has(s, "_rc = Msg_compute_key_hash(_v, _hash)"));
     try testing.expect(has(s, "_kh_cleanup:"));
     try testing.expect(has(s, "free(_v->ids._buffer)"));
+    // No element loop needed for primitive elements
+    try testing.expect(!has(s, "_fsi"));
+}
+
+test "c_backend cdr: compute_key_hash_from_cdr with @key sequence<string> frees elements then buffer" {
+    // Greptile PR #5: sequence<string> must free each char* element before the buffer.
+    var c_src = try testGenCdr("@final struct Msg { @key sequence<string> tags; long value; };", "msg");
+    defer c_src.deinit(testing.allocator);
+    const s = c_src.items;
+    try testing.expect(has(s, "_kh_cleanup:"));
+    // Element loop must appear before the buffer free
+    try testing.expect(has(s, "free((void *)_v->tags._buffer[_fsi])"));
+    try testing.expect(has(s, "free(_v->tags._buffer)"));
+}
+
+test "c_backend cdr: compute_key_hash_from_cdr with @key string array frees each element" {
+    // Greptile PR #5: string[N] as @key must free each char* in a loop, not just comment.
+    var c_src = try testGenCdr("@final struct Msg { @key string name[3]; long value; };", "msg");
+    defer c_src.deinit(testing.allocator);
+    const s = c_src.items;
+    try testing.expect(has(s, "_kh_cleanup:"));
+    // Must emit a free loop over the array elements
+    try testing.expect(has(s, "_fai0"));
+    try testing.expect(has(s, "< 3u"));
+    try testing.expect(has(s, "free((void *)_v->name[_fai0])"));
+    // Must NOT be just a comment
+    try testing.expect(!has(s, "/* NOTE:"));
 }
 
 test "c_backend cdr: compute_key_hash_from_cdr with only primitive key has no cleanup" {
