@@ -81,7 +81,9 @@ int Sample_deserialize(ZidlCdrReader *_r, Sample *_v) {
     { const char *_sp; uint32_t _sl;
         _rc = zidl_cdr_read_string_zerocopy(_r, &_sp, &_sl);
         if (_rc) return _rc;
-        if (_sl > 32u) return ZIDL_CDR_INVALID;
+        if (_sl > 32u) {
+            return ZIDL_CDR_INVALID;
+        }
         memcpy(_v->bstr, _sp, _sl);
         _v->bstr[_sl] = '\0';
     }
@@ -92,7 +94,9 @@ int Sample_deserialize(ZidlCdrReader *_r, Sample *_v) {
         _v->nums._maximum = _sl;
         _v->nums._release = true;
         _v->nums._buffer = (int32_t *)malloc(_sl * sizeof(int32_t));
-        if (!_v->nums._buffer && _sl > 0) return ZIDL_CDR_OVERFLOW;
+        if (!_v->nums._buffer && _sl > 0) {
+            return ZIDL_CDR_OVERFLOW;
+        }
         { uint32_t _si; for (_si = 0; _si < _sl; _si++) {
             _rc = zidl_cdr_read_i32(_r, &_v->nums._buffer[_si]);
             if (_rc) return _rc;
@@ -104,7 +108,11 @@ int Sample_deserialize(ZidlCdrReader *_r, Sample *_v) {
         if (_rc) return _rc;
     }
     }
-    { uint32_t _ev; _rc = zidl_cdr_read_u32(_r, &_ev); if (_rc) return _rc; _v->clr = _ev; }
+    { uint32_t _ev;
+        _rc = zidl_cdr_read_u32(_r, &_ev);
+        if (_rc) return _rc;
+        _v->clr = _ev;
+    }
     _rc = Point_deserialize(_r, &_v->nested);
     if (_rc) return _rc;
     return ZIDL_CDR_OK;

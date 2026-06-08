@@ -1008,6 +1008,11 @@ const CdrGenerator = struct {
     /// 1 = function body (4 sp), 2 = one block deep (8 sp), 3 = two deep (12 sp).
     indent_depth: u32 = 1,
 
+    /// When non-null, emitRcCheck / emitReturnRc emit goto instead of return.
+    /// Used in _compute_key_hash_from_cdr to ensure all exit paths free
+    /// heap-allocated key fields before returning.
+    goto_label: ?[]const u8 = null,
+
     fn write(self: *CdrGenerator, s: []const u8) !void {
         try self.out.appendSlice(self.alloc, s);
     }
@@ -1407,6 +1412,19 @@ const CdrGenerator = struct {
             // _compute_key_hash_from_cdr: compute key hash from raw CDR wire bytes
             // (4-byte encapsulation header included).  Suitable as the function-pointer
             // type for a DDS implementation's C-ABI TypeSupport registration API.
+
+            // Compute needs_cleanup first — required before setting goto_label.
+            const needs_cleanup = blk: {
+                var any = false;
+                for (s.members) |m| {
+                    if (m.annotations.is_key and keyFieldAllocatesC(m.type_ref)) {
+                        any = true;
+                        break;
+                    }
+                }
+                break :blk any;
+            };
+
             try self.print("int {s}_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {{\n", .{c_name});
             try self.writeI("ZidlCdrReader _r_data;\n");
             try self.writeI("int _rc = zidl_cdr_reader_init(&_r_data, _payload, _len);\n");
@@ -1415,15 +1433,19 @@ const CdrGenerator = struct {
             try self.printI("{s} _v_data;\n", .{c_name});
             try self.printI("memset(&_v_data, 0, sizeof({s}));\n", .{c_name});
             try self.printI("{s} *_v = &_v_data;\n", .{c_name});
+            // All reads from this point use goto_label so that every exit path
+            // (CDR error or successful completion) passes through the cleanup block.
+            // free(NULL) — from zero-initialized struct fields — is safe in C99.
+            if (needs_cleanup) self.goto_label = "_kh_cleanup";
             if (mutable) {
                 try self.writeI("size_t _em_end;\n");
                 try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_em_end);\n");
-                try self.writeI("if (_rc) return _rc;\n");
+                try self.emitRcCheck();
                 try self.writeI("while (zidl_cdr_mutable_has_more(_r, _em_end)) {\n");
                 self.indent_depth += 1;
                 try self.writeI("ZidlEmHeader _emh;\n");
                 try self.writeI("_rc = zidl_cdr_read_emheader(_r, &_emh);\n");
-                try self.writeI("if (_rc) return _rc;\n");
+                try self.emitRcCheck();
                 try self.writeI("switch (_emh.member_id) {\n");
                 self.indent_depth += 1;
                 for (s.members, 0..) |m, idx| {
@@ -1438,9 +1460,13 @@ const CdrGenerator = struct {
                 }
                 try self.writeI("default:\n");
                 self.indent_depth += 1;
-                try self.writeI("if (_emh.must_understand) return ZIDL_CDR_INVALID;\n");
+                try self.writeI("if (_emh.must_understand) {\n");
+                self.indent_depth += 1;
+                try self.emitReturnRc("ZIDL_CDR_INVALID");
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
                 try self.writeI("_rc = zidl_cdr_skip_emheader_payload(_r, &_emh);\n");
-                try self.writeI("if (_rc) return _rc;\n");
+                try self.emitRcCheck();
                 try self.writeI("break;\n");
                 self.indent_depth -= 1;
                 self.indent_depth -= 1;
@@ -1457,7 +1483,7 @@ const CdrGenerator = struct {
                 self.indent_depth += 1;
                 try self.writeI("uint32_t _dh_size;\n");
                 try self.writeI("_rc = zidl_cdr_read_dheader(_r, &_dh_size);\n");
-                try self.writeI("if (_rc) return _rc;\n");
+                try self.emitRcCheck();
                 try self.writeI("_key_end = _r->pos + (size_t)_dh_size;\n");
                 self.indent_depth -= 1;
                 try self.writeI("}\n");
@@ -1469,7 +1495,11 @@ const CdrGenerator = struct {
                     // both trailing non-key bytes (full payload) and their absence
                     // (key-only payload).
                 }
-                try self.writeI("if (_key_end != (size_t)-1) { _rc = zidl_cdr_seek_to(_r, _key_end); if (_rc) return _rc; }\n");
+                if (self.goto_label) |label| {
+                    try self.printI("if (_key_end != (size_t)-1) {{ _rc = zidl_cdr_seek_to(_r, _key_end); if (_rc) goto {s}; }}\n", .{label});
+                } else {
+                    try self.writeI("if (_key_end != (size_t)-1) { _rc = zidl_cdr_seek_to(_r, _key_end); if (_rc) return _rc; }\n");
+                }
             } else {
                 // @final: key fields are leading — read them and stop.
                 for (s.members) |m| {
@@ -1478,28 +1508,20 @@ const CdrGenerator = struct {
                     }
                 }
             }
-            // If any key field allocates heap memory, store the result first,
-            // free the allocations, then return.  Early-return error paths can
-            // also leak in the presence of multiple allocating key fields (a
-            // rare pattern in practice); that is a pre-existing CDR generator
-            // limitation and not introduced here.
-            const needs_cleanup = blk: {
-                var any = false;
-                for (s.members) |m| {
-                    if (m.annotations.is_key and keyFieldAllocatesC(m.type_ref)) {
-                        any = true;
-                        break;
-                    }
-                }
-                break :blk any;
-            };
+            // Deactivate goto_label before emitting the cleanup block itself.
+            self.goto_label = null;
             if (needs_cleanup) {
-                try self.printI("int _result = {s}_compute_key_hash(_v, _hash);\n", .{c_name});
+                // Normal path falls through to the label; error paths jump here.
+                // _rc holds the compute_key_hash result on success, or the CDR
+                // error code on failure.  free(NULL) is a safe no-op for fields
+                // that were never allocated (e.g. earlier key fields on failure).
+                try self.printI("_rc = {s}_compute_key_hash(_v, _hash);\n", .{c_name});
+                try self.writeI("_kh_cleanup:\n");
                 for (s.members) |m| {
                     if (!m.annotations.is_key) continue;
                     try self.emitFreeKeyField(m);
                 }
-                try self.writeI("return _result;\n");
+                try self.writeI("return _rc;\n");
             } else {
                 try self.printI("return {s}_compute_key_hash(_v, _hash);\n", .{c_name});
             }
@@ -2024,6 +2046,26 @@ const CdrGenerator = struct {
 
     // ── Read helpers ──────────────────────────────────────────────────────────
 
+    /// Emit `if (_rc) return _rc;` or `if (_rc) goto <label>;` depending on
+    /// whether goto_label is set.  Use everywhere an error short-circuits a read.
+    fn emitRcCheck(self: *CdrGenerator) !void {
+        if (self.goto_label) |label| {
+            try self.printI("if (_rc) goto {s};\n", .{label});
+        } else {
+            try self.writeI("if (_rc) return _rc;\n");
+        }
+    }
+
+    /// Emit `return <val>;` or `_rc = <val>; goto <label>;` depending on
+    /// whether goto_label is set.  Use for non-_rc early exits (OVERFLOW, INVALID).
+    fn emitReturnRc(self: *CdrGenerator, val: []const u8) !void {
+        if (self.goto_label) |label| {
+            try self.printI("_rc = {s}; goto {s};\n", .{ val, label });
+        } else {
+            try self.printI("return {s};\n", .{val});
+        }
+    }
+
     /// Returns true for type refs that allocate heap memory when read
     /// by emitReadMember (unbounded string, unbounded wstring, sequence).
     fn keyFieldAllocatesC(tr: ir.TypeRef) bool {
@@ -2226,7 +2268,7 @@ const CdrGenerator = struct {
                     try self.printI("/* unsupported type for field {s} */\n", .{field_name});
                 } else {
                     try self.printI("_rc = {s}(_r, &{s});\n", .{ fn_name, lval });
-                    try self.writeI("if (_rc) return _rc;\n");
+                    try self.emitRcCheck();
                 }
             },
             .string => |bound| {
@@ -2235,8 +2277,12 @@ const CdrGenerator = struct {
                     try self.writeI("{ const char *_sp; uint32_t _sl;\n");
                     self.indent_depth += 1;
                     try self.writeI("_rc = zidl_cdr_read_string_zerocopy(_r, &_sp, &_sl);\n");
-                    try self.writeI("if (_rc) return _rc;\n");
-                    try self.printI("if (_sl > {d}u) return ZIDL_CDR_INVALID;\n", .{n});
+                    try self.emitRcCheck();
+                    try self.printI("if (_sl > {d}u) {{\n", .{n});
+                    self.indent_depth += 1;
+                    try self.emitReturnRc("ZIDL_CDR_INVALID");
+                    self.indent_depth -= 1;
+                    try self.writeI("}\n");
                     try self.printI("memcpy({s}, _sp, _sl);\n", .{lval});
                     try self.printI("{s}[_sl] = '\\0';\n", .{lval});
                     self.indent_depth -= 1;
@@ -2244,16 +2290,35 @@ const CdrGenerator = struct {
                 } else {
                     // Unbounded string → char *; allocating read
                     try self.printI("_rc = zidl_cdr_read_string(_r, &{s});\n", .{lval});
-                    try self.writeI("if (_rc) return _rc;\n");
+                    try self.emitRcCheck();
                 }
             },
             .wstring => |bound| {
                 if (bound) |n| {
                     // Bounded wstring<N> → uint16_t[N+1]: alloc read, bound-check, memcpy, free.
-                    try self.printI("{{ uint16_t *_wp; uint32_t _wl; _rc = zidl_cdr_read_wstring(_r, &_wp, &_wl); if (_rc) return _rc; if (_wl > {d}u) {{ free(_wp); return ZIDL_CDR_INVALID; }} memcpy({s}, _wp, _wl * sizeof(uint16_t)); {s}[_wl] = 0; free(_wp); }}\n", .{ n, lval, lval });
+                    // Expanded (not inlined) so emitRcCheck/emitReturnRc can emit goto when needed.
+                    try self.writeI("{ uint16_t *_wp; uint32_t _wl;\n");
+                    self.indent_depth += 1;
+                    try self.writeI("_rc = zidl_cdr_read_wstring(_r, &_wp, &_wl);\n");
+                    try self.emitRcCheck();
+                    try self.printI("if (_wl > {d}u) {{ free(_wp);\n", .{n});
+                    self.indent_depth += 1;
+                    try self.emitReturnRc("ZIDL_CDR_INVALID");
+                    self.indent_depth -= 1;
+                    try self.writeI("}\n");
+                    try self.printI("memcpy({s}, _wp, _wl * sizeof(uint16_t));\n", .{lval});
+                    try self.printI("{s}[_wl] = 0;\n", .{lval});
+                    try self.writeI("free(_wp);\n");
+                    self.indent_depth -= 1;
+                    try self.writeI("}\n");
                 } else {
                     // Unbounded wstring → uint16_t * (NUL-terminated, caller frees).
-                    try self.printI("{{ uint32_t _wl; _rc = zidl_cdr_read_wstring(_r, &{s}, &_wl); if (_rc) return _rc; }}\n", .{lval});
+                    try self.writeI("{ uint32_t _wl;\n");
+                    self.indent_depth += 1;
+                    try self.printI("_rc = zidl_cdr_read_wstring(_r, &{s}, &_wl);\n", .{lval});
+                    try self.emitRcCheck();
+                    self.indent_depth -= 1;
+                    try self.writeI("}\n");
                 }
             },
             .sequence => |seq| {
@@ -2261,14 +2326,18 @@ const CdrGenerator = struct {
                 try self.writeI("{ uint32_t _sl;\n");
                 self.indent_depth += 1;
                 try self.writeI("_rc = zidl_cdr_read_u32(_r, &_sl);\n");
-                try self.writeI("if (_rc) return _rc;\n");
+                try self.emitRcCheck();
                 const elem_c = try self.elemCType(seq.element.*);
                 defer self.alloc.free(elem_c);
                 try self.printI("{s}._length = _sl;\n", .{lval});
                 try self.printI("{s}._maximum = _sl;\n", .{lval});
                 try self.printI("{s}._release = true;\n", .{lval});
                 try self.printI("{s}._buffer = ({s} *)malloc(_sl * sizeof({s}));\n", .{ lval, elem_c, elem_c });
-                try self.printI("if (!{s}._buffer && _sl > 0) return ZIDL_CDR_OVERFLOW;\n", .{lval});
+                try self.printI("if (!{s}._buffer && _sl > 0) {{\n", .{lval});
+                self.indent_depth += 1;
+                try self.emitReturnRc("ZIDL_CDR_OVERFLOW");
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
                 try self.writeI("{ uint32_t _si; for (_si = 0; _si < _sl; _si++) {\n");
                 self.indent_depth += 1;
                 const elem_lval = try std.fmt.allocPrint(self.alloc, "{s}._buffer[_si]", .{lval});
@@ -2285,7 +2354,7 @@ const CdrGenerator = struct {
             },
             .fixed_pt => |fp| {
                 try self.printI("_rc = zidl_cdr_read_fixed(_r, {d}, {d}, &{s});\n", .{ fp.digits, fp.scale, lval });
-                try self.writeI("if (_rc) return _rc;\n");
+                try self.emitRcCheck();
             },
             .map => {
                 try self.printI("/* TODO: map read for {s} */\n", .{field_name});
@@ -2305,17 +2374,24 @@ const CdrGenerator = struct {
                 const c_type = try self.prefixedCName(qname);
                 defer self.alloc.free(c_type);
                 try self.printI("_rc = {s}_deserialize(_r, &{s});\n", .{ c_type, lval });
-                try self.writeI("if (_rc) return _rc;\n");
+                try self.emitRcCheck();
             },
             .enum_ => |e| {
                 const suffix = enumCStorageType(e.annotations);
                 const ctype = enumCTypeName(e.annotations);
-                try self.printI("{{ {s} _ev; _rc = zidl_cdr_read_{s}(_r, &_ev); if (_rc) return _rc; {s} = _ev; }}\n", .{ ctype, suffix, lval });
+                // Expanded (not inlined) so emitRcCheck can emit goto when needed.
+                try self.printI("{{ {s} _ev;\n", .{ctype});
+                self.indent_depth += 1;
+                try self.printI("_rc = zidl_cdr_read_{s}(_r, &_ev);\n", .{suffix});
+                try self.emitRcCheck();
+                try self.printI("{s} = _ev;\n", .{lval});
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
             },
             .bitmask => |bm| {
                 const suffix = enumCStorageType(bm.annotations);
                 try self.printI("_rc = zidl_cdr_read_{s}(_r, &{s});\n", .{ suffix, lval });
-                try self.writeI("if (_rc) return _rc;\n");
+                try self.emitRcCheck();
             },
             .typedef => |t| {
                 if (t.dimensions.len > 0) {
@@ -3561,17 +3637,21 @@ test "c_backend cdr: compute_key_hash_from_cdr frees @key unbounded string" {
     const s = c_src.items;
     // Should NOT directly return compute_key_hash — needs cleanup step first
     try testing.expect(!has(s, "return Msg_compute_key_hash(_v, _hash)"));
-    // Should store result, free the string, then return
-    try testing.expect(has(s, "_result = Msg_compute_key_hash(_v, _hash)"));
+    // goto-based cleanup: _rc = compute_key_hash, label, free, return _rc
+    try testing.expect(has(s, "_rc = Msg_compute_key_hash(_v, _hash)"));
+    try testing.expect(has(s, "_kh_cleanup:"));
     try testing.expect(has(s, "free((void *)_v->tag)"));
-    try testing.expect(has(s, "return _result"));
+    try testing.expect(has(s, "return _rc;"));
+    // All reads before the label must use goto, not return
+    try testing.expect(has(s, "if (_rc) goto _kh_cleanup;"));
 }
 
 test "c_backend cdr: compute_key_hash_from_cdr with @key sequence frees buffer" {
     var c_src = try testGenCdr("@final struct Msg { @key sequence<long> ids; long value; };", "msg");
     defer c_src.deinit(testing.allocator);
     const s = c_src.items;
-    try testing.expect(has(s, "_result = Msg_compute_key_hash(_v, _hash)"));
+    try testing.expect(has(s, "_rc = Msg_compute_key_hash(_v, _hash)"));
+    try testing.expect(has(s, "_kh_cleanup:"));
     try testing.expect(has(s, "free(_v->ids._buffer)"));
 }
 
