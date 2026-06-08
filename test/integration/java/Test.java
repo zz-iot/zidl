@@ -127,26 +127,20 @@ public class Test {
     }
 
     static void testSampleDeserializeKey() {
-        ByteBuffer buf = ByteBuffer.allocate(1024).order(ByteOrder.LITTLE_ENDIAN);
+        /* deserializeKey operates on a key-only payload produced by serializeKey */
+        ByteBuffer buf = ByteBuffer.allocate(64).order(ByteOrder.LITTLE_ENDIAN);
         writeEncapHeader(buf);
         int cdrBase = buf.position();
 
         Types.Sample s = new Types.Sample();
         s.set_id(0x01020304);
-        s.set_b(true);
-        s.set_str("non-key payload");
-        s.set_arr(new int[]{1, 2, 3});
-        s.set_nested(new Types.Point(10, 20));
-        s.serialize(buf, cdrBase);
+        s.serializeKey(buf, cdrBase);
 
         buf.flip();
         buf.position(4);
         Types.Sample key = Types.Sample.deserializeKey(buf, cdrBase);
         checkEq(s.get_id(), key.get_id(), "key.id");
-        check(!key.get_b(), "key.b default");
-        checkEq("", key.get_str(), "key.str default");
-        checkEq(0, key.get_nested().get_x(), "key.nested.x default");
-        check(!buf.hasRemaining(), "deserializeKey consumed full sample");
+        check(!buf.hasRemaining(), "deserializeKey consumed key-only payload");
 
         System.out.println("  testSampleDeserializeKey: OK");
     }

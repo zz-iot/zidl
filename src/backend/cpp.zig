@@ -1172,6 +1172,11 @@ const CdrGenerator = struct {
         if (has_key) {
             try self.print("int {s}_serialize_key(ZidlCdrWriter *_w, const {s} *_v) {{\n", .{ c_name, cpp_qname });
             try self.writeI("int _rc;\n");
+            if (appendable) {
+                try self.writeI("size_t _dh;\n");
+                try self.writeI("_rc = zidl_cdr_reserve_dheader_maybe(_w, &_dh);\n");
+                try self.writeI("if (_rc) return _rc;\n");
+            }
             if (s.base) |base| {
                 if (typeDeclHasKeyCpp(base)) {
                     const base_c = try self.prefixedCName(ir.typeDeclQualifiedName(base));
@@ -1191,6 +1196,9 @@ const CdrGenerator = struct {
                 } else {
                     try self.emitWriteForTypeRef(m.type_ref, m.name, access);
                 }
+            }
+            if (appendable) {
+                try self.writeI("zidl_cdr_patch_dheader_maybe(_w, _dh);\n");
             }
             try self.writeI("return ZIDL_CDR_OK;\n");
             try self.write("}\n\n");
@@ -1253,11 +1261,29 @@ const CdrGenerator = struct {
                     }
                     try self.writeI("if (_rc) return _rc;\n");
                 }
+                // @final: key-only payload — read key members, no skips.
+                // Emit static_assert if a non-key member precedes a key member;
+                // full-payload callers would silently read wrong bytes.
+                if (!appendable) {
+                    var saw_non_key = false;
+                    for (s.members) |m| {
+                        if (m.annotations.is_key) {
+                            if (saw_non_key) {
+                                try self.printI(
+                                    "static_assert(false, \"zidl: @final struct '{s}' has non-leading @key member '{s}'; \"\n",
+                                    .{ s.name, m.name },
+                                );
+                                try self.writeI("    \"move all @key members before non-key members, or use @appendable\");\n");
+                                break;
+                            }
+                        } else {
+                            saw_non_key = true;
+                        }
+                    }
+                }
                 for (s.members) |m| {
                     if (m.annotations.is_key) {
                         try self.emitReadMember(m);
-                    } else {
-                        try self.emitSkipMember(m);
                     }
                 }
                 if (appendable) {
@@ -1269,7 +1295,9 @@ const CdrGenerator = struct {
 
             try self.print("int {s}_compute_key_hash(const {s} *_v, uint8_t _hash[16]) {{\n", .{ c_name, cpp_qname });
             try self.writeI("ZidlCdrWriter _w;\n");
-            try self.writeI("int _rc = zidl_cdr_writer_init(&_w, ZIDL_XCDR2);\n");
+            // XCDR1: reserve_dheader_maybe is a no-op, so key bytes are
+            // written without a DHEADER regardless of extensibility.
+            try self.writeI("int _rc = zidl_cdr_writer_init(&_w, ZIDL_XCDR1);\n");
             try self.writeI("if (_rc) return _rc;\n");
             try self.writeI("zidl_cdr_writer_set_byte_order(&_w, ZIDL_CDR_BE);\n");
             try self.printI("_rc = {s}_serialize_key(&_w, _v);\n", .{c_name});

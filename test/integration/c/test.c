@@ -129,7 +129,8 @@ static void test_sample_key(void) {
 }
 
 static void test_sample_deserialize_key(void) {
-    uint8_t buf[1024];
+    /* deserialize_key operates on a key-only payload produced by serialize_key */
+    uint8_t buf[64];
     ZidlCdrWriter w;
     zidl_cdr_writer_init_fixed(&w, buf, sizeof(buf), ZIDL_XCDR2);
     check(zidl_cdr_write_encap(&w), "write_encap");
@@ -137,11 +138,7 @@ static void test_sample_deserialize_key(void) {
     Sample s;
     memset(&s, 0, sizeof(s));
     s.id = 0x01020304u;
-    s.b = true;
-    s.str = "non-key payload";
-    s.arr[0] = 1; s.arr[1] = 2; s.arr[2] = 3;
-    s.nested.x = 10; s.nested.y = 20;
-    check(Sample_serialize(&w, &s), "Sample_serialize");
+    check(Sample_serialize_key(&w, &s), "Sample_serialize_key");
 
     ZidlCdrReader r;
     check(zidl_cdr_reader_init(&r, buf, w.pos + 4), "reader_init");
@@ -150,9 +147,6 @@ static void test_sample_deserialize_key(void) {
     memset(&key, 0, sizeof(key));
     check(Sample_deserialize_key(&r, &key), "Sample_deserialize_key");
     assert(key.id == s.id);
-    assert(key.b == false);
-    assert(key.str == NULL);
-    assert(key.nested.x == 0);
     assert(zidl_cdr_remaining(&r) == 0);
 
     printf("  test_sample_deserialize_key: OK\n");
