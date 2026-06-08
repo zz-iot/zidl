@@ -7,6 +7,7 @@
 #include "Point.h"
 #include "Sample.h"
 #include "Frame.h"
+#include "Beacon.h"
 #include "Greeter.h"
 
 #endif /* TYPES_ALL_H */

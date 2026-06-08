@@ -30,8 +30,8 @@ Remaining work:
 5. Add XRCE-client-focused fixtures that exercise bounded-only IDL on embedded-friendly
    generated output.
 6. Keep DDS-XRCE agent/broker work separate from zidl unless codegen needs explicit hooks.
-   zidl should generate client-side type support; the agent can live in zzdds or a separate
-   repository that consumes zidl output.
+   zidl should generate client-side type support; the agent can live in a DDS implementation
+   or a separate repository that consumes zidl output.
 
 ---
 

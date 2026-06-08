@@ -43,6 +43,14 @@ struct Frame {
     string topic;
 };
 
+// @appendable keyed type — used by cross-backend wire-byte tests to verify
+// that serialize_key emits a DHEADER for @appendable structs.
+@appendable
+struct Beacon {
+    @key unsigned long id;
+    string payload;
+};
+
 interface Greeter {
     string greet(in string name);
     void reset();

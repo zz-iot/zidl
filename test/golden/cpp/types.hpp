@@ -46,6 +46,11 @@ struct Frame {
     std::string topic{};
 }; // struct Frame
 
+struct Beacon {
+    uint32_t id{};
+    std::string payload{};
+}; // struct Beacon
+
 class Greeter {
 public:
     virtual ~Greeter() = default;
@@ -68,10 +73,20 @@ int Sample_skip(ZidlCdrReader *_r);
 int Sample_serialize_key(ZidlCdrWriter *_w, const ::Sample *_v);
 int Sample_deserialize_key(ZidlCdrReader *_r, ::Sample *_v);
 int Sample_compute_key_hash(const ::Sample *_v, uint8_t _hash[16]);
+int Sample_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);
 
 #define Frame_has_key 0
 int Frame_serialize(ZidlCdrWriter *_w, const ::Frame *_v);
 int Frame_deserialize(ZidlCdrReader *_r, ::Frame *_v);
 int Frame_skip(ZidlCdrReader *_r);
+
+#define Beacon_has_key 1
+int Beacon_serialize(ZidlCdrWriter *_w, const ::Beacon *_v);
+int Beacon_deserialize(ZidlCdrReader *_r, ::Beacon *_v);
+int Beacon_skip(ZidlCdrReader *_r);
+int Beacon_serialize_key(ZidlCdrWriter *_w, const ::Beacon *_v);
+int Beacon_deserialize_key(ZidlCdrReader *_r, ::Beacon *_v);
+int Beacon_compute_key_hash(const ::Beacon *_v, uint8_t _hash[16]);
+int Beacon_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);
 
 #endif // TYPES_HPP

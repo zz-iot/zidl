@@ -217,28 +217,6 @@ public class Sample implements java.io.Serializable {
 
     protected static void deserializeKeyInto(Sample _out, java.nio.ByteBuffer _buf, int _cdrBase) {
         _cdrAlign(_buf, _cdrBase, 4); _out.id = _buf.getInt();
-        _buf.get();
-        _buf.get();
-        _cdrAlign(_buf, _cdrBase, 2); _buf.getShort();
-        _cdrAlign(_buf, _cdrBase, 2); _buf.getShort();
-        _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
-        _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
-        _cdrAlign(_buf, _cdrBase, 4); _buf.getLong();
-        _cdrAlign(_buf, _cdrBase, 4); _buf.getLong();
-        _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
-        _cdrAlign(_buf, _cdrBase, 4); _buf.getLong();
-        _cdrReadString(_buf, _cdrBase);
-        _cdrReadString(_buf, _cdrBase);
-        { _cdrAlign(_buf, _cdrBase, 4); int _n = _buf.getInt();
-          for (int _i = 0; _i < _n; _i++) {
-            _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
-          }
-        }
-        for (int _sk0 = 0; _sk0 < 3; _sk0++) {
-            _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
-        }
-        _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
-        Point.skip(_buf, _cdrBase);
     }
 
     public byte[] computeKeyHash() {

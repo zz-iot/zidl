@@ -1693,8 +1693,16 @@ const Generator = struct {
             try self.write("public void serializeKey(java.nio.ByteBuffer _buf, int _cdrBase) {\n");
             try self.ind();
             try self.write("    _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
+            if (appendable) {
+                try self.ind();
+                try self.write("    _cdrAlign(_buf, _cdrBase, 4); int _dhPos = _buf.position(); _buf.putInt(0);\n");
+            }
             try self.ind();
             try self.write("    serializeKeyFields(_buf, _cdrBase);\n");
+            if (appendable) {
+                try self.ind();
+                try self.write("    _buf.putInt(_dhPos, _buf.position() - _dhPos - 4);\n");
+            }
             try self.ind();
             try self.write("}\n");
 
@@ -1757,11 +1765,31 @@ const Generator = struct {
                         try self.print("    {s}.skip(_buf, _cdrBase);\n", .{qname});
                     }
                 }
+                // @final: key-only payload — read key members, no skips.
+                // Throw if a non-key member precedes a key member; full-payload
+                // callers would silently read wrong bytes.
+                if (!appendable) {
+                    var saw_non_key = false;
+                    for (s.members) |m| {
+                        if (m.annotations.is_key) {
+                            if (saw_non_key) {
+                                try self.ind();
+                                try self.print(
+                                    "    throw new UnsupportedOperationException(\"zidl: @final struct '{s}' has non-leading @key member '{s}'; \" +\n",
+                                    .{ s.name, m.name },
+                                );
+                                try self.ind();
+                                try self.write("        \"move all @key members before non-key members, or use @appendable\");\n");
+                                break;
+                            }
+                        } else {
+                            saw_non_key = true;
+                        }
+                    }
+                }
                 for (s.members) |m| {
                     if (m.annotations.is_key) {
                         try self.emitMemberDeserializeKey(m, "_out", "    ");
-                    } else {
-                        try self.emitMemberSkip(m, "    ");
                     }
                 }
                 if (appendable) {

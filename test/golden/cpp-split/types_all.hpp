@@ -7,6 +7,7 @@
 #include "Point.hpp"
 #include "Sample.hpp"
 #include "Frame.hpp"
+#include "Beacon.hpp"
 #include "Greeter.hpp"
 
 #endif // TYPES_ALL_HPP

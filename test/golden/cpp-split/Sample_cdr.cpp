@@ -150,43 +150,29 @@ int Sample_deserialize_key(ZidlCdrReader *_r, ::Sample *_v) {
     int _rc;
     _rc = zidl_cdr_read_u32(_r, &_v->id);
     if (_rc) return _rc;
-    { bool _tmp; _rc = zidl_cdr_read_bool(_r, &_tmp); if (_rc) return _rc; }
-    { uint8_t _tmp; _rc = zidl_cdr_read_u8(_r, &_tmp); if (_rc) return _rc; }
-    { int16_t _tmp; _rc = zidl_cdr_read_i16(_r, &_tmp); if (_rc) return _rc; }
-    { uint16_t _tmp; _rc = zidl_cdr_read_u16(_r, &_tmp); if (_rc) return _rc; }
-    { int32_t _tmp; _rc = zidl_cdr_read_i32(_r, &_tmp); if (_rc) return _rc; }
-    { uint32_t _tmp; _rc = zidl_cdr_read_u32(_r, &_tmp); if (_rc) return _rc; }
-    { int64_t _tmp; _rc = zidl_cdr_read_i64(_r, &_tmp); if (_rc) return _rc; }
-    { uint64_t _tmp; _rc = zidl_cdr_read_u64(_r, &_tmp); if (_rc) return _rc; }
-    { float _tmp; _rc = zidl_cdr_read_f32(_r, &_tmp); if (_rc) return _rc; }
-    { double _tmp; _rc = zidl_cdr_read_f64(_r, &_tmp); if (_rc) return _rc; }
-    { const char *_sp; uint32_t _sl; _rc = zidl_cdr_read_string_zerocopy(_r, &_sp, &_sl); if (_rc) return _rc; }
-    { const char *_sp; uint32_t _sl; _rc = zidl_cdr_read_string_zerocopy(_r, &_sp, &_sl); if (_rc) return _rc; }
-    { uint32_t _sl;
-        _rc = zidl_cdr_read_u32(_r, &_sl);
-        if (_rc) return _rc;
-        for (uint32_t _si = 0; _si < _sl; _si++) {
-            { int32_t _tmp; _rc = zidl_cdr_read_i32(_r, &_tmp); if (_rc) return _rc; }
-        }
-    }
-    { uint32_t _ski0; for (_ski0 = 0; _ski0 < 3u; _ski0++) {
-        { int32_t _tmp; _rc = zidl_cdr_read_i32(_r, &_tmp); if (_rc) return _rc; }
-    }
-    }
-    { uint32_t _tmp; _rc = zidl_cdr_read_u32(_r, &_tmp); if (_rc) return _rc; }
-    _rc = Point_skip(_r);
-    if (_rc) return _rc;
     return ZIDL_CDR_OK;
 }
 
 int Sample_compute_key_hash(const ::Sample *_v, uint8_t _hash[16]) {
     ZidlCdrWriter _w;
-    int _rc = zidl_cdr_writer_init(&_w, ZIDL_XCDR2);
+    int _rc = zidl_cdr_writer_init(&_w, ZIDL_XCDR1);
     if (_rc) return _rc;
     zidl_cdr_writer_set_byte_order(&_w, ZIDL_CDR_BE);
     _rc = Sample_serialize_key(&_w, _v);
     if (!_rc) zidl_cdr_compute_key_hash(_w.buf, _w.len, _hash);
     zidl_cdr_writer_deinit(&_w);
     return _rc;
+}
+
+int Sample_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {
+    ZidlCdrReader _r_data;
+    int _rc = zidl_cdr_reader_init(&_r_data, _payload, _len);
+    if (_rc) return _rc;
+    ZidlCdrReader *_r = &_r_data;
+    ::Sample _v_data{};
+    ::Sample *_v = &_v_data;
+    _rc = zidl_cdr_read_u32(_r, &_v->id);
+    if (_rc) return _rc;
+    return Sample_compute_key_hash(_v, _hash);
 }
 
