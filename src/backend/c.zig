@@ -417,6 +417,7 @@ const Generator = struct {
             try self.print("{s}{s}int {s}_serialize_key(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, c_name });
             try self.print("{s}{s}int {s}_deserialize_key(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, c_name });
             try self.print("{s}{s}int {s}_compute_key_hash(const {s} *_v, uint8_t _hash[16]);\n", .{ em, sp, c_name, c_name });
+            try self.print("{s}{s}int {s}_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);\n", .{ em, sp, c_name });
         }
         try self.write("\n");
     }
@@ -1401,6 +1402,83 @@ const CdrGenerator = struct {
             try self.writeI("if (!_rc) zidl_cdr_compute_key_hash(_w.buf, _w.len, _hash);\n");
             try self.writeI("zidl_cdr_writer_deinit(&_w);\n");
             try self.writeI("return _rc;\n");
+            try self.write("}\n\n");
+
+            // _compute_key_hash_from_cdr: compute key hash from raw CDR wire bytes
+            // (4-byte encapsulation header included).  Suitable as the function-pointer
+            // type for the zzdds C-ABI TypeSupport registration API.
+            try self.print("int {s}_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {{\n", .{c_name});
+            try self.writeI("ZidlCdrReader _r_data;\n");
+            try self.writeI("int _rc = zidl_cdr_reader_init(&_r_data, _payload, _len);\n");
+            try self.writeI("if (_rc) return _rc;\n");
+            try self.writeI("ZidlCdrReader *_r = &_r_data;\n");
+            try self.printI("{s} _v_data;\n", .{c_name});
+            try self.printI("memset(&_v_data, 0, sizeof({s}));\n", .{c_name});
+            try self.printI("{s} *_v = &_v_data;\n", .{c_name});
+            if (mutable) {
+                try self.writeI("size_t _em_end;\n");
+                try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_em_end);\n");
+                try self.writeI("if (_rc) return _rc;\n");
+                try self.writeI("while (zidl_cdr_mutable_has_more(_r, _em_end)) {\n");
+                self.indent_depth += 1;
+                try self.writeI("ZidlEmHeader _emh;\n");
+                try self.writeI("_rc = zidl_cdr_read_emheader(_r, &_emh);\n");
+                try self.writeI("if (_rc) return _rc;\n");
+                try self.writeI("switch (_emh.member_id) {\n");
+                self.indent_depth += 1;
+                for (s.members, 0..) |m, idx| {
+                    if (!m.annotations.is_key) continue;
+                    const member_id: u32 = memberIdAtC(m, idx);
+                    try self.printI("case {d}: {{\n", .{member_id});
+                    self.indent_depth += 1;
+                    try self.emitReadPresentMember(m);
+                    try self.writeI("break;\n");
+                    self.indent_depth -= 1;
+                    try self.writeI("}\n");
+                }
+                try self.writeI("default:\n");
+                self.indent_depth += 1;
+                try self.writeI("if (_emh.must_understand) return ZIDL_CDR_INVALID;\n");
+                try self.writeI("_rc = zidl_cdr_skip_emheader_payload(_r, &_emh);\n");
+                try self.writeI("if (_rc) return _rc;\n");
+                try self.writeI("break;\n");
+                self.indent_depth -= 1;
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            } else if (appendable) {
+                // Read DHEADER to get the extent of the key payload.  Then read
+                // key fields in declaration order.  The seek_to at the end handles
+                // both cases: full payload (skips trailing non-key fields) and
+                // key-only payload (no-op when pos already equals _key_end).
+                try self.writeI("size_t _key_end = (size_t)-1;\n");
+                try self.writeI("if (_r->xcdr_version == ZIDL_XCDR2) {\n");
+                self.indent_depth += 1;
+                try self.writeI("uint32_t _dh_size;\n");
+                try self.writeI("_rc = zidl_cdr_read_dheader(_r, &_dh_size);\n");
+                try self.writeI("if (_rc) return _rc;\n");
+                try self.writeI("_key_end = _r->pos + (size_t)_dh_size;\n");
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+                for (s.members) |m| {
+                    if (m.annotations.is_key) {
+                        try self.emitReadMember(m);
+                    }
+                    // Non-key members are NOT skipped: seek_to(_key_end) handles
+                    // both trailing non-key bytes (full payload) and their absence
+                    // (key-only payload).
+                }
+                try self.writeI("if (_key_end != (size_t)-1) { _rc = zidl_cdr_seek_to(_r, _key_end); if (_rc) return _rc; }\n");
+            } else {
+                // @final: key fields are leading — read them and stop.
+                for (s.members) |m| {
+                    if (m.annotations.is_key) {
+                        try self.emitReadMember(m);
+                    }
+                }
+            }
+            try self.printI("return {s}_compute_key_hash(_v, _hash);\n", .{c_name});
             try self.write("}\n\n");
         }
     }

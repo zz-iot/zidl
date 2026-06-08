@@ -79,3 +79,24 @@ int Beacon_compute_key_hash(const Beacon *_v, uint8_t _hash[16]) {
     return _rc;
 }
 
+int Beacon_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {
+    ZidlCdrReader _r_data;
+    int _rc = zidl_cdr_reader_init(&_r_data, _payload, _len);
+    if (_rc) return _rc;
+    ZidlCdrReader *_r = &_r_data;
+    Beacon _v_data;
+    memset(&_v_data, 0, sizeof(Beacon));
+    Beacon *_v = &_v_data;
+    size_t _key_end = (size_t)-1;
+    if (_r->xcdr_version == ZIDL_XCDR2) {
+        uint32_t _dh_size;
+        _rc = zidl_cdr_read_dheader(_r, &_dh_size);
+        if (_rc) return _rc;
+        _key_end = _r->pos + (size_t)_dh_size;
+    }
+    _rc = zidl_cdr_read_u32(_r, &_v->id);
+    if (_rc) return _rc;
+    if (_key_end != (size_t)-1) { _rc = zidl_cdr_seek_to(_r, _key_end); if (_rc) return _rc; }
+    return Beacon_compute_key_hash(_v, _hash);
+}
+

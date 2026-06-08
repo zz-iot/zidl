@@ -164,6 +164,38 @@ static void test_sample_compute_key_hash() {
 // ── cross-backend wire-byte tests ─────────────────────────────────────────
 // See test/integration/c/test.c for the expected-byte layout comments.
 
+static void test_compute_key_hash_from_cdr() {
+    uint8_t buf[1024];
+    ZidlCdrWriter w;
+    zidl_cdr_writer_init_fixed(&w, buf, sizeof(buf), ZIDL_XCDR2);
+    check(zidl_cdr_write_encap(&w), "write_encap");
+    ::Sample s{};
+    s.id = 0x01020304u;
+    s.b = true;
+    s.str = "hello";
+    check(Sample_serialize(&w, &s), "Sample_serialize");
+
+    uint8_t hash_from_cdr[16], hash_from_struct[16];
+    check(Sample_compute_key_hash_from_cdr(buf, w.len, hash_from_cdr), "Sample_compute_key_hash_from_cdr");
+    check(Sample_compute_key_hash(&s, hash_from_struct), "Sample_compute_key_hash");
+    assert(std::memcmp(hash_from_cdr, hash_from_struct, 16) == 0);
+
+    uint8_t kbuf[64];
+    ZidlCdrWriter kw;
+    zidl_cdr_writer_init_fixed(&kw, kbuf, sizeof(kbuf), ZIDL_XCDR2);
+    check(zidl_cdr_write_encap(&kw), "write_encap_beacon");
+    ::Beacon b{};
+    b.id = 7u;
+    check(Beacon_serialize_key(&kw, &b), "Beacon_serialize_key");
+
+    uint8_t bhash_from_key[16], bhash_from_struct[16];
+    check(Beacon_compute_key_hash_from_cdr(kbuf, kw.len, bhash_from_key), "Beacon_compute_key_hash_from_cdr");
+    check(Beacon_compute_key_hash(&b, bhash_from_struct), "Beacon_compute_key_hash");
+    assert(std::memcmp(bhash_from_key, bhash_from_struct, 16) == 0);
+
+    std::cout << "  test_compute_key_hash_from_cdr: OK\n";
+}
+
 static void test_wire_bytes_sample_key() {
     uint8_t buf[64];
     ZidlCdrWriter w;
@@ -236,6 +268,7 @@ int main() {
     test_sample_key();
     test_sample_deserialize_key();
     test_sample_compute_key_hash();
+    test_compute_key_hash_from_cdr();
     test_wire_bytes_sample_key();
     test_wire_bytes_beacon_key();
     std::cout << "All C++ integration tests passed.\n";
