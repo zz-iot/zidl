@@ -170,6 +170,95 @@ static void test_sample_compute_key_hash(void) {
     printf("  test_sample_compute_key_hash: OK\n");
 }
 
+// ── cross-backend wire-byte tests ─────────────────────────────────────────
+//
+// These tests pin the exact CDR bytes produced by serialize_key /
+// deserialize_key / compute_key_hash for each backend.  The expected bytes
+// are identical across C, C++, Java, and Zig — any divergence is a bug.
+//
+// Sample (@final, @key unsigned long id=0x01020304):
+//   serialize_key  → encap(00 07 00 00) + id-LE(04 03 02 01)           = 8 bytes
+//   compute_key_hash → id-BE(01 02 03 04) padded to 16                (already tested above)
+//
+// Beacon (@appendable, @key unsigned long id=7):
+//   serialize_key  → encap(00 07 00 00) + DHEADER-LE(04 00 00 00)
+//                    + id-LE(07 00 00 00)                              = 12 bytes
+//   compute_key_hash → id-BE(00 00 00 07) padded to 16
+
+static void test_wire_bytes_sample_key(void) {
+    uint8_t buf[64];
+    ZidlCdrWriter w;
+    zidl_cdr_writer_init_fixed(&w, buf, sizeof(buf), ZIDL_XCDR2);
+    check(zidl_cdr_write_encap(&w), "write_encap");
+
+    Sample s;
+    memset(&s, 0, sizeof(s));
+    s.id = 0x01020304u;
+    check(Sample_serialize_key(&w, &s), "Sample_serialize_key");
+
+    /* 4-byte encap + 4-byte id = 8 bytes total */
+    assert(w.len == 8);
+    const uint8_t expected[8] = {
+        0x00, 0x07, 0x00, 0x00,  /* encap: XCDR2 LE */
+        0x04, 0x03, 0x02, 0x01,  /* id = 0x01020304, u32 LE */
+    };
+    assert(memcmp(buf, expected, sizeof(expected)) == 0);
+
+    /* round-trip */
+    ZidlCdrReader r;
+    check(zidl_cdr_reader_init(&r, buf, w.len), "reader_init");
+    Sample key;
+    memset(&key, 0, sizeof(key));
+    check(Sample_deserialize_key(&r, &key), "Sample_deserialize_key");
+    assert(key.id == 0x01020304u);
+    assert(zidl_cdr_remaining(&r) == 0);
+
+    printf("  test_wire_bytes_sample_key: OK\n");
+}
+
+static void test_wire_bytes_beacon_key(void) {
+    uint8_t buf[64];
+    ZidlCdrWriter w;
+    zidl_cdr_writer_init_fixed(&w, buf, sizeof(buf), ZIDL_XCDR2);
+    check(zidl_cdr_write_encap(&w), "write_encap");
+
+    Beacon b;
+    memset(&b, 0, sizeof(b));
+    b.id = 7u;
+    check(Beacon_serialize_key(&w, &b), "Beacon_serialize_key");
+
+    /* 4-byte encap + 4-byte DHEADER + 4-byte id = 12 bytes total */
+    assert(w.len == 12);
+    const uint8_t expected[12] = {
+        0x00, 0x07, 0x00, 0x00,  /* encap: XCDR2 LE */
+        0x04, 0x00, 0x00, 0x00,  /* DHEADER = 4 (one u32 key field follows) */
+        0x07, 0x00, 0x00, 0x00,  /* id = 7, u32 LE */
+    };
+    assert(memcmp(buf, expected, sizeof(expected)) == 0);
+
+    /* round-trip */
+    ZidlCdrReader r;
+    check(zidl_cdr_reader_init(&r, buf, w.len), "reader_init");
+    Beacon key;
+    memset(&key, 0, sizeof(key));
+    check(Beacon_deserialize_key(&r, &key), "Beacon_deserialize_key");
+    assert(key.id == 7u);
+    assert(zidl_cdr_remaining(&r) == 0);
+
+    /* key hash: id=7 as BE u32, padded to 16 */
+    uint8_t hash[16];
+    check(Beacon_compute_key_hash(&b, hash), "Beacon_compute_key_hash");
+    const uint8_t expected_hash[16] = {
+        0x00, 0x00, 0x00, 0x07,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+    };
+    assert(memcmp(hash, expected_hash, sizeof(expected_hash)) == 0);
+
+    printf("  test_wire_bytes_beacon_key: OK\n");
+}
+
 int main(void) {
     printf("C integration tests:\n");
     test_sample_roundtrip();
@@ -177,6 +266,8 @@ int main(void) {
     test_sample_key();
     test_sample_deserialize_key();
     test_sample_compute_key_hash();
+    test_wire_bytes_sample_key();
+    test_wire_bytes_beacon_key();
     printf("All C integration tests passed.\n");
     return 0;
 }

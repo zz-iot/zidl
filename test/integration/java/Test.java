@@ -168,6 +168,80 @@ public class Test {
         testSampleKey();
         testSampleDeserializeKey();
         testSampleComputeKeyHash();
+        testWireBytesSampleKey();
+        testWireBytesBeaconKey();
         System.out.println("All Java integration tests passed.");
+    }
+
+    // ── cross-backend wire-byte tests ─────────────────────────────────────
+    // See test/integration/c/test.c for the expected-byte layout comments.
+
+    static void testWireBytesSampleKey() {
+        ByteBuffer buf = ByteBuffer.allocate(64).order(ByteOrder.LITTLE_ENDIAN);
+        writeEncapHeader(buf);
+        int cdrBase = buf.position();
+
+        Types.Sample s = new Types.Sample();
+        s.set_id(0x01020304);
+        s.serializeKey(buf, cdrBase);
+
+        buf.flip();
+        byte[] expected = new byte[] {
+            0x00, 0x07, 0x00, 0x00,              // encap: XCDR2 LE
+            0x04, 0x03, 0x02, 0x01,              // id = 0x01020304, u32 LE
+        };
+        check(buf.limit() == expected.length, "sample key wire length");
+        byte[] actual = new byte[buf.limit()];
+        buf.get(actual);
+        check(Arrays.equals(expected, actual), "sample key wire bytes");
+
+        // round-trip
+        buf.rewind();
+        buf.position(4);
+        Types.Sample key = Types.Sample.deserializeKey(buf, cdrBase);
+        checkEq(0x01020304, key.get_id() & 0xFFFFFFFFL, "round-trip id");
+        check(!buf.hasRemaining(), "key payload fully consumed");
+
+        System.out.println("  testWireBytesSampleKey: OK");
+    }
+
+    static void testWireBytesBeaconKey() {
+        ByteBuffer buf = ByteBuffer.allocate(64).order(ByteOrder.LITTLE_ENDIAN);
+        writeEncapHeader(buf);
+        int cdrBase = buf.position();
+
+        Types.Beacon b = new Types.Beacon();
+        b.set_id(7);
+        b.serializeKey(buf, cdrBase);
+
+        buf.flip();
+        byte[] expected = new byte[] {
+            0x00, 0x07, 0x00, 0x00,  // encap: XCDR2 LE
+            0x04, 0x00, 0x00, 0x00,  // DHEADER = 4
+            0x07, 0x00, 0x00, 0x00,  // id = 7, u32 LE
+        };
+        check(buf.limit() == expected.length, "beacon key wire length");
+        byte[] actual = new byte[buf.limit()];
+        buf.get(actual);
+        check(Arrays.equals(expected, actual), "beacon key wire bytes");
+
+        // round-trip
+        buf.rewind();
+        buf.position(4);
+        Types.Beacon key = Types.Beacon.deserializeKey(buf, cdrBase);
+        checkEq(7, key.get_id() & 0xFFFFFFFFL, "round-trip beacon id");
+        check(!buf.hasRemaining(), "beacon key payload fully consumed");
+
+        // key hash: id=7 as BE u32, padded to 16
+        byte[] hash = b.computeKeyHash();
+        byte[] expectedHash = new byte[] {
+            0x00, 0x00, 0x00, 0x07,
+            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        };
+        check(Arrays.equals(expectedHash, hash), "beacon computeKeyHash");
+
+        System.out.println("  testWireBytesBeaconKey: OK");
     }
 }

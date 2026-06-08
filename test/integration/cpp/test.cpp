@@ -123,18 +123,15 @@ static void test_sample_key() {
 }
 
 static void test_sample_deserialize_key() {
-    uint8_t buf[1024];
+    /* deserialize_key operates on a key-only payload produced by serialize_key */
+    uint8_t buf[64];
     ZidlCdrWriter w;
     zidl_cdr_writer_init_fixed(&w, buf, sizeof(buf), ZIDL_XCDR2);
     check(zidl_cdr_write_encap(&w), "write_encap");
 
     ::Sample s{};
     s.id = 0x01020304u;
-    s.b = true;
-    s.str = "non-key payload";
-    s.arr[0] = 1; s.arr[1] = 2; s.arr[2] = 3;
-    s.nested = {10, 20};
-    check(Sample_serialize(&w, &s), "Sample_serialize");
+    check(Sample_serialize_key(&w, &s), "Sample_serialize_key");
 
     ZidlCdrReader r;
     check(zidl_cdr_reader_init(&r, buf, w.pos + 4), "reader_init");
@@ -142,9 +139,6 @@ static void test_sample_deserialize_key() {
     ::Sample key{};
     check(Sample_deserialize_key(&r, &key), "Sample_deserialize_key");
     assert(key.id == s.id);
-    assert(key.b == false);
-    assert(key.str.empty());
-    assert(key.nested.x == 0);
     assert(zidl_cdr_remaining(&r) == 0);
 
     std::cout << "  test_sample_deserialize_key: OK\n";
@@ -167,6 +161,74 @@ static void test_sample_compute_key_hash() {
     std::cout << "  test_sample_compute_key_hash: OK\n";
 }
 
+// ── cross-backend wire-byte tests ─────────────────────────────────────────
+// See test/integration/c/test.c for the expected-byte layout comments.
+
+static void test_wire_bytes_sample_key() {
+    uint8_t buf[64];
+    ZidlCdrWriter w;
+    zidl_cdr_writer_init_fixed(&w, buf, sizeof(buf), ZIDL_XCDR2);
+    check(zidl_cdr_write_encap(&w), "write_encap");
+
+    ::Sample s{};
+    s.id = 0x01020304u;
+    check(Sample_serialize_key(&w, &s), "Sample_serialize_key");
+
+    assert(w.len == 8);
+    const uint8_t expected[8] = {
+        0x00, 0x07, 0x00, 0x00,
+        0x04, 0x03, 0x02, 0x01,
+    };
+    assert(std::memcmp(buf, expected, sizeof(expected)) == 0);
+
+    ZidlCdrReader r;
+    check(zidl_cdr_reader_init(&r, buf, w.len), "reader_init");
+    ::Sample key{};
+    check(Sample_deserialize_key(&r, &key), "Sample_deserialize_key");
+    assert(key.id == 0x01020304u);
+    assert(zidl_cdr_remaining(&r) == 0);
+
+    std::cout << "  test_wire_bytes_sample_key: OK\n";
+}
+
+static void test_wire_bytes_beacon_key() {
+    uint8_t buf[64];
+    ZidlCdrWriter w;
+    zidl_cdr_writer_init_fixed(&w, buf, sizeof(buf), ZIDL_XCDR2);
+    check(zidl_cdr_write_encap(&w), "write_encap");
+
+    ::Beacon b{};
+    b.id = 7u;
+    check(Beacon_serialize_key(&w, &b), "Beacon_serialize_key");
+
+    assert(w.len == 12);
+    const uint8_t expected[12] = {
+        0x00, 0x07, 0x00, 0x00,
+        0x04, 0x00, 0x00, 0x00,
+        0x07, 0x00, 0x00, 0x00,
+    };
+    assert(std::memcmp(buf, expected, sizeof(expected)) == 0);
+
+    ZidlCdrReader r;
+    check(zidl_cdr_reader_init(&r, buf, w.len), "reader_init");
+    ::Beacon key{};
+    check(Beacon_deserialize_key(&r, &key), "Beacon_deserialize_key");
+    assert(key.id == 7u);
+    assert(zidl_cdr_remaining(&r) == 0);
+
+    uint8_t hash[16];
+    check(Beacon_compute_key_hash(&b, hash), "Beacon_compute_key_hash");
+    const uint8_t expected_hash[16] = {
+        0x00, 0x00, 0x00, 0x07,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+    };
+    assert(std::memcmp(hash, expected_hash, sizeof(expected_hash)) == 0);
+
+    std::cout << "  test_wire_bytes_beacon_key: OK\n";
+}
+
 int main() {
     std::cout << "C++ integration tests:\n";
     test_sample_roundtrip();
@@ -174,6 +236,8 @@ int main() {
     test_sample_key();
     test_sample_deserialize_key();
     test_sample_compute_key_hash();
+    test_wire_bytes_sample_key();
+    test_wire_bytes_beacon_key();
     std::cout << "All C++ integration tests passed.\n";
     return 0;
 }

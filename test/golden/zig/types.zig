@@ -220,6 +220,74 @@ pub const Frame = struct {
     pub const type_identifier: [32]u8 = [32]u8{ 0xC3, 0x7C, 0xEE, 0x90, 0xAB, 0x86, 0x70, 0xF2, 0x2D, 0xEE, 0xF7, 0x7A, 0x3C, 0xED, 0xA5, 0x0E, 0x5E, 0x32, 0xA9, 0x65, 0xF7, 0x00, 0xF2, 0xD7, 0xAE, 0x64, 0x5A, 0xBC, 0xFD, 0x20, 0xE5, 0xEC };
 }; // Frame
 
+pub const Beacon = struct {
+    id: u32 = 0,
+    payload: []const u8 = "",
+
+    pub const has_key = true;
+
+    pub fn serialize(writer: anytype, value: @This()) !void {
+        const _dh = try writer.reserveDheaderMaybe();
+        try writer.writeU32(value.id);
+        try writer.writeString(value.payload);
+        writer.patchDheaderMaybe(_dh);
+    }
+
+    pub fn deserializeInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {
+        try reader.skipDheaderIfXcdr2();
+        out.id = try reader.readU32();
+        out.payload = try reader.readString(allocator);
+    }
+
+    pub fn deserialize(reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !@This() {
+        var _out: @This() = .{};
+        try @This().deserializeInto(&_out, reader, allocator);
+        return _out;
+    }
+
+    pub fn skip(reader: *zidl_rt.CdrReader) !void {
+        if (reader.xcdr_version == .xcdr2) {
+            const _size = try reader.readDheader();
+            try reader.skip(_size);
+            return;
+        }
+        _ = try reader.readU32();
+        try reader.skipString();
+    }
+
+    pub fn serializeKey(writer: anytype, value: @This()) !void {
+        const _dh = try writer.reserveDheaderMaybe();
+        try writer.writeU32(value.id);
+        writer.patchDheaderMaybe(_dh);
+    }
+
+    pub fn deserializeKey(reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !@This() {
+        var _out: @This() = .{};
+        try @This().deserializeKeyInto(&_out, reader, allocator);
+        return _out;
+    }
+
+    pub fn deserializeKeyInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {
+        _ = allocator;
+        const _key_end: ?usize = if (reader.xcdr_version == .xcdr2) blk: {
+            const _size = try reader.readDheader();
+            break :blk reader.pos + _size;
+        } else null;
+        out.id = try reader.readU32();
+        if (_key_end) |_end| try reader.seekTo(_end);
+    }
+
+    pub fn computeKeyHash(value: @This()) [16]u8 {
+        var _khw = zidl_rt.KeyHashWriter.init();
+        @This().serializeKey(&_khw, value) catch unreachable;
+        return _khw.final();
+    }
+
+    pub const type_object: []const u8 = &[_]u8{ 0x00, 0x07, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0xF1, 0x51, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x0B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0x00, 0x07, 0xB8, 0x0B, 0xB7, 0x74, 0x00, 0x0C, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x70, 0x00, 0x32, 0x1C, 0x3C, 0xF4 };
+    pub const equivalence_hash: [14]u8 = [14]u8{ 0xCA, 0xA7, 0xE9, 0x76, 0x2E, 0xA3, 0xCD, 0x81, 0x89, 0xC1, 0x11, 0x2B, 0x50, 0x66 };
+    pub const type_identifier: [32]u8 = [32]u8{ 0x52, 0xCC, 0xDE, 0xA4, 0xF8, 0x7F, 0x65, 0x1A, 0xF2, 0x73, 0xD0, 0x3E, 0xD2, 0x41, 0xAD, 0x10, 0x38, 0x63, 0x46, 0x5E, 0xD6, 0x23, 0xA7, 0xFB, 0xB0, 0x34, 0xD6, 0x2B, 0x15, 0x10, 0xAD, 0xFC };
+}; // Beacon
+
 pub const Greeter = struct {
     ptr: *anyopaque,
     vtable: *const Vtable,

@@ -187,6 +187,70 @@ test "roundtrip: Frame @appendable DHEADER" {
     try testing.expectEqualStrings(src.topic, dst.topic);
 }
 
+// ── Cross-backend wire-byte tests ────────────────────────────────────────────
+//
+// These tests pin the exact CDR bytes for serialize_key / deserialize_key /
+// computeKeyHash.  The expected bytes are identical across C, C++, Java, and
+// Zig — any divergence is a bug.
+//
+// Sample (@final, @key unsigned long id=0x01020304):
+//   serializeKey  → encap(00 07 00 00) + id-LE(04 03 02 01)           = 8 bytes
+//
+// Beacon (@appendable, @key unsigned long id=7):
+//   serializeKey  → encap(00 07 00 00) + DHEADER-LE(04 00 00 00)
+//                   + id-LE(07 00 00 00)                               = 12 bytes
+//   computeKeyHash → id-BE(00 00 00 07) padded to 16
+
+test "wire-bytes: Sample serialize_key / deserialize_key" {
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(testing.allocator);
+
+    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    try writer.writeEncapHeader();
+    try types.Sample.serializeKey(&writer, .{ .id = 0x01020304 });
+
+    const expected = [_]u8{
+        0x00, 0x07, 0x00, 0x00, // encap: XCDR2 LE
+        0x04, 0x03, 0x02, 0x01, // id = 0x01020304, u32 LE
+    };
+    try testing.expectEqualSlices(u8, &expected, buf.items);
+
+    var reader = try zidl_rt.CdrReader.init(buf.items);
+    const key = try types.Sample.deserializeKey(&reader, testing.allocator);
+    try testing.expectEqual(@as(u32, 0x01020304), key.id);
+    try testing.expectEqual(@as(usize, 0), reader.remaining());
+}
+
+test "wire-bytes: Beacon serialize_key / deserialize_key / computeKeyHash" {
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(testing.allocator);
+
+    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    try writer.writeEncapHeader();
+    try types.Beacon.serializeKey(&writer, .{ .id = 7 });
+
+    const expected = [_]u8{
+        0x00, 0x07, 0x00, 0x00, // encap: XCDR2 LE
+        0x04, 0x00, 0x00, 0x00, // DHEADER = 4 (one u32 key field follows)
+        0x07, 0x00, 0x00, 0x00, // id = 7, u32 LE
+    };
+    try testing.expectEqualSlices(u8, &expected, buf.items);
+
+    var reader = try zidl_rt.CdrReader.init(buf.items);
+    const key = try types.Beacon.deserializeKey(&reader, testing.allocator);
+    try testing.expectEqual(@as(u32, 7), key.id);
+    try testing.expectEqual(@as(usize, 0), reader.remaining());
+
+    const hash = types.Beacon.computeKeyHash(.{ .id = 7 });
+    const expected_hash = [_]u8{
+        0x00, 0x00, 0x00, 0x07,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+    };
+    try testing.expectEqualSlices(u8, &expected_hash, &hash);
+}
+
 // ── Vtable: Greeter ───────────────────────────────────────────────────────────
 
 test "vtable: Greeter call forwarding" {
