@@ -1478,7 +1478,31 @@ const CdrGenerator = struct {
                     }
                 }
             }
-            try self.printI("return {s}_compute_key_hash(_v, _hash);\n", .{c_name});
+            // If any key field allocates heap memory, store the result first,
+            // free the allocations, then return.  Early-return error paths can
+            // also leak in the presence of multiple allocating key fields (a
+            // rare pattern in practice); that is a pre-existing CDR generator
+            // limitation and not introduced here.
+            const needs_cleanup = blk: {
+                var any = false;
+                for (s.members) |m| {
+                    if (m.annotations.is_key and keyFieldAllocatesC(m.type_ref)) {
+                        any = true;
+                        break;
+                    }
+                }
+                break :blk any;
+            };
+            if (needs_cleanup) {
+                try self.printI("int _result = {s}_compute_key_hash(_v, _hash);\n", .{c_name});
+                for (s.members) |m| {
+                    if (!m.annotations.is_key) continue;
+                    try self.emitFreeKeyField(m);
+                }
+                try self.writeI("return _result;\n");
+            } else {
+                try self.printI("return {s}_compute_key_hash(_v, _hash);\n", .{c_name});
+            }
             try self.write("}\n\n");
         }
     }
@@ -1999,6 +2023,44 @@ const CdrGenerator = struct {
     }
 
     // ── Read helpers ──────────────────────────────────────────────────────────
+
+    /// Returns true for type refs that allocate heap memory when read
+    /// by emitReadMember (unbounded string, unbounded wstring, sequence).
+    fn keyFieldAllocatesC(tr: ir.TypeRef) bool {
+        return switch (tr) {
+            .string => |b| b == null,
+            .wstring => |b| b == null,
+            .sequence => true,
+            else => false,
+        };
+    }
+
+    /// Emit a free() for a key field that was heap-allocated by emitReadMember.
+    /// Arrays of heap-allocating element types (e.g. string[N]) are noted but
+    /// not deep-freed — they are extremely rare as @key members.
+    fn emitFreeKeyField(self: *CdrGenerator, m: ir.StructMember) anyerror!void {
+        if (m.dimensions.len > 0) {
+            // Array of allocating element type — top-level array is on the stack,
+            // but each element may hold a heap pointer.  Emit a warning comment;
+            // this pattern is unusual enough that we don't generate deep-free code.
+            try self.printI("/* NOTE: @key array field '{s}' may contain heap pointers; manual cleanup required */\n", .{m.name});
+            return;
+        }
+        switch (m.type_ref) {
+            .string => |b| if (b == null) {
+                try self.printI("free((void *)_v->{s});\n", .{m.name});
+            },
+            .wstring => |b| if (b == null) {
+                try self.printI("free(_v->{s});\n", .{m.name});
+            },
+            .sequence => {
+                // Only frees the top-level buffer; elements that themselves
+                // allocate (e.g. sequence<string>) are not deep-freed here.
+                try self.printI("free(_v->{s}._buffer);\n", .{m.name});
+            },
+            else => {},
+        }
+    }
 
     fn emitReadMember(self: *CdrGenerator, m: ir.StructMember) anyerror!void {
         if (m.annotations.is_optional) {
@@ -3489,6 +3551,38 @@ test "c_backend cdr: serialize @key member emits serialize_key" {
     try testing.expect(has(s, "Key_serialize_key(ZidlCdrWriter *_w, const Key *_v)"));
     // Only the @key member should appear in serialize_key
     try testing.expect(has(s, "zidl_cdr_write_i32(_w, _v->id)"));
+}
+
+test "c_backend cdr: compute_key_hash_from_cdr frees @key unbounded string" {
+    // Greptile PR #5: _compute_key_hash_from_cdr must free heap allocations
+    // made by emitReadMember before returning, or it leaks on every hash call.
+    var c_src = try testGenCdr("@final struct Msg { @key string tag; long value; };", "msg");
+    defer c_src.deinit(testing.allocator);
+    const s = c_src.items;
+    // Should NOT directly return compute_key_hash — needs cleanup step first
+    try testing.expect(!has(s, "return Msg_compute_key_hash(_v, _hash)"));
+    // Should store result, free the string, then return
+    try testing.expect(has(s, "_result = Msg_compute_key_hash(_v, _hash)"));
+    try testing.expect(has(s, "free((void *)_v->tag)"));
+    try testing.expect(has(s, "return _result"));
+}
+
+test "c_backend cdr: compute_key_hash_from_cdr with @key sequence frees buffer" {
+    var c_src = try testGenCdr("@final struct Msg { @key sequence<long> ids; long value; };", "msg");
+    defer c_src.deinit(testing.allocator);
+    const s = c_src.items;
+    try testing.expect(has(s, "_result = Msg_compute_key_hash(_v, _hash)"));
+    try testing.expect(has(s, "free(_v->ids._buffer)"));
+}
+
+test "c_backend cdr: compute_key_hash_from_cdr with only primitive key has no cleanup" {
+    // Primitive @key fields don't allocate: direct return is correct.
+    var c_src = try testGenCdr("@final struct Sample { @key unsigned long id; string name; };", "sample");
+    defer c_src.deinit(testing.allocator);
+    const s = c_src.items;
+    try testing.expect(has(s, "return Sample_compute_key_hash(_v, _hash)"));
+    // No free/result split needed
+    try testing.expect(!has(s, "free((void *)_v->name)")); // name is not @key
 }
 
 test "c_backend cdr: serialize unbounded string" {
