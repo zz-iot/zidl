@@ -1406,7 +1406,7 @@ const CdrGenerator = struct {
 
             // _compute_key_hash_from_cdr: compute key hash from raw CDR wire bytes
             // (4-byte encapsulation header included).  Suitable as the function-pointer
-            // type for the zzdds C-ABI TypeSupport registration API.
+            // type for a DDS implementation's C-ABI TypeSupport registration API.
             try self.print("int {s}_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {{\n", .{c_name});
             try self.writeI("ZidlCdrReader _r_data;\n");
             try self.writeI("int _rc = zidl_cdr_reader_init(&_r_data, _payload, _len);\n");
