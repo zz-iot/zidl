@@ -256,9 +256,14 @@ try MyStruct.serialize(&w, &my_value);
 ```zig
 var r = try zidl_rt.CdrReader.init(cdr_bytes);
 var value = try MyStruct.deserialize(&r, alloc);
-// Free heap-allocated strings manually; sequence buffers with ._release = true:
-defer alloc.free(value.my_string);
-defer if (value.my_seq._release) { if (value.my_seq._buffer) |b| alloc.free(b[0..value.my_seq._length]); };
+defer value.deinit(alloc);  // frees sequence buffers where _release == true
+```
+
+To store a copy that outlives the caller's context (e.g. in a vtable `init`):
+
+```zig
+const stored = try incoming_qos.clone(alloc);
+defer stored.deinit(alloc);
 ```
 
 ### Key Serialization and Hashing
@@ -361,6 +366,11 @@ e.g. `DDS::Duration_t` → `DDS.<pfx>Duration_t`.
 - Unbounded sequence fields use the C PSM extern struct layout and default to `.{}` (all fields zero, no allocation).
 - `zidl_rt.BoundedArray(T, N)` fields default to zero-length.
 - On `deserialize`, heap-allocated fields (strings, sequences) are allocated
-  with the provided `alloc`; caller is responsible for `deinit`.
-- Generated `deinit(alloc)` method frees all heap fields recursively (where
-  the allocator is needed). For types with no heap fields, no `deinit` is generated.
+  with the provided `alloc`; caller is responsible for cleanup.
+- Generated `deinit(self: *@This(), alloc: std.mem.Allocator) void` frees all
+  heap-owned sequence buffers (guarded by `_release == true`) recursively. Only
+  emitted when the type has at least one sequence field; no-op types do not get it.
+- Generated `clone(self: @This(), alloc: std.mem.Allocator) !@This()` deep-copies
+  all sequence fields — the symmetric counterpart to `deinit`. Useful when a QoS
+  or data struct is stored beyond the lifetime of the caller's stack buffer (e.g.
+  vtable `init` methods that store the QoS by value).

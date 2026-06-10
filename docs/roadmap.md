@@ -73,14 +73,11 @@ this roadmap. New language backends have their own sections below.
   interfaces become plain C callback structs with a `void *listener_data` context
   pointer.  The existing vtable structs in the generated header become an internal
   artifact; they should not appear in the public C API header.
-- **Zig backend `--generate-c-api`**: new flag that generates `pub export fn
-  callconv(.c)` wrappers alongside the standard Zig vtable output.  For DDS
-  object interfaces, wraps each vtable operation with C-ABI type conversion
-  (`[*:0]const u8` → `[]const u8`, C structs → Zig structs) and vtable dispatch.
-  For listener interfaces, generates `CXxxListenerAdapter` (wraps C callback
-  struct in a Zig listener vtable) and embeds adapter allocation inside the DDS
-  object create/delete C-ABI wrappers.  See `docs/ecosystem.md`
-  §"`--generate-c-api`" for the full design.
+- ~~**Zig backend `--generate-c-api`**~~: **Implemented.** Because the Zig vtable
+  slots use C-ABI types from the start, the generated `pub export fn callconv(.c)`
+  wrappers are trivial one-line forwarders with no type conversion.  No
+  `CXxxListenerAdapter` is generated; listener structs are passed and stored by
+  value directly.  See `docs/ecosystem.md` §"`--generate-c-api`" for details.
 
 ### All backends (annotation support)
 
@@ -122,6 +119,17 @@ this roadmap. New language backends have their own sections below.
   (`test/xrce-microzig/`) is committed and self-contained, but the main `build.zig`
   does not yet invoke it as part of `zig build integration-test`. Blocked on confirming
   the 0.15.1 toolchain path is available in CI.
+
+---
+
+## Recently Completed
+
+| Item | Notes |
+|---|---|
+| `--generate-c-api` trivial forwarders (Zig backend) | Vtable slots are C-ABI; exports are one-liners. No type conversion. |
+| `extern struct` for C-compatible IDL types | Structs whose fields are all C-compatible use `extern struct`; others use plain `struct`. |
+| `deinit(alloc)` on sequence-containing types | Recursively frees heap-owned sequence buffers (`_release == true`). |
+| `clone(alloc)` on sequence-containing types | Deep copy symmetric to `deinit`; used by vtable `init` to own QoS with sequence fields. |
 
 ---
 

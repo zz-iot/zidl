@@ -118,20 +118,25 @@ The full normative DCPS IDL is in [`dcps_idl.md`](dcps_idl.md).
 
 **Per-language interface shapes:**
 
-*Zig* — fat-pointer vtable structs (current):
+*Zig* — fat-pointer vtable struct with C-ABI slot types (primary, current):
 ```zig
 // FooDataWriter — typed write operations
-pub const FooDataWriter = struct {
+pub const FooDataWriter = extern struct {
     ptr: *anyopaque,
     vtable: *const Vtable,
     pub const Vtable = struct {
-        register_instance: *const fn (*anyopaque, *const Foo) i32,
+        register_instance: *const fn (*anyopaque, *const Foo, i32) i32,
         write: *const fn (*anyopaque, *const Foo, i32) i32,
         dispose: *const fn (*anyopaque, *const Foo, i32) i32,
         // ...
     };
 };
 ```
+
+Vtable slot types are C-ABI throughout: strings are `[*:0]const u8`, struct
+parameters are `*const T`, and callback (listener) parameters are
+`?*const ListenerStruct`.  An idiomatic Zig wrapper layer (slice-friendly,
+ergonomic) is a planned future addition on top of this; it is not yet generated.
 
 *C* — opaque typedef + free function declarations (planned; see roadmap):
 ```c
@@ -150,35 +155,33 @@ function pointer per callback), matching the same convention.
 
 ---
 
-## `--generate-c-api`: C-ABI Bridge Layer (Zig backend, planned)
+## `--generate-c-api`: C-ABI Export Layer (Zig backend, implemented)
 
-A companion flag to `--generate-interfaces` for the Zig backend.  Where
-`--generate-interfaces` generates the idiomatic Zig vtable representation,
-`--generate-c-api` additionally generates the `pub export fn callconv(.c)`
-wrappers that implement the free functions declared by the C backend's
-`--generate-interfaces` output.
+A companion flag to `--generate-interfaces` for the Zig backend.  Because the
+Zig vtable slots already use C-ABI types throughout (see per-language shapes
+above), the C export functions are **trivial one-line forwarders** — no type
+conversion code is emitted:
 
-For **DDS object interfaces** (runtime-implemented): generates a wrapper
-function per operation that converts C-ABI types (`[*:0]const u8`, C structs)
-to Zig-idiomatic types (`[]const u8`, Zig structs) and dispatches through the
-Zig vtable.
+```zig
+pub export fn DDS_Publisher_create_datawriter(
+    self: DDS.Publisher,
+    a_topic: DDS.Topic,
+    qos: ?*const DDS.DataWriterQos,
+    a_listener: ?*const DDS.DataWriterListener,
+    mask: DDS.StatusMask,
+) callconv(.c) DDS.DataWriter {
+    return self.vtable.create_datawriter(self.ptr, a_topic, qos, a_listener, mask);
+}
+```
 
-For **listener interfaces** (user-implemented callbacks): generates a
-`CXxxListenerAdapter` struct that holds the user's C callback struct and
-implements the Zig listener vtable by converting DDS entity fat-pointers back
-to C opaque handles before calling the C callbacks.  Adapter creation is
-embedded in the DDS object C-ABI implementations (e.g. `create_datareader`
-allocates the adapter when a non-null listener is supplied; the impl's `deinit`
-frees it).
+For **listener interfaces** (`@callback` annotated): user code passes a
+`?*const XxxListener` pointer directly; no adapter struct is generated.  The
+listener is stored by the vtable implementation as a plain value copy.
 
-Listener interfaces are identified by name suffix (`*Listener`).
-
-**Performance note:** The hot-path typed operations (`write`, `read`, `take`)
-are generated per-type from the user's own IDL and use only C-compatible types
-(pointer to data type, `InstanceHandle_t` integer).  There is zero conversion
-overhead on the data path.  Conversion overhead applies only to cold-path setup
-operations (topic name strings, filter expression strings, `StringSeq`
-parameters), which are called at most once per entity during startup.
+**Design note:** The absence of conversion overhead is a direct consequence of
+the binding model: the Zig vtable is the primary binding and its slot types are
+C-ABI from the start.  An idiomatic Zig wrapper layer (slice strings, ergonomic
+QoS builders) would sit on top of this and is a planned future addition.
 
 ---
 
