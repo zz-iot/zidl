@@ -1413,7 +1413,10 @@ const Generator = struct {
                 // Unbounded strings arrive as [*:0]const u8; Handlers expects []const u8.
                 if (is_unbounded_str) {
                     try self.print(", std.mem.span(_{s})", .{p.name});
-                    // Named struct params arrive as *const T; dereference for Zig caller.
+                    // Nullable pointer params (callback struct or sequence typedef): unwrap or zero.
+                } else if (std.mem.startsWith(u8, ct, "?*const ")) {
+                    try self.print(", (if (_{s}) |_q| _q.* else .{{}})", .{p.name});
+                    // Non-null pointer params (plain struct or inline sequence): dereference.
                 } else if (std.mem.startsWith(u8, ct, "*const ")) {
                     try self.print(", _{s}.*", .{p.name});
                 } else {
@@ -5079,6 +5082,23 @@ test "zig_backend: --generate-c-api emits noop vtable for listener interfaces" {
     try testing.expect(!has(s, "pub export fn WriterListener_on_change"));
     // Entity still gets free functions
     try testing.expect(has(s, "pub export fn Writer_write_val"));
+}
+
+test "zig_backend: @callback thunk unwraps ?*const T params (seq typedef and callback struct)" {
+    var out = try testGenOpts(
+        \\typedef sequence<long> NumSeq;
+        \\interface StatusListener {
+        \\    void on_missed(in NumSeq missed);
+        \\};
+    , "sl", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Thunk receives ?*const NumSeq (C-ABI for seq typedef in-param).
+    try testing.expect(has(s, "_missed: ?*const NumSeq"));
+    // Thunk body must unwrap the optional pointer, not pass it as-is.
+    try testing.expect(has(s, "(if (_missed) |_q| _q.* else .{})"));
+    // Handlers signature uses the plain Zig type (by value).
+    try testing.expect(has(s, "on_missed: ?*const fn (*Ctx, NumSeq) void = null,"));
 }
 
 test "zig_backend: --generate-c-api with --type-prefix uses prefix in export name" {
