@@ -1578,23 +1578,7 @@ const Generator = struct {
 
     /// C-ABI qualified name: `DDS::DomainParticipant` → `DDS_DomainParticipant`.
     fn cApiQualName(self: *Generator, qname: []const u8, pfx: []const u8) ![]u8 {
-        _ = pfx;
-        var out = try self.alloc.alloc(u8, qname.len);
-        errdefer self.alloc.free(out);
-        var j: usize = 0;
-        var i: usize = 0;
-        while (i < qname.len) {
-            if (i + 1 < qname.len and qname[i] == ':' and qname[i + 1] == ':') {
-                out[j] = '_';
-                j += 1;
-                i += 2;
-            } else {
-                out[j] = qname[i];
-                j += 1;
-                i += 1;
-            }
-        }
-        return self.alloc.realloc(out, j);
+        return interface.prefixedCNameFromQualified(self.alloc, qname, pfx);
     }
 
     /// C-ABI parameter type for `pub export fn`: string → sentinel pointer,
@@ -5095,6 +5079,17 @@ test "zig_backend: --generate-c-api emits noop vtable for listener interfaces" {
     try testing.expect(!has(s, "pub export fn WriterListener_on_change"));
     // Entity still gets free functions
     try testing.expect(has(s, "pub export fn Writer_write_val"));
+}
+
+test "zig_backend: --generate-c-api with --type-prefix uses prefix in export name" {
+    var out = try testGenOpts(
+        \\interface Greeter { string greet(in string name); };
+    , "g", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true, .type_prefix = "DDS_" });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Exported symbol must carry the prefix so it matches the C header's declaration
+    try testing.expect(has(s, "pub export fn DDS_Greeter_greet("));
+    try testing.expect(!has(s, "pub export fn Greeter_greet("));
 }
 
 test "zig_backend: --generate-c-api string return uses ptrCast" {
