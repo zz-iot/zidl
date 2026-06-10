@@ -88,17 +88,6 @@ pub const CBackend = struct {
             defer self.alloc.free(c_filename);
             try writeOutputFile(self.alloc, io, opts, c_filename, cdr_content.items);
         }
-
-        // ── <stem>_iface.c ────────────────────────────────────────────────────
-
-        if (opts.generate_interfaces) {
-            var iface_content = std.ArrayList(u8).empty;
-            defer iface_content.deinit(self.alloc);
-            try generateIfaceSource(self.alloc, spec, opts, &iface_content);
-            const if_filename = try std.fmt.allocPrint(self.alloc, "{s}_iface.c", .{opts.input_stem});
-            defer self.alloc.free(if_filename);
-            try writeOutputFile(self.alloc, io, opts, if_filename, iface_content.items);
-        }
     }
 
     fn vtableDeinit(ctx: *anyopaque) void {
@@ -126,12 +115,19 @@ pub fn generateHeader(
         .opts = opts,
         .out = out,
         .seq_emitted = .empty,
+        .scalar_typedef_emitted = .empty,
+        .enum_emitted = .empty,
     };
     defer {
-        // Free the heap-allocated key strings stored in the map.
         var it = gen.seq_emitted.keyIterator();
         while (it.next()) |k| alloc.free(k.*);
         gen.seq_emitted.deinit(alloc);
+        var it2 = gen.scalar_typedef_emitted.keyIterator();
+        while (it2.next()) |k| alloc.free(k.*);
+        gen.scalar_typedef_emitted.deinit(alloc);
+        var it3 = gen.enum_emitted.keyIterator();
+        while (it3.next()) |k| alloc.free(k.*);
+        gen.enum_emitted.deinit(alloc);
     }
     try gen.emitHeader(spec);
 }
@@ -176,13 +172,17 @@ const Generator = struct {
     alloc: std.mem.Allocator,
     opts: interface.Options,
     out: *std.ArrayList(u8),
-    /// Sequence element keys (e.g. `"int32_t"`) for which we have already
-    /// emitted a sequence typedef.  Prevents duplicate emission.
+    /// Sequence element keys for which we have already emitted a sequence typedef.
     seq_emitted: std.StringHashMapUnmanaged(void),
+    /// C names of scalar typedefs already emitted in pass-0.
+    scalar_typedef_emitted: std.StringHashMapUnmanaged(void),
+    /// C names of enums/bitmasks already emitted in pass-0.
+    enum_emitted: std.StringHashMapUnmanaged(void),
     /// When true, wrap each sequence typedef in `#ifndef`/`#define`/`#endif`
     /// guards so that multiple split headers defining the same typedef can be
-    /// safely included together.
-    guarded_seqs: bool = false,
+    /// safely included together.  Always true: prevents conflicts when multiple
+    /// generated headers (e.g. dcps.h and shape.h) define the same sequence type.
+    guarded_seqs: bool = true,
 
     // ── Low-level output helpers ──────────────────────────────────────────────
 
@@ -222,8 +222,26 @@ const Generator = struct {
             try self.write("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
         }
 
-        // Pre-scan all items and emit sequence typedefs before any struct.
+        // Pass 0: emit simple scalar typedefs and enum typedefs before sequences.
+        try self.scanItemsForScalarTypedefs(spec.items);
+
+        // Pass 1 (interfaces, part a): emit entity fat-pointer typedefs before
+        // sequences, so that `DDS_DataReader *_buffer` compiles.
+        if (self.opts.generate_interfaces) {
+            try self.scanItemsForEntityTypedefs(spec.items);
+        }
+
+        // Sequence pre-scan: emit sequence struct definitions.
+        // For struct-typed element types, a forward typedef is emitted inline by
+        // ensureSeqTypedef so `DDS_SampleInfo *_buffer` compiles.
         try self.scanItemsForSeqs(spec.items);
+
+        // Pass 1 (interfaces, part b): forward-declare status struct types used
+        // in listener callback signatures, then emit listener callback structs.
+        if (self.opts.generate_interfaces) {
+            try self.scanItemsForStatusForwardDecls(spec.items);
+            try self.scanItemsForListenerStructs(spec.items);
+        }
 
         // Emit all declarations in source order.
         try self.emitItems(spec.items);
@@ -245,6 +263,47 @@ const Generator = struct {
             c.* = if (std.ascii.isAlphanumeric(c.*)) std.ascii.toUpper(c.*) else '_';
         }
         return g;
+    }
+
+    // ── Pass-0: scalar/enum typedef pre-scan ──────────────────────────────────
+    // Emit `typedef <base> TypeName` and enum declarations before sequence
+    // structs, so that sequence _buffer fields can reference them.
+
+    fn scanItemsForScalarTypedefs(self: *Generator, items: []const ir.ModuleItem) !void {
+        for (items) |item| {
+            switch (item) {
+                .module => |m| try self.scanItemsForScalarTypedefs(m.items),
+                .type_decl => |td| try self.emitScalarTypedefIfNeeded(td),
+                .const_ => {},
+            }
+        }
+    }
+
+    fn emitScalarTypedefIfNeeded(self: *Generator, td: ir.TypeDecl) !void {
+        switch (td) {
+            // Typedef of a base type (e.g. `typedef unsigned long DomainId_t`)
+            .typedef => |t| switch (t.type_ref) {
+                // Only pre-emit plain scalar typedefs (no array dimensions).
+                // Array typedefs like `typedef long Matrix[2][4]` must be
+                // emitted by the main pass which knows how to print the dims.
+                .base => if (t.dimensions.len == 0) {
+                    const c_name = try self.prefixedCName(t.qualified_name);
+                    defer self.alloc.free(c_name);
+                    if (self.scalar_typedef_emitted.get(c_name) != null) return;
+                    const k = try self.alloc.dupe(u8, c_name);
+                    errdefer self.alloc.free(k);
+                    try self.scalar_typedef_emitted.put(self.alloc, k, {});
+                    const c_type = try self.typeRefToC(t.type_ref);
+                    defer self.alloc.free(c_type);
+                    try self.print("typedef {s} {s};\n", .{ c_type, c_name });
+                },
+                else => {},
+            },
+            // Enums: emit the typedef so enum values are usable in seq buffers.
+            .enum_ => |e| try self.emitEnum(e),
+            .bitmask => |bm| try self.emitBitmask(bm),
+            else => {},
+        }
     }
 
     // ── Sequence pre-scan ─────────────────────────────────────────────────────
@@ -322,6 +381,26 @@ const Generator = struct {
         const key_dup = try self.alloc.dupe(u8, key);
         errdefer self.alloc.free(key_dup);
         try self.seq_emitted.put(self.alloc, key_dup, {});
+
+        // For named struct/exception element types, emit a forward typedef
+        // declaration so `ElemType *_buffer` compiles before the full struct
+        // definition appears.  Interfaces are already handled by the entity
+        // pre-scan pass; scalar/enum types by pass-0.
+        // For struct/exception element types, emit a forward typedef so the
+        // _buffer field compiles.  C11 permits compatible typedef redeclarations,
+        // so emitting this here is safe even if the full struct appears later.
+        switch (elem) {
+            .named => |td| switch (td) {
+                .struct_, .exception => {
+                    const qn = ir.typeDeclQualifiedName(td);
+                    const c_name = try self.prefixedCName(qn);
+                    defer self.alloc.free(c_name);
+                    try self.print("typedef struct {s}_s {s};\n", .{ c_name, c_name });
+                },
+                else => {},
+            },
+            else => {},
+        }
 
         const seq_name = try std.fmt.allocPrint(self.alloc, "{s}_seq", .{key});
         defer self.alloc.free(seq_name);
@@ -460,6 +539,11 @@ const Generator = struct {
     fn emitEnum(self: *Generator, e: *const ir.Enum) !void {
         const c_name = try self.prefixedCName(e.qualified_name);
         defer self.alloc.free(c_name);
+        // Guard against double-emission (pass-0 may have already emitted this).
+        if (self.enum_emitted.get(c_name) != null) return;
+        const k = try self.alloc.dupe(u8, c_name);
+        errdefer self.alloc.free(k);
+        try self.enum_emitted.put(self.alloc, k, {});
 
         try self.write("typedef enum {\n");
         for (e.enumerators, 0..) |en, i| {
@@ -474,6 +558,11 @@ const Generator = struct {
     fn emitBitmask(self: *Generator, bm: *const ir.Bitmask) !void {
         const c_name = try self.prefixedCName(bm.qualified_name);
         defer self.alloc.free(c_name);
+        // Guard against double-emission (pass-0 may have already emitted this).
+        if (self.enum_emitted.get(c_name) != null) return;
+        const k = try self.alloc.dupe(u8, c_name);
+        errdefer self.alloc.free(k);
+        try self.enum_emitted.put(self.alloc, k, {});
 
         const storage = bitmaskStorageType(bm.annotations);
         try self.print("typedef {s} {s};\n", .{ storage, c_name });
@@ -512,6 +601,11 @@ const Generator = struct {
     fn emitTypedef(self: *Generator, t: *const ir.Typedef) !void {
         const c_name = try self.prefixedCName(t.qualified_name);
         defer self.alloc.free(c_name);
+        // Skip scalar typedefs already emitted in pass-0.
+        switch (t.type_ref) {
+            .base => if (self.scalar_typedef_emitted.get(c_name) != null) return,
+            else => {},
+        }
 
         const c_type = try self.typeRefToC(t.type_ref);
         defer self.alloc.free(c_type);
@@ -559,52 +653,38 @@ const Generator = struct {
 
         if (!self.opts.generate_interfaces) {
             try self.print(
-                "/* IDL interface {s} — vtable struct emitted with --generate-interfaces */\n\n",
+                "/* IDL interface {s} — use --generate-interfaces for C declarations */\n\n",
                 .{c_name},
             );
             return;
         }
 
-        // Collect all operations and attributes (flattened through inheritance).
+        // Listener structs and entity opaque typedefs are emitted in the
+        // pre-scan passes inside emitHeader; only free function declarations
+        // remain for non-listener interfaces here.
+        if (isListenerInterface(iface)) return;
+
         var ops = std.ArrayListUnmanaged(ir.Operation).empty;
         defer ops.deinit(self.alloc);
         var attrs = std.ArrayListUnmanaged(ir.Attribute).empty;
         defer attrs.deinit(self.alloc);
         try self.collectInterfaceMembers(iface, &ops, &attrs);
 
-        // ── Vtable struct ──────────────────────────────────────────────────
         try self.print("/* IDL interface: {s} */\n", .{c_name});
-        try self.print("typedef struct {s}_Vtable {{\n", .{c_name});
-        for (ops.items) |op| try self.emitVtableEntry(&op);
-        for (attrs.items) |attr| try self.emitVtableAttrEntry(&attr);
-        try self.write("    void (*deinit)(void *ptr);\n");
-        try self.print("}} {s}_Vtable;\n\n", .{c_name});
-
-        // ── Fat-pointer struct ─────────────────────────────────────────────
-        try self.print("typedef struct {s} {{\n", .{c_name});
-        try self.write("    void                *ptr;\n");
-        try self.print("    const {s}_Vtable *vtable;\n", .{c_name});
-        try self.print("}} {s};\n\n", .{c_name});
-
-        // ── Inline forwarding functions ────────────────────────────────────
-        for (ops.items) |op| try self.emitVtableFwdOp(c_name, &op);
-        for (attrs.items) |attr| try self.emitVtableFwdAttr(c_name, &attr);
-        try self.print("static inline void {s}_deinit({s} _self) {{\n", .{ c_name, c_name });
-        try self.write("    _self.vtable->deinit(_self.ptr);\n}\n\n");
-
-        // Constructor declaration for the Zig-backed vtable instance.
-        try self.print("{s} {s}_zig_new(void *ptr);\n\n", .{ c_name, c_name });
+        for (ops.items) |op| try self.emitFreeFunctionDecl(c_name, &op);
+        for (attrs.items) |attr| try self.emitFreeAttrDecls(c_name, &attr);
+        try self.write("\n");
     }
 
-    /// Emit one vtable function-pointer field for an operation.
-    fn emitVtableEntry(self: *Generator, op: *const ir.Operation) !void {
+    /// Emit a free C function declaration for one interface operation.
+    fn emitFreeFunctionDecl(self: *Generator, c_name: []const u8, op: *const ir.Operation) !void {
         const ret = if (op.return_type) |rt|
             try self.typeRefToC(rt)
         else
             try self.alloc.dupe(u8, "void");
         defer self.alloc.free(ret);
 
-        try self.print("    {s}{s}(*{s})(void *ptr", .{ ret, ptrSep(ret), op.name });
+        try self.print("{s}{s}{s}_{s}({s} self", .{ ret, ptrSep(ret), c_name, op.name, c_name });
         for (op.params) |p| {
             const pt = try self.vtableParamC(p);
             defer self.alloc.free(pt);
@@ -613,60 +693,130 @@ const Generator = struct {
         try self.write(");\n");
     }
 
-    /// Emit vtable function-pointer fields for an attribute.
-    fn emitVtableAttrEntry(self: *Generator, attr: *const ir.Attribute) !void {
+    /// Emit free C function declarations for an attribute getter (and setter).
+    fn emitFreeAttrDecls(self: *Generator, c_name: []const u8, attr: *const ir.Attribute) !void {
         const at = try self.typeRefToC(attr.type_ref);
         defer self.alloc.free(at);
-        try self.print("    {s}{s}(*get_{s})(void *ptr);\n", .{ at, ptrSep(at), attr.name });
+        try self.print("{s}{s}{s}_get_{s}({s} self);\n", .{ at, ptrSep(at), c_name, attr.name, c_name });
         if (!attr.readonly) {
-            try self.print(
-                "    void (*set_{s})(void *ptr, {s}{s}value);\n",
-                .{ attr.name, at, ptrSep(at) },
-            );
+            try self.print("void {s}_set_{s}({s} self, {s}{s}value);\n", .{ c_name, attr.name, c_name, at, ptrSep(at) });
         }
     }
 
-    /// Emit a static-inline forwarding function for an operation.
-    fn emitVtableFwdOp(self: *Generator, c_name: []const u8, op: *const ir.Operation) !void {
-        const ret = if (op.return_type) |rt|
-            try self.typeRefToC(rt)
-        else
-            try self.alloc.dupe(u8, "void");
-        defer self.alloc.free(ret);
+    /// Pre-scan pass 1: emit opaque handle typedefs for all non-listener interfaces.
+    fn scanItemsForEntityTypedefs(self: *Generator, items: []const ir.ModuleItem) !void {
+        var any = false;
+        for (items) |item| {
+            switch (item) {
+                .module => |m| try self.scanItemsForEntityTypedefs(m.items),
+                .type_decl => |td| switch (td) {
+                    .interface => |iface| if (!isListenerInterface(iface)) {
+                        const c_name = try self.prefixedCName(iface.qualified_name);
+                        defer self.alloc.free(c_name);
+                        // Fat-pointer struct: matches extern struct { ptr, vtable } in
+                        // the Zig backend so C and Zig agree on the 16-byte ABI layout.
+                        // The vtable field is void* to avoid exposing vtable types publicly.
+                        try self.print("typedef struct {{ void *ptr; const void *vtable; }} {s};\n", .{c_name});
+                        any = true;
+                    },
+                    else => {},
+                },
+                .const_ => {},
+            }
+        }
+        if (any) try self.write("\n");
+    }
 
-        try self.print("static inline {s}{s}{s}_{s}({s} _self", .{
-            ret, ptrSep(ret), c_name, op.name, c_name,
-        });
-        for (op.params) |p| {
+    /// Pre-scan pass 1b: emit forward struct typedefs for any named struct/exception
+    /// types used as status parameters in listener callback signatures.
+    /// These appear in DDS_*Listener struct definitions before the full struct
+    /// definitions are emitted in the main pass.
+    fn scanItemsForStatusForwardDecls(self: *Generator, items: []const ir.ModuleItem) !void {
+        for (items) |item| {
+            switch (item) {
+                .module => |m| try self.scanItemsForStatusForwardDecls(m.items),
+                .type_decl => |td| switch (td) {
+                    .interface => |iface| if (isListenerInterface(iface)) {
+                        for (iface.operations) |op| {
+                            for (op.params) |p| {
+                                try self.emitForwardDeclIfStruct(p.type_ref);
+                            }
+                        }
+                    },
+                    else => {},
+                },
+                .const_ => {},
+            }
+        }
+    }
+
+    fn emitForwardDeclIfStruct(self: *Generator, tr: ir.TypeRef) !void {
+        switch (tr) {
+            .named => |td| switch (td) {
+                .struct_, .exception => {
+                    const qn = ir.typeDeclQualifiedName(td);
+                    const c_name = try self.prefixedCName(qn);
+                    defer self.alloc.free(c_name);
+                    // Idempotent: guard with scalar_typedef_emitted (re-using it for all forward decls).
+                    if (self.scalar_typedef_emitted.get(c_name) != null) return;
+                    const k = try self.alloc.dupe(u8, c_name);
+                    errdefer self.alloc.free(k);
+                    try self.scalar_typedef_emitted.put(self.alloc, k, {});
+                    try self.print("typedef struct {s}_s {s};\n", .{ c_name, c_name });
+                },
+                else => {},
+            },
+            else => {},
+        }
+    }
+
+    /// Pre-scan pass 2: emit full callback struct definitions for listener interfaces.
+    fn scanItemsForListenerStructs(self: *Generator, items: []const ir.ModuleItem) !void {
+        for (items) |item| {
+            switch (item) {
+                .module => |m| try self.scanItemsForListenerStructs(m.items),
+                .type_decl => |td| switch (td) {
+                    .interface => |iface| if (isListenerInterface(iface)) {
+                        try self.emitListenerStruct(iface);
+                    },
+                    else => {},
+                },
+                .const_ => {},
+            }
+        }
+    }
+
+    /// Emit the C callback struct for a listener interface.
+    fn emitListenerStruct(self: *Generator, iface: *const ir.Interface) !void {
+        const c_name = try self.prefixedCName(iface.qualified_name);
+        defer self.alloc.free(c_name);
+
+        var ops = std.ArrayListUnmanaged(ir.Operation).empty;
+        defer ops.deinit(self.alloc);
+        var attrs = std.ArrayListUnmanaged(ir.Attribute).empty;
+        defer attrs.deinit(self.alloc);
+        try self.collectInterfaceMembers(iface, &ops, &attrs);
+
+        try self.print("/* IDL listener interface: {s} */\n", .{c_name});
+        try self.print("typedef struct {s} {{\n", .{c_name});
+        try self.write("    void *listener_data;\n");
+        for (ops.items) |op| try self.emitListenerCallbackField(&op);
+        try self.print("}} {s};\n\n", .{c_name});
+    }
+
+    /// Emit one function-pointer field of a listener callback struct.
+    /// All listener callbacks are void-returning; the trailing `void *listener_data`
+    /// is appended so the runtime can pass the user context on each call.
+    fn emitListenerCallbackField(self: *Generator, op: *const ir.Operation) !void {
+        try self.print("    void (*{s})(", .{op.name});
+        for (op.params, 0..) |p, i| {
+            if (i > 0) try self.write(", ");
             const pt = try self.vtableParamC(p);
             defer self.alloc.free(pt);
-            try self.print(", {s}{s}{s}", .{ pt, ptrSep(pt), p.name });
+            try self.print("{s}{s}{s}", .{ pt, ptrSep(pt), p.name });
         }
-        try self.write(") {\n");
-        if (op.return_type != null) {
-            try self.print("    return _self.vtable->{s}(_self.ptr", .{op.name});
-        } else {
-            try self.print("    _self.vtable->{s}(_self.ptr", .{op.name});
-        }
-        for (op.params) |p| try self.print(", {s}", .{p.name});
-        try self.write(");\n}\n\n");
-    }
-
-    /// Emit static-inline forwarding functions for an attribute.
-    fn emitVtableFwdAttr(self: *Generator, c_name: []const u8, attr: *const ir.Attribute) !void {
-        const at = try self.typeRefToC(attr.type_ref);
-        defer self.alloc.free(at);
-        try self.print(
-            "static inline {s}{s}{s}_get_{s}({s} _self) {{\n    return _self.vtable->get_{s}(_self.ptr);\n}}\n\n",
-            .{ at, ptrSep(at), c_name, attr.name, c_name, attr.name },
-        );
-        if (!attr.readonly) {
-            try self.print(
-                "static inline void {s}_set_{s}({s} _self, {s}{s}value) {{\n" ++
-                    "    _self.vtable->set_{s}(_self.ptr, value);\n}}\n\n",
-                .{ c_name, attr.name, c_name, at, ptrSep(at), attr.name },
-            );
-        }
+        if (op.params.len > 0) try self.write(", ");
+        try self.write("void *listener_data);\n");
     }
 
     /// C type for an operation parameter respecting in/out/inout mode.
@@ -674,8 +824,30 @@ const Generator = struct {
         const base = try self.typeRefToC(p.type_ref);
         defer self.alloc.free(base);
         return switch (p.mode) {
-            .in_ => self.alloc.dupe(u8, base),
+            .in_ => if (isCPrimitive(p.type_ref))
+                self.alloc.dupe(u8, base) // scalars: pass by value
+            else
+                std.fmt.allocPrint(self.alloc, "const {s} *", .{base}), // structs: const pointer
             .out, .inout => std.fmt.allocPrint(self.alloc, "{s} *", .{base}),
+        };
+    }
+
+    /// True when a C type can be passed by value (scalar, enum, non-listener entity handle).
+    /// Used to decide whether `in` params in function declarations use T vs const T*.
+    /// Listener interfaces are intentionally NOT primitive — they're passed as const T* so
+    /// callers can pass NULL to request the noop listener.
+    fn isCPrimitive(tr: ir.TypeRef) bool {
+        return switch (tr) {
+            .base => true,
+            .string, .wstring => true, // char* — already pointer-sized
+            .named => |td| switch (td) {
+                .typedef => |t| isCPrimitive(t.type_ref),
+                .enum_, .bitmask, .bitset => true,
+                // Non-listener entity interfaces: fat-pointer structs passed by value.
+                .interface => |iface| !isListenerInterface(iface),
+                else => false, // struct, union, exception: pass by const pointer
+            },
+            else => false,
         };
     }
 
@@ -967,6 +1139,18 @@ fn bitmaskStorageType(annotations: ir.EnumAnnotations) []const u8 {
 
 /// Return `""` when `c_type` ends with `'*'` (pointer type), otherwise `" "`.
 /// Used to produce idiomatic C declarations: `char *name` not `char * name`.
+/// Interfaces whose names end with "Listener" are user-implemented callbacks
+/// (DataReaderListener, DataWriterListener, etc.).  All others are DDS entity
+/// interfaces implemented by the runtime (DataWriter, DataReader, etc.).
+/// The canonical gate is the `@callback` IDL annotation; the name-suffix heuristic
+/// is a deprecated fallback for IDL files that haven't been annotated yet.
+fn isListenerInterface(iface: *const ir.Interface) bool {
+    for (iface.raw) |ann| {
+        if (std.mem.eql(u8, ann.name, "callback")) return true;
+    }
+    return std.mem.endsWith(u8, iface.name, "Listener");
+}
+
 fn ptrSep(c_type: []const u8) []const u8 {
     return if (c_type.len > 0 and c_type[c_type.len - 1] == '*') "" else " ";
 }
@@ -2520,203 +2704,6 @@ const CdrGenerator = struct {
     }
 };
 
-// ── Interface source generation ────────────────────────────────────────────────
-
-/// Generate the interface binding source file `<stem>_iface.c` into `out`.
-///
-/// For each IDL `interface` declaration, emits:
-///   - `extern` declarations for Zig DDS runtime function exports
-///     (`zidl_<CName>_<op>`, `zidl_<CName>_get_<attr>`, etc.)
-///   - A `static const <CName>_Vtable <CName>_zig_vtable_` initialiser
-///   - `<CName> <CName>_zig_new(void *ptr)` constructor definition
-///
-/// The generated file `#include`s the corresponding header, which contains the
-/// vtable struct and fat-pointer struct declarations.
-pub fn generateIfaceSource(
-    alloc: std.mem.Allocator,
-    spec: *const ir.Spec,
-    opts: interface.Options,
-    out: *std.ArrayList(u8),
-) !void {
-    var gen = IfaceGenerator{
-        .alloc = alloc,
-        .opts = opts,
-        .out = out,
-    };
-    try gen.emitSource(spec);
-}
-
-const IfaceGenerator = struct {
-    alloc: std.mem.Allocator,
-    opts: interface.Options,
-    out: *std.ArrayList(u8),
-
-    fn write(self: *IfaceGenerator, s: []const u8) !void {
-        try self.out.appendSlice(self.alloc, s);
-    }
-
-    fn print(self: *IfaceGenerator, comptime fmt: []const u8, args: anytype) !void {
-        const s = try std.fmt.allocPrint(self.alloc, fmt, args);
-        defer self.alloc.free(s);
-        try self.out.appendSlice(self.alloc, s);
-    }
-
-    fn emitSource(self: *IfaceGenerator, spec: *const ir.Spec) !void {
-        try self.print(
-            "/* Generated by zidl from {s}.idl — DO NOT EDIT */\n\n",
-            .{self.opts.input_stem},
-        );
-        try self.print("#include \"{s}.h\"\n", .{self.opts.input_stem});
-        try self.write("#include <stddef.h>\n\n");
-        try self.emitItems(spec.items);
-    }
-
-    fn emitItems(self: *IfaceGenerator, items: []const ir.ModuleItem) anyerror!void {
-        for (items) |item| {
-            switch (item) {
-                .module => |m| try self.emitItems(m.items),
-                .type_decl => |td| switch (td) {
-                    .interface => |iface| try self.emitIfaceImpl(iface),
-                    else => {},
-                },
-                .const_ => {},
-            }
-        }
-    }
-
-    fn emitIfaceImpl(self: *IfaceGenerator, iface: *const ir.Interface) !void {
-        const c_name = try self.prefixedCName(iface.qualified_name);
-        defer self.alloc.free(c_name);
-
-        var ops = std.ArrayListUnmanaged(ir.Operation).empty;
-        defer ops.deinit(self.alloc);
-        var attrs = std.ArrayListUnmanaged(ir.Attribute).empty;
-        defer attrs.deinit(self.alloc);
-        try self.collectInterfaceMembers(iface, &ops, &attrs);
-
-        try self.print("/* ── interface {s} ── */\n\n", .{c_name});
-
-        // Extern declarations for Zig DDS runtime exports.
-        try self.write("/* Zig DDS runtime exports (provided at link time). */\n");
-        for (ops.items) |op| try self.emitZigExtern(c_name, &op);
-        for (attrs.items) |attr| try self.emitZigAttrExterns(c_name, &attr);
-        try self.print("extern void zidl_{s}_deinit(void *ptr);\n\n", .{c_name});
-
-        // Static vtable initialiser.
-        try self.print("static const {s}_Vtable {s}_zig_vtable_ = {{\n", .{ c_name, c_name });
-        for (ops.items) |op| {
-            try self.print("    .{s} = zidl_{s}_{s},\n", .{ op.name, c_name, op.name });
-        }
-        for (attrs.items) |attr| {
-            try self.print("    .get_{s} = zidl_{s}_get_{s},\n", .{ attr.name, c_name, attr.name });
-            if (!attr.readonly) {
-                try self.print("    .set_{s} = zidl_{s}_set_{s},\n", .{ attr.name, c_name, attr.name });
-            }
-        }
-        try self.print("    .deinit = zidl_{s}_deinit,\n", .{c_name});
-        try self.print("}};\n\n", .{});
-
-        // Constructor definition.
-        try self.print("{s} {s}_zig_new(void *ptr) {{\n", .{ c_name, c_name });
-        try self.print(
-            "    return ({s}){{ .ptr = ptr, .vtable = &{s}_zig_vtable_ }};\n",
-            .{ c_name, c_name },
-        );
-        try self.write("}\n\n");
-    }
-
-    fn emitZigExtern(self: *IfaceGenerator, c_name: []const u8, op: *const ir.Operation) !void {
-        const ret = if (op.return_type) |rt|
-            try self.typeRefToC(rt)
-        else
-            try self.alloc.dupe(u8, "void");
-        defer self.alloc.free(ret);
-
-        try self.print("extern {s}{s}zidl_{s}_{s}(void *ptr", .{ ret, ptrSep(ret), c_name, op.name });
-        for (op.params) |p| {
-            const pt = try self.vtableParamC(p);
-            defer self.alloc.free(pt);
-            try self.print(", {s}{s}{s}", .{ pt, ptrSep(pt), p.name });
-        }
-        try self.write(");\n");
-    }
-
-    fn emitZigAttrExterns(self: *IfaceGenerator, c_name: []const u8, attr: *const ir.Attribute) !void {
-        const at = try self.typeRefToC(attr.type_ref);
-        defer self.alloc.free(at);
-        try self.print(
-            "extern {s}{s}zidl_{s}_get_{s}(void *ptr);\n",
-            .{ at, ptrSep(at), c_name, attr.name },
-        );
-        if (!attr.readonly) {
-            try self.print(
-                "extern void zidl_{s}_set_{s}(void *ptr, {s}{s}value);\n",
-                .{ c_name, attr.name, at, ptrSep(at) },
-            );
-        }
-    }
-
-    fn collectInterfaceMembers(
-        self: *IfaceGenerator,
-        iface: *const ir.Interface,
-        ops: *std.ArrayListUnmanaged(ir.Operation),
-        attrs: *std.ArrayListUnmanaged(ir.Attribute),
-    ) anyerror!void {
-        for (iface.bases) |base| {
-            if (base == .interface) try self.collectInterfaceMembers(base.interface, ops, attrs);
-        }
-        try ops.appendSlice(self.alloc, iface.operations);
-        try attrs.appendSlice(self.alloc, iface.attributes);
-    }
-
-    fn typeRefToC(self: *IfaceGenerator, tr: ir.TypeRef) ![]u8 {
-        return switch (tr) {
-            .base => |b| self.alloc.dupe(u8, baseToCType(b)),
-            .named => |td| self.prefixedCName(ir.typeDeclQualifiedName(td)),
-            .sequence => |seq| self.seqTypeName(seq.element.*),
-            .string => self.alloc.dupe(u8, "char *"),
-            .wstring => self.alloc.dupe(u8, "uint16_t *"),
-            .fixed_pt => self.alloc.dupe(u8, "double"),
-            .map => self.alloc.dupe(u8, "void *"),
-        };
-    }
-
-    fn seqElemKey(self: *IfaceGenerator, elem: ir.TypeRef) ![]u8 {
-        return switch (elem) {
-            .base => |b| self.alloc.dupe(u8, baseToSeqKey(b)),
-            .named => |td| self.prefixedCName(ir.typeDeclQualifiedName(td)),
-            .sequence => |seq| blk: {
-                const inner = try self.seqElemKey(seq.element.*);
-                defer self.alloc.free(inner);
-                break :blk std.fmt.allocPrint(self.alloc, "{s}_seq", .{inner});
-            },
-            .string => self.alloc.dupe(u8, "string"),
-            .wstring => self.alloc.dupe(u8, "wstring"),
-            .fixed_pt => self.alloc.dupe(u8, "fixed_pt"),
-            .map => self.alloc.dupe(u8, "map"),
-        };
-    }
-
-    fn seqTypeName(self: *IfaceGenerator, elem: ir.TypeRef) ![]u8 {
-        const key = try self.seqElemKey(elem);
-        defer self.alloc.free(key);
-        return std.fmt.allocPrint(self.alloc, "{s}_seq", .{key});
-    }
-
-    fn prefixedCName(self: *IfaceGenerator, qname: []const u8) ![]u8 {
-        return interface.prefixedCNameFromQualified(self.alloc, qname, self.opts.type_prefix);
-    }
-
-    fn vtableParamC(self: *IfaceGenerator, p: ir.Parameter) ![]u8 {
-        const base = try self.typeRefToC(p.type_ref);
-        defer self.alloc.free(base);
-        return switch (p.mode) {
-            .in_ => self.alloc.dupe(u8, base),
-            .out, .inout => std.fmt.allocPrint(self.alloc, "{s} *", .{base}),
-        };
-    }
-};
-
 /// Map IDL base type to C CDR write function name.
 fn baseCWriteFn(b: ast.BaseTypeSpec) []const u8 {
     return switch (b) {
@@ -2909,12 +2896,20 @@ fn generateTypeHeader(
         .opts = opts,
         .out = out,
         .seq_emitted = .empty,
+        .scalar_typedef_emitted = .empty,
+        .enum_emitted = .empty,
         .guarded_seqs = true,
     };
     defer {
         var it = gen.seq_emitted.keyIterator();
         while (it.next()) |k| alloc.free(k.*);
         gen.seq_emitted.deinit(alloc);
+        var it2 = gen.scalar_typedef_emitted.keyIterator();
+        while (it2.next()) |k| alloc.free(k.*);
+        gen.scalar_typedef_emitted.deinit(alloc);
+        var it3 = gen.enum_emitted.keyIterator();
+        while (it3.next()) |k| alloc.free(k.*);
+        gen.enum_emitted.deinit(alloc);
     }
 
     try gen.print("/* Generated by zidl from {s}.idl — DO NOT EDIT */\n\n", .{opts.input_stem});
@@ -2990,11 +2985,19 @@ fn generateAggregateHeader(
         .opts = opts,
         .out = out,
         .seq_emitted = .empty,
+        .scalar_typedef_emitted = .empty,
+        .enum_emitted = .empty,
     };
     defer {
         var it = gen.seq_emitted.keyIterator();
         while (it.next()) |k| alloc.free(k.*);
         gen.seq_emitted.deinit(alloc);
+        var it2 = gen.scalar_typedef_emitted.keyIterator();
+        while (it2.next()) |k| alloc.free(k.*);
+        gen.scalar_typedef_emitted.deinit(alloc);
+        var it3 = gen.enum_emitted.keyIterator();
+        while (it3.next()) |k| alloc.free(k.*);
+        gen.enum_emitted.deinit(alloc);
     }
 
     try gen.print("/* Generated by zidl from {s}.idl — DO NOT EDIT */\n\n", .{opts.input_stem});
@@ -3065,16 +3068,6 @@ pub fn generateSplitFiles(
     const all_filename = try std.fmt.allocPrint(alloc, "{s}_all.h", .{opts.input_stem});
     defer alloc.free(all_filename);
     try writeOutputFile(alloc, io, opts, all_filename, all_content.items);
-
-    // Interface vtable source (same as single-file mode).
-    if (opts.generate_interfaces) {
-        var iface_content = std.ArrayList(u8).empty;
-        defer iface_content.deinit(alloc);
-        try generateIfaceSource(alloc, spec, opts, &iface_content);
-        const if_filename = try std.fmt.allocPrint(alloc, "{s}_iface.c", .{opts.input_stem});
-        defer alloc.free(if_filename);
-        try writeOutputFile(alloc, io, opts, if_filename, iface_content.items);
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -3426,53 +3419,73 @@ fn testGenIfaceHeader(source: []const u8, stem: []const u8) !std.ArrayList(u8) {
     return out;
 }
 
-fn testGenIfaceSource(source: []const u8, stem: []const u8) !std.ArrayList(u8) {
-    const alloc = testing.allocator;
-    var ast_arena = std.heap.ArenaAllocator.init(alloc);
-    defer ast_arena.deinit();
-    var p = parser_mod.Parser.init(source, ast_arena.allocator());
-    const spec = try p.parseSpecification();
-    var az = try semantic_mod.Analyzer.init(alloc);
-    defer az.deinit();
-    try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
-    defer ir_spec.deinit();
-    var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(alloc);
-    const opts = interface.Options{ .input_stem = stem, .generate_interfaces = true };
-    try generateIfaceSource(alloc, &ir_spec, opts, &out);
-    return out;
-}
-
-test "c_backend: interface vtable header" {
+test "c_backend: interface fat-pointer typedef emitted before free functions" {
     var out = try testGenIfaceHeader(
         \\interface Greeter { string greet(in string name); };
     , "iface");
     defer out.deinit(testing.allocator);
     const s = out.items;
+    // Fat-pointer struct typedef (matches Zig extern struct layout for ABI correctness)
+    try testing.expect(has(s, "typedef struct { void *ptr; const void *vtable; } Greeter;"));
+    // Free function declarations, not vtable fields
     try testing.expect(has(s, "/* IDL interface: Greeter */"));
-    try testing.expect(has(s, "Greeter_Vtable"));
-    try testing.expect(has(s, "char *(*greet)(void *ptr, char *name);"));
-    try testing.expect(has(s, "void (*deinit)(void *ptr);"));
-    try testing.expect(has(s, "typedef struct Greeter {"));
-    try testing.expect(has(s, "void                *ptr;"));
-    try testing.expect(has(s, "const Greeter_Vtable *vtable;"));
-    try testing.expect(has(s, "Greeter Greeter_zig_new(void *ptr);"));
+    try testing.expect(has(s, "char *Greeter_greet(Greeter self, char *name);"));
+    // No named vtable struct
+    try testing.expect(!has(s, "Greeter_Vtable"));
+    try testing.expect(!has(s, "zig_new"));
 }
 
-test "c_backend: interface iface source" {
-    var out = try testGenIfaceSource(
-        \\interface Calc { long add(in long a, in long b); };
-    , "calc");
+test "c_backend: interface readonly attribute emits getter only" {
+    var out = try testGenIfaceHeader(
+        \\interface Counter { readonly attribute long count; };
+    , "c");
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "#include \"calc.h\""));
-    try testing.expect(has(s, "extern int32_t zidl_Calc_add(void *ptr, int32_t a, int32_t b);"));
-    try testing.expect(has(s, "extern void zidl_Calc_deinit(void *ptr);"));
-    try testing.expect(has(s, "static const Calc_Vtable Calc_zig_vtable_"));
-    try testing.expect(has(s, ".add = zidl_Calc_add,"));
-    try testing.expect(has(s, ".deinit = zidl_Calc_deinit,"));
-    try testing.expect(has(s, "Calc Calc_zig_new(void *ptr)"));
+    try testing.expect(has(s, "int32_t Counter_get_count(Counter self);"));
+    try testing.expect(!has(s, "Counter_set_count"));
+}
+
+test "c_backend: interface readwrite attribute emits both" {
+    var out = try testGenIfaceHeader(
+        \\interface Src { attribute long value; };
+    , "s");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "int32_t Src_get_value(Src self);"));
+    try testing.expect(has(s, "void Src_set_value(Src self, int32_t value);"));
+}
+
+test "c_backend: listener interface emits callback struct not free functions" {
+    var out = try testGenIfaceHeader(
+        \\interface Entity { long enable(); };
+        \\interface EntityListener { void on_change(in Entity e); };
+    , "ev");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Entity gets fat-pointer typedef + free functions
+    try testing.expect(has(s, "typedef struct { void *ptr; const void *vtable; } Entity;"));
+    try testing.expect(has(s, "int32_t Entity_enable(Entity self);"));
+    // Listener gets a callback struct, not an opaque typedef + free functions
+    try testing.expect(has(s, "void *listener_data;"));
+    try testing.expect(has(s, "void (*on_change)(Entity e, void *listener_data);"));
+    // Listener must NOT get an opaque typedef
+    try testing.expect(!has(s, "typedef struct EntityListener_s *EntityListener;"));
+    try testing.expect(!has(s, "EntityListener_enable"));
+}
+
+test "c_backend: listener callback struct references entity types declared above" {
+    // Listener struct uses Entity opaque handle in callback param — the pre-scan
+    // ensures entity typedefs appear before listener structs regardless of IDL order.
+    var out = try testGenIfaceHeader(
+        \\interface DataListener { void on_data(in long value); };
+        \\interface Writer { long write(in long x); };
+    , "dl");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Writer fat-pointer typedef comes before the listener struct (pre-scan pass 1)
+    const writer_pos = std.mem.indexOf(u8, s, "typedef struct { void *ptr; const void *vtable; } Writer;") orelse return error.NotFound;
+    const listener_pos = std.mem.indexOf(u8, s, "typedef struct DataListener {") orelse return error.NotFound;
+    try testing.expect(writer_pos < listener_pos);
 }
 
 test "c_backend: all primitives in struct" {

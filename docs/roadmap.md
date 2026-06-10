@@ -65,10 +65,22 @@ this roadmap. New language backends have their own sections below.
 - **PL_CDR generation**: `--zig-pl-cdr` is parsed and wired through the CLI but neither
   the C nor C++ backend emits `serializePlCdr` / `deserializeFromPlCdr` functions.
   This is the RTPS ParameterList wire format used for DDS discovery types.
-- **`--generate-interfaces` complex-type ABI**: `ImplGenerator.emitImplOp` in both
-  backends emits `/* TODO */` stubs for operations with complex IDL types (structs,
-  sequences, etc.) as parameters or return values. The ABI boundary with the DDS
-  runtime has not been decided.
+- **C backend `--generate-interfaces` (opaque handles + free functions)**: currently
+  emits COM-style fat-pointer vtable structs.  Should emit opaque `typedef struct
+  Foo_s *Foo;` handles and free function declarations (`ReturnCode_t
+  Foo_method(Foo self, ...)`) matching the OMG C PSM binding and the idioms of
+  major C DDS implementations (Cyclone DDS, RTI Connext C API).  Listener
+  interfaces become plain C callback structs with a `void *listener_data` context
+  pointer.  The existing vtable structs in the generated header become an internal
+  artifact; they should not appear in the public C API header.
+- **Zig backend `--generate-c-api`**: new flag that generates `pub export fn
+  callconv(.c)` wrappers alongside the standard Zig vtable output.  For DDS
+  object interfaces, wraps each vtable operation with C-ABI type conversion
+  (`[*:0]const u8` → `[]const u8`, C structs → Zig structs) and vtable dispatch.
+  For listener interfaces, generates `CXxxListenerAdapter` (wraps C callback
+  struct in a Zig listener vtable) and embeds adapter allocation inside the DDS
+  object create/delete C-ABI wrappers.  See `docs/ecosystem.md`
+  §"`--generate-c-api`" for the full design.
 
 ### All backends (annotation support)
 
@@ -110,6 +122,121 @@ this roadmap. New language backends have their own sections below.
   (`test/xrce-microzig/`) is committed and self-contained, but the main `build.zig`
   does not yet invoke it as part of `zig build integration-test`. Blocked on confirming
   the 0.15.1 toolchain path is available in CI.
+
+---
+
+## C-ABI Interface / Callback Type Coverage
+
+The C-ABI primary interface design commits to a hard constraint: **every type that appears
+in a vtable slot or `@callback` listener callback parameter must be C-ABI representable.**
+All DDS DCPS status types currently satisfy this constraint (flat structs of primitives,
+enums, and fixed-size handles). This section tracks test coverage for that guarantee and
+planned mitigation work for types that currently fail it.
+
+### Positive test coverage
+
+Each row is a test case that should exist in the backend unit test suite confirming that
+the named type category works correctly as an interface or `@callback` callback parameter.
+
+| Type category | IDL example | Status |
+|---|---|---|
+| All primitive types | `void f(in long x, in boolean b)` | ✓ covered by existing golden |
+| Named struct parameter | `void f(in MyStatus s)` | ✓ covered by existing golden |
+| Named sequence typedef parameter | `void f(in StringSeq s)` | ✓ covered by DDS listener golden |
+| Named enum parameter | `void f(in MyEnum e)` | ✓ covered by existing golden |
+| `string` parameter | `void f(in string s)` | ✓ covered by existing golden |
+| Entity fat-pointer parameter | `void on_data(in DataReader r)` | ✓ covered by DDS listener golden |
+| Fixed-size array typedef parameter | `void f(in MyByteArray a)` | missing — add to `types.idl` golden |
+| Nested named struct parameter | `void f(in OuterStatus s)` | missing — add to `types.idl` golden |
+
+### Negative test coverage
+
+Each row is a case that **must** produce a named error from the generator rather than
+silently emitting broken or type-unsafe C. A `// TODO` comment or a `void *` fallback
+is not acceptable — it compiles but produces wrong behaviour at runtime.
+
+| Type category | IDL example | Current behaviour | Target behaviour |
+|---|---|---|---|
+| `map<K,V>` parameter | `void f(in map<string,long> m)` | C backend errors on map in structs; interface/callback position not separately tested | Hard error: "map not C-ABI representable in interface parameter; use a named opaque typedef" |
+| Anonymous/inline sequence parameter | `void f(in sequence<string> s)` | Untested; likely silent wrong emit | Hard error: "anonymous sequence not C-ABI representable; add a typedef" |
+| Discriminated union parameter | `void f(in MyUnion u)` | C backend has no union-in-interface test; output untested | Hard error: "union not C-ABI representable in interface parameter (C union is untagged)" |
+| `wstring` parameter | `void f(in wstring s)` | Emits `wchar_t *`; silently platform-width-dependent | Warning or hard error: "wstring ABI width is platform-dependent; use a fixed-width typedef" |
+| `fixed<D,S>` parameter | `void f(in fixed<10,2> x)` | Emits `// TODO` comment | Hard error: "fixed_pt not C-ABI representable in interface parameter" |
+| `valuetype` parameter | `void f(in MyValueType v)` | Untested | Hard error |
+| Sequence-of-non-C-type typedef | `typedef sequence<MyUnion> UnionSeq; void f(in UnionSeq s)` | Untested; element type check missing | Hard error propagating from union element |
+
+Each negative case should have a dedicated unit test in `src/backend/zig.zig` and
+`src/backend/c.zig` asserting that the generator returns an appropriate error (not a
+successful codegen that happens to be wrong).
+
+### Mitigation work
+
+The items below describe what it would take to move each negative case into the
+positive column, ordered by impact (likelihood of appearing in real DDS-adjacent IDL)
+and implementation complexity.
+
+**1. Anonymous/inline sequences → synthesize a typedef**
+
+When `sequence<T>` appears directly as an interface parameter type with no prior
+typedef, automatically synthesize one:
+`typedef sequence<T> _ZidlGen_<InterfaceName>_<OpName>_<ParamName>_Seq;`
+and emit the corresponding extern struct before the callback struct or vtable
+declaration. Purely mechanical; no semantic change. Covers the most common
+case of a developer writing `sequence<string>` inline without thinking about it.
+
+*Impact: medium. Risk: low.*
+
+**2. Discriminated union → OMG C PSM companion struct**
+
+IDL `union` has no direct C-ABI equivalent because C unions are untagged.
+The OMG C PSM (formal/02-06-01) defines the canonical mapping:
+
+```c
+typedef struct MyUnion {
+    long _d;        /* discriminant */
+    union {
+        MyStruct s; /* case 1 */
+        long n;     /* case 2 */
+        bool b;     /* default */
+    } _u;
+} MyUnion;
+```
+
+The Zig-side representation stays a tagged union. A generated conversion
+function translates between them in the `@callback` comptime thunk. This
+is well-specified by the OMG but non-trivial to wire into the thunk generator.
+
+*Impact: medium. Risk: medium (conversion thunk in comptime wrapper).*
+
+**3. `wstring` → fixed-width `uint16_t *`**
+
+DDS RTPS encodes wstring as UTF-16LE (2-byte code units). The platform-dependent
+`wchar_t` is the wrong type for cross-ABI use. Replace with `uint16_t *` (or
+`typedef uint16_t DDS_WChar; DDS_WChar *`) to make ABI width deterministic.
+Mechanical, but breaks existing C callers passing `wchar_t` literals.
+
+*Impact: low (wstring is uncommon in modern DDS profiles). Risk: low once decided.*
+
+**4. `fixed<D,S>` → runtime struct in `zidl_cdr.h`**
+
+Define `typedef struct { uint8_t digits[16]; uint8_t scale; } zidl_fixed_t;` in the
+runtime header and emit `zidl_fixed_t` for `fixed<D,S>` parameters. No precision
+validation in the ABI; caller's responsibility. Straightforward.
+
+*Impact: very low (fixed-point is almost never used in DDS). Risk: very low.*
+
+**5. `map<K,V>` → opaque handle + accessor functions**
+
+No C struct can represent an arbitrary hash map. The practical path is an opaque
+handle (`typedef struct ZidlMap_s *ZidlMap;`) with generated free functions:
+`ZidlMap_get`, `ZidlMap_set`, `ZidlMap_iter`. On the Zig side the map remains a
+native hash map; the thunk wraps a pointer to it.
+
+Maps rarely appear in DDS API surfaces (they mostly appear in user data types, which
+bypass the vtable as opaque CDR bytes). Best deferred until a concrete use case in
+DDS API IDL arises.
+
+*Impact: low. Risk: high (non-trivial generated accessor surface).*
 
 ---
 

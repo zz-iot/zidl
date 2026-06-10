@@ -30,7 +30,7 @@ test "roundtrip: Sample @final fields" {
         .f64_val = 2.718281828,
         .str = "hello world",
         .bstr = zidl_rt.BoundedArray(u8, 32).fromSlice("bounded") catch unreachable,
-        .nums = .empty,
+        .nums = .{}, // zero-initialized extern struct sequence
         .arr = .{ 10, 20, 30 },
         .clr = .GREEN,
         .nested = .{ .x = 7, .y = -3 },
@@ -86,15 +86,14 @@ test "roundtrip: Sample deserializeKey from full sample (key field is leading)" 
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(testing.allocator);
 
-    var nums = std.ArrayListUnmanaged(i32).empty;
-    defer nums.deinit(testing.allocator);
-    try nums.appendSlice(testing.allocator, &.{ 11, 22, 33 });
+    const nums_items = try testing.allocator.dupe(i32, &.{ 11, 22, 33 });
+    defer testing.allocator.free(nums_items);
 
     const src = types.Sample{
         .id = 0x01020304,
         .b = true,
         .str = "non-key payload",
-        .nums = nums,
+        .nums = .{ ._length = 3, ._maximum = 3, ._buffer = nums_items.ptr, ._release = false },
         .arr = .{ 1, 2, 3 },
         .nested = .{ .x = 10, .y = 20 },
     };
@@ -109,7 +108,7 @@ test "roundtrip: Sample deserializeKey from full sample (key field is leading)" 
     try testing.expectEqual(src.id, key.id);
     try testing.expectEqual(false, key.b);
     try testing.expectEqualStrings("", key.str);
-    try testing.expectEqual(@as(usize, 0), key.nums.items.len);
+    try testing.expectEqual(@as(u32, 0), key.nums._length);
     try testing.expectEqual(@as(i32, 0), key.nested.x);
     // @final structs have no DHEADER bound; deserializeKeyInto reads only key
     // fields and leaves the non-key tail in the reader.
@@ -145,12 +144,11 @@ test "roundtrip: Sample with sequence" {
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(testing.allocator);
 
-    var nums = std.ArrayListUnmanaged(i32).empty;
-    defer nums.deinit(testing.allocator);
-    try nums.appendSlice(testing.allocator, &.{ 1, 2, 3, 4, 5 });
+    const nums_items = try testing.allocator.dupe(i32, &.{ 1, 2, 3, 4, 5 });
+    defer testing.allocator.free(nums_items);
 
     var src = types.Sample{};
-    src.nums = nums;
+    src.nums = .{ ._length = 5, ._maximum = 5, ._buffer = nums_items.ptr, ._release = false };
 
     var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
     try writer.writeEncapHeader();
@@ -161,10 +159,14 @@ test "roundtrip: Sample with sequence" {
     try types.Sample.deserializeInto(&dst, &reader, testing.allocator);
     defer {
         testing.allocator.free(dst.str);
-        dst.nums.deinit(testing.allocator);
+        if (dst.nums._release) {
+            if (dst.nums._buffer) |b| testing.allocator.free(b[0..dst.nums._length]);
+        }
     }
 
-    try testing.expectEqualSlices(i32, nums.items, dst.nums.items);
+    const src_slice = if (src.nums._buffer) |b| b[0..src.nums._length] else &.{};
+    const dst_slice = if (dst.nums._buffer) |b| b[0..dst.nums._length] else &.{};
+    try testing.expectEqualSlices(i32, src_slice, dst_slice);
 }
 
 // ── CDR round-trip: Frame (@appendable, DHEADER) ──────────────────────────────
@@ -257,6 +259,7 @@ test "vtable: Greeter call forwarding" {
     var impl = stub.GreeterStub{};
     const g = impl.asGreeter();
 
+    // Forwarding method accepts []const u8 and returns []const u8 (idiomatic Zig).
     const greeting = g.greet("Alice");
     try testing.expectEqualStrings("hello", greeting);
     try testing.expectEqualStrings("Alice", impl.last_name);

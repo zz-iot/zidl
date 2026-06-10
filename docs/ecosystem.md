@@ -106,7 +106,8 @@ EquivalenceHash.
 ## `--generate-interfaces`: DCPS API Generation
 
 When `--generate-interfaces` is set, each IDL `interface` declaration and each
-topic-type struct get typed DataWriter/DataReader wrappers.
+topic-type struct get typed DataWriter/DataReader wrappers in the
+**language-idiomatic** form for the target backend.
 
 **How topic types are determined:**
 - A struct with `@topic` annotation: `TypeAnnotations.is_topic == true`.
@@ -115,12 +116,10 @@ topic-type struct get typed DataWriter/DataReader wrappers.
 
 The full normative DCPS IDL is in [`dcps_idl.md`](dcps_idl.md).
 
-**Generated interface shape** (Zig example for a struct `Foo`):
+**Per-language interface shapes:**
 
+*Zig* — fat-pointer vtable structs (current):
 ```zig
-// FooTypeSupport — wraps registration
-pub const FooTypeSupport = struct { ... };
-
 // FooDataWriter — typed write operations
 pub const FooDataWriter = struct {
     ptr: *anyopaque,
@@ -132,10 +131,54 @@ pub const FooDataWriter = struct {
         // ...
     };
 };
-
-// FooDataReader — typed read operations
-pub const FooDataReader = struct { ... };
 ```
+
+*C* — opaque typedef + free function declarations (planned; see roadmap):
+```c
+typedef struct FooDataWriter_s *FooDataWriter;
+int32_t FooDataWriter_write(FooDataWriter writer, const Foo *data, int32_t handle);
+```
+
+DDS object entities are opaque handles; operations are free C functions.  This
+matches the OMG C PSM binding and the idioms of major C DDS implementations.
+Listener interfaces become plain C callback structs (a context pointer plus one
+function pointer per callback), matching the same convention.
+
+*C++11* — RAII wrappers using `std::string` / `std::vector` (planned).
+
+*Java* — interfaces with JNI bridge (planned).
+
+---
+
+## `--generate-c-api`: C-ABI Bridge Layer (Zig backend, planned)
+
+A companion flag to `--generate-interfaces` for the Zig backend.  Where
+`--generate-interfaces` generates the idiomatic Zig vtable representation,
+`--generate-c-api` additionally generates the `pub export fn callconv(.c)`
+wrappers that implement the free functions declared by the C backend's
+`--generate-interfaces` output.
+
+For **DDS object interfaces** (runtime-implemented): generates a wrapper
+function per operation that converts C-ABI types (`[*:0]const u8`, C structs)
+to Zig-idiomatic types (`[]const u8`, Zig structs) and dispatches through the
+Zig vtable.
+
+For **listener interfaces** (user-implemented callbacks): generates a
+`CXxxListenerAdapter` struct that holds the user's C callback struct and
+implements the Zig listener vtable by converting DDS entity fat-pointers back
+to C opaque handles before calling the C callbacks.  Adapter creation is
+embedded in the DDS object C-ABI implementations (e.g. `create_datareader`
+allocates the adapter when a non-null listener is supplied; the impl's `deinit`
+frees it).
+
+Listener interfaces are identified by name suffix (`*Listener`).
+
+**Performance note:** The hot-path typed operations (`write`, `read`, `take`)
+are generated per-type from the user's own IDL and use only C-compatible types
+(pointer to data type, `InstanceHandle_t` integer).  There is zero conversion
+overhead on the data path.  Conversion overhead applies only to cold-path setup
+operations (topic name strings, filter expression strings, `StringSeq`
+parameters), which are called at most once per entity during startup.
 
 ---
 
@@ -144,13 +187,13 @@ pub const FooDataReader = struct { ... };
 DDS-RPC v1.0 (formal/17-04-01) enables request-reply patterns over DDS topics.
 `--generate-interfaces` and DDS-RPC are intentionally orthogonal:
 
-- `--generate-interfaces` emits the DCPS abstract API (local vtable call shape).
+- `--generate-interfaces` emits the per-language idiomatic API shape.
 - DDS-RPC request/reply pairs are a separate code-gen path (`--rpc`, future).
 - IDL `interface` operations map to request/reply topic pairs in DDS-RPC, not to
-  vtable functions — the two must not be conflated.
+  per-language dispatch — the two must not be conflated.
 
-The current Zig vtable output is the local-call form. A future `--rpc` flag could
-emit request/reply struct types and serialization instead.
+A future `--rpc` flag could emit request/reply struct types and serialization
+instead.
 
 ---
 

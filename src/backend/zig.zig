@@ -313,7 +313,8 @@ const Generator = struct {
     fn emitStruct(self: *Generator, s: *const ir.Struct) !void {
         const pfx = self.opts.type_prefix;
         try self.ind();
-        try self.print("pub const {s}{s} = struct {{\n", .{ pfx, s.name });
+        const kw: []const u8 = if (structIsCExternCompatible(s)) "extern struct" else "struct";
+        try self.print("pub const {s}{s} = {s} {{\n", .{ pfx, s.name, kw });
         if (s.base) |base| {
             // Zig has no struct inheritance — embed the base as a named field.
             const base_zig = try self.qualNameToZig(ir.typeDeclQualifiedName(base));
@@ -941,6 +942,106 @@ const Generator = struct {
 
     fn emitTypedef(self: *Generator, t: *const ir.Typedef) !void {
         const pfx = self.opts.type_prefix;
+
+        // Unbounded sequence typedefs get a proper named extern struct with a `deinit`
+        // method rather than a single-line type alias, so callers can clean up
+        // allocations made by `deserializeInto` without knowing the element type.
+        const is_unbounded_seq = t.dimensions.len == 0 and switch (t.type_ref) {
+            .sequence => |seq| seq.bound == null,
+            else => false,
+        };
+        if (is_unbounded_seq) {
+            const seq = t.type_ref.sequence;
+            const buf_elem = try self.seqBufElemZig(seq.element.*);
+            defer self.alloc.free(buf_elem);
+            try self.ind();
+            try self.print("pub const {s}{s} = extern struct {{\n", .{ pfx, t.name });
+            try self.ind();
+            try self.write("    _maximum: u32 = 0,\n");
+            try self.ind();
+            try self.write("    _length: u32 = 0,\n");
+            try self.ind();
+            try self.print("    _buffer: ?[*]{s} = null,\n", .{buf_elem});
+            try self.ind();
+            try self.write("    _release: bool = false,\n");
+            try self.write("\n");
+            try self.ind();
+            try self.write("    pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {\n");
+            try self.ind();
+            try self.write("        if (!self._release) return;\n");
+            try self.ind();
+            try self.write("        if (self._buffer) |_buf| {\n");
+            // String elements were allocated with dupeZ → free len+1 bytes per element.
+            if (seq.element.* == .string) {
+                try self.ind();
+                try self.write("            for (_buf[0..self._length]) |_s| {\n");
+                try self.ind();
+                try self.write("                const _sl = std.mem.span(_s);\n");
+                try self.ind();
+                try self.write("                alloc.free(_sl.ptr[0.._sl.len + 1]);\n");
+                try self.ind();
+                try self.write("            }\n");
+            }
+            try self.ind();
+            try self.write("            alloc.free(_buf[0..self._length]);\n");
+            try self.ind();
+            try self.write("        }\n");
+            try self.ind();
+            try self.write("        self.* = .{};\n");
+            try self.ind();
+            try self.write("    }\n");
+            try self.write("\n");
+            // clone — symmetric counterpart to deinit.
+            try self.ind();
+            try self.write("    pub fn clone(self: @This(), alloc: std.mem.Allocator) !@This() {\n");
+            try self.ind();
+            try self.write("        if (self._length == 0) return self;\n");
+            if (seq.element.* == .string) {
+                try self.ind();
+                try self.print("        const _buf = try alloc.alloc({s}, self._length);\n", .{buf_elem});
+                try self.ind();
+                try self.write("        var _n: u32 = 0;\n");
+                try self.ind();
+                try self.write("        errdefer {\n");
+                try self.ind();
+                try self.write("            for (_buf[0.._n]) |_s| {\n");
+                try self.ind();
+                try self.write("                const _sl = std.mem.span(_s);\n");
+                try self.ind();
+                try self.write("                alloc.free(_sl.ptr[0.._sl.len + 1]);\n");
+                try self.ind();
+                try self.write("            }\n");
+                try self.ind();
+                try self.write("            alloc.free(_buf);\n");
+                try self.ind();
+                try self.write("        }\n");
+                try self.ind();
+                try self.write("        if (self._buffer) |_sb| {\n");
+                try self.ind();
+                try self.write("            for (_sb[0..self._length]) |_src| {\n");
+                try self.ind();
+                try self.write("                _buf[_n] = (try alloc.dupeZ(u8, std.mem.span(_src))).ptr;\n");
+                try self.ind();
+                try self.write("                _n += 1;\n");
+                try self.ind();
+                try self.write("            }\n");
+                try self.ind();
+                try self.write("        }\n");
+            } else {
+                try self.ind();
+                try self.print("        const _buf = try alloc.alloc({s}, self._length);\n", .{buf_elem});
+                try self.ind();
+                try self.write("        if (self._buffer) |_sb| @memcpy(_buf, _sb[0..self._length]);\n");
+            }
+            try self.ind();
+            try self.write("        return .{ ._buffer = _buf.ptr, ._length = self._length, ._maximum = self._length, ._release = true };\n");
+            try self.ind();
+            try self.write("    }\n");
+            try self.ind();
+            try self.print("}}; // {s}{s}\n\n", .{ pfx, t.name });
+            return;
+        }
+
         const zig_type = try self.typeRefToZig(t.type_ref);
         defer self.alloc.free(zig_type);
 
@@ -953,6 +1054,16 @@ const Generator = struct {
             defer self.alloc.free(arr_type);
             try self.print("pub const {s}{s} = {s};\n\n", .{ pfx, t.name, arr_type });
         }
+    }
+
+    /// Buffer element type for a C sequence struct's `_buffer` field.
+    /// String elements become `[*:0]const u8` (C string pointer) instead of `[]const u8`.
+    fn seqBufElemZig(self: *Generator, elem_tr: ir.TypeRef) ![]u8 {
+        return switch (elem_tr) {
+            .string => self.alloc.dupe(u8, "[*:0]const u8"),
+            .wstring => self.alloc.dupe(u8, "[*:0]const u16"),
+            else => self.typeRefToZig(elem_tr),
+        };
     }
 
     // ── Native ────────────────────────────────────────────────────────────────
@@ -981,6 +1092,25 @@ const Generator = struct {
 
     fn emitInterface(self: *Generator, iface: *const ir.Interface) anyerror!void {
         const pfx = self.opts.type_prefix;
+
+        // @callback interfaces: C callback struct + noop constant only.
+        // No fat-pointer vtable entity — the C struct IS the type.
+        // Always emitted regardless of generate_interfaces (it's a type, not a vtable wrapper).
+        if (isCallbackInterface(iface)) {
+            var ops = std.ArrayListUnmanaged(ir.Operation).empty;
+            defer ops.deinit(self.alloc);
+            var attrs = std.ArrayListUnmanaged(ir.Attribute).empty;
+            defer attrs.deinit(self.alloc);
+            try self.collectInterfaceMembers(iface, &ops, &attrs);
+            // attrs: @callback interfaces currently have no attribute operations
+            try self.emitCListenerStruct(pfx, iface.name, ops.items);
+            try self.emitNoopListener(pfx, iface.name);
+            if (ops.items.len > 0) {
+                try self.emitZigListenerHelpers(pfx, iface.name, ops.items);
+            }
+            return;
+        }
+
         if (!self.opts.generate_interfaces) {
             try self.ind();
             try self.print(
@@ -1000,8 +1130,11 @@ const Generator = struct {
         try self.collectInterfaceMembers(iface, &ops, &attrs);
 
         // ── Outer struct ──────────────────────────────────────────────────
+        // extern struct makes the two-pointer {ptr, vtable} layout C-ABI
+        // compatible, which --generate-c-api relies on to pass entity values
+        // through callconv(.c) functions without an extra heap indirection.
         try self.ind();
-        try self.print("pub const {s}{s} = struct {{\n", .{ pfx, iface.name });
+        try self.print("pub const {s}{s} = extern struct {{\n", .{ pfx, iface.name });
 
         try self.ind();
         try self.write("    ptr: *anyopaque,\n");
@@ -1009,6 +1142,8 @@ const Generator = struct {
         try self.write("    vtable: *const Vtable,\n\n");
 
         // ── Vtable ────────────────────────────────────────────────────────
+        // Vtable slots use C-ABI types throughout: sentinel strings, nullable
+        // callback struct pointers, and struct pointers instead of by-value structs.
         try self.ind();
         try self.write("    pub const Vtable = struct {\n");
 
@@ -1017,17 +1152,17 @@ const Generator = struct {
             try self.write("        ");
             try self.print("{s}: *const fn (*anyopaque", .{op.name});
             for (op.params) |p| {
-                const pt = try self.paramTypeStr(p);
+                const pt = try self.cApiTypeRef(p.type_ref, p.mode);
                 defer self.alloc.free(pt);
                 try self.print(", {s}: {s}", .{ p.name, pt });
             }
-            const ret = try self.returnTypeStr(op.return_type);
+            const ret = try self.cApiOptRetType(op.return_type);
             defer self.alloc.free(ret);
             try self.print(") {s},\n", .{ret});
         }
 
         for (attrs.items) |attr| {
-            const at = try self.typeRefToZig(attr.type_ref);
+            const at = try self.cApiRetType(attr.type_ref);
             defer self.alloc.free(at);
             // getter
             try self.ind();
@@ -1035,7 +1170,9 @@ const Generator = struct {
             // setter (writable attributes only)
             if (!attr.readonly) {
                 try self.ind();
-                try self.print("        set_{s}: *const fn (*anyopaque, {s}) void,\n", .{ attr.name, at });
+                const st = try self.cApiTypeRef(attr.type_ref, .in_);
+                defer self.alloc.free(st);
+                try self.print("        set_{s}: *const fn (*anyopaque, {s}) void,\n", .{ attr.name, st });
             }
         }
 
@@ -1044,48 +1181,84 @@ const Generator = struct {
         try self.ind();
         try self.write("    };\n\n");
 
-        // ── Forwarding methods ────────────────────────────────────────────
+        // ── Forwarding methods (idiomatic Zig types) ─────────────────────
+        // These wrap the C-ABI vtable slots with ergonomic Zig types:
+        // `[]const u8` strings, by-value QoS structs, optional callback structs.
         for (ops.items) |op| {
-            const ret = try self.returnTypeStr(op.return_type);
+            const ret = try self.idiomOptRetType(op.return_type);
             defer self.alloc.free(ret);
+            const needs_span = idiomRetNeedsSpan(op.return_type);
 
             try self.ind();
             try self.write("    pub fn ");
             try self.print("{s}(self: @This()", .{op.name});
             for (op.params) |p| {
-                const pt = try self.paramTypeStr(p);
+                const pt = try self.idiomParamType(p);
                 defer self.alloc.free(pt);
                 try self.print(", {s}: {s}", .{ p.name, pt });
             }
             try self.print(") {s} {{\n", .{ret});
 
-            try self.ind();
-            try self.write("        return self.vtable.");
-            try self.print("{s}(self.ptr", .{op.name});
+            // Emit local vars for callback params (needed for taking pointer)
             for (op.params) |p| {
-                try self.print(", {s}", .{p.name});
+                if (idiomNeedsLocal(p)) {
+                    try self.ind();
+                    try self.print("        var _lv_{s} = {s};\n", .{ p.name, p.name });
+                }
             }
-            try self.write(");\n");
+
+            // Emit vtable call with converted args
+            try self.ind();
+            if (needs_span) {
+                try self.print("        return std.mem.span(self.vtable.{s}(self.ptr", .{op.name});
+            } else {
+                try self.print("        return self.vtable.{s}(self.ptr", .{op.name});
+            }
+            for (op.params) |p| {
+                const lv: ?[]const u8 = if (idiomNeedsLocal(p))
+                    try std.fmt.allocPrint(self.alloc, "_lv_{s}", .{p.name})
+                else
+                    null;
+                defer if (lv) |s| self.alloc.free(s);
+                const arg = try self.idiomCallArg(p, lv);
+                defer self.alloc.free(arg);
+                try self.print(", {s}", .{arg});
+            }
+            if (needs_span) {
+                try self.write("));\n");
+            } else {
+                try self.write(");\n");
+            }
             try self.ind();
             try self.write("    }\n\n");
         }
 
         for (attrs.items) |attr| {
-            const at = try self.typeRefToZig(attr.type_ref);
+            // getter: idiomatic return type
+            const at = try self.idiomOptRetType(attr.type_ref);
             defer self.alloc.free(at);
-            // getter
+            const getter_needs_span = idiomRetNeedsSpan(attr.type_ref);
             try self.ind();
             try self.print("    pub fn get_{s}(self: @This()) {s} {{\n", .{ attr.name, at });
             try self.ind();
-            try self.print("        return self.vtable.get_{s}(self.ptr);\n", .{attr.name});
+            if (getter_needs_span) {
+                try self.print("        return std.mem.span(self.vtable.get_{s}(self.ptr));\n", .{attr.name});
+            } else {
+                try self.print("        return self.vtable.get_{s}(self.ptr);\n", .{attr.name});
+            }
             try self.ind();
             try self.write("    }\n\n");
-            // setter
+            // setter: idiomatic param type
             if (!attr.readonly) {
+                const sp: ir.Parameter = .{ .name = "value", .type_ref = attr.type_ref, .mode = .in_, .span = std.mem.zeroes(@TypeOf(@as(ir.Parameter, undefined).span)), .raw = &.{} };
+                const st = try self.idiomParamType(sp);
+                defer self.alloc.free(st);
+                const sarg = try self.idiomCallArg(sp, null);
+                defer self.alloc.free(sarg);
                 try self.ind();
-                try self.print("    pub fn set_{s}(self: @This(), value: {s}) void {{\n", .{ attr.name, at });
+                try self.print("    pub fn set_{s}(self: @This(), value: {s}) void {{\n", .{ attr.name, st });
                 try self.ind();
-                try self.print("        self.vtable.set_{s}(self.ptr, value);\n", .{attr.name});
+                try self.print("        self.vtable.set_{s}(self.ptr, {s});\n", .{ attr.name, sarg });
                 try self.ind();
                 try self.write("    }\n\n");
             }
@@ -1109,6 +1282,504 @@ const Generator = struct {
 
         try self.ind();
         try self.print("}}; // {s}{s}\n\n", .{ pfx, iface.name });
+
+        if (self.opts.generate_c_api) {
+            try self.emitCApiExports(iface, pfx, ops.items, attrs.items);
+        }
+    }
+
+    // ── C-API exports (--generate-c-api) ─────────────────────────────────────
+
+    /// Emit `pub export fn callconv(.c)` trivial forwarders for all operations and
+    /// attributes of an entity interface.  Callback interfaces are handled by
+    /// `emitInterface` and produce no C-API export functions.
+    fn emitCApiExports(
+        self: *Generator,
+        iface: *const ir.Interface,
+        pfx: []const u8,
+        ops: []const ir.Operation,
+        attrs: []const ir.Attribute,
+    ) anyerror!void {
+        if (isCallbackInterface(iface)) return; // struct + noop already emitted by emitInterface
+
+        const qual_c_name = try self.cApiQualName(iface.qualified_name, pfx);
+        defer self.alloc.free(qual_c_name);
+
+        // One trivial forwarder per operation.
+        for (ops) |op| {
+            try self.emitCApiOp(qual_c_name, pfx, iface.name, &op);
+        }
+        // Getter + optional setter per attribute.
+        for (attrs) |attr| {
+            try self.emitCApiAttr(qual_c_name, pfx, iface.name, &attr);
+        }
+    }
+
+    /// Zero-initialized noop constant for a callback struct.
+    /// All function pointers are null, so the caller must check before invoking.
+    fn emitNoopListener(
+        self: *Generator,
+        pfx: []const u8,
+        iface_name: []const u8,
+    ) anyerror!void {
+        try self.ind();
+        try self.print("pub const noop_{s}: {s}{s} = .{{}};\n\n", .{ iface_name, pfx, iface_name });
+    }
+
+    /// Emit the idiomatic Zig helper pair for a @callback interface:
+    ///
+    ///   pub fn XxxHandlers(comptime Ctx: type) type { ... }
+    ///
+    /// A comptime-parameterised struct whose fields are Zig-idiomatic callbacks:
+    /// `*const fn(*Ctx, EntityType, StatusType) void` (no callconv(.c), status by value).
+    ///
+    ///   pub fn xxxListener(ctx: anytype, comptime cbs: XxxHandlers(...)) XxxListener { ... }
+    ///
+    /// Wraps each non-null Zig callback in a comptime-generated callconv(.c) thunk and
+    /// returns the C callback struct.  Zero heap allocation — the thunks are compile-time
+    /// constants; `ctx` is stored directly as `listener_data`.
+    fn emitZigListenerHelpers(
+        self: *Generator,
+        pfx: []const u8,
+        iface_name: []const u8,
+        ops: []const ir.Operation,
+    ) anyerror!void {
+        // ── Handlers type ─────────────────────────────────────────────────────
+        try self.ind();
+        try self.print("pub fn {s}Handlers(comptime Ctx: type) type {{\n", .{iface_name});
+        try self.ind();
+        try self.write("    return struct {\n");
+        for (ops) |op| {
+            try self.ind();
+            try self.print("        {s}: ?*const fn (*Ctx", .{op.name});
+            for (op.params) |p| {
+                const zt = try self.typeRefToZig(p.type_ref);
+                defer self.alloc.free(zt);
+                try self.print(", {s}", .{zt});
+            }
+            try self.write(") void = null,\n");
+        }
+        try self.ind();
+        try self.write("    };\n");
+        try self.ind();
+        try self.write("}\n\n");
+
+        // ── Builder function (lowercase-first iface_name) ─────────────────────
+        var fname = try self.alloc.dupe(u8, iface_name);
+        defer self.alloc.free(fname);
+        fname[0] = std.ascii.toLower(fname[0]);
+
+        try self.ind();
+        try self.print(
+            "pub fn {s}(ctx: anytype, comptime cbs: {s}Handlers(@TypeOf(ctx.*))) {s}{s} {{\n",
+            .{ fname, iface_name, pfx, iface_name },
+        );
+        try self.ind();
+        try self.write("    return .{\n");
+        try self.ind();
+        try self.write("        .listener_data = ctx,\n");
+
+        for (ops) |op| {
+            try self.ind();
+            try self.print(
+                "        .{s} = if (cbs.{s}) |_cb| struct {{\n",
+                .{ op.name, op.name },
+            );
+            // Capture the comptime callback as a const so the nested fn can use it.
+            try self.ind();
+            try self.write("            const _h = _cb;\n");
+            // Emit the callconv(.c) wrapper function.
+            try self.ind();
+            try self.write("            fn _w(");
+            for (op.params, 0..) |p, i| {
+                if (i > 0) try self.write(", ");
+                const ct = try self.cApiTypeRef(p.type_ref, p.mode);
+                defer self.alloc.free(ct);
+                try self.print("_{s}: {s}", .{ p.name, ct });
+            }
+            if (op.params.len > 0) try self.write(", ");
+            try self.write("_ld: ?*anyopaque) callconv(.c) void {\n");
+            // Body: call _h with context + params, dereferencing status pointers.
+            try self.ind();
+            try self.write("                _h(@ptrCast(@alignCast(_ld))");
+            for (op.params) |p| {
+                const ct = try self.cApiTypeRef(p.type_ref, p.mode);
+                defer self.alloc.free(ct);
+                // Named struct params arrive as *const T; dereference for Zig caller.
+                if (std.mem.startsWith(u8, ct, "*const ")) {
+                    try self.print(", _{s}.*", .{p.name});
+                } else {
+                    try self.print(", _{s}", .{p.name});
+                }
+            }
+            try self.write(");\n");
+            try self.ind();
+            try self.write("            }\n");
+            try self.ind();
+            try self.write("        }._w else null,\n");
+        }
+
+        try self.ind();
+        try self.write("    };\n");
+        try self.ind();
+        try self.write("}\n\n");
+    }
+
+    /// C callback struct for a @callback interface (matches the C backend layout).
+    fn emitCListenerStruct(
+        self: *Generator,
+        pfx: []const u8,
+        iface_name: []const u8,
+        ops: []const ir.Operation,
+    ) anyerror!void {
+        try self.ind();
+        try self.print("pub const {s}{s} = extern struct {{\n", .{ pfx, iface_name });
+        try self.ind();
+        try self.write("    listener_data: ?*anyopaque = null,\n");
+        for (ops) |op| {
+            try self.ind();
+            try self.print("    {s}: ?*const fn (", .{op.name});
+            for (op.params, 0..) |p, i| {
+                if (i > 0) try self.write(", ");
+                const pt = try self.cApiTypeRef(p.type_ref, p.mode);
+                defer self.alloc.free(pt);
+                try self.write(pt);
+            }
+            if (op.params.len > 0) try self.write(", ");
+            try self.write("?*anyopaque) callconv(.c) void = null,\n");
+        }
+        try self.ind();
+        try self.print("}}; // {s}{s}\n\n", .{ pfx, iface_name });
+    }
+
+    /// Adapter struct: wraps `C_{iface_name}` in a Zig `{iface_name}` vtable.
+    /// Allocated with `std.heap.c_allocator` by entity create wrappers; freed
+    /// in the `deinit` vtable slot when the entity is deleted.
+    /// Emit one trivial `pub export fn callconv(.c)` forwarder for an interface operation.
+    /// Vtable slots now use C-ABI types directly, so no conversion is needed.
+    fn emitCApiOp(
+        self: *Generator,
+        c_name: []const u8,
+        pfx: []const u8,
+        iface_name: []const u8,
+        op: *const ir.Operation,
+    ) anyerror!void {
+        const c_ret = try self.cApiOptRetType(op.return_type);
+        defer self.alloc.free(c_ret);
+        const is_void_ret = std.mem.eql(u8, c_ret, "void");
+
+        try self.ind();
+        try self.print("pub export fn {s}_{s}(self: {s}{s}", .{ c_name, op.name, pfx, iface_name });
+        for (op.params) |p| {
+            const pt = try self.cApiParamType(p);
+            defer self.alloc.free(pt);
+            try self.print(", {s}: {s}", .{ p.name, pt });
+        }
+        try self.print(") callconv(.c) {s} {{\n", .{c_ret});
+
+        try self.ind();
+        if (!is_void_ret) {
+            try self.write("    return ");
+        } else {
+            try self.write("    ");
+        }
+        try self.print("self.vtable.{s}(self.ptr", .{op.name});
+        for (op.params) |p| {
+            try self.print(", {s}", .{p.name});
+        }
+        try self.write(");\n");
+
+        try self.ind();
+        try self.write("}\n\n");
+    }
+
+    /// Emit trivial getter and optional setter `pub export fn` for an attribute.
+    fn emitCApiAttr(
+        self: *Generator,
+        c_name: []const u8,
+        pfx: []const u8,
+        iface_name: []const u8,
+        attr: *const ir.Attribute,
+    ) anyerror!void {
+        const c_at = try self.cApiRetType(attr.type_ref);
+        defer self.alloc.free(c_at);
+
+        try self.ind();
+        try self.print("pub export fn {s}_get_{s}(self: {s}{s}) callconv(.c) {s} {{\n", .{ c_name, attr.name, pfx, iface_name, c_at });
+        try self.ind();
+        try self.print("    return self.vtable.get_{s}(self.ptr);\n", .{attr.name});
+        try self.ind();
+        try self.write("}\n\n");
+
+        if (!attr.readonly) {
+            const c_param = try self.cApiTypeRef(attr.type_ref, .in_);
+            defer self.alloc.free(c_param);
+            try self.ind();
+            try self.print("pub export fn {s}_set_{s}(self: {s}{s}, value: {s}) callconv(.c) void {{\n", .{ c_name, attr.name, pfx, iface_name, c_param });
+            try self.ind();
+            try self.print("    self.vtable.set_{s}(self.ptr, value);\n", .{attr.name});
+            try self.ind();
+            try self.write("}\n\n");
+        }
+    }
+
+    /// If `tr` refers to a listener interface, return that interface; else null.
+    /// Used to detect listener parameters that need CXxxListenerAdapter treatment.
+    /// Returns true when the interface bears `@callback`, meaning the generator should
+    /// produce a C callback struct instead of a fat-pointer vtable entity.
+    /// Falls back to the "Listener" name suffix heuristic for IDL files that have not
+    /// yet been annotated — this fallback is deprecated and will be removed.
+    fn isCallbackInterface(iface: *const ir.Interface) bool {
+        for (iface.raw) |ann| {
+            if (std.mem.eql(u8, ann.name, "callback")) return true;
+        }
+        // Deprecated fallback: name-based heuristic for backwards compatibility.
+        return std.mem.endsWith(u8, iface.name, "Listener");
+    }
+
+    /// If `tr` is a named typedef whose underlying type is a sequence, return that typedef.
+    /// Used to detect sequence parameters that need C_XxxSeq ↔ ArrayListUnmanaged conversion.
+    fn seqTypedef(tr: ir.TypeRef) ?*const ir.Typedef {
+        return switch (tr) {
+            .named => |td| switch (td) {
+                .typedef => |t| switch (t.type_ref) {
+                    .sequence => t,
+                    else => null,
+                },
+                else => null,
+            },
+            else => null,
+        };
+    }
+
+    /// True when `tr` is a type that maps to a C scalar — base types, and typedef chains
+    /// that ultimately resolve to a base type (e.g. `DomainId_t = uint32_t`).
+    /// These can be passed by value in `callconv(.c)` functions; non-primitive named types
+    /// (structs, unions) must be passed by pointer.
+    fn isCApiPrimitive(tr: ir.TypeRef) bool {
+        return switch (tr) {
+            .base => true,
+            .named => |td| switch (td) {
+                .typedef => |t| isCApiPrimitive(t.type_ref),
+                .enum_, .bitmask, .bitset => true,
+                else => false,
+            },
+            else => false,
+        };
+    }
+
+    /// C-ABI qualified name: `DDS::DomainParticipant` → `DDS_DomainParticipant`.
+    fn cApiQualName(self: *Generator, qname: []const u8, pfx: []const u8) ![]u8 {
+        _ = pfx;
+        var out = try self.alloc.alloc(u8, qname.len);
+        errdefer self.alloc.free(out);
+        var j: usize = 0;
+        var i: usize = 0;
+        while (i < qname.len) {
+            if (i + 1 < qname.len and qname[i] == ':' and qname[i + 1] == ':') {
+                out[j] = '_';
+                j += 1;
+                i += 2;
+            } else {
+                out[j] = qname[i];
+                j += 1;
+                i += 1;
+            }
+        }
+        return self.alloc.realloc(out, j);
+    }
+
+    /// C-ABI parameter type for `pub export fn`: string → sentinel pointer,
+    /// named struct/union → pointer, everything else same as vtable type.
+    fn cApiParamType(self: *Generator, p: ir.Parameter) ![]u8 {
+        return self.cApiTypeRef(p.type_ref, p.mode);
+    }
+
+    // ── Idiomatic Zig forwarding-method helpers ───────────────────────────────
+    //
+    // Forwarding methods (the `pub fn xxx(self: @This(), ...)` on entity structs)
+    // use ergonomic Zig types rather than C-ABI types:
+    //   • `in` strings: `[]const u8`  (vs `[*:0]const u8` in vtable slot)
+    //   • `in` non-primitive structs: by value (vs `*const T` in vtable slot)
+    //   • `in` callback interfaces: `?T` optional by value (vs `?*const T`)
+    // The body emits the necessary conversions before calling the vtable slot.
+    // Out/inout params, return types for non-strings, and primitives are unchanged.
+
+    /// Idiomatic Zig parameter type for a forwarding method.
+    fn idiomParamType(self: *Generator, p: ir.Parameter) ![]u8 {
+        if (p.mode == .out or p.mode == .inout) {
+            return self.cApiTypeRef(p.type_ref, p.mode);
+        }
+        return switch (p.type_ref) {
+            .string => |b| if (b == null)
+                self.alloc.dupe(u8, "[]const u8")
+            else
+                self.cApiTypeRef(p.type_ref, p.mode),
+            .wstring => |b| if (b == null)
+                self.alloc.dupe(u8, "[]const u16")
+            else
+                self.cApiTypeRef(p.type_ref, p.mode),
+            .named => |td| switch (td) {
+                .interface => |iface| if (isCallbackInterface(iface)) blk: {
+                    const zig = try self.typeRefToZig(p.type_ref);
+                    defer self.alloc.free(zig);
+                    break :blk std.fmt.allocPrint(self.alloc, "?{s}", .{zig});
+                } else self.cApiTypeRef(p.type_ref, p.mode),
+                else => if (!isCApiPrimitive(p.type_ref) and seqTypedef(p.type_ref) == null)
+                    self.typeRefToZig(p.type_ref) // by value
+                else
+                    self.cApiTypeRef(p.type_ref, p.mode),
+            },
+            else => self.cApiTypeRef(p.type_ref, p.mode),
+        };
+    }
+
+    /// Whether a forwarding method param needs a local `var` before the vtable call.
+    /// Required for optional-callback params so we can take a pointer to the value.
+    fn idiomNeedsLocal(p: ir.Parameter) bool {
+        if (p.mode != .in_) return false;
+        return switch (p.type_ref) {
+            .named => |td| switch (td) {
+                .interface => |iface| isCallbackInterface(iface),
+                else => false,
+            },
+            else => false,
+        };
+    }
+
+    /// Expression to pass an idiomatic forwarding param to the vtable.
+    /// `lv_name` is the emitted local variable name (non-null only for callback params).
+    fn idiomCallArg(self: *Generator, p: ir.Parameter, lv_name: ?[]const u8) ![]u8 {
+        if (p.mode == .out or p.mode == .inout) {
+            return self.alloc.dupe(u8, p.name);
+        }
+        return switch (p.type_ref) {
+            .string => |b| if (b == null)
+                std.fmt.allocPrint(self.alloc, "@as([*:0]const u8, @ptrCast({s}.ptr))", .{p.name})
+            else
+                self.alloc.dupe(u8, p.name),
+            .wstring => |b| if (b == null)
+                std.fmt.allocPrint(self.alloc, "@as([*:0]const u16, @ptrCast({s}.ptr))", .{p.name})
+            else
+                self.alloc.dupe(u8, p.name),
+            .named => |td| switch (td) {
+                .interface => |iface| if (isCallbackInterface(iface)) blk: {
+                    const lv = lv_name orelse p.name;
+                    const zig = try self.typeRefToZig(p.type_ref);
+                    defer self.alloc.free(zig);
+                    break :blk std.fmt.allocPrint(self.alloc, "(if ({s}) |*_x| @as(?*const {s}, _x) else null)", .{ lv, zig });
+                } else self.alloc.dupe(u8, p.name),
+                else => if (!isCApiPrimitive(p.type_ref) and seqTypedef(p.type_ref) == null)
+                    std.fmt.allocPrint(self.alloc, "&{s}", .{p.name})
+                else
+                    self.alloc.dupe(u8, p.name),
+            },
+            else => self.alloc.dupe(u8, p.name),
+        };
+    }
+
+    /// Idiomatic Zig return type for a forwarding method.
+    /// Strings become `[]const u8`; everything else unchanged.
+    fn idiomOptRetType(self: *Generator, ret: ?ir.TypeRef) ![]u8 {
+        if (ret) |tr| return switch (tr) {
+            .string => self.alloc.dupe(u8, "[]const u8"),
+            .wstring => self.alloc.dupe(u8, "[]const u16"),
+            else => self.cApiRetType(tr),
+        };
+        return self.alloc.dupe(u8, "void");
+    }
+
+    /// Whether the idiomatic return needs `std.mem.span()` wrapping.
+    fn idiomRetNeedsSpan(ret: ?ir.TypeRef) bool {
+        return if (ret) |tr| switch (tr) {
+            .string, .wstring => true,
+            else => false,
+        } else false;
+    }
+
+    fn cApiTypeRef(self: *Generator, tr: ir.TypeRef, mode: ir.ParamMode) ![]u8 {
+        return switch (tr) {
+            .string => self.alloc.dupe(u8, switch (mode) {
+                .in_ => "[*:0]const u8",
+                .out, .inout => "[*:0]u8",
+            }),
+            .wstring => self.alloc.dupe(u8, switch (mode) {
+                .in_ => "[*:0]const u16",
+                .out, .inout => "[*:0]u16",
+            }),
+            .named => |td| switch (td) {
+                // Entity interfaces: extern struct fat pointer, pass by value.
+                // Callback interfaces: optional pointer to C callback struct.
+                .interface => |iface| if (isCallbackInterface(iface)) blk: {
+                    const p = self.opts.type_prefix;
+                    break :blk switch (mode) {
+                        .in_ => std.fmt.allocPrint(self.alloc, "?*const {s}{s}", .{ p, iface.name }),
+                        .out, .inout => std.fmt.allocPrint(self.alloc, "?*{s}{s}", .{ p, iface.name }),
+                    };
+                } else self.typeRefToZig(tr),
+                // Enum/bitmask/bitset are primitive-sized — pass by value.
+                .enum_, .bitmask, .bitset => self.typeRefToZig(tr),
+                // Sequence typedefs: pointer to the extern struct (now the canonical type).
+                // Primitive typedefs (uint32_t aliases like DomainId_t, StatusMask, etc.):
+                //   pass by value — same as the underlying C scalar.
+                // Other named types (struct, union, exception): pass by pointer.
+                else => blk: {
+                    if (seqTypedef(tr)) |std_td| {
+                        const p = self.opts.type_prefix;
+                        break :blk switch (mode) {
+                            .in_ => std.fmt.allocPrint(self.alloc, "?*const {s}{s}", .{ p, std_td.name }),
+                            .out, .inout => std.fmt.allocPrint(self.alloc, "?*{s}{s}", .{ p, std_td.name }),
+                        };
+                    }
+                    if (isCApiPrimitive(tr)) {
+                        break :blk self.typeRefToZig(tr); // by value, like the underlying scalar
+                    }
+                    const zig = try self.typeRefToZig(tr);
+                    defer self.alloc.free(zig);
+                    break :blk switch (mode) {
+                        .in_ => std.fmt.allocPrint(self.alloc, "*const {s}", .{zig}),
+                        .out, .inout => std.fmt.allocPrint(self.alloc, "*{s}", .{zig}),
+                    };
+                },
+            },
+            .sequence => blk: {
+                // Sequences: pass by pointer.  The Zig sequence type is not C-ABI
+                // compatible internally, but a pointer to it is always pointer-sized.
+                // Phase 3b will introduce proper C sequence struct conversion.
+                const zig = try self.typeRefToZig(tr);
+                defer self.alloc.free(zig);
+                break :blk switch (mode) {
+                    .in_ => std.fmt.allocPrint(self.alloc, "*const {s}", .{zig}),
+                    .out, .inout => std.fmt.allocPrint(self.alloc, "*{s}", .{zig}),
+                };
+            },
+            else => blk: {
+                // Primitive base types: by value for `in`, pointer for `out`/`inout`.
+                const zig = try self.typeRefToZig(tr);
+                errdefer self.alloc.free(zig);
+                break :blk switch (mode) {
+                    .in_ => zig,
+                    .out, .inout => blk2: {
+                        defer self.alloc.free(zig);
+                        break :blk2 std.fmt.allocPrint(self.alloc, "*{s}", .{zig});
+                    },
+                };
+            },
+        };
+    }
+
+    /// C-ABI return type: `[]const u8` → `[*:0]const u8`, others unchanged.
+    fn cApiRetType(self: *Generator, ret: ir.TypeRef) ![]u8 {
+        return switch (ret) {
+            .string => self.alloc.dupe(u8, "[*:0]const u8"),
+            .wstring => self.alloc.dupe(u8, "[*:0]const u16"),
+            else => self.typeRefToZig(ret),
+        };
+    }
+
+    /// C-ABI return type for an optional return (operation return type).
+    fn cApiOptRetType(self: *Generator, ret: ?ir.TypeRef) ![]u8 {
+        return if (ret) |tr| self.cApiRetType(tr) else self.alloc.dupe(u8, "void");
     }
 
     /// Flatten inherited operations and attributes into `ops`/`attrs`.
@@ -1126,25 +1797,6 @@ const Generator = struct {
         }
         try ops.appendSlice(self.alloc, iface.operations);
         try attrs.appendSlice(self.alloc, iface.attributes);
-    }
-
-    /// Return the Zig type string for an operation parameter, applying the
-    /// `out`/`inout` → pointer transformation.  Caller owns result.
-    fn paramTypeStr(self: *Generator, p: ir.Parameter) ![]u8 {
-        const base = try self.typeRefToZig(p.type_ref);
-        defer self.alloc.free(base);
-        return switch (p.mode) {
-            .in_ => self.alloc.dupe(u8, base),
-            .out, .inout => std.fmt.allocPrint(self.alloc, "*{s}", .{base}),
-        };
-    }
-
-    /// Return the Zig return type string for an operation.  Caller owns result.
-    fn returnTypeStr(self: *Generator, ret: ?ir.TypeRef) ![]u8 {
-        return if (ret) |tr|
-            self.typeRefToZig(tr)
-        else
-            self.alloc.dupe(u8, "void");
     }
 
     // ── Const ─────────────────────────────────────────────────────────────────
@@ -1716,7 +2368,25 @@ const Generator = struct {
                         try self.ind();
                         try self.print("        if (value.{s}) |{s}| {{\n", .{ m.name, seq_var });
                         try self.ind();
-                        try self.print("            for ({s}.items) |_elem| {{\n", .{seq_var});
+                        try self.print("            if ({s}._buffer) |_sb| {{\n", .{seq_var});
+                        try self.ind();
+                        try self.print("                for (_sb[0..{s}._length]) |_elem| {{\n", .{seq_var});
+                        try self.ind();
+                        try self.print("                    const _ph = try writer.reservePlParam({d});\n", .{pid});
+                        try self.emitWriteForTypeRef(elem_tr, "_elem", "                    ");
+                        try self.ind();
+                        try self.write("                    try writer.patchPlParam(_ph);\n");
+                        try self.ind();
+                        try self.write("                }\n");
+                        try self.ind();
+                        try self.write("            }\n");
+                        try self.ind();
+                        try self.write("        }\n");
+                    } else {
+                        try self.ind();
+                        try self.print("        if (value.{s}._buffer) |_sb| {{\n", .{m.name});
+                        try self.ind();
+                        try self.print("            for (_sb[0..value.{s}._length]) |_elem| {{\n", .{m.name});
                         try self.ind();
                         try self.print("                const _ph = try writer.reservePlParam({d});\n", .{pid});
                         try self.emitWriteForTypeRef(elem_tr, "_elem", "                ");
@@ -1724,16 +2394,6 @@ const Generator = struct {
                         try self.write("                try writer.patchPlParam(_ph);\n");
                         try self.ind();
                         try self.write("            }\n");
-                        try self.ind();
-                        try self.write("        }\n");
-                    } else {
-                        try self.ind();
-                        try self.print("        for (value.{s}.items) |_elem| {{\n", .{m.name});
-                        try self.ind();
-                        try self.print("            const _ph = try writer.reservePlParam({d});\n", .{pid});
-                        try self.emitWriteForTypeRef(elem_tr, "_elem", "            ");
-                        try self.ind();
-                        try self.write("            try writer.patchPlParam(_ph);\n");
                         try self.ind();
                         try self.write("        }\n");
                     }
@@ -1852,6 +2512,205 @@ const Generator = struct {
             try self.ind();
             try self.write("    }\n");
         }
+
+        // deinit + clone — only when the struct has sequence fields that may hold heap memory.
+        if (structNeedsSeqDeinit(s)) {
+            try self.write("\n");
+            try self.emitStructDeinitFn(s);
+            try self.write("\n");
+            try self.emitStructCloneFn(s);
+        }
+    }
+
+    /// Emit `pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void` for
+    /// structs whose sequence fields may have been heap-allocated by
+    /// `deserializeInto` (identified by `_release == true`).
+    /// String fields (`[]const u8`) are NOT freed here — the caller must manage
+    /// those manually, as there is no ownership flag to distinguish allocated
+    /// strings from static literals.
+    fn emitStructDeinitFn(self: *Generator, s: *const ir.Struct) !void {
+        try self.ind();
+        try self.write("    pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {\n");
+        for (s.members) |m| {
+            if (!typeRefNeedsSeqDeinit(m.type_ref)) continue;
+            try self.emitFieldSeqDeinit(m.name, m.type_ref, "        ");
+        }
+        try self.ind();
+        try self.write("    }\n");
+    }
+
+    /// Emit the cleanup snippet for a single struct field whose type is or
+    /// contains an unbounded sequence.
+    fn emitFieldSeqDeinit(self: *Generator, field_name: []const u8, tr: ir.TypeRef, indent: []const u8) !void {
+        switch (tr) {
+            .sequence => |seq| {
+                // Anonymous extern struct field — inline the _release-guarded cleanup.
+                try self.ind();
+                try self.print("{s}if (self.{s}._release) {{\n", .{ indent, field_name });
+                try self.ind();
+                try self.print("{s}    if (self.{s}._buffer) |_buf| {{\n", .{ indent, field_name });
+                if (seq.element.* == .string) {
+                    try self.ind();
+                    try self.print("{s}        for (_buf[0..self.{s}._length]) |_s| {{\n", .{ indent, field_name });
+                    try self.ind();
+                    try self.print("{s}            const _sl = std.mem.span(_s);\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}            alloc.free(_sl.ptr[0.._sl.len + 1]);\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}        }}\n", .{indent});
+                }
+                try self.ind();
+                try self.print("{s}        alloc.free(_buf[0..self.{s}._length]);\n", .{ indent, field_name });
+                try self.ind();
+                try self.print("{s}    }}\n", .{indent});
+                try self.ind();
+                try self.print("{s}    self.{s} = .{{}};\n", .{ indent, field_name });
+                try self.ind();
+                try self.print("{s}}}\n", .{indent});
+            },
+            .named => |td| switch (td) {
+                // Named sequence typedef or named struct with deinit — delegate.
+                .typedef, .struct_ => {
+                    try self.ind();
+                    try self.print("{s}self.{s}.deinit(alloc);\n", .{ indent, field_name });
+                },
+                else => {},
+            },
+            else => {},
+        }
+    }
+
+    /// Emit `pub fn clone(self: @This(), alloc: std.mem.Allocator) !@This()` for
+    /// structs whose sequence fields need a deep copy.  Each field is cloned in
+    /// declaration order; an errdefer is emitted after each clone so that partial
+    /// failure frees whatever was already allocated.
+    fn emitStructCloneFn(self: *Generator, s: *const ir.Struct) !void {
+        try self.ind();
+        try self.write("    pub fn clone(self: @This(), alloc: std.mem.Allocator) !@This() {\n");
+        try self.ind();
+        try self.write("        var result = self;\n");
+        for (s.members) |m| {
+            if (!typeRefNeedsSeqDeinit(m.type_ref)) continue;
+            try self.emitFieldSeqCloneStmt(m.name, m.type_ref, "        ");
+            try self.emitFieldSeqCloneErrdefer(m.name, m.type_ref, "        ");
+        }
+        try self.ind();
+        try self.write("        return result;\n");
+        try self.ind();
+        try self.write("    }\n");
+    }
+
+    /// Emit the copy snippet for a single struct field (the `result.field = ...` part).
+    fn emitFieldSeqCloneStmt(self: *Generator, field_name: []const u8, tr: ir.TypeRef, indent: []const u8) !void {
+        switch (tr) {
+            .sequence => |seq| {
+                const buf_elem = try self.seqBufElemZig(seq.element.*);
+                defer self.alloc.free(buf_elem);
+                // Reset before the clone attempt so the errdefer is a no-op if
+                // _length == 0 (avoids freeing the original's buffer via the
+                // shallow-copied _release flag).
+                try self.ind();
+                try self.print("{s}result.{s} = .{{}};\n", .{ indent, field_name });
+                try self.ind();
+                try self.print("{s}if (self.{s}._length > 0) {{\n", .{ indent, field_name });
+                if (seq.element.* == .string) {
+                    try self.ind();
+                    try self.print("{s}    const _buf = try alloc.alloc({s}, self.{s}._length);\n", .{ indent, buf_elem, field_name });
+                    try self.ind();
+                    try self.print("{s}    var _n: u32 = 0;\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}    errdefer {{\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}        for (_buf[0.._n]) |_s| {{\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}            const _sl = std.mem.span(_s);\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}            alloc.free(_sl.ptr[0.._sl.len + 1]);\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}        }}\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}        alloc.free(_buf);\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}    }}\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}    if (self.{s}._buffer) |_sb| {{\n", .{ indent, field_name });
+                    try self.ind();
+                    try self.print("{s}        for (_sb[0..self.{s}._length]) |_src| {{\n", .{ indent, field_name });
+                    try self.ind();
+                    try self.print("{s}            _buf[_n] = (try alloc.dupeZ(u8, std.mem.span(_src))).ptr;\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}            _n += 1;\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}        }}\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}    }}\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}    result.{s} = .{{ ._buffer = _buf.ptr, ._length = self.{s}._length, ._maximum = self.{s}._length, ._release = true }};\n", .{ indent, field_name, field_name, field_name });
+                } else {
+                    try self.ind();
+                    try self.print("{s}    const _buf = try alloc.alloc({s}, self.{s}._length);\n", .{ indent, buf_elem, field_name });
+                    try self.ind();
+                    try self.print("{s}    if (self.{s}._buffer) |_sb| @memcpy(_buf, _sb[0..self.{s}._length]);\n", .{ indent, field_name, field_name });
+                    try self.ind();
+                    try self.print("{s}    result.{s} = .{{ ._buffer = _buf.ptr, ._length = self.{s}._length, ._maximum = self.{s}._length, ._release = true }};\n", .{ indent, field_name, field_name, field_name });
+                }
+                try self.ind();
+                try self.print("{s}}}\n", .{indent});
+            },
+            .named => |td| switch (td) {
+                // Named sequence typedef or named struct with clone — delegate.
+                .typedef, .struct_ => {
+                    try self.ind();
+                    try self.print("{s}result.{s} = try self.{s}.clone(alloc);\n", .{ indent, field_name, field_name });
+                },
+                else => {},
+            },
+            else => {},
+        }
+    }
+
+    /// Emit the errdefer cleanup snippet for a field already cloned by
+    /// `emitFieldSeqCloneStmt`.  Must be emitted immediately after the clone
+    /// statement so that failures in subsequent fields trigger this cleanup.
+    fn emitFieldSeqCloneErrdefer(self: *Generator, field_name: []const u8, tr: ir.TypeRef, indent: []const u8) !void {
+        switch (tr) {
+            .sequence => |seq| {
+                try self.ind();
+                try self.print("{s}errdefer {{\n", .{indent});
+                try self.ind();
+                try self.print("{s}    if (result.{s}._release) {{\n", .{ indent, field_name });
+                try self.ind();
+                try self.print("{s}        if (result.{s}._buffer) |_b| {{\n", .{ indent, field_name });
+                if (seq.element.* == .string) {
+                    try self.ind();
+                    try self.print("{s}            for (_b[0..result.{s}._length]) |_s| {{\n", .{ indent, field_name });
+                    try self.ind();
+                    try self.print("{s}                const _sl = std.mem.span(_s);\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}                alloc.free(_sl.ptr[0.._sl.len + 1]);\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}            }}\n", .{indent});
+                }
+                try self.ind();
+                try self.print("{s}            alloc.free(_b[0..result.{s}._length]);\n", .{ indent, field_name });
+                try self.ind();
+                try self.print("{s}        }}\n", .{indent});
+                try self.ind();
+                try self.print("{s}        result.{s} = .{{}};\n", .{ indent, field_name });
+                try self.ind();
+                try self.print("{s}    }}\n", .{indent});
+                try self.ind();
+                try self.print("{s}}}\n", .{indent});
+            },
+            .named => |td| switch (td) {
+                .typedef, .struct_ => {
+                    try self.ind();
+                    try self.print("{s}errdefer result.{s}.deinit(alloc);\n", .{ indent, field_name });
+                },
+                else => {},
+            },
+            else => {},
+        }
     }
 
     // ── TypeObject / TypeIdentifier constant emission ─────────────────────────
@@ -1924,20 +2783,38 @@ const Generator = struct {
                 try self.ind();
                 if (seq.bound != null) {
                     try self.print("{s}try writer.writeU32(@intCast({s}.slice().len));\n", .{ extra, access });
-                } else {
-                    try self.print("{s}try writer.writeU32(@intCast({s}.items.len));\n", .{ extra, access });
-                }
-                try self.ind();
-                if (seq.bound != null) {
+                    try self.ind();
                     try self.print("{s}for ({s}.slice()) |_se| {{\n", .{ extra, access });
+                    const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
+                    defer self.alloc.free(inner);
+                    try self.emitWriteForTypeRef(seq.element.*, "_se", inner);
+                    try self.ind();
+                    try self.print("{s}}}\n", .{extra});
                 } else {
-                    try self.print("{s}for ({s}.items) |_se| {{\n", .{ extra, access });
+                    // Unbounded extern struct: check _buffer before iterating.
+                    try self.print("{s}try writer.writeU32({s}._length);\n", .{ extra, access });
+                    try self.ind();
+                    try self.print("{s}if ({s}._buffer) |_sb| {{\n", .{ extra, access });
+                    const inner = try std.fmt.allocPrint(self.alloc, "{s}        ", .{extra});
+                    defer self.alloc.free(inner);
+                    try self.ind();
+                    try self.print("{s}    for (_sb[0..{s}._length]) |_se| {{\n", .{ extra, access });
+                    // String elements in C-ABI buffers are [*:0]const u8; span them for writeString.
+                    const is_c_str_elem_w = switch (seq.element.*) {
+                        .string => |b| b == null,
+                        else => false,
+                    };
+                    if (is_c_str_elem_w) {
+                        try self.ind();
+                        try self.print("{s}try writer.writeString(std.mem.span(_se));\n", .{inner});
+                    } else {
+                        try self.emitWriteForTypeRef(seq.element.*, "_se", inner);
+                    }
+                    try self.ind();
+                    try self.print("{s}    }}\n", .{extra}); // close for
+                    try self.ind();
+                    try self.print("{s}}}\n", .{extra}); // close if
                 }
-                const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
-                defer self.alloc.free(inner);
-                try self.emitWriteForTypeRef(seq.element.*, "_se", inner);
-                try self.ind();
-                try self.print("{s}}}\n", .{extra});
             },
             .named => |td| switch (td) {
                 .enum_ => |e| {
@@ -2078,17 +2955,54 @@ const Generator = struct {
                     try self.print("{s}if (_n > {d}) return error.SequenceTooLong;\n", .{ ii, bound });
                     try self.ind();
                     try self.print("{s}{s}.clearRetainingCapacity();\n", .{ ii, out_expr });
-                } else {
                     try self.ind();
-                    try self.print("{s}try {s}.ensureTotalCapacity(allocator, _n);\n", .{ ii, out_expr });
+                    try self.print("{s}for (0.._n) |_| {{\n", .{ii});
+                    const iii = try std.fmt.allocPrint(self.alloc, "{s}    ", .{ii});
+                    defer self.alloc.free(iii);
+                    try self.emitSequenceElementRead(seq.element.*, out_expr, iii);
+                    try self.ind();
+                    try self.print("{s}}}\n", .{ii});
+                } else {
+                    // Unbounded sequence: allocate a buffer, then read elements into it.
+                    const buf_elem = try self.seqBufElemZig(seq.element.*);
+                    defer self.alloc.free(buf_elem);
+                    try self.ind();
+                    try self.print("{s}{s}._length = _n;\n", .{ ii, out_expr });
+                    try self.ind();
+                    try self.print("{s}{s}._maximum = _n;\n", .{ ii, out_expr });
+                    try self.ind();
+                    try self.print("{s}if (_n > 0) {{\n", .{ii});
+                    const iii = try std.fmt.allocPrint(self.alloc, "{s}    ", .{ii});
+                    defer self.alloc.free(iii);
+                    try self.ind();
+                    try self.print("{s}const _buf = try allocator.alloc({s}, _n);\n", .{ iii, buf_elem });
+                    try self.ind();
+                    try self.print("{s}{s}._buffer = _buf.ptr;\n", .{ iii, out_expr });
+                    try self.ind();
+                    try self.print("{s}{s}._release = true;\n", .{ iii, out_expr });
+                    try self.ind();
+                    try self.print("{s}for (_buf) |*_se| {{\n", .{iii});
+                    const iv = try std.fmt.allocPrint(self.alloc, "{s}    ", .{iii});
+                    defer self.alloc.free(iv);
+                    // String elements in C-ABI buffers are [*:0]const u8; use zero-copy
+                    // read + dupeZ to produce a null-terminated allocation.
+                    const is_c_str_elem = switch (seq.element.*) {
+                        .string => |b| b == null,
+                        else => false,
+                    };
+                    if (is_c_str_elem) {
+                        try self.ind();
+                        try self.print("{s}const _rs = try reader.readStringZeroCopy();\n", .{iv});
+                        try self.ind();
+                        try self.print("{s}_se.* = (try allocator.dupeZ(u8, _rs)).ptr;\n", .{iv});
+                    } else {
+                        try self.emitReadForTypeRef(seq.element.*, "_se.*", iv);
+                    }
+                    try self.ind();
+                    try self.print("{s}}}\n", .{iii});
+                    try self.ind();
+                    try self.print("{s}}}\n", .{ii});
                 }
-                try self.ind();
-                try self.print("{s}for (0.._n) |_| {{\n", .{ii});
-                const iii = try std.fmt.allocPrint(self.alloc, "{s}    ", .{ii});
-                defer self.alloc.free(iii);
-                try self.emitSequenceElementRead(seq.element.*, out_expr, iii);
-                try self.ind();
-                try self.print("{s}}}\n", .{ii});
                 try self.ind();
                 try self.print("{s}}}\n", .{extra});
             },
@@ -2279,114 +3193,46 @@ const Generator = struct {
     /// Emit "read one element and `try seq.append(allocator, elem)`" for `@pl_repeated` fields.
     /// Unlike `emitSequenceElementRead` (which uses `appendAssumeCapacity` after
     /// `ensureTotalCapacity`), this path works without a prior element count.
+    /// Emit code to grow an extern-struct sequence by one element for @pl_repeated.
+    /// Uses alloc+memcpy to avoid a dependency on ArrayList — O(n) per append,
+    /// acceptable for the small discovery-data sequences this path handles.
     fn emitPlRepeatedElementAppend(
         self: *Generator,
         elem_tr: ir.TypeRef,
         seq_expr: []const u8,
         extra: []const u8,
     ) anyerror!void {
-        switch (elem_tr) {
-            .base => |b| {
-                const method = baseReadMethod(b);
-                try self.ind();
-                try self.print("{s}try {s}.append(allocator, try reader.{s}());\n", .{ extra, seq_expr, method });
-            },
-            .string => |bound| {
-                if (bound != null) {
-                    const zig_elem = try self.typeRefToZig(elem_tr);
-                    defer self.alloc.free(zig_elem);
-                    try self.ind();
-                    try self.print("{s}{{\n", .{extra});
-                    const ii = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
-                    defer self.alloc.free(ii);
-                    try self.ind();
-                    try self.print("{s}const _s = try reader.readStringZeroCopy();\n", .{ii});
-                    try self.ind();
-                    try self.print("{s}if (_s.len > {d}) return error.StringTooLong;\n", .{ ii, bound.? });
-                    try self.ind();
-                    try self.print("{s}try {s}.append(allocator, {s}.fromSlice(_s) catch unreachable);\n", .{ ii, seq_expr, zig_elem });
-                    try self.ind();
-                    try self.print("{s}}}\n", .{extra});
-                } else {
-                    try self.ind();
-                    try self.print("{s}try {s}.append(allocator, try reader.readString(allocator));\n", .{ extra, seq_expr });
-                }
-            },
-            .named => |td| switch (td) {
-                .enum_ => |e| {
-                    const stor = enumStorageType(e.annotations);
-                    const method = switch (stor[0]) {
-                        'u' => switch (stor[1]) {
-                            '8' => "readU8",
-                            '1' => "readU16",
-                            '3' => "readU32",
-                            '6' => "readU64",
-                            else => "readU32",
-                        },
-                        else => "readU32",
-                    };
-                    try self.ind();
-                    try self.print("{s}try {s}.append(allocator, @enumFromInt(try reader.{s}()));\n", .{ extra, seq_expr, method });
-                },
-                .bitmask => |bm| {
-                    const stor = bitmaskStorageType(bm.annotations);
-                    const method = switch (stor[0]) {
-                        'u' => switch (stor[1]) {
-                            '8' => "readU8",
-                            '1' => "readU16",
-                            '3' => "readU32",
-                            '6' => "readU64",
-                            else => "readU32",
-                        },
-                        else => "readU32",
-                    };
-                    try self.ind();
-                    try self.print("{s}try {s}.append(allocator, try reader.{s}());\n", .{ extra, seq_expr, method });
-                },
-                .typedef => |t| {
-                    if (t.dimensions.len > 0) {
-                        try self.ind();
-                        try self.print("{s}// TODO: @pl_repeated sequence-of-array-typedef\n", .{extra});
-                    } else {
-                        try self.emitPlRepeatedElementAppend(t.type_ref, seq_expr, extra);
-                    }
-                },
-                .union_ => {
-                    const zig_type = try self.typeRefToZig(elem_tr);
-                    defer self.alloc.free(zig_type);
-                    try self.ind();
-                    try self.print("{s}var _elem: {s} = .{{}};\n", .{ extra, zig_type });
-                    try self.ind();
-                    try self.print("{s}try {s}.deserializeInto(&_elem, reader, allocator);\n", .{ extra, zig_type });
-                    try self.ind();
-                    try self.print("{s}try {s}.append(allocator, _elem);\n", .{ extra, seq_expr });
-                },
-                .bitset => {
-                    const zig_type = try self.typeRefToZig(elem_tr);
-                    defer self.alloc.free(zig_type);
-                    try self.ind();
-                    try self.print("{s}var _elem: {s} = .{{}};\n", .{ extra, zig_type });
-                    try self.ind();
-                    try self.print("{s}try {s}.deserializeInto(&_elem, reader, allocator);\n", .{ extra, zig_type });
-                    try self.ind();
-                    try self.print("{s}try {s}.append(allocator, _elem);\n", .{ extra, seq_expr });
-                },
-                else => {
-                    const zig_type = try self.typeRefToZig(elem_tr);
-                    defer self.alloc.free(zig_type);
-                    try self.ind();
-                    try self.print("{s}var _elem: {s} = .{{}};\n", .{ extra, zig_type });
-                    try self.ind();
-                    try self.print("{s}try {s}.deserializeInto(&_elem, reader, allocator);\n", .{ extra, zig_type });
-                    try self.ind();
-                    try self.print("{s}try {s}.append(allocator, _elem);\n", .{ extra, seq_expr });
-                },
-            },
-            else => {
-                try self.ind();
-                try self.print("{s}// TODO: @pl_repeated element read\n", .{extra});
-            },
-        }
+        const buf_elem = try self.seqBufElemZig(elem_tr);
+        defer self.alloc.free(buf_elem);
+        const ii = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
+        defer self.alloc.free(ii);
+
+        // Emit the grow-by-one preamble
+        try self.ind();
+        try self.print("{s}{{\n", .{extra});
+        try self.ind();
+        try self.print("{s}const _plen = {s}._length;\n", .{ ii, seq_expr });
+        try self.ind();
+        try self.print("{s}const _pbuf = try allocator.alloc({s}, _plen + 1);\n", .{ ii, buf_elem });
+        try self.ind();
+        try self.print("{s}if ({s}._buffer) |_ob| @memcpy(_pbuf[0.._plen], _ob[0.._plen]);\n", .{ ii, seq_expr });
+        try self.ind();
+        try self.print("{s}if ({s}._release) {{ if ({s}._buffer) |_ob| allocator.free(_ob[0.._plen]); }}\n", .{ ii, seq_expr, seq_expr });
+
+        // Emit the element read into _pbuf[_plen]
+        try self.emitReadForTypeRef(elem_tr, "_pbuf[_plen]", ii);
+
+        // Emit the sequence update
+        try self.ind();
+        try self.print("{s}{s}._buffer = _pbuf.ptr;\n", .{ ii, seq_expr });
+        try self.ind();
+        try self.print("{s}{s}._length = _plen + 1;\n", .{ ii, seq_expr });
+        try self.ind();
+        try self.print("{s}{s}._maximum = _plen + 1;\n", .{ ii, seq_expr });
+        try self.ind();
+        try self.print("{s}{s}._release = true;\n", .{ ii, seq_expr });
+        try self.ind();
+        try self.print("{s}}}\n", .{extra});
     }
 
     /// Emit write loops for an IDL array member (multi-dimensional).
@@ -2659,12 +3505,15 @@ const Generator = struct {
             .base => |b| self.alloc.dupe(u8, baseToZigType(b)),
             .named => |td| self.qualNameToZig(ir.typeDeclQualifiedName(td)),
             .sequence => |seq| blk: {
-                const elem = try self.typeRefToZig(seq.element.*);
-                defer self.alloc.free(elem);
-                break :blk if (seq.bound) |n|
-                    std.fmt.allocPrint(self.alloc, "zidl_rt.BoundedArray({s}, {d})", .{ elem, n })
-                else
-                    std.fmt.allocPrint(self.alloc, "std.ArrayListUnmanaged({s})", .{elem});
+                if (seq.bound) |n| {
+                    const elem = try self.typeRefToZig(seq.element.*);
+                    defer self.alloc.free(elem);
+                    break :blk std.fmt.allocPrint(self.alloc, "zidl_rt.BoundedArray({s}, {d})", .{ elem, n });
+                }
+                // Unbounded sequences use a C-compatible extern struct matching the C PSM layout.
+                const buf_elem = try self.seqBufElemZig(seq.element.*);
+                defer self.alloc.free(buf_elem);
+                break :blk std.fmt.allocPrint(self.alloc, "extern struct {{ _maximum: u32 = 0, _length: u32 = 0, _buffer: ?[*]{s} = null, _release: bool = false }}", .{buf_elem});
             },
             .string => |bound| if (bound) |n|
                 std.fmt.allocPrint(self.alloc, "zidl_rt.BoundedArray(u8, {d})", .{n})
@@ -2766,10 +3615,7 @@ const Generator = struct {
                 self.alloc.dupe(u8, ".{}")
             else
                 self.alloc.dupe(u8, "&.{}"),
-            .sequence => |seq| if (seq.bound != null)
-                self.alloc.dupe(u8, ".{}") // BoundedArray has field defaults
-            else
-                self.alloc.dupe(u8, ".empty"),
+            .sequence => self.alloc.dupe(u8, ".{}"), // BoundedArray and extern struct both use .{}
             .named => |td| switch (td) {
                 .enum_ => |e| if (e.enumerators.len > 0)
                     // In a type-inferred context (struct field), .Name resolves
@@ -2977,6 +3823,74 @@ fn typeRefNeedsAllocator(tr: ir.TypeRef) bool {
     };
 }
 
+/// Returns true if `tr` maps to a C-ABI-compatible Zig type — one that may
+/// legally appear as a field in an `extern struct`.
+///
+/// The key cases:
+///   - Unbounded sequence → anonymous `extern struct { _maximum, _length, _buffer, _release }` — yes.
+///   - Bounded sequence   → `zidl_rt.BoundedArray(T, N)` — no (Zig runtime type).
+///   - Unbounded string   → `[]const u8` (fat slice) — no.
+///   - Bounded string     → `zidl_rt.BoundedArray(u8, N)` — no.
+///   - Named struct       → yes iff `structIsCExternCompatible`.
+fn typeRefIsCExternCompatible(tr: ir.TypeRef) bool {
+    return switch (tr) {
+        .base => |b| b != .long_double, // long_double is 16-byte in Zig, 10-byte in C x86-64
+        .string => false,
+        .wstring => false, // wchar_t width is platform-dependent
+        .sequence => |seq| seq.bound == null, // unbounded → extern struct; bounded → BoundedArray
+        .fixed_pt => false, // emitted as f64; not a proper C fixed-point type
+        .map => false,
+        .named => |td| switch (td) {
+            .enum_ => true,
+            .bitmask, .bitset => true,
+            .struct_ => |s| structIsCExternCompatible(s),
+            .exception => |e| blk: {
+                for (e.members) |m| {
+                    if (!typeRefIsCExternCompatible(m.type_ref)) break :blk false;
+                }
+                break :blk true;
+            },
+            .typedef => |t| typeRefIsCExternCompatible(t.type_ref),
+            else => false, // interface, union, native
+        },
+    };
+}
+
+/// Returns true if every field of `s` is C-ABI compatible, meaning the struct
+/// may be emitted as `extern struct` with a formally guaranteed memory layout.
+fn structIsCExternCompatible(s: *const ir.Struct) bool {
+    if (s.base != null) return false; // inheritance adds a _base field with uncertain layout
+    for (s.members) |m| {
+        if (m.annotations.is_optional) return false; // @optional adds a companion bool field
+        if (!typeRefIsCExternCompatible(m.type_ref)) return false;
+    }
+    return true;
+}
+
+/// Returns true if the type ref is an unbounded sequence (anonymous or via typedef),
+/// or a named struct that transitively contains one — i.e., whether a `deinit`
+/// helper can clean up heap memory allocated by `deserializeInto`.
+/// String fields (`[]const u8`) are excluded: they have no `_release` guard so
+/// we cannot distinguish allocated from static-literal storage here.
+fn typeRefNeedsSeqDeinit(tr: ir.TypeRef) bool {
+    return switch (tr) {
+        .sequence => |seq| seq.bound == null,
+        .named => |td| switch (td) {
+            .typedef => |t| typeRefNeedsSeqDeinit(t.type_ref),
+            .struct_ => |s| structNeedsSeqDeinit(s),
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn structNeedsSeqDeinit(s: *const ir.Struct) bool {
+    for (s.members) |m| {
+        if (typeRefNeedsSeqDeinit(m.type_ref)) return true;
+    }
+    return false;
+}
+
 fn typeDeclHasKey(td: ir.TypeDecl) bool {
     return switch (td) {
         .struct_ => |s| structHasKey(s),
@@ -3029,6 +3943,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
     type_prefix: []const u8 = "",
     pl_cdr: bool = false,
     zig_version: interface.ZigVersion = .@"0.16.0",
+    generate_c_api: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
 
@@ -3056,6 +3971,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
         .type_prefix = extra_opts.type_prefix,
         .pl_cdr = extra_opts.pl_cdr,
         .zig_version = extra_opts.zig_version,
+        .generate_c_api = extra_opts.generate_c_api,
     };
     try generateFile(alloc, &ir_spec, opts, &out);
     return out;
@@ -3085,7 +4001,7 @@ test "zig_backend: simple struct" {
     var out = try testGen("struct Point { long x; long y; };", "point");
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "pub const Point = struct {"));
+    try testing.expect(has(s, "pub const Point = extern struct {"));
     try testing.expect(has(s, "x: i32 = 0,"));
     try testing.expect(has(s, "y: i32 = 0,"));
     try testing.expect(has(s, "}; // Point"));
@@ -3098,7 +4014,7 @@ test "zig_backend: struct in module" {
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "pub const Sensor = struct {"));
-    try testing.expect(has(s, "pub const Reading = struct {"));
+    try testing.expect(has(s, "pub const Reading = extern struct {"));
     try testing.expect(has(s, "value: f64 = 0.0,"));
     try testing.expect(has(s, "}; // Sensor"));
 }
@@ -3111,7 +4027,7 @@ test "zig_backend: nested module" {
     const s = out.items;
     try testing.expect(has(s, "pub const A = struct {"));
     try testing.expect(has(s, "pub const B = struct {"));
-    try testing.expect(has(s, "pub const C = struct {"));
+    try testing.expect(has(s, "pub const C = extern struct {"));
 }
 
 test "zig_backend: primitive type mapping" {
@@ -3168,7 +4084,7 @@ test "zig_backend: sequence types" {
     , "seq");
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "unbounded: std.ArrayListUnmanaged(i32) = .empty,"));
+    try testing.expect(has(s, "unbounded: extern struct { _maximum: u32 = 0, _length: u32 = 0, _buffer: ?[*]i32 = null, _release: bool = false } = .{},"));
     try testing.expect(has(s, "bounded: zidl_rt.BoundedArray(i32, 10) = .{},"));
 }
 
@@ -3529,14 +4445,15 @@ test "zig_backend: serialize string and sequence" {
     // Unbounded string → writeString, readString(allocator)
     try testing.expect(has(s, "try writer.writeString(value.label);"));
     try testing.expect(has(s, "label = try reader.readString(allocator);"));
-    // Sequence → length prefix + loop
-    try testing.expect(has(s, "try writer.writeU32(@intCast(value.values.items.len));"));
-    try testing.expect(has(s, "for (value.values.items) |_se|"));
+    // Sequence → length prefix + if/for loop over buffer
+    try testing.expect(has(s, "try writer.writeU32(value.values._length);"));
+    try testing.expect(has(s, "if (value.values._buffer) |_sb|"));
+    try testing.expect(has(s, "for (_sb[0..value.values._length]) |_se|"));
     try testing.expect(has(s, "try writer.writeI32(_se);"));
-    // Read side: ensureTotalCapacity + loop
+    // Read side: alloc buffer + loop
     try testing.expect(has(s, "const _n = try reader.readU32();"));
-    try testing.expect(has(s, "try out.values.ensureTotalCapacity(allocator, _n);"));
-    try testing.expect(has(s, "out.values.appendAssumeCapacity(try reader.readI32());"));
+    try testing.expect(has(s, "const _buf = try allocator.alloc(i32, _n);"));
+    try testing.expect(has(s, "_se.* = try reader.readI32();"));
     // Needs allocator → no "_ = allocator"
     try testing.expect(!has(s, "_ = allocator;"));
 }
@@ -3813,14 +4730,15 @@ test "zig_backend: serialize sequence of structs" {
     , "seqstruct");
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // Write: length + loop calling .serialize()
-    try testing.expect(has(s, "try writer.writeU32(@intCast(value.items.items.len));"));
-    try testing.expect(has(s, "for (value.items.items) |_se|"));
+    // Write: length + if/for loop calling .serialize()
+    try testing.expect(has(s, "try writer.writeU32(value.items._length);"));
+    try testing.expect(has(s, "if (value.items._buffer) |_sb|"));
+    try testing.expect(has(s, "for (_sb[0..value.items._length]) |_se|"));
     try testing.expect(has(s, "try Item.serialize(writer, _se);"));
-    // Read: ensureTotalCapacity + loop + deserializeInto
-    try testing.expect(has(s, "var _elem: Item = .{};"));
-    try testing.expect(has(s, "try Item.deserializeInto(&_elem, reader, allocator);"));
-    try testing.expect(has(s, "out.items.appendAssumeCapacity(_elem);"));
+    // Read: alloc buffer + loop + deserializeInto via pointer
+    try testing.expect(has(s, "const _buf = try allocator.alloc(Item, _n);"));
+    try testing.expect(has(s, "for (_buf) |*_se|"));
+    try testing.expect(has(s, "try Item.deserializeInto(&_se.*, reader, allocator);"));
 }
 
 test "zig_backend: serialize sequence of enums" {
@@ -3832,8 +4750,8 @@ test "zig_backend: serialize sequence of enums" {
     const s = out.items;
     // Write loop: @intFromEnum
     try testing.expect(has(s, "try writer.writeU32(@intFromEnum(_se));"));
-    // Read loop: appendAssumeCapacity(@enumFromInt(...))
-    try testing.expect(has(s, "out.colors.appendAssumeCapacity(@enumFromInt(try reader.readU32()));"));
+    // Read loop: direct assignment into buffer element
+    try testing.expect(has(s, "_se.* = @enumFromInt(try reader.readU32());"));
 }
 
 test "zig_backend: typedef needsAllocator recurses correctly" {
@@ -3902,7 +4820,7 @@ test "zig_backend: interface placeholder without flag" {
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "// IDL interface Greeter"));
-    try testing.expect(!has(s, "pub const Greeter = struct {"));
+    try testing.expect(!has(s, "pub const Greeter = extern struct {"));
 }
 
 test "zig_backend: interface basic vtable struct" {
@@ -3911,7 +4829,7 @@ test "zig_backend: interface basic vtable struct" {
     , "iface", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "pub const Greeter = struct {"));
+    try testing.expect(has(s, "pub const Greeter = extern struct {"));
     try testing.expect(has(s, "ptr: *anyopaque,"));
     try testing.expect(has(s, "vtable: *const Vtable,"));
     try testing.expect(has(s, "pub const Vtable = struct {"));
@@ -3958,12 +4876,12 @@ test "zig_backend: interface readonly attribute" {
     , "named", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // Vtable: getter only
-    try testing.expect(has(s, "get_name: *const fn (*anyopaque) []const u8,"));
+    // Vtable slot: [*:0]const u8 (C-ABI)
+    try testing.expect(has(s, "get_name: *const fn (*anyopaque) [*:0]const u8,"));
     try testing.expect(!has(s, "set_name"));
-    // Forwarding getter
+    // Forwarding getter: idiomatic []const u8 via std.mem.span
     try testing.expect(has(s, "pub fn get_name(self: @This()) []const u8 {"));
-    try testing.expect(has(s, "return self.vtable.get_name(self.ptr);"));
+    try testing.expect(has(s, "return std.mem.span(self.vtable.get_name(self.ptr));"));
 }
 
 test "zig_backend: interface read-write attribute" {
@@ -4024,8 +4942,164 @@ test "zig_backend: interface in module" {
     const s = out.items;
     // Struct inside DDS namespace struct
     try testing.expect(has(s, "pub const DDS = struct {"));
-    try testing.expect(has(s, "pub const Entity = struct {"));
+    try testing.expect(has(s, "pub const Entity = extern struct {"));
     try testing.expect(has(s, "get_id: *const fn (*anyopaque) i32,"));
+}
+
+test "zig_backend: --generate-c-api emits callconv(.c) wrappers for entity interfaces" {
+    var out = try testGenOpts(
+        \\interface Writer { long write_val(in long x, in string label); void reset(); };
+    , "w", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Trivial forwarder: string param is [*:0]const u8, passed directly to vtable
+    try testing.expect(has(s, "pub export fn Writer_write_val(self: Writer, x: i32, label: [*:0]const u8) callconv(.c) i32"));
+    try testing.expect(has(s, "return self.vtable.write_val(self.ptr, x, label);"));
+    // No span conversion — vtable already uses C types
+    try testing.expect(!has(s, "std.mem.span(label)"));
+    // Void op
+    try testing.expect(has(s, "pub export fn Writer_reset(self: Writer) callconv(.c) void"));
+}
+
+test "zig_backend: --generate-c-api emits C_XxxListener and adapter for listener interfaces" {
+    var out = try testGenOpts(
+        \\struct Status { long count; };
+        \\interface Source { long enable(); };
+        \\interface SourceListener { void on_change(in Source src, in Status st); };
+    , "sl", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // @callback interfaces now produce C callback struct (no C_ prefix, no fat-pointer, no adapter)
+    try testing.expect(has(s, "pub const SourceListener = extern struct {"));
+    try testing.expect(has(s, "on_change: ?*const fn (Source, *const Status, ?*anyopaque) callconv(.c) void"));
+    try testing.expect(has(s, "pub const noop_SourceListener: SourceListener = .{};"));
+    // No fat-pointer SourceListener, no adapter
+    try testing.expect(!has(s, "pub const CSourceListenerAdapter"));
+    try testing.expect(!has(s, "pub fn asZigListener"));
+}
+
+test "zig_backend: @callback interface emits Zig listener helpers" {
+    var out = try testGenOpts(
+        \\struct OfferedStatus { long count; };
+        \\interface DataWriter { long write(); };
+        \\interface WriterListener {
+        \\    void on_offered(in DataWriter dw, in OfferedStatus status);
+        \\    void on_alive(in DataWriter dw);
+        \\};
+    , "wl", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // C callback struct emitted as before
+    try testing.expect(has(s, "pub const WriterListener = extern struct {"));
+    try testing.expect(has(s, "pub const noop_WriterListener: WriterListener = .{};"));
+    // Handlers type: plain Zig signatures, no callconv(.c), status by value
+    try testing.expect(has(s, "pub fn WriterListenerHandlers(comptime Ctx: type) type {"));
+    try testing.expect(has(s, "on_offered: ?*const fn (*Ctx, DataWriter, OfferedStatus) void = null,"));
+    try testing.expect(has(s, "on_alive: ?*const fn (*Ctx, DataWriter) void = null,"));
+    // Builder function: lowercase-first name
+    try testing.expect(has(s, "pub fn writerListener(ctx: anytype, comptime cbs: WriterListenerHandlers(@TypeOf(ctx.*))) WriterListener {"));
+    // Thunks: callconv(.c) wrappers inside anonymous structs
+    try testing.expect(has(s, "fn _w(_dw: DataWriter, _status: *const OfferedStatus, _ld: ?*anyopaque) callconv(.c) void {"));
+    try testing.expect(has(s, "_h(@ptrCast(@alignCast(_ld)), _dw, _status.*);"));
+    // on_alive has no status — no dereference
+    try testing.expect(has(s, "fn _w(_dw: DataWriter, _ld: ?*anyopaque) callconv(.c) void {"));
+    try testing.expect(has(s, "_h(@ptrCast(@alignCast(_ld)), _dw);"));
+}
+
+test "zig_backend: --generate-c-api entity wrappers use C_XxxListener and adapter" {
+    var out = try testGenOpts(
+        \\interface WriterListener { void on_miss(); };
+        \\interface Pub {
+        \\    long create_writer(in long qos, in WriterListener a_listener);
+        \\    long set_listener(in WriterListener a_listener, in long mask);
+        \\};
+    , "pw", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Vtable and export both use ?*const WriterListener (the callback struct)
+    try testing.expect(has(s, "a_listener: ?*const WriterListener"));
+    // Trivial forwarder — no adapter allocation
+    try testing.expect(has(s, "return self.vtable.create_writer(self.ptr, qos, a_listener);"));
+    try testing.expect(!has(s, "std.heap.c_allocator.create(C"));
+}
+
+test "zig_backend: --generate-c-api emits C_XxxSeq and out-seq write-back" {
+    var out = try testGenOpts(
+        \\typedef long long Handle;
+        \\typedef sequence<Handle> HandleSeq;
+        \\interface Obj { long get_handles(out HandleSeq handles); };
+    , "sq", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Sequence typedef is now the extern struct itself (no C_ prefix companion)
+    try testing.expect(has(s, "pub const HandleSeq = extern struct {"));
+    try testing.expect(has(s, "_buffer: ?[*]Handle = null,"));
+    // out param is ?*HandleSeq (no C_ prefix)
+    try testing.expect(has(s, "handles: ?*HandleSeq"));
+    // Trivial forwarder — no write-back logic
+    try testing.expect(has(s, "return self.vtable.get_handles(self.ptr, handles);"));
+    try testing.expect(!has(s, "pub const C_HandleSeq"));
+}
+
+test "zig_backend: --generate-c-api in-StringSeq allocates span conversion" {
+    var out = try testGenOpts(
+        \\typedef sequence<string> StringSeq;
+        \\interface F { long filter(in StringSeq params); };
+    , "sf", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // StringSeq typedef is the extern struct; [*:0]const u8 buffer (C strings)
+    try testing.expect(has(s, "pub const StringSeq = extern struct {"));
+    try testing.expect(has(s, "_buffer: ?[*][*:0]const u8 = null,"));
+    // param type is nullable pointer to StringSeq (no C_ prefix)
+    try testing.expect(has(s, "params: ?*const StringSeq"));
+    // Trivial forwarder — no span conversion inside the export fn body.
+    // (std.mem.span is legitimately used in StringSeq.deinit, but not in the forwarder.)
+    try testing.expect(has(s, "return self.vtable.filter(self.ptr, params);"));
+    try testing.expect(!has(s, "fn DDS_F_filter") or !has(s, "std.mem.span(params)"));
+}
+
+test "zig_backend: --generate-c-api emits noop vtable for listener interfaces" {
+    var out = try testGenOpts(
+        \\interface Writer { long write_val(in long x); };
+        \\interface WriterListener { void on_change(in Writer w); };
+    , "wl", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Listener gets a noop constant, not a free function
+    try testing.expect(has(s, "pub const noop_WriterListener"));
+    try testing.expect(!has(s, "pub export fn WriterListener_on_change"));
+    // Entity still gets free functions
+    try testing.expect(has(s, "pub export fn Writer_write_val"));
+}
+
+test "zig_backend: --generate-c-api string return uses ptrCast" {
+    var out = try testGenOpts(
+        \\interface Named { string get_name(); };
+    , "n", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Vtable returns [*:0]const u8; trivial forwarder passes it through
+    try testing.expect(has(s, "get_name: *const fn (*anyopaque) [*:0]const u8,"));
+    try testing.expect(has(s, "callconv(.c) [*:0]const u8"));
+    try testing.expect(has(s, "return self.vtable.get_name(self.ptr);"));
+    // No ptrCast needed — vtable already returns the right type
+    try testing.expect(!has(s, "@ptrCast(_r.ptr)"));
+}
+
+test "zig_backend: --generate-c-api struct in-param passed by pointer" {
+    var out = try testGenOpts(
+        \\struct Qos { long depth; };
+        \\interface Writer { long set_qos(in Qos qos); };
+    , "sq", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Struct in-param → *const T in both vtable slot and C-ABI export signature
+    try testing.expect(has(s, "set_qos: *const fn (*anyopaque, qos: *const Qos) i32,"));
+    try testing.expect(has(s, "qos: *const Qos"));
+    // Trivial forwarder — passes qos directly (pointer, no deref)
+    try testing.expect(has(s, "return self.vtable.set_qos(self.ptr, qos);"));
+    try testing.expect(!has(s, "qos.*"));
 }
 
 test "zig_backend: cdr @optional scalar serialize writes bool then value" {
@@ -4094,7 +5168,7 @@ test "zig_backend split: module gets own file and root re-exports" {
     defer alloc.free(m_path);
     const m_content = try std.Io.Dir.cwd().readFileAlloc(io, m_path, alloc, std.Io.Limit.limited(64 * 1024));
     defer alloc.free(m_content);
-    try testing.expect(has(m_content, "pub const S = struct {"));
+    try testing.expect(has(m_content, "pub const S = extern struct {"));
 
     // mymod.zig re-exports M.
     const root_path = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}/mymod.zig", .{tmp.sub_path});
@@ -4140,7 +5214,7 @@ test "zig_backend split: non-module items go in root file" {
     defer alloc.free(root_path);
     const root_content = try std.Io.Dir.cwd().readFileAlloc(io, root_path, alloc, std.Io.Limit.limited(64 * 1024));
     defer alloc.free(root_content);
-    try testing.expect(has(root_content, "pub const Point = struct {"));
+    try testing.expect(has(root_content, "pub const Point = extern struct {"));
     // No module re-export lines (those look like: pub const M = @import("M.zig")).
     try testing.expect(!has(root_content, ".zig\");"));
 }
@@ -4152,8 +5226,8 @@ test "zig_backend type_prefix: struct declaration prefixed" {
         .type_prefix = "DDS_",
     });
     defer out.deinit(testing.allocator);
-    try testing.expect(has(out.items, "pub const DDS_Foo = struct {"));
-    try testing.expect(!has(out.items, "pub const Foo = struct {"));
+    try testing.expect(has(out.items, "pub const DDS_Foo = extern struct {"));
+    try testing.expect(!has(out.items, "pub const Foo = extern struct {"));
 }
 
 test "zig_backend type_prefix: enum declaration prefixed" {
@@ -4176,7 +5250,7 @@ test "zig_backend type_prefix: field type reference prefixed" {
         .type_prefix = "DDS_",
     });
     defer out.deinit(testing.allocator);
-    try testing.expect(has(out.items, "pub const DDS_Line = struct {"));
+    try testing.expect(has(out.items, "pub const DDS_Line = extern struct {"));
     try testing.expect(has(out.items, "start: DDS_Point"));
 }
 
@@ -4190,7 +5264,7 @@ test "zig_backend type_prefix: module name not prefixed" {
     // Module M should NOT be prefixed.
     try testing.expect(has(out.items, "pub const M = struct {"));
     // But type S inside it should be.
-    try testing.expect(has(out.items, "pub const DDS_S = struct {"));
+    try testing.expect(has(out.items, "pub const DDS_S = extern struct {"));
 }
 
 // ── PL_CDR generation ─────────────────────────────────────────────────────────
@@ -4277,14 +5351,12 @@ test "zig_backend pl_cdr: @pl_repeated serialize: per-element loop" {
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // Per-element loop: field `items` (ArrayListUnmanaged) accessed via `.items`.
-    // The PL_CDR path uses `_elem`; regular serialize uses `_se`.
-    try testing.expect(has(s, "for (value.items.items) |_elem|"));
-    // One reservePlParam per element (no index suffix — not a fixed _ph0 / _ph1).
+    // Per-element loop: field `items` now uses extern struct _buffer/_length.
+    try testing.expect(has(s, "if (value.items._buffer) |_sb|"));
+    try testing.expect(has(s, "for (_sb[0..value.items._length]) |_elem|"));
+    // One reservePlParam per element (no index suffix).
     try testing.expect(has(s, "const _ph = try writer.reservePlParam(10)"));
     try testing.expect(has(s, "try writer.patchPlParam(_ph)"));
-    // The per-element _ph handle must not use the indexed naming _ph0 that the
-    // non-repeated path would use for member index 0.
     try testing.expect(!has(s, "const _ph0 = try writer.reservePlParam(10)"));
 }
 
@@ -4298,8 +5370,10 @@ test "zig_backend pl_cdr: @pl_repeated deserialize: append per PID occurrence" {
     const s = out.items;
     // Switch on PID 10.
     try testing.expect(has(s, "10 => {"));
-    // Should append one element per PID occurrence using the allocator.
-    try testing.expect(has(s, "try out.items.append(allocator, try reader.readI32())"));
+    // Grow-by-one: alloc new buffer, memcpy, write element.
+    try testing.expect(has(s, "const _plen = out.items._length;"));
+    try testing.expect(has(s, "const _pbuf = try allocator.alloc(i32, _plen + 1);"));
+    try testing.expect(has(s, "_pbuf[_plen] = try reader.readI32();"));
 }
 
 test "zig_backend pl_cdr: @pl_repeated + @optional serialize" {
@@ -4312,7 +5386,7 @@ test "zig_backend pl_cdr: @pl_repeated + @optional serialize" {
     const s = out.items;
     // @optional wrapper uses the captured sequence.
     try testing.expect(has(s, "if (value.vals) |_seq_0|"));
-    try testing.expect(has(s, "for (_seq_0.items) |_elem|"));
+    try testing.expect(has(s, "if (_seq_0._buffer) |_sb|"));
     try testing.expect(has(s, "const _ph = try writer.reservePlParam(5)"));
 }
 
@@ -4326,8 +5400,8 @@ test "zig_backend pl_cdr: @pl_repeated + @optional deserialize" {
     const s = out.items;
     // Must initialise the optional on first occurrence.
     try testing.expect(has(s, "if (out.vals == null) out.vals = .{}"));
-    // Must append via the optional pointer.
-    try testing.expect(has(s, "try out.vals.?.append(allocator, try reader.readI32())"));
+    // Must grow by one using alloc+memcpy pattern.
+    try testing.expect(has(s, "const _plen = out.vals.?._length;"));
 }
 
 test "zig_backend pl_cdr: @pl_repeated with struct element type" {
@@ -4337,13 +5411,13 @@ test "zig_backend pl_cdr: @pl_repeated with struct element type" {
     , "t", .{ .no_typeobject_support = true, .pl_cdr = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // Serialize: iterate and write each struct element.
-    try testing.expect(has(s, "for (value.pts.items) |_elem|"));
+    // Serialize: iterate via _buffer/_length.
+    try testing.expect(has(s, "if (value.pts._buffer) |_sb|"));
+    try testing.expect(has(s, "for (_sb[0..value.pts._length]) |_elem|"));
     try testing.expect(has(s, "try Point.serialize(writer, _elem)"));
-    // Deserialize: read into a temp var and append.
-    try testing.expect(has(s, "var _elem: Point = .{}"));
-    try testing.expect(has(s, "try Point.deserializeInto(&_elem, reader, allocator)"));
-    try testing.expect(has(s, "try out.pts.append(allocator, _elem)"));
+    // Deserialize: alloc + deserializeInto.
+    try testing.expect(has(s, "const _pbuf = try allocator.alloc(Point, _plen + 1);"));
+    try testing.expect(has(s, "try Point.deserializeInto(&_pbuf[_plen], reader, allocator);"));
 }
 
 test "zig_backend pl_cdr: @pl_repeated with string element type" {
@@ -4354,11 +5428,12 @@ test "zig_backend pl_cdr: @pl_repeated with string element type" {
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // Serialize: write each string.
-    try testing.expect(has(s, "for (value.strs.items) |_elem|"));
+    // Serialize: iterate via _buffer/_length.
+    try testing.expect(has(s, "if (value.strs._buffer) |_sb|"));
+    try testing.expect(has(s, "for (_sb[0..value.strs._length]) |_elem|"));
     try testing.expect(has(s, "try writer.writeString(_elem)"));
-    // Deserialize: append each string.
-    try testing.expect(has(s, "try out.strs.append(allocator, try reader.readString(allocator))"));
+    // Deserialize: alloc + readString.
+    try testing.expect(has(s, "const _pbuf = try allocator.alloc([*:0]const u8, _plen + 1);"));
 }
 
 test "zig_backend: fixed<5,2> field type is f64 with zero default" {

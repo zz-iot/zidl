@@ -7,18 +7,23 @@
 #include <stdbool.h>
 #include "zidl_cdr.h"
 
+typedef enum {
+    Color_RED = 0,
+    Color_GREEN = 1,
+    Color_BLUE = 2
+} Color;
+
+typedef struct { void *ptr; const void *vtable; } Greeter;
+
+#ifndef INT32_T_SEQ_DEFINED
+#define INT32_T_SEQ_DEFINED
 typedef struct {
     uint32_t _maximum;
     uint32_t _length;
     int32_t *_buffer;
     bool _release;
 } int32_t_seq;
-
-typedef enum {
-    Color_RED = 0,
-    Color_GREEN = 1,
-    Color_BLUE = 2
-} Color;
+#endif
 
 typedef struct Point_s {
     int32_t x;
@@ -84,34 +89,8 @@ int Beacon_compute_key_hash(const Beacon *_v, uint8_t _hash[16]);
 int Beacon_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);
 
 /* IDL interface: Greeter */
-typedef struct Greeter_Vtable {
-    char *(*greet)(void *ptr, char *name);
-    void (*reset)(void *ptr);
-    int32_t (*get_count)(void *ptr);
-    void (*deinit)(void *ptr);
-} Greeter_Vtable;
-
-typedef struct Greeter {
-    void                *ptr;
-    const Greeter_Vtable *vtable;
-} Greeter;
-
-static inline char *Greeter_greet(Greeter _self, char *name) {
-    return _self.vtable->greet(_self.ptr, name);
-}
-
-static inline void Greeter_reset(Greeter _self) {
-    _self.vtable->reset(_self.ptr);
-}
-
-static inline int32_t Greeter_get_count(Greeter _self) {
-    return _self.vtable->get_count(_self.ptr);
-}
-
-static inline void Greeter_deinit(Greeter _self) {
-    _self.vtable->deinit(_self.ptr);
-}
-
-Greeter Greeter_zig_new(void *ptr);
+char *Greeter_greet(Greeter self, char *name);
+void Greeter_reset(Greeter self);
+int32_t Greeter_get_count(Greeter self);
 
 #endif /* TYPES_H */
