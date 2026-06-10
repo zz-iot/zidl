@@ -335,8 +335,8 @@ pub const Greeter = extern struct {
         deinit: *const fn (*anyopaque) void,
     };
 
-    pub fn greet(self: @This(), name: []const u8) []const u8 {
-        return std.mem.span(self.vtable.greet(self.ptr, @as([*:0]const u8, @ptrCast(name.ptr))));
+    pub fn greet(self: @This(), name: [:0]const u8) []const u8 {
+        return std.mem.span(self.vtable.greet(self.ptr, name.ptr));
     }
 
     pub fn reset(self: @This()) void {

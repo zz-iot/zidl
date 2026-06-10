@@ -1612,11 +1612,11 @@ const Generator = struct {
         }
         return switch (p.type_ref) {
             .string => |b| if (b == null)
-                self.alloc.dupe(u8, "[]const u8")
+                self.alloc.dupe(u8, "[:0]const u8")
             else
                 self.cApiTypeRef(p.type_ref, p.mode),
             .wstring => |b| if (b == null)
-                self.alloc.dupe(u8, "[]const u16")
+                self.alloc.dupe(u8, "[:0]const u16")
             else
                 self.cApiTypeRef(p.type_ref, p.mode),
             .named => |td| switch (td) {
@@ -1655,11 +1655,11 @@ const Generator = struct {
         }
         return switch (p.type_ref) {
             .string => |b| if (b == null)
-                std.fmt.allocPrint(self.alloc, "@as([*:0]const u8, @ptrCast({s}.ptr))", .{p.name})
+                std.fmt.allocPrint(self.alloc, "{s}.ptr", .{p.name})
             else
                 self.alloc.dupe(u8, p.name),
             .wstring => |b| if (b == null)
-                std.fmt.allocPrint(self.alloc, "@as([*:0]const u16, @ptrCast({s}.ptr))", .{p.name})
+                std.fmt.allocPrint(self.alloc, "{s}.ptr", .{p.name})
             else
                 self.alloc.dupe(u8, p.name),
             .named => |td| switch (td) {

@@ -2940,6 +2940,20 @@ fn generateTypeHeader(
     // Sequence typedefs for this type.
     try gen.scanTypeDeclForSeqs(td);
 
+    // For non-listener entity interfaces: emit the fat-pointer typedef here so that
+    // the free function declarations below compile when this header is included standalone.
+    // (In the single-file path this typedef is emitted by scanItemsForEntityTypedefs.)
+    if (opts.generate_interfaces) {
+        switch (td) {
+            .interface => |iface| if (!isListenerInterface(iface)) {
+                const c_name = try gen.prefixedCName(iface.qualified_name);
+                defer alloc.free(c_name);
+                try gen.print("typedef struct {{ void *ptr; const void *vtable; }} {s};\n\n", .{c_name});
+            },
+            else => {},
+        }
+    }
+
     // Type definition (emitStruct already emits CDR prototypes when typesupport is on).
     try gen.emitTypeDecl(td);
 
