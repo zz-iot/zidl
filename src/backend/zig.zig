@@ -983,7 +983,7 @@ const Generator = struct {
                 try self.write("            }\n");
             }
             try self.ind();
-            try self.write("            alloc.free(_buf[0..self._length]);\n");
+            try self.write("            alloc.free(_buf[0..self._maximum]);\n");
             try self.ind();
             try self.write("        }\n");
             try self.ind();
@@ -1399,14 +1399,22 @@ const Generator = struct {
             }
             if (op.params.len > 0) try self.write(", ");
             try self.write("_ld: ?*anyopaque) callconv(.c) void {\n");
-            // Body: call _h with context + params, dereferencing status pointers.
+            // Body: call _h with context + params, converting C-ABI types to Zig types.
             try self.ind();
             try self.write("                _h(@ptrCast(@alignCast(_ld))");
             for (op.params) |p| {
                 const ct = try self.cApiTypeRef(p.type_ref, p.mode);
                 defer self.alloc.free(ct);
-                // Named struct params arrive as *const T; dereference for Zig caller.
-                if (std.mem.startsWith(u8, ct, "*const ")) {
+                const is_unbounded_str = switch (p.type_ref) {
+                    .string => |b| b == null,
+                    .wstring => |b| b == null,
+                    else => false,
+                };
+                // Unbounded strings arrive as [*:0]const u8; Handlers expects []const u8.
+                if (is_unbounded_str) {
+                    try self.print(", std.mem.span(_{s})", .{p.name});
+                    // Named struct params arrive as *const T; dereference for Zig caller.
+                } else if (std.mem.startsWith(u8, ct, "*const ")) {
                     try self.print(", _{s}.*", .{p.name});
                 } else {
                     try self.print(", _{s}", .{p.name});
@@ -2560,7 +2568,7 @@ const Generator = struct {
                     try self.print("{s}        }}\n", .{indent});
                 }
                 try self.ind();
-                try self.print("{s}        alloc.free(_buf[0..self.{s}._length]);\n", .{ indent, field_name });
+                try self.print("{s}        alloc.free(_buf[0..self.{s}._maximum]);\n", .{ indent, field_name });
                 try self.ind();
                 try self.print("{s}    }}\n", .{indent});
                 try self.ind();
@@ -5004,6 +5012,22 @@ test "zig_backend: @callback interface emits Zig listener helpers" {
     // on_alive has no status — no dereference
     try testing.expect(has(s, "fn _w(_dw: DataWriter, _ld: ?*anyopaque) callconv(.c) void {"));
     try testing.expect(has(s, "_h(@ptrCast(@alignCast(_ld)), _dw);"));
+}
+
+test "zig_backend: @callback thunk wraps string params with std.mem.span" {
+    var out = try testGenOpts(
+        \\interface LogListener {
+        \\    void on_message(in string msg, in long level);
+        \\};
+    , "ll", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Handlers type uses idiomatic []const u8, not the C-ABI [*:0]const u8
+    try testing.expect(has(s, "on_message: ?*const fn (*Ctx, []const u8, i32) void = null,"));
+    // Thunk receives the C-ABI sentinel pointer
+    try testing.expect(has(s, "fn _w(_msg: [*:0]const u8, _level: i32, _ld: ?*anyopaque) callconv(.c) void {"));
+    // Thunk converts [*:0]const u8 → []const u8 via std.mem.span before calling _h
+    try testing.expect(has(s, "_h(@ptrCast(@alignCast(_ld)), std.mem.span(_msg), _level);"));
 }
 
 test "zig_backend: --generate-c-api entity wrappers use C_XxxListener and adapter" {

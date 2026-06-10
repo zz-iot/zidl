@@ -186,7 +186,7 @@ pub const Sample = struct {
     pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
         if (self.nums._release) {
             if (self.nums._buffer) |_buf| {
-                alloc.free(_buf[0..self.nums._length]);
+                alloc.free(_buf[0..self.nums._maximum]);
             }
             self.nums = .{};
         }
