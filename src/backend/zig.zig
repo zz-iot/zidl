@@ -3209,15 +3209,18 @@ const Generator = struct {
         try self.print("{s}const _plen = {s}._length;\n", .{ ii, seq_expr });
         try self.ind();
         try self.print("{s}const _pbuf = try allocator.alloc({s}, _plen + 1);\n", .{ ii, buf_elem });
+        // errdefer frees _pbuf if the element read below fails, preventing a leak.
+        try self.ind();
+        try self.print("{s}errdefer allocator.free(_pbuf);\n", .{ii});
         try self.ind();
         try self.print("{s}if ({s}._buffer) |_ob| @memcpy(_pbuf[0.._plen], _ob[0.._plen]);\n", .{ ii, seq_expr });
-        try self.ind();
-        try self.print("{s}if ({s}._release) {{ if ({s}._buffer) |_ob| allocator.free(_ob[0..{s}._maximum]); }}\n", .{ ii, seq_expr, seq_expr, seq_expr });
 
-        // Emit the element read into _pbuf[_plen]
+        // Emit the element read into _pbuf[_plen] — must succeed before we touch seq_expr.
         try self.emitReadForTypeRef(elem_tr, "_pbuf[_plen]", ii);
 
-        // Emit the sequence update
+        // Read succeeded: now safe to release the old buffer and update the sequence.
+        try self.ind();
+        try self.print("{s}if ({s}._release) {{ if ({s}._buffer) |_ob| allocator.free(_ob[0..{s}._maximum]); }}\n", .{ ii, seq_expr, seq_expr, seq_expr });
         try self.ind();
         try self.print("{s}{s}._buffer = _pbuf.ptr;\n", .{ ii, seq_expr });
         try self.ind();
