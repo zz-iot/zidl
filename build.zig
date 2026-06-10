@@ -51,10 +51,10 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_cmd.addArgs(args);
 
     // ── unit tests ────────────────────────────────────────────────────────────
-    const mod_tests = b.addTest(.{ .root_module = mod });
+    const mod_tests = b.addTest(.{ .name = "zidl-mod", .root_module = mod });
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
-    const exe_tests = b.addTest(.{ .root_module = exe.root_module });
+    const exe_tests = b.addTest(.{ .name = "zidl-exe", .root_module = exe.root_module });
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     const test_step = b.step("test", "Run unit tests + Zig integration tests");
@@ -85,6 +85,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const zig_integration_tests = b.addTest(.{
+        .name = "zidl-integ",
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/integration/zig/test.zig"),
             .target = target,
@@ -241,6 +242,7 @@ pub fn build(b: *std.Build) void {
     // run: make -C interop regen CYCLONE=/path/to/cyclonedds
     const interop_step = b.step("interop-test", "Run Zig CDR interop tests (no Cyclone required)");
     const interop_tests = b.addTest(.{
+        .name = "zidl-interop",
         .root_module = b.createModule(.{
             .root_source_file = b.path("interop/zig_interop_test.zig"),
             .target = target,
@@ -250,4 +252,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
     interop_step.dependOn(&b.addRunArtifact(interop_tests).step);
+
+    // ── emit-tests: build all test binaries to zig-out/tests/ for kcov ───────
+    const emit_tests_step = b.step("emit-tests", "Build test binaries for kcov coverage analysis");
+    emit_tests_step.dependOn(&b.addInstallArtifact(mod_tests, .{ .dest_dir = .{ .override = .{ .custom = "tests" } } }).step);
+    emit_tests_step.dependOn(&b.addInstallArtifact(exe_tests, .{ .dest_dir = .{ .override = .{ .custom = "tests" } } }).step);
+    emit_tests_step.dependOn(&b.addInstallArtifact(zig_integration_tests, .{ .dest_dir = .{ .override = .{ .custom = "tests" } } }).step);
+    emit_tests_step.dependOn(&b.addInstallArtifact(interop_tests, .{ .dest_dir = .{ .override = .{ .custom = "tests" } } }).step);
 }

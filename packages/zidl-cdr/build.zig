@@ -57,4 +57,9 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(test_exe);
     const test_step = b.step("test", "Run zidl-cdr tests");
     test_step.dependOn(&run_tests.step);
+
+    const emit_tests_step = b.step("emit-tests", "Build test binaries for kcov coverage analysis");
+    emit_tests_step.dependOn(&b.addInstallArtifact(test_exe, .{
+        .dest_dir = .{ .override = .{ .custom = "tests" } },
+    }).step);
 }
