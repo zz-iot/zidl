@@ -2684,7 +2684,7 @@ const Generator = struct {
                     try self.print("{s}            }}\n", .{indent});
                 }
                 try self.ind();
-                try self.print("{s}            alloc.free(_b[0..result.{s}._length]);\n", .{ indent, field_name });
+                try self.print("{s}            alloc.free(_b[0..result.{s}._maximum]);\n", .{ indent, field_name });
                 try self.ind();
                 try self.print("{s}        }}\n", .{indent});
                 try self.ind();
@@ -3209,7 +3209,7 @@ const Generator = struct {
         try self.ind();
         try self.print("{s}if ({s}._buffer) |_ob| @memcpy(_pbuf[0.._plen], _ob[0.._plen]);\n", .{ ii, seq_expr });
         try self.ind();
-        try self.print("{s}if ({s}._release) {{ if ({s}._buffer) |_ob| allocator.free(_ob[0.._plen]); }}\n", .{ ii, seq_expr, seq_expr });
+        try self.print("{s}if ({s}._release) {{ if ({s}._buffer) |_ob| allocator.free(_ob[0..{s}._maximum]); }}\n", .{ ii, seq_expr, seq_expr, seq_expr });
 
         // Emit the element read into _pbuf[_plen]
         try self.emitReadForTypeRef(elem_tr, "_pbuf[_plen]", ii);

@@ -203,7 +203,7 @@ pub const Sample = struct {
         errdefer {
             if (result.nums._release) {
                 if (result.nums._buffer) |_b| {
-                    alloc.free(_b[0..result.nums._length]);
+                    alloc.free(_b[0..result.nums._maximum]);
                 }
                 result.nums = .{};
             }
