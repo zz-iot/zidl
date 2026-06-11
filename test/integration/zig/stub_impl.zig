@@ -19,9 +19,10 @@ pub const GreeterStub = struct {
         .deinit = deinit,
     };
 
-    fn greet(ptr: *anyopaque, name: []const u8) []const u8 {
+    // Vtable slots now use [*:0]const u8 (C-ABI) for strings.
+    fn greet(ptr: *anyopaque, name: [*:0]const u8) [*:0]const u8 {
         const self: *GreeterStub = @ptrCast(@alignCast(ptr));
-        self.last_name = name;
+        self.last_name = std.mem.span(name);
         self.count += 1;
         return "hello";
     }

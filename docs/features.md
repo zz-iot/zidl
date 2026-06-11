@@ -33,7 +33,10 @@ All four backends generate the same core set of outputs for every IDL input:
 | CDR `@mutable` (XCDR2 EMHEADER) | Implemented in all backends |
 | CDR `@mutable` (PL_CDR / RTPS ParameterList) | Zig only, via `--zig-pl-cdr` flag |
 | `--generate-interfaces` DCPS binding layer | Zig/C/Java: implemented; C++: TODO stubs |
+| `--generate-c-api` C-ABI export functions (Zig backend) | Implemented — trivial forwarders from `DDS_*` C symbols to vtable |
 | `--split-files` (one file per type) | Implemented |
+| `deinit(alloc)` on types with sequence fields (Zig) | Implemented |
+| `clone(alloc)` deep copy on types with sequence fields (Zig) | Implemented |
 
 **TypeObject/TypeIdentifier** (Zig only): the encoder supports `struct`, `enum`,
 `union`, `bitmask`, and `bitset`. A generated `pub const type_object` constant is
@@ -71,7 +74,7 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 | `string<N>` (bounded) | `zidl_rt.BoundedArray(u8, N)` |
 | `wstring` (unbounded) | `[]const u16` (`u16` literals unsupported — emits comment) |
 | `wstring<N>` (bounded) | `zidl_rt.BoundedArray(u16, N)` |
-| `sequence<T>` | `std.ArrayListUnmanaged(T)` |
+| `sequence<T>` | `extern struct { _maximum: u32, _length: u32, _buffer: ?[*]T, _release: bool }` (C PSM layout; named typedef if via `typedef sequence<T>`) |
 | `sequence<T, N>` | `zidl_rt.BoundedArray(T, N)` |
 | `T[N]` | `[N]T` |
 | `map<K,V>` (non-string key) | `std.AutoArrayHashMapUnmanaged(K, V)` |
@@ -80,7 +83,7 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 | `enum` | `enum(u32) { ... }` |
 | `bitmask` | `packed struct(UNN) { ... }` |
 | `bitset` | `packed struct(UNN) { ... }` |
-| `struct` | `pub const Foo = struct { ... }` |
+| `struct` | `pub const Foo = extern struct { ... }` when all fields are C-compatible; `struct` otherwise |
 | `union` | `pub const Foo = union(enum) { ... }` |
 | IDL module | Zig namespace (`pub const Foo = struct { ... }`) |
 

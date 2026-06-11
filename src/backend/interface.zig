@@ -110,6 +110,17 @@ pub const Options = struct {
     /// Zig backend only: generated source compatibility target. zidl itself may
     /// run on a newer Zig toolchain while emitting code for MicroZig-era Zig.
     zig_version: ZigVersion = .@"0.16.0",
+    /// Zig backend only: alongside the vtable struct output, emit
+    /// `pub export fn callconv(.c)` wrappers implementing the free C functions
+    /// declared by the C backend's `--generate-interfaces` output.
+    ///
+    /// DDS object interfaces → one wrapper per operation/attribute.
+    /// Listener interfaces → noop vtable constants usable as a null listener.
+    ///
+    /// String parameters use `[*:0]const u8` / `std.mem.span()` conversion.
+    /// Named struct `in` parameters are accepted as `*const T` (pointer hides
+    /// potential non-extern struct internals) and dereferenced for the vtable call.
+    generate_c_api: bool = false,
 };
 
 // ── XRCE profile validation ───────────────────────────────────────────────────

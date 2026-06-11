@@ -58,6 +58,7 @@ const Opts = struct {
     extern_c: bool = false,
     cpp_namespace: []const u8 = "",
     pl_cdr: bool = false,
+    generate_c_api: bool = false,
     preprocess_timestamp_seconds: ?u64 = null,
     inputs: std.ArrayListUnmanaged([]const u8) = .empty,
 };
@@ -212,6 +213,8 @@ pub fn main(init: std.process.Init) !void {
             opts.split_files = false;
         } else if (std.mem.eql(u8, arg, "--zig-pl-cdr")) {
             opts.pl_cdr = true;
+        } else if (std.mem.eql(u8, arg, "--generate-c-api")) {
+            opts.generate_c_api = true;
         } else if (std.mem.eql(u8, arg, "--c-pragma-once")) {
             opts.pragma_once = true;
         } else if (std.mem.eql(u8, arg, "--c-extern-c")) {
@@ -427,6 +430,7 @@ fn processFile(
         .extern_c = opts.extern_c,
         .cpp_namespace = opts.cpp_namespace,
         .pl_cdr = opts.pl_cdr,
+        .generate_c_api = opts.generate_c_api,
         .zig_version = opts.zig_version,
     };
     try be.generate(&ir_spec, gen_opts);
@@ -511,6 +515,7 @@ fn printUsage(w: *Io.Writer) !void {
         \\  --java-package <pkg>           Package prefix, e.g. com.example (Java backend)
         \\  --java-jni-library <name>      System.loadLibrary() name for JNI impls (Java backend)
         \\  --zig-pl-cdr                   Generate PL_CDR functions for @mutable types (Zig backend)
+        \\  --generate-c-api               Emit pub export fn callconv(.c) wrappers for C free-function API (Zig backend)
         \\  --zig-version <0.16.0|0.15.1>  Output compatibility target (Zig backend)
         \\  -h / --help   Show this help
         \\  -v / --version  Show version
