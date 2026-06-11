@@ -160,7 +160,7 @@ test "roundtrip: Sample with sequence" {
     defer {
         testing.allocator.free(dst.str);
         if (dst.nums._release) {
-            if (dst.nums._buffer) |b| testing.allocator.free(b[0..dst.nums._length]);
+            if (dst.nums._buffer) |b| testing.allocator.free(b[0..dst.nums._maximum]);
         }
     }
 
