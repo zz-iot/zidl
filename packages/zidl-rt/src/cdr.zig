@@ -1207,6 +1207,22 @@ test "encap header: xcdr1 le" {
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x01, 0x00, 0x00 }, buf.items);
 }
 
+test "encap header delimited: xcdr2 le emits 0x0009" {
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(testing.allocator);
+    var w = mkWriter(.xcdr2, &buf);
+    try w.writeEncapHeaderDelimited();
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x09, 0x00, 0x00 }, buf.items);
+}
+
+test "encap header delimited: xcdr1 le emits same as writeEncapHeader" {
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(testing.allocator);
+    var w = mkWriter(.xcdr1, &buf);
+    try w.writeEncapHeaderDelimited();
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x01, 0x00, 0x00 }, buf.items);
+}
+
 test "reader init: rejects unknown encap id" {
     const bad = [_]u8{ 0xFF, 0xFF, 0x00, 0x00 };
     try testing.expectError(error.InvalidEncapsulation, CdrReader.init(&bad));
