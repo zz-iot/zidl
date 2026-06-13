@@ -173,7 +173,8 @@ pub fn CdrWriter(comptime xcdr_version: XcdrVersion) type {
         // ── Encapsulation header ──────────────────────────────────────────
 
         /// Emit the 4-byte CDR encapsulation header for this writer's XCDR
-        /// version and little-endian byte order.
+        /// version and little-endian byte order.  Use for @final top-level types
+        /// (no DHEADER in XCDR2); use writeEncapHeaderDelimited for @appendable.
         ///
         /// The representation identifier is written big-endian (per RTPS spec),
         /// followed by two zero option bytes.
@@ -191,6 +192,23 @@ pub fn CdrWriter(comptime xcdr_version: XcdrVersion) type {
             // Reset pos to 0: CDR alignment is from the start of the CDR payload
             // (after the 4-byte encap header), not from the start of the buffer.
             // Without this, 8-byte XCDR1 alignment calculations would be off by 4.
+            self.pos = 0;
+        }
+
+        /// Like writeEncapHeader but uses ENCAP_DELIMITED_CDR2_LE (0x0009) for XCDR2.
+        /// Required for @appendable top-level types: signals that a DHEADER is present.
+        /// XCDR1 behaviour is identical to writeEncapHeader.
+        pub fn writeEncapHeaderDelimited(self: *Self) !void {
+            const id: u16 = switch (xcdr_version) {
+                .xcdr1 => ENCAP_CDR1_LE,
+                .xcdr2 => ENCAP_DELIMITED_CDR2_LE,
+            };
+            try self.writeBytes(&[_]u8{
+                @truncate(id >> 8),
+                @truncate(id),
+                0x00,
+                0x00,
+            });
             self.pos = 0;
         }
 
