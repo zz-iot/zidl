@@ -5722,8 +5722,6 @@ test "zig_backend: typed DataWriter/DataReader for keyed @appendable struct" {
     try testing.expect(has(s, "value: ShapeType,"));
     try testing.expect(has(s, "instance_state: _dds.InstanceStateKind,"));
     try testing.expect(has(s, "instance_handle: _dds.InstanceHandle_t,"));
-    try testing.expect(has(s, "pub const TakenSample = struct {"));
-    try testing.expect(has(s, "value: ShapeType,"));
     try testing.expect(has(s, "pub fn take(self: @This(), alloc: std.mem.Allocator) anyerror!?TakenSample {"));
     try testing.expect(has(s, "_dds.takeCdr(self._dr)"));
     try testing.expect(has(s, "ShapeType.deserialize(&_reader, alloc)"));
