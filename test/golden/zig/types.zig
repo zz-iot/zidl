@@ -292,11 +292,11 @@ pub const SampleDataReader = struct {
         }
     };
 
-    pub fn take(self: @This(), alloc: std.mem.Allocator) ?TakenSample {
+    pub fn take(self: @This(), alloc: std.mem.Allocator) anyerror!?TakenSample {
         const _raw = dds.takeCdr(self._dr) orelse return null;
         defer _raw.deinit();
-        var _reader = zidl_rt.CdrReader.init(_raw.data) catch return null;
-        const _value = Sample.deserialize(&_reader, alloc) catch return null;
+        var _reader = try zidl_rt.CdrReader.init(_raw.data);
+        const _value = try Sample.deserialize(&_reader, alloc);
         return .{ .value = _value, .instance_state = _raw.instance_state, .instance_handle = _raw.instance_handle };
     }
 }; // SampleDataReader
@@ -480,11 +480,11 @@ pub const BeaconDataReader = struct {
         instance_handle: dds.InstanceHandle_t,
     };
 
-    pub fn take(self: @This(), alloc: std.mem.Allocator) ?TakenSample {
+    pub fn take(self: @This(), alloc: std.mem.Allocator) anyerror!?TakenSample {
         const _raw = dds.takeCdr(self._dr) orelse return null;
         defer _raw.deinit();
-        var _reader = zidl_rt.CdrReader.init(_raw.data) catch return null;
-        const _value = Beacon.deserialize(&_reader, alloc) catch return null;
+        var _reader = try zidl_rt.CdrReader.init(_raw.data);
+        const _value = try Beacon.deserialize(&_reader, alloc);
         return .{ .value = _value, .instance_state = _raw.instance_state, .instance_handle = _raw.instance_handle };
     }
 }; // BeaconDataReader

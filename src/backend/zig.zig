@@ -2610,16 +2610,19 @@ const Generator = struct {
         try self.ind();
         try self.write("    };\n");
         try self.write("\n");
+        // Returns anyerror!?TakenSample so that callers can distinguish
+        // "no data available" (null) from "data consumed but unparseable" (error).
+        // Using catch-return-null would silently drop a consumed DDS sample.
         try self.ind();
-        try self.write("    pub fn take(self: @This(), alloc: std.mem.Allocator) ?TakenSample {\n");
+        try self.write("    pub fn take(self: @This(), alloc: std.mem.Allocator) anyerror!?TakenSample {\n");
         try self.ind();
         try self.write("        const _raw = dds.takeCdr(self._dr) orelse return null;\n");
         try self.ind();
         try self.write("        defer _raw.deinit();\n");
         try self.ind();
-        try self.write("        var _reader = zidl_rt.CdrReader.init(_raw.data) catch return null;\n");
+        try self.write("        var _reader = try zidl_rt.CdrReader.init(_raw.data);\n");
         try self.ind();
-        try self.print("        const _value = {s}.deserialize(&_reader, alloc) catch return null;\n", .{type_name});
+        try self.print("        const _value = try {s}.deserialize(&_reader, alloc);\n", .{type_name});
         try self.ind();
         try self.write("        return .{ .value = _value, .instance_state = _raw.instance_state, .instance_handle = _raw.instance_handle };\n");
         try self.ind();
@@ -5721,7 +5724,7 @@ test "zig_backend: typed DataWriter/DataReader for keyed @appendable struct" {
     try testing.expect(has(s, "instance_handle: dds.InstanceHandle_t,"));
     try testing.expect(has(s, "pub const TakenSample = struct {"));
     try testing.expect(has(s, "value: ShapeType,"));
-    try testing.expect(has(s, "pub fn take(self: @This(), alloc: std.mem.Allocator) ?TakenSample {"));
+    try testing.expect(has(s, "pub fn take(self: @This(), alloc: std.mem.Allocator) anyerror!?TakenSample {"));
     try testing.expect(has(s, "dds.takeCdr(self._dr)"));
     try testing.expect(has(s, "ShapeType.deserialize(&_reader, alloc)"));
     // no TakenSample.deinit — ShapeType has no unbounded sequences
