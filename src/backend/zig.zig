@@ -167,7 +167,7 @@ pub fn generateSplitFiles(
             try gen.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
         if (!opts.no_typesupport and itemsHaveTopicTypes(m.items)) {
-            try gen.write("const dds = @import(\"dds\");\n");
+            try gen.write("const _dds = @import(\"dds\");\n");
         }
         // Self-reference alias: allows Module.SomeType syntax within this file.
         try gen.print("// Self-reference alias: allows {s}.SomeType syntax within this file.\n", .{m.name});
@@ -212,7 +212,7 @@ pub fn generateSplitFiles(
             try gen.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
         if (!opts.no_typesupport and itemsHaveTopicTypes(non_module.items)) {
-            try gen.write("const dds = @import(\"dds\");\n");
+            try gen.write("const _dds = @import(\"dds\");\n");
         }
         try gen.write("\n");
         try gen.emitItems(non_module.items);
@@ -274,7 +274,7 @@ const Generator = struct {
             try self.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
         if (!self.opts.no_typesupport and itemsHaveTopicTypes(spec.items)) {
-            try self.write("const dds = @import(\"dds\");\n");
+            try self.write("const _dds = @import(\"dds\");\n");
         }
         try self.write("\n");
         try self.emitItems(spec.items);
@@ -2536,11 +2536,11 @@ const Generator = struct {
     /// the DDS-DCPS spec (Annex A) calls `FooDataWriter` / `FooDataReader`.
     ///
     /// The `dds` module contract (must be provided by the consuming build):
-    ///   - `dds.DataWriter`, `dds.DataReader`
-    ///   - `dds.InstanceStateKind`, `dds.InstanceHandle_t`
-    ///   - `dds.WriteKind` enum: `.alive`, `.dispose`, `.unregister`
-    ///   - `dds.writeCdr(dw, kind, key_hash: [16]u8, payload: []const u8) !void`
-    ///   - `dds.takeCdr(dr) ?RawSample` — `.data`, `.instance_state`,
+    ///   - `_dds.DataWriter`, `_dds.DataReader`
+    ///   - `_dds.InstanceStateKind`, `_dds.InstanceHandle_t`
+    ///   - `_dds.WriteKind` enum: `.alive`, `.dispose`, `.unregister`
+    ///   - `_dds.writeCdr(dw, kind, key_hash: [16]u8, payload: []const u8) !void`
+    ///   - `_dds.takeCdr(dr) ?RawSample` — `.data`, `.instance_state`,
     ///     `.instance_handle`, `.deinit() void`
     fn emitStructTypedWrapper(self: *Generator, s: *const ir.Struct) !void {
         const pfx = self.opts.type_prefix;
@@ -2552,14 +2552,14 @@ const Generator = struct {
         try self.ind();
         try self.print("pub const {s}DataWriter = struct {{\n", .{type_name});
         try self.ind();
-        try self.write("    _dw: dds.DataWriter,\n");
+        try self.write("    _dw: _dds.DataWriter,\n");
         try self.ind();
         try self.write("    _alloc: std.mem.Allocator,\n");
         try self.ind();
         try self.write("    _xcdr2: bool,\n");
         try self.write("\n");
         try self.ind();
-        try self.write("    pub fn init(dw: dds.DataWriter, alloc: std.mem.Allocator, xcdr2: bool) @This() {\n");
+        try self.write("    pub fn init(dw: _dds.DataWriter, alloc: std.mem.Allocator, xcdr2: bool) @This() {\n");
         try self.ind();
         try self.write("        return .{ ._dw = dw, ._alloc = alloc, ._xcdr2 = xcdr2 };\n");
         try self.ind();
@@ -2576,10 +2576,10 @@ const Generator = struct {
         try self.ind();
         try self.print("pub const {s}DataReader = struct {{\n", .{type_name});
         try self.ind();
-        try self.write("    _dr: dds.DataReader,\n");
+        try self.write("    _dr: _dds.DataReader,\n");
         try self.write("\n");
         try self.ind();
-        try self.write("    pub fn init(dr: dds.DataReader) @This() {\n");
+        try self.write("    pub fn init(dr: _dds.DataReader) @This() {\n");
         try self.ind();
         try self.write("        return .{ ._dr = dr };\n");
         try self.ind();
@@ -2595,9 +2595,9 @@ const Generator = struct {
         try self.ind();
         try self.print("        value: {s},\n", .{type_name});
         try self.ind();
-        try self.write("        instance_state: dds.InstanceStateKind,\n");
+        try self.write("        instance_state: _dds.InstanceStateKind,\n");
         try self.ind();
-        try self.write("        instance_handle: dds.InstanceHandle_t,\n");
+        try self.write("        instance_handle: _dds.InstanceHandle_t,\n");
         if (structNeedsSeqDeinit(s)) {
             try self.write("\n");
             try self.ind();
@@ -2616,7 +2616,7 @@ const Generator = struct {
         try self.ind();
         try self.write("    pub fn take(self: @This(), alloc: std.mem.Allocator) anyerror!?TakenSample {\n");
         try self.ind();
-        try self.write("        const _raw = dds.takeCdr(self._dr) orelse return null;\n");
+        try self.write("        const _raw = _dds.takeCdr(self._dr) orelse return null;\n");
         try self.ind();
         try self.write("        defer _raw.deinit();\n");
         try self.ind();
@@ -2680,7 +2680,7 @@ const Generator = struct {
         try self.ind();
         try self.print("        const _hash = {s}.computeKeyHash({s});\n", .{ type_name, param_name });
         try self.ind();
-        try self.print("        try dds.writeCdr(self._dw, .{s}, _hash, _buf.items);\n", .{kind_str});
+        try self.print("        try _dds.writeCdr(self._dw, .{s}, _hash, _buf.items);\n", .{kind_str});
         try self.ind();
         try self.write("    }\n");
     }
@@ -5695,37 +5695,37 @@ test "zig_backend: typed DataWriter/DataReader for keyed @appendable struct" {
     defer out.deinit(testing.allocator);
     const s = out.items;
     // dds import emitted
-    try testing.expect(has(s, "const dds = @import(\"dds\");"));
+    try testing.expect(has(s, "const _dds = @import(\"dds\");"));
     // DataWriter struct
     try testing.expect(has(s, "pub const ShapeTypeDataWriter = struct {"));
-    try testing.expect(has(s, "_dw: dds.DataWriter,"));
+    try testing.expect(has(s, "_dw: _dds.DataWriter,"));
     try testing.expect(has(s, "_alloc: std.mem.Allocator,"));
     try testing.expect(has(s, "_xcdr2: bool,"));
-    try testing.expect(has(s, "pub fn init(dw: dds.DataWriter, alloc: std.mem.Allocator, xcdr2: bool) @This() {"));
+    try testing.expect(has(s, "pub fn init(dw: _dds.DataWriter, alloc: std.mem.Allocator, xcdr2: bool) @This() {"));
     // write() — @appendable uses writeEncapHeaderDelimited for xcdr2
     try testing.expect(has(s, "pub fn write(self: @This(), value: ShapeType) !void {"));
     try testing.expect(has(s, "try _w.writeEncapHeaderDelimited();"));
     try testing.expect(has(s, "try ShapeType.serialize(&_w, value);"));
-    try testing.expect(has(s, "try dds.writeCdr(self._dw, .alive, _hash, _buf.items);"));
+    try testing.expect(has(s, "try _dds.writeCdr(self._dw, .alive, _hash, _buf.items);"));
     // dispose()
     try testing.expect(has(s, "pub fn dispose(self: @This(), key: ShapeType) !void {"));
     try testing.expect(has(s, "try ShapeType.serializeKey(&_w, key);"));
-    try testing.expect(has(s, "try dds.writeCdr(self._dw, .dispose, _hash, _buf.items);"));
+    try testing.expect(has(s, "try _dds.writeCdr(self._dw, .dispose, _hash, _buf.items);"));
     // unregister()
     try testing.expect(has(s, "pub fn unregister(self: @This(), key: ShapeType) !void {"));
-    try testing.expect(has(s, "try dds.writeCdr(self._dw, .unregister, _hash, _buf.items);"));
+    try testing.expect(has(s, "try _dds.writeCdr(self._dw, .unregister, _hash, _buf.items);"));
     // DataReader struct
     try testing.expect(has(s, "pub const ShapeTypeDataReader = struct {"));
-    try testing.expect(has(s, "_dr: dds.DataReader,"));
-    try testing.expect(has(s, "pub fn init(dr: dds.DataReader) @This() {"));
+    try testing.expect(has(s, "_dr: _dds.DataReader,"));
+    try testing.expect(has(s, "pub fn init(dr: _dds.DataReader) @This() {"));
     try testing.expect(has(s, "pub const TakenSample = struct {"));
     try testing.expect(has(s, "value: ShapeType,"));
-    try testing.expect(has(s, "instance_state: dds.InstanceStateKind,"));
-    try testing.expect(has(s, "instance_handle: dds.InstanceHandle_t,"));
+    try testing.expect(has(s, "instance_state: _dds.InstanceStateKind,"));
+    try testing.expect(has(s, "instance_handle: _dds.InstanceHandle_t,"));
     try testing.expect(has(s, "pub const TakenSample = struct {"));
     try testing.expect(has(s, "value: ShapeType,"));
     try testing.expect(has(s, "pub fn take(self: @This(), alloc: std.mem.Allocator) anyerror!?TakenSample {"));
-    try testing.expect(has(s, "dds.takeCdr(self._dr)"));
+    try testing.expect(has(s, "_dds.takeCdr(self._dr)"));
     try testing.expect(has(s, "ShapeType.deserialize(&_reader, alloc)"));
     // no TakenSample.deinit — ShapeType has no unbounded sequences
     try testing.expect(!has(s, "pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {"));
@@ -5750,7 +5750,7 @@ test "zig_backend: no DataWriter/DataReader for struct without @key" {
     const s = out.items;
     try testing.expect(!has(s, "DataWriter"));
     try testing.expect(!has(s, "DataReader"));
-    try testing.expect(!has(s, "const dds ="));
+    try testing.expect(!has(s, "const _dds ="));
 }
 
 test "zig_backend: no_typesupport suppresses DataWriter/DataReader" {
@@ -5763,7 +5763,7 @@ test "zig_backend: no_typesupport suppresses DataWriter/DataReader" {
     const s = out.items;
     try testing.expect(!has(s, "DataWriter"));
     try testing.expect(!has(s, "DataReader"));
-    try testing.expect(!has(s, "const dds ="));
+    try testing.expect(!has(s, "const _dds ="));
 }
 
 test "zig_backend: no DataWriter/DataReader for @mutable keyed struct" {
@@ -5796,9 +5796,25 @@ test "zig_backend: DataWriter/DataReader inside module" {
     , "dds");
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // dds import at file level
-    try testing.expect(has(s, "const dds = @import(\"dds\");"));
+    // _dds import at file level (prefixed to avoid clash with any IDL module named "dds")
+    try testing.expect(has(s, "const _dds = @import(\"dds\");"));
     // wrappers inside module struct
     try testing.expect(has(s, "pub const ShapeDataWriter = struct {"));
     try testing.expect(has(s, "pub const ShapeDataReader = struct {"));
+}
+
+test "zig_backend: module named 'dds' does not produce duplicate const dds" {
+    // IDL module named 'dds' — without the underscore prefix the self-reference
+    // alias 'pub const dds = struct { ... }' (single-file) or 'const dds = @This()'
+    // (split-file) would clash with 'const dds = @import("dds")'.  Using '_dds'
+    // makes the clash structurally impossible (IDL names cannot start with '_').
+    var out = try testGen(
+        \\module dds { @appendable struct Topic { @key long id; }; };
+    , "types");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "const _dds = @import(\"dds\");"));
+    try testing.expect(!has(s, "const dds = @import(\"dds\");"));
+    try testing.expect(has(s, "pub const TopicDataWriter = struct {"));
+    try testing.expect(has(s, "_dw: _dds.DataWriter,"));
 }

@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const zidl_rt = @import("zidl_rt");
-const dds = @import("dds");
+const _dds = @import("dds");
 
 pub const Color = enum(u32) {
     RED = 0,
@@ -218,11 +218,11 @@ pub const Sample = struct {
 }; // Sample
 
 pub const SampleDataWriter = struct {
-    _dw: dds.DataWriter,
+    _dw: _dds.DataWriter,
     _alloc: std.mem.Allocator,
     _xcdr2: bool,
 
-    pub fn init(dw: dds.DataWriter, alloc: std.mem.Allocator, xcdr2: bool) @This() {
+    pub fn init(dw: _dds.DataWriter, alloc: std.mem.Allocator, xcdr2: bool) @This() {
         return .{ ._dw = dw, ._alloc = alloc, ._xcdr2 = xcdr2 };
     }
 
@@ -239,7 +239,7 @@ pub const SampleDataWriter = struct {
             try Sample.serialize(&_w, value);
         }
         const _hash = Sample.computeKeyHash(value);
-        try dds.writeCdr(self._dw, .alive, _hash, _buf.items);
+        try _dds.writeCdr(self._dw, .alive, _hash, _buf.items);
     }
 
     pub fn dispose(self: @This(), key: Sample) !void {
@@ -255,7 +255,7 @@ pub const SampleDataWriter = struct {
             try Sample.serializeKey(&_w, key);
         }
         const _hash = Sample.computeKeyHash(key);
-        try dds.writeCdr(self._dw, .dispose, _hash, _buf.items);
+        try _dds.writeCdr(self._dw, .dispose, _hash, _buf.items);
     }
 
     pub fn unregister(self: @This(), key: Sample) !void {
@@ -271,21 +271,21 @@ pub const SampleDataWriter = struct {
             try Sample.serializeKey(&_w, key);
         }
         const _hash = Sample.computeKeyHash(key);
-        try dds.writeCdr(self._dw, .unregister, _hash, _buf.items);
+        try _dds.writeCdr(self._dw, .unregister, _hash, _buf.items);
     }
 }; // SampleDataWriter
 
 pub const SampleDataReader = struct {
-    _dr: dds.DataReader,
+    _dr: _dds.DataReader,
 
-    pub fn init(dr: dds.DataReader) @This() {
+    pub fn init(dr: _dds.DataReader) @This() {
         return .{ ._dr = dr };
     }
 
     pub const TakenSample = struct {
         value: Sample,
-        instance_state: dds.InstanceStateKind,
-        instance_handle: dds.InstanceHandle_t,
+        instance_state: _dds.InstanceStateKind,
+        instance_handle: _dds.InstanceHandle_t,
 
         pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
             self.value.deinit(alloc);
@@ -293,7 +293,7 @@ pub const SampleDataReader = struct {
     };
 
     pub fn take(self: @This(), alloc: std.mem.Allocator) anyerror!?TakenSample {
-        const _raw = dds.takeCdr(self._dr) orelse return null;
+        const _raw = _dds.takeCdr(self._dr) orelse return null;
         defer _raw.deinit();
         var _reader = try zidl_rt.CdrReader.init(_raw.data);
         const _value = try Sample.deserialize(&_reader, alloc);
@@ -410,11 +410,11 @@ pub const Beacon = struct {
 }; // Beacon
 
 pub const BeaconDataWriter = struct {
-    _dw: dds.DataWriter,
+    _dw: _dds.DataWriter,
     _alloc: std.mem.Allocator,
     _xcdr2: bool,
 
-    pub fn init(dw: dds.DataWriter, alloc: std.mem.Allocator, xcdr2: bool) @This() {
+    pub fn init(dw: _dds.DataWriter, alloc: std.mem.Allocator, xcdr2: bool) @This() {
         return .{ ._dw = dw, ._alloc = alloc, ._xcdr2 = xcdr2 };
     }
 
@@ -431,7 +431,7 @@ pub const BeaconDataWriter = struct {
             try Beacon.serialize(&_w, value);
         }
         const _hash = Beacon.computeKeyHash(value);
-        try dds.writeCdr(self._dw, .alive, _hash, _buf.items);
+        try _dds.writeCdr(self._dw, .alive, _hash, _buf.items);
     }
 
     pub fn dispose(self: @This(), key: Beacon) !void {
@@ -447,7 +447,7 @@ pub const BeaconDataWriter = struct {
             try Beacon.serializeKey(&_w, key);
         }
         const _hash = Beacon.computeKeyHash(key);
-        try dds.writeCdr(self._dw, .dispose, _hash, _buf.items);
+        try _dds.writeCdr(self._dw, .dispose, _hash, _buf.items);
     }
 
     pub fn unregister(self: @This(), key: Beacon) !void {
@@ -463,25 +463,25 @@ pub const BeaconDataWriter = struct {
             try Beacon.serializeKey(&_w, key);
         }
         const _hash = Beacon.computeKeyHash(key);
-        try dds.writeCdr(self._dw, .unregister, _hash, _buf.items);
+        try _dds.writeCdr(self._dw, .unregister, _hash, _buf.items);
     }
 }; // BeaconDataWriter
 
 pub const BeaconDataReader = struct {
-    _dr: dds.DataReader,
+    _dr: _dds.DataReader,
 
-    pub fn init(dr: dds.DataReader) @This() {
+    pub fn init(dr: _dds.DataReader) @This() {
         return .{ ._dr = dr };
     }
 
     pub const TakenSample = struct {
         value: Beacon,
-        instance_state: dds.InstanceStateKind,
-        instance_handle: dds.InstanceHandle_t,
+        instance_state: _dds.InstanceStateKind,
+        instance_handle: _dds.InstanceHandle_t,
     };
 
     pub fn take(self: @This(), alloc: std.mem.Allocator) anyerror!?TakenSample {
-        const _raw = dds.takeCdr(self._dr) orelse return null;
+        const _raw = _dds.takeCdr(self._dr) orelse return null;
         defer _raw.deinit();
         var _reader = try zidl_rt.CdrReader.init(_raw.data);
         const _value = try Beacon.deserialize(&_reader, alloc);
