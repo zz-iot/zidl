@@ -539,11 +539,11 @@ const Generator = struct {
 
         if (!self.opts.no_typesupport) {
             try self.emitStructCdrProtos(c_name, s);
-        }
-        if (structHasDefault(s)) {
-            const em = self.opts.export_macro;
-            const sp: []const u8 = if (em.len > 0) " " else "";
-            try self.print("{s}{s}void {s}_apply_defaults({s} *_v);\n\n", .{ em, sp, c_name, c_name });
+            if (structHasDefault(s)) {
+                const em = self.opts.export_macro;
+                const sp: []const u8 = if (em.len > 0) " " else "";
+                try self.print("{s}{s}void {s}_apply_defaults({s} *_v);\n\n", .{ em, sp, c_name, c_name });
+            }
         }
         try self.emitVerbatimForPlacement(s.annotations.raw, "after-declaration");
     }
@@ -3344,6 +3344,7 @@ fn testGenFullOpts(source: []const u8, stem: []const u8, extra: struct {
     pragma_once: bool = false,
     extern_c: bool = false,
     export_macro: []const u8 = "",
+    no_typesupport: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
 
@@ -3370,6 +3371,7 @@ fn testGenFullOpts(source: []const u8, stem: []const u8, extra: struct {
         .pragma_once = extra.pragma_once,
         .extern_c = extra.extern_c,
         .export_macro = extra.export_macro,
+        .no_typesupport = extra.no_typesupport,
     };
     try generateHeader(alloc, &ir_spec, opts, &out);
 
@@ -4361,4 +4363,15 @@ test "c_backend cdr: @default emits apply_defaults prototype and implementation"
     try testing.expect(has(s, "_v->port_base = 7400;"));
     try testing.expect(has(s, "_v->multicast_group_v4 = \"239.255.0.1\";"));
     try testing.expect(!has(s, "TODO"));
+}
+
+test "c_backend: @default prototype absent when no_typesupport" {
+    const idl =
+        \\struct Cfg {
+        \\    @optional @default(42) long val;
+        \\};
+    ;
+    var h = try testGenFullOpts(idl, "cfg", .{ .no_typesupport = true });
+    defer h.deinit(testing.allocator);
+    try testing.expect(!has(h.items, "apply_defaults"));
 }
