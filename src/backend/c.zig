@@ -4374,6 +4374,54 @@ test "c_backend cdr: @default emits apply_defaults prototype and implementation"
     try testing.expect(!has(s, "TODO"));
 }
 
+test "c_backend: >64 @optional members returns TooManyOptionalMembers" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try buf.appendSlice(testing.allocator, "struct Big {\n");
+    for (0..65) |i| {
+        const line = try std.fmt.allocPrint(testing.allocator, "    @optional long m{d};\n", .{i});
+        defer testing.allocator.free(line);
+        try buf.appendSlice(testing.allocator, line);
+    }
+    try buf.appendSlice(testing.allocator, "};\n");
+    const result = testGen(buf.items, "big");
+    try testing.expectError(error.TooManyOptionalMembers, result);
+}
+
+test "c_backend cdr: @default char in apply_defaults" {
+    const idl =
+        \\struct Cfg {
+        \\    @optional @default('A') char c;
+        \\};
+    ;
+    var src = try testGenCdr(idl, "cfg");
+    defer src.deinit(testing.allocator);
+    try testing.expect(has(src.items, "_v->c = 'A';"));
+}
+
+test "c_backend cdr: @default scoped_name in apply_defaults" {
+    const idl =
+        \\const long MY_MAX = 100;
+        \\struct Cfg {
+        \\    @optional @default(MY_MAX) long limit;
+        \\};
+    ;
+    var src = try testGenCdr(idl, "cfg");
+    defer src.deinit(testing.allocator);
+    try testing.expect(has(src.items, "_v->limit = MY_MAX;"));
+}
+
+test "c_backend cdr: @default string with non-ASCII uses octal escape" {
+    const idl =
+        \\struct Cfg {
+        \\    @optional @default("\001") string s;
+        \\};
+    ;
+    var src = try testGenCdr(idl, "cfg");
+    defer src.deinit(testing.allocator);
+    try testing.expect(has(src.items, "strdup(\"\\001\")"));
+}
+
 test "c_backend: @default prototype absent when no_typesupport" {
     const idl =
         \\struct Cfg {

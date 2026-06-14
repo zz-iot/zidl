@@ -4413,3 +4413,20 @@ test "cpp_backend: @optional without @default uses empty braces" {
     defer h.deinit(testing.allocator);
     try testing.expect(has(h.items, "std::optional<int32_t> val{};"));
 }
+
+test "cpp_backend: @default char field emits char literal" {
+    var h = try testGen(
+        \\struct Cfg { @default('A') char c; };
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "char c{'A'};"));
+}
+
+test "cpp_backend: @default scoped_name emits identifier" {
+    var h = try testGen(
+        \\const long MY_MAX = 100;
+        \\struct Cfg { @default(MY_MAX) long limit; };
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "int32_t limit{MY_MAX};"));
+}

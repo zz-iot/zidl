@@ -5190,3 +5190,23 @@ test "annotation_dcl: const member" {
     try testing.expect(ann.members[0] == .const_dcl);
     try testing.expectEqualStrings("MAX", ann.members[0].const_dcl.name);
 }
+
+test "annotation: keyword used as annotation name" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var p = testParser("@default(42)", arena.allocator());
+    const appl = try p.parseAnnotationAppl();
+    try testing.expectEqualStrings("default", appl.name.parts[0]);
+    try testing.expect(appl.params == .positional);
+}
+
+test "annotation: scoped name with keyword part and absolute prefix" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var p = testParser("@::Foo::in", arena.allocator());
+    const appl = try p.parseAnnotationAppl();
+    try testing.expect(appl.name.absolute);
+    try testing.expectEqual(@as(usize, 2), appl.name.parts.len);
+    try testing.expectEqualStrings("Foo", appl.name.parts[0]);
+    try testing.expectEqualStrings("in", appl.name.parts[1]);
+}

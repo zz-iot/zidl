@@ -1649,3 +1649,12 @@ test "builder: @default with no parameter leaves default_value null" {
     const m = ir_spec.items[0].type_decl.struct_.members[0];
     try testing.expect(m.annotations.default_value == null);
 }
+
+test "builder: @default named form with unknown key leaves default_value null" {
+    var ir_spec = try testBuild(
+        \\struct Cfg { @default(foo=42) long x; };
+    );
+    defer ir_spec.deinit();
+    const m = ir_spec.items[0].type_decl.struct_.members[0];
+    try testing.expect(m.annotations.default_value == null);
+}

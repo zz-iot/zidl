@@ -4499,6 +4499,63 @@ test "java: @optional overrides @default and uses null" {
     , "cfg", "this.val = null;");
 }
 
+test "java: @default long long appends L suffix" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @default(1000000) long long counter; };
+    , "cfg", "this.counter = 1000000L;");
+}
+
+test "java: @default float appends f suffix" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @default(3.14) float speed; };
+    , "cfg", "this.speed = 3.14f;");
+}
+
+test "java: @default double has no type suffix" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @default(2.718) double ratio; };
+    , "cfg", "this.ratio = 2.718;");
+}
+
+test "java: @default char emits char literal" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @default('A') char letter; };
+    , "cfg", "this.letter = 'A';");
+}
+
+test "java: @default single-quote char emits escaped literal" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @default('\'') char q; };
+    , "cfg", "this.q = '\\'';");
+}
+
+test "java: @default backslash char emits escaped literal" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @default('\\') char bk; };
+    , "cfg", "this.bk = '\\\\';");
+}
+
+test "java: @default non-printable char emits unicode escape" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @default('\001') char ctrl; };
+    , "cfg", "this.ctrl = '\\u0001';");
+}
+
+test "java: @default scoped_name emits identifier" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\const long MY_MAX = 100;
+        \\struct Cfg { @default(MY_MAX) long limit; };
+    , "cfg", "this.limit = MY_MAX;");
+}
+
 test "java: CDR helpers include _cdrWriteFixed and _cdrReadFixed" {
     const alloc = testing.allocator;
     try testGen(alloc, "struct S { long x; };", "s", "private static void _cdrWriteFixed");

@@ -5905,3 +5905,28 @@ test "zig_backend: @optional without @default initializes to null" {
     defer h.deinit(testing.allocator);
     try testing.expect(has(h.items, "val: ?i32 = null,"));
 }
+
+test "zig_backend: @default float field sets initializer" {
+    var h = try testGen(
+        \\struct Cfg { @default(3.14) float speed; };
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "speed: f32 = 3.14,"));
+}
+
+test "zig_backend: @default char field emits character literal" {
+    var h = try testGen(
+        \\struct Cfg { @default('A') char c; };
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "c: u8 = 'A',"));
+}
+
+test "zig_backend: @default scoped_name emits identifier" {
+    var h = try testGen(
+        \\const long MY_MAX = 100;
+        \\struct Cfg { @default(MY_MAX) long limit; };
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "limit: i32 = MY_MAX,"));
+}
