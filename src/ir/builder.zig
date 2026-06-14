@@ -932,6 +932,8 @@ const Builder = struct {
                 result.id = extractU32Param(&a.params);
             } else if (std.ascii.eqlIgnoreCase(name, "pl_repeated")) {
                 result.is_pl_repeated = true;
+            } else if (std.ascii.eqlIgnoreCase(name, "default")) {
+                result.default_value = try extractDefaultParam(self.alloc, &a.params);
             } else if (std.ascii.eqlIgnoreCase(name, "bound") or
                 std.ascii.eqlIgnoreCase(name, "max"))
             {
@@ -1190,6 +1192,22 @@ fn extractU64Param(params: *const ast.AnnotationApplParams) ?u64 {
         else => {},
     }
     return null;
+}
+
+/// Extract the value from a `@default(V)` annotation parameter.
+/// Accepts both positional (`@default(7400)`) and named (`@default(value=7400)`) forms.
+fn extractDefaultParam(alloc: std.mem.Allocator, params: *const ast.AnnotationApplParams) !?ir.AnnotationParamValue {
+    const expr: *const ast.ConstExpr = switch (params.*) {
+        .none => return null,
+        .positional => |*e| e,
+        .named => |named| blk: {
+            for (named) |*p| {
+                if (std.ascii.eqlIgnoreCase(p.name, "value")) break :blk &p.value;
+            }
+            return null;
+        },
+    };
+    return extractAnnotationParamValue(alloc, expr);
 }
 
 /// Extract a single annotation parameter value from an AST const expression.

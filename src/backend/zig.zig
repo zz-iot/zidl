@@ -332,7 +332,7 @@ const Generator = struct {
             try self.print("    _base: {s} = .{{}},\n", .{base_zig});
         }
         for (s.members) |m| {
-            try self.emitField(m.name, m.type_ref, m.dimensions, m.annotations.is_optional);
+            try self.emitField(m.name, m.type_ref, m.dimensions, m.annotations.is_optional, m.annotations.default_value);
         }
         // Emit serialize fns when full typesupport is requested, or when
         // --zig-pl-cdr is set (PL_CDR fns are part of the struct, not TypeSupport).
@@ -1094,7 +1094,7 @@ const Generator = struct {
         try self.ind();
         try self.print("pub const {s}{s} = struct {{\n", .{ pfx, e.name });
         for (e.members) |m| {
-            try self.emitField(m.name, m.type_ref, m.dimensions, false);
+            try self.emitField(m.name, m.type_ref, m.dimensions, false, null);
         }
         try self.ind();
         try self.print("}}; // {s}{s}\n\n", .{ pfx, e.name });
@@ -1873,6 +1873,7 @@ const Generator = struct {
         type_ref: ir.TypeRef,
         dims: []const u64,
         is_optional: bool,
+        default_value: ?ir.AnnotationParamValue,
     ) !void {
         const zig_type = try self.typeRefToZig(type_ref);
         defer self.alloc.free(zig_type);
@@ -1880,18 +1881,44 @@ const Generator = struct {
         try self.ind();
 
         if (is_optional) {
-            try self.print("    {s}: ?{s} = null,\n", .{ name, zig_type });
+            if (default_value) |dv| {
+                const dv_str = try self.formatDefaultValueZig(dv, type_ref);
+                defer self.alloc.free(dv_str);
+                try self.print("    {s}: ?{s} = {s},\n", .{ name, zig_type, dv_str });
+            } else {
+                try self.print("    {s}: ?{s} = null,\n", .{ name, zig_type });
+            }
         } else if (dims.len > 0) {
             const arr_type = try self.makeArrayType(zig_type, dims);
             defer self.alloc.free(arr_type);
             const default = try self.defaultForArrayType(arr_type);
             defer self.alloc.free(default);
             try self.print("    {s}: {s} = {s},\n", .{ name, arr_type, default });
+        } else if (default_value) |dv| {
+            const dv_str = try self.formatDefaultValueZig(dv, type_ref);
+            defer self.alloc.free(dv_str);
+            try self.print("    {s}: {s} = {s},\n", .{ name, zig_type, dv_str });
         } else {
             const default = try self.defaultForTypeRef(type_ref);
             defer self.alloc.free(default);
             try self.print("    {s}: {s} = {s},\n", .{ name, zig_type, default });
         }
+    }
+
+    /// Format an `AnnotationParamValue` as a Zig literal expression.
+    fn formatDefaultValueZig(self: *Generator, dv: ir.AnnotationParamValue, type_ref: ir.TypeRef) ![]u8 {
+        _ = type_ref;
+        return switch (dv) {
+            .integer => |v| std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            .float => |v| std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            .boolean => |v| self.alloc.dupe(u8, if (v) "true" else "false"),
+            .character => |v| if (std.ascii.isPrint(v) and v != '\'' and v != '\\')
+                std.fmt.allocPrint(self.alloc, "'{c}'", .{v})
+            else
+                std.fmt.allocPrint(self.alloc, "'\\x{X:0>2}'", .{v}),
+            .string => |s| std.fmt.allocPrint(self.alloc, "\"{s}\"", .{s}),
+            else => self.alloc.dupe(u8, "undefined"),
+        };
     }
 
     // ── CDR serialization emission ────────────────────────────────────────────

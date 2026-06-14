@@ -404,7 +404,7 @@ const Generator = struct {
         }
         try self.write(" {\n");
         for (s.members) |m| {
-            try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, m.annotations.is_optional, "    ");
+            try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, m.annotations.is_optional, m.annotations.default_value, "    ");
         }
         try self.print("}}; // struct {s}\n\n", .{s.name});
         try self.emitVerbatimForPlacement(s.annotations.raw, "after-declaration");
@@ -564,7 +564,7 @@ const Generator = struct {
             .{e.name},
         );
         for (e.members) |m| {
-            try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, false, "    ");
+            try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, false, null, "    ");
         }
         try self.print("}}; // struct {s}\n\n", .{e.name});
     }
@@ -729,6 +729,7 @@ const Generator = struct {
         name: []const u8,
         dims: []const u64,
         is_optional: bool,
+        default_value: ?ir.AnnotationParamValue,
         indent: []const u8,
     ) !void {
         const cpp_type = try self.typeRefToCpp(type_ref);
@@ -741,10 +742,36 @@ const Generator = struct {
             }
             try self.write(";\n");
         } else if (is_optional) {
-            try self.print("{s}std::optional<{s}> {s}{{}};\n", .{ indent, cpp_type, name });
+            if (default_value) |dv| {
+                const dv_str = try self.formatDefaultValueCpp(dv, type_ref);
+                defer self.alloc.free(dv_str);
+                try self.print("{s}std::optional<{s}> {s}{{{s}}};\n", .{ indent, cpp_type, name, dv_str });
+            } else {
+                try self.print("{s}std::optional<{s}> {s}{{}};\n", .{ indent, cpp_type, name });
+            }
+        } else if (default_value) |dv| {
+            const dv_str = try self.formatDefaultValueCpp(dv, type_ref);
+            defer self.alloc.free(dv_str);
+            try self.print("{s}{s} {s}{{{s}}};\n", .{ indent, cpp_type, name, dv_str });
         } else {
             try self.print("{s}{s} {s}{{}};\n", .{ indent, cpp_type, name });
         }
+    }
+
+    /// Format an `AnnotationParamValue` as a C++ initializer expression.
+    fn formatDefaultValueCpp(self: *Generator, dv: ir.AnnotationParamValue, type_ref: ir.TypeRef) ![]u8 {
+        _ = type_ref;
+        return switch (dv) {
+            .integer => |v| std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            .float => |v| std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            .boolean => |v| self.alloc.dupe(u8, if (v) "true" else "false"),
+            .character => |v| if (std.ascii.isPrint(v) and v != '\'' and v != '\\')
+                std.fmt.allocPrint(self.alloc, "'{c}'", .{v})
+            else
+                std.fmt.allocPrint(self.alloc, "'\\x{X:0>2}'", .{v}),
+            .string => |s| std.fmt.allocPrint(self.alloc, "\"{s}\"", .{s}),
+            else => self.alloc.dupe(u8, "{}"),
+        };
     }
 
     // ── Type-ref → C++ type string ────────────────────────────────────────────

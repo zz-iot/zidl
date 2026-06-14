@@ -82,6 +82,10 @@ pub const MemberAnnotations = struct {
     /// encoding).  Only valid on `sequence<T>` members inside `@mutable` structs when
     /// `--zig-pl-cdr` is in effect.  Validated in the IR builder.
     is_pl_repeated: bool = false,
+    /// `@default(V)` — vendor annotation providing a non-zero default value.
+    /// Only meaningful on `@optional` members; backends use it to implement
+    /// `apply_defaults`-style helpers that fill absent fields before first use.
+    default_value: ?AnnotationParamValue = null,
     raw: []const RawAnnotation = &.{},
 };
 

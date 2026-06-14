@@ -2518,10 +2518,35 @@ const Generator = struct {
         return self.typeRefToJava(m.type_ref, m.dimensions);
     }
 
-    /// Return the Java default expression for a struct member (@optional → null).
+    /// Return the Java default expression for a struct member.
+    /// Priority: @optional → null; @default → annotated value; otherwise type zero.
     fn memberDefault(self: *Generator, m: ir.StructMember) ![]u8 {
         if (m.annotations.is_optional) return self.alloc.dupe(u8, "null");
+        if (m.annotations.default_value) |dv| {
+            return self.formatDefaultValueJava(dv, m.type_ref);
+        }
         return self.defaultForMember(m.type_ref, m.dimensions);
+    }
+
+    /// Format an `AnnotationParamValue` as a Java literal expression.
+    fn formatDefaultValueJava(self: *Generator, dv: ir.AnnotationParamValue, type_ref: ir.TypeRef) ![]u8 {
+        return switch (dv) {
+            .integer => |v| std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            .float => |v| switch (type_ref) {
+                .base => |b| switch (b) {
+                    .float => std.fmt.allocPrint(self.alloc, "{d}f", .{v}),
+                    else => std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+                },
+                else => std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            },
+            .boolean => |v| self.alloc.dupe(u8, if (v) "true" else "false"),
+            .character => |v| if (std.ascii.isPrint(v) and v != '\'' and v != '\\')
+                std.fmt.allocPrint(self.alloc, "'{c}'", .{v})
+            else
+                std.fmt.allocPrint(self.alloc, "'\\u{X:0>4}'", .{v}),
+            .string => |s| std.fmt.allocPrint(self.alloc, "\"{s}\"", .{s}),
+            else => self.alloc.dupe(u8, "null"),
+        };
     }
 
     fn defaultForTypeRef(self: *Generator, tr: ir.TypeRef) anyerror![]u8 {
