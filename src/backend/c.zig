@@ -1411,6 +1411,14 @@ const CdrGenerator = struct {
     // ── Struct / Exception ────────────────────────────────────────────────────
 
     fn emitStructFns(self: *CdrGenerator, s: *const ir.Struct) !void {
+        if (structHasOptional(s)) {
+            var opt_count: u32 = 0;
+            for (s.members) |m| {
+                if (m.annotations.is_optional) opt_count += 1;
+            }
+            if (opt_count > 64) return error.TooManyOptionalMembers;
+        }
+
         const c_name = try self.prefixedCName(s.qualified_name);
         defer self.alloc.free(c_name);
 
@@ -4386,6 +4394,8 @@ test "c_backend: >64 @optional members returns TooManyOptionalMembers" {
     try buf.appendSlice(testing.allocator, "};\n");
     const result = testGen(buf.items, "big");
     try testing.expectError(error.TooManyOptionalMembers, result);
+    const cdr_result = testGenCdr(buf.items, "big");
+    try testing.expectError(error.TooManyOptionalMembers, cdr_result);
 }
 
 test "c_backend cdr: @default char in apply_defaults" {

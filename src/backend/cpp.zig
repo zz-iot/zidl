@@ -760,10 +760,15 @@ const Generator = struct {
 
     /// Format an `AnnotationParamValue` as a C++ initializer expression.
     fn formatDefaultValueCpp(self: *Generator, dv: ir.AnnotationParamValue, type_ref: ir.TypeRef) ![]u8 {
-        _ = type_ref;
         return switch (dv) {
             .integer => |v| std.fmt.allocPrint(self.alloc, "{d}", .{v}),
-            .float => |v| std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            .float => |v| switch (type_ref) {
+                .base => |b| switch (b) {
+                    .float => std.fmt.allocPrint(self.alloc, "{d}f", .{v}),
+                    else => std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+                },
+                else => std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            },
             .boolean => |v| self.alloc.dupe(u8, if (v) "true" else "false"),
             .character => |v| if (std.ascii.isPrint(v) and v != '\'' and v != '\\')
                 std.fmt.allocPrint(self.alloc, "'{c}'", .{v})
@@ -4412,6 +4417,14 @@ test "cpp_backend: @optional without @default uses empty braces" {
     , "cfg");
     defer h.deinit(testing.allocator);
     try testing.expect(has(h.items, "std::optional<int32_t> val{};"));
+}
+
+test "cpp_backend: @default float field appends f suffix to avoid narrowing" {
+    var h = try testGen(
+        \\struct Cfg { @default(3.14) float speed; };
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "float speed{3.14f};"));
 }
 
 test "cpp_backend: @default char field emits char literal" {
