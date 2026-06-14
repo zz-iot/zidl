@@ -2531,7 +2531,13 @@ const Generator = struct {
     /// Format an `AnnotationParamValue` as a Java literal expression.
     fn formatDefaultValueJava(self: *Generator, dv: ir.AnnotationParamValue, type_ref: ir.TypeRef) ![]u8 {
         return switch (dv) {
-            .integer => |v| std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            .integer => |v| switch (type_ref) {
+                .base => |b| switch (b) {
+                    .long_long, .int64, .unsigned_long_long, .uint64 => std.fmt.allocPrint(self.alloc, "{d}L", .{v}),
+                    else => std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+                },
+                else => std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            },
             .float => |v| switch (type_ref) {
                 .base => |b| switch (b) {
                     .float => std.fmt.allocPrint(self.alloc, "{d}f", .{v}),

@@ -504,6 +504,14 @@ const Generator = struct {
 
         const has_optional = structHasOptional(s);
 
+        if (has_optional) {
+            var opt_count: u32 = 0;
+            for (s.members) |m| {
+                if (m.annotations.is_optional) opt_count += 1;
+            }
+            if (opt_count > 64) return error.TooManyOptionalMembers;
+        }
+
         try self.emitVerbatimForPlacement(s.annotations.raw, "before-declaration");
         try self.print("typedef struct {s}_s {{\n", .{c_name});
         if (has_optional) {
