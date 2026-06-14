@@ -83,8 +83,8 @@ pub const MemberAnnotations = struct {
     /// `--zig-pl-cdr` is in effect.  Validated in the IR builder.
     is_pl_repeated: bool = false,
     /// `@default(V)` — vendor annotation providing a non-zero default value.
-    /// Only meaningful on `@optional` members; backends use it to implement
-    /// `apply_defaults`-style helpers that fill absent fields before first use.
+    /// Used by all backends: C emits `apply_defaults` for optional+default members;
+    /// C++, Zig, and Java emit inline initializers for both optional and non-optional members.
     default_value: ?AnnotationParamValue = null,
     raw: []const RawAnnotation = &.{},
 };

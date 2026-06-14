@@ -2548,6 +2548,10 @@ const Generator = struct {
             .boolean => |v| self.alloc.dupe(u8, if (v) "true" else "false"),
             .character => |v| if (std.ascii.isPrint(v) and v != '\'' and v != '\\')
                 std.fmt.allocPrint(self.alloc, "'{c}'", .{v})
+            else if (v == '\'')
+                self.alloc.dupe(u8, "'\\''")
+            else if (v == '\\')
+                self.alloc.dupe(u8, "'\\\\'")
             else
                 std.fmt.allocPrint(self.alloc, "'\\u{X:0>4}'", .{v}),
             .string => |s| blk: {
