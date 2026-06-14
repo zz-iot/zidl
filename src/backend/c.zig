@@ -2934,7 +2934,7 @@ const CdrGenerator = struct {
             .string => |s| blk: {
                 const esc = try escapeStringC(self.alloc, s);
                 defer self.alloc.free(esc);
-                break :blk std.fmt.allocPrint(self.alloc, "\"{s}\"", .{esc});
+                break :blk std.fmt.allocPrint(self.alloc, "strdup(\"{s}\")", .{esc});
             },
             .scoped_name => |n| self.alloc.dupe(u8, n),
             else => self.alloc.dupe(u8, "0"),
@@ -4370,7 +4370,7 @@ test "c_backend cdr: @default emits apply_defaults prototype and implementation"
     const s = src.items;
     try testing.expect(has(s, "void UdpConfig_apply_defaults(UdpConfig *_v)"));
     try testing.expect(has(s, "_v->port_base = 7400;"));
-    try testing.expect(has(s, "_v->multicast_group_v4 = \"239.255.0.1\";"));
+    try testing.expect(has(s, "_v->multicast_group_v4 = strdup(\"239.255.0.1\");"));
     try testing.expect(!has(s, "TODO"));
 }
 
