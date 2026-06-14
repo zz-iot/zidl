@@ -404,7 +404,7 @@ const Generator = struct {
         }
         try self.write(" {\n");
         for (s.members) |m| {
-            try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, m.annotations.is_optional, "    ");
+            try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, m.annotations.is_optional, m.annotations.default_value, "    ");
         }
         try self.print("}}; // struct {s}\n\n", .{s.name});
         try self.emitVerbatimForPlacement(s.annotations.raw, "after-declaration");
@@ -564,7 +564,7 @@ const Generator = struct {
             .{e.name},
         );
         for (e.members) |m| {
-            try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, false, "    ");
+            try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, false, null, "    ");
         }
         try self.print("}}; // struct {s}\n\n", .{e.name});
     }
@@ -729,6 +729,7 @@ const Generator = struct {
         name: []const u8,
         dims: []const u64,
         is_optional: bool,
+        default_value: ?ir.AnnotationParamValue,
         indent: []const u8,
     ) !void {
         const cpp_type = try self.typeRefToCpp(type_ref);
@@ -741,10 +742,46 @@ const Generator = struct {
             }
             try self.write(";\n");
         } else if (is_optional) {
-            try self.print("{s}std::optional<{s}> {s}{{}};\n", .{ indent, cpp_type, name });
+            if (default_value) |dv| {
+                const dv_str = try self.formatDefaultValueCpp(dv, type_ref);
+                defer self.alloc.free(dv_str);
+                try self.print("{s}std::optional<{s}> {s}{{{s}}};\n", .{ indent, cpp_type, name, dv_str });
+            } else {
+                try self.print("{s}std::optional<{s}> {s}{{}};\n", .{ indent, cpp_type, name });
+            }
+        } else if (default_value) |dv| {
+            const dv_str = try self.formatDefaultValueCpp(dv, type_ref);
+            defer self.alloc.free(dv_str);
+            try self.print("{s}{s} {s}{{{s}}};\n", .{ indent, cpp_type, name, dv_str });
         } else {
             try self.print("{s}{s} {s}{{}};\n", .{ indent, cpp_type, name });
         }
+    }
+
+    /// Format an `AnnotationParamValue` as a C++ initializer expression.
+    fn formatDefaultValueCpp(self: *Generator, dv: ir.AnnotationParamValue, type_ref: ir.TypeRef) ![]u8 {
+        return switch (dv) {
+            .integer => |v| std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            .float => |v| switch (type_ref) {
+                .base => |b| switch (b) {
+                    .float => std.fmt.allocPrint(self.alloc, "{d}f", .{v}),
+                    else => std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+                },
+                else => std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            },
+            .boolean => |v| self.alloc.dupe(u8, if (v) "true" else "false"),
+            .character => |v| if (std.ascii.isPrint(v) and v != '\'' and v != '\\')
+                std.fmt.allocPrint(self.alloc, "'{c}'", .{v})
+            else
+                std.fmt.allocPrint(self.alloc, "'\\x{X:0>2}'", .{v}),
+            .string => |s| blk: {
+                const esc = try escapeStringLiteral(self.alloc, s);
+                defer self.alloc.free(esc);
+                break :blk std.fmt.allocPrint(self.alloc, "\"{s}\"", .{esc});
+            },
+            .scoped_name => |n| self.alloc.dupe(u8, n),
+            else => self.alloc.dupe(u8, "{}"),
+        };
     }
 
     // ── Type-ref → C++ type string ────────────────────────────────────────────
@@ -780,6 +817,30 @@ const Generator = struct {
 };
 
 // ── Static helpers ────────────────────────────────────────────────────────────
+
+fn escapeStringLiteral(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    for (s) |c| {
+        switch (c) {
+            '\\' => try buf.appendSlice(alloc, "\\\\"),
+            '"' => try buf.appendSlice(alloc, "\\\""),
+            '\n' => try buf.appendSlice(alloc, "\\n"),
+            '\r' => try buf.appendSlice(alloc, "\\r"),
+            '\t' => try buf.appendSlice(alloc, "\\t"),
+            0 => try buf.appendSlice(alloc, "\\000"),
+            else => if (c >= 0x20 and c <= 0x7e) {
+                try buf.append(alloc, c);
+            } else {
+                // Octal escapes (\OOO) instead of \xHH: C/C++ \x is greedy
+                // and consumes all following hex digits as part of the escape.
+                var tmp: [4]u8 = undefined;
+                const oct = std.fmt.bufPrint(&tmp, "\\{o:0>3}", .{c}) catch unreachable;
+                try buf.appendSlice(alloc, oct);
+            },
+        }
+    }
+    return buf.toOwnedSlice(alloc);
+}
 
 fn baseToCppType(b: ast.BaseTypeSpec) []const u8 {
     return switch (b) {
@@ -4319,4 +4380,66 @@ test "cpp_backend: impl simple return with string param forwards correctly" {
     try testing.expect(has(s, "int32_t compute(std::string key) override {"));
     try testing.expect(has(s, "return zidl_Foo_compute(ptr_, key.c_str());"));
     try testing.expect(!has(s, "TODO"));
+}
+
+test "cpp_backend: @default on non-optional field sets initializer" {
+    var h = try testGen(
+        \\struct Cfg {
+        \\    @default(7400) unsigned short base_port;
+        \\    @default(TRUE) boolean active;
+        \\    @default(3.14) double threshold;
+        \\    @default("hi") string label;
+        \\};
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    const s = h.items;
+    try testing.expect(has(s, "uint16_t base_port{7400};"));
+    try testing.expect(has(s, "bool active{true};"));
+    try testing.expect(has(s, "double threshold{"));
+    try testing.expect(has(s, "std::string label{\"hi\"};"));
+}
+
+test "cpp_backend: @optional with @default sets optional initializer" {
+    var h = try testGen(
+        \\struct Cfg {
+        \\    @optional @default(42) long value;
+        \\};
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "std::optional<int32_t> value{42};"));
+}
+
+test "cpp_backend: @optional without @default uses empty braces" {
+    var h = try testGen(
+        \\struct Cfg {
+        \\    @optional long val;
+        \\};
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "std::optional<int32_t> val{};"));
+}
+
+test "cpp_backend: @default float field appends f suffix to avoid narrowing" {
+    var h = try testGen(
+        \\struct Cfg { @default(3.14) float speed; };
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "float speed{3.14f};"));
+}
+
+test "cpp_backend: @default char field emits char literal" {
+    var h = try testGen(
+        \\struct Cfg { @default('A') char c; };
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "char c{'A'};"));
+}
+
+test "cpp_backend: @default scoped_name emits identifier" {
+    var h = try testGen(
+        \\const long MY_MAX = 100;
+        \\struct Cfg { @default(MY_MAX) long limit; };
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "int32_t limit{MY_MAX};"));
 }

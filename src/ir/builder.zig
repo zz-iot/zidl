@@ -932,6 +932,8 @@ const Builder = struct {
                 result.id = extractU32Param(&a.params);
             } else if (std.ascii.eqlIgnoreCase(name, "pl_repeated")) {
                 result.is_pl_repeated = true;
+            } else if (std.ascii.eqlIgnoreCase(name, "default")) {
+                result.default_value = try extractDefaultParam(self.alloc, &a.params);
             } else if (std.ascii.eqlIgnoreCase(name, "bound") or
                 std.ascii.eqlIgnoreCase(name, "max"))
             {
@@ -1190,6 +1192,22 @@ fn extractU64Param(params: *const ast.AnnotationApplParams) ?u64 {
         else => {},
     }
     return null;
+}
+
+/// Extract the value from a `@default(V)` annotation parameter.
+/// Accepts both positional (`@default(7400)`) and named (`@default(value=7400)`) forms.
+fn extractDefaultParam(alloc: std.mem.Allocator, params: *const ast.AnnotationApplParams) !?ir.AnnotationParamValue {
+    const expr: *const ast.ConstExpr = switch (params.*) {
+        .none => return null,
+        .positional => |*e| e,
+        .named => |named| blk: {
+            for (named) |*p| {
+                if (std.ascii.eqlIgnoreCase(p.name, "value")) break :blk &p.value;
+            }
+            return null;
+        },
+    };
+    return extractAnnotationParamValue(alloc, expr);
 }
 
 /// Extract a single annotation parameter value from an AST const expression.
@@ -1601,4 +1619,42 @@ test "builder: @pl_repeated on string member is rejected" {
         error.PlRepeatedOnNonSequence,
         testBuild("struct S { @pl_repeated string name; };"),
     );
+}
+
+test "builder: @default positional integer is stored in default_value" {
+    var ir_spec = try testBuild(
+        \\struct Cfg { @default(7400) unsigned short base_port; };
+    );
+    defer ir_spec.deinit();
+    const m = ir_spec.items[0].type_decl.struct_.members[0];
+    try testing.expect(m.annotations.default_value != null);
+    try testing.expectEqual(@as(i64, 7400), m.annotations.default_value.?.integer);
+}
+
+test "builder: @default named form (value=N) is stored in default_value" {
+    var ir_spec = try testBuild(
+        \\struct Cfg { @default(value=42) long x; };
+    );
+    defer ir_spec.deinit();
+    const m = ir_spec.items[0].type_decl.struct_.members[0];
+    try testing.expect(m.annotations.default_value != null);
+    try testing.expectEqual(@as(i64, 42), m.annotations.default_value.?.integer);
+}
+
+test "builder: @default with no parameter leaves default_value null" {
+    var ir_spec = try testBuild(
+        \\struct Cfg { @default() long x; };
+    );
+    defer ir_spec.deinit();
+    const m = ir_spec.items[0].type_decl.struct_.members[0];
+    try testing.expect(m.annotations.default_value == null);
+}
+
+test "builder: @default named form with unknown key leaves default_value null" {
+    var ir_spec = try testBuild(
+        \\struct Cfg { @default(foo=42) long x; };
+    );
+    defer ir_spec.deinit();
+    const m = ir_spec.items[0].type_decl.struct_.members[0];
+    try testing.expect(m.annotations.default_value == null);
 }

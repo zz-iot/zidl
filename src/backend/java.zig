@@ -2518,10 +2518,50 @@ const Generator = struct {
         return self.typeRefToJava(m.type_ref, m.dimensions);
     }
 
-    /// Return the Java default expression for a struct member (@optional → null).
+    /// Return the Java default expression for a struct member.
+    /// Priority: @optional → null; @default → annotated value; otherwise type zero.
     fn memberDefault(self: *Generator, m: ir.StructMember) ![]u8 {
         if (m.annotations.is_optional) return self.alloc.dupe(u8, "null");
+        if (m.annotations.default_value) |dv| {
+            return self.formatDefaultValueJava(dv, m.type_ref);
+        }
         return self.defaultForMember(m.type_ref, m.dimensions);
+    }
+
+    /// Format an `AnnotationParamValue` as a Java literal expression.
+    fn formatDefaultValueJava(self: *Generator, dv: ir.AnnotationParamValue, type_ref: ir.TypeRef) ![]u8 {
+        return switch (dv) {
+            .integer => |v| switch (type_ref) {
+                .base => |b| switch (b) {
+                    .long_long, .int64, .unsigned_long_long, .uint64 => std.fmt.allocPrint(self.alloc, "{d}L", .{v}),
+                    else => std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+                },
+                else => std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            },
+            .float => |v| switch (type_ref) {
+                .base => |b| switch (b) {
+                    .float => std.fmt.allocPrint(self.alloc, "{d}f", .{v}),
+                    else => std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+                },
+                else => std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            },
+            .boolean => |v| self.alloc.dupe(u8, if (v) "true" else "false"),
+            .character => |v| if (std.ascii.isPrint(v) and v != '\'' and v != '\\')
+                std.fmt.allocPrint(self.alloc, "'{c}'", .{v})
+            else if (v == '\'')
+                self.alloc.dupe(u8, "'\\''")
+            else if (v == '\\')
+                self.alloc.dupe(u8, "'\\\\'")
+            else
+                std.fmt.allocPrint(self.alloc, "'\\u{X:0>4}'", .{v}),
+            .string => |s| blk: {
+                const esc = try escapeStringLiteral(self.alloc, s);
+                defer self.alloc.free(esc);
+                break :blk std.fmt.allocPrint(self.alloc, "\"{s}\"", .{esc});
+            },
+            .scoped_name => |n| self.alloc.dupe(u8, n),
+            else => self.alloc.dupe(u8, "null"),
+        };
     }
 
     fn defaultForTypeRef(self: *Generator, tr: ir.TypeRef) anyerror![]u8 {
@@ -2632,6 +2672,28 @@ const Generator = struct {
 
 /// Determine the EMHEADER LC value (0–3) for a fixed-size scalar type in Java.
 /// Returns null if the type requires LC=4 (NEXTINT) — variable-length or complex.
+fn escapeStringLiteral(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    for (s) |c| {
+        switch (c) {
+            '\\' => try buf.appendSlice(alloc, "\\\\"),
+            '"' => try buf.appendSlice(alloc, "\\\""),
+            '\n' => try buf.appendSlice(alloc, "\\n"),
+            '\r' => try buf.appendSlice(alloc, "\\r"),
+            '\t' => try buf.appendSlice(alloc, "\\t"),
+            0 => try buf.appendSlice(alloc, "\\u0000"),
+            else => if (c >= 0x20 and c <= 0x7e) {
+                try buf.append(alloc, c);
+            } else {
+                var tmp: [6]u8 = undefined;
+                const hex = std.fmt.bufPrint(&tmp, "\\u{X:0>4}", .{c}) catch unreachable;
+                try buf.appendSlice(alloc, hex);
+            },
+        }
+    }
+    return buf.toOwnedSlice(alloc);
+}
+
 fn lcForJavaTypeRef(type_ref: ir.TypeRef, dimensions: []const u64) ?u2 {
     if (dimensions.len > 0) return null;
     return switch (type_ref) {
@@ -4407,6 +4469,91 @@ test "java: fixed<5,2> field type is double and serializes as BCD" {
     try testGen(alloc, "struct S { fixed<5,2> price; };", "fp", "double price");
     try testGen(alloc, "struct S { fixed<5,2> price; };", "fp", "_cdrWriteFixed(_buf, 5, 2, this.price)");
     try testGen(alloc, "struct S { fixed<5,2> price; };", "fp", "_out.price = _cdrReadFixed(_buf, 5, 2)");
+}
+
+test "java: @default integer sets constructor assignment" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @default(7400) unsigned short base_port; };
+    , "cfg", "this.base_port = 7400;");
+}
+
+test "java: @default boolean sets constructor assignment" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @default(TRUE) boolean enabled; };
+    , "cfg", "this.enabled = true;");
+}
+
+test "java: @default string sets constructor assignment" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @default("hello") string label; };
+    , "cfg", "this.label = \"hello\";");
+}
+
+test "java: @optional overrides @default and uses null" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @optional @default(42) long val; };
+    , "cfg", "this.val = null;");
+}
+
+test "java: @default long long appends L suffix" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @default(1000000) long long counter; };
+    , "cfg", "this.counter = 1000000L;");
+}
+
+test "java: @default float appends f suffix" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @default(3.14) float speed; };
+    , "cfg", "this.speed = 3.14f;");
+}
+
+test "java: @default double has no type suffix" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @default(2.718) double ratio; };
+    , "cfg", "this.ratio = 2.718;");
+}
+
+test "java: @default char emits char literal" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @default('A') char letter; };
+    , "cfg", "this.letter = 'A';");
+}
+
+test "java: @default single-quote char emits escaped literal" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @default('\'') char q; };
+    , "cfg", "this.q = '\\'';");
+}
+
+test "java: @default backslash char emits escaped literal" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @default('\\') char bk; };
+    , "cfg", "this.bk = '\\\\';");
+}
+
+test "java: @default non-printable char emits unicode escape" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @default('\001') char ctrl; };
+    , "cfg", "this.ctrl = '\\u0001';");
+}
+
+test "java: @default scoped_name emits identifier" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\const long MY_MAX = 100;
+        \\struct Cfg { @default(MY_MAX) long limit; };
+    , "cfg", "this.limit = MY_MAX;");
 }
 
 test "java: CDR helpers include _cdrWriteFixed and _cdrReadFixed" {

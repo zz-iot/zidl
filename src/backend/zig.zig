@@ -332,7 +332,7 @@ const Generator = struct {
             try self.print("    _base: {s} = .{{}},\n", .{base_zig});
         }
         for (s.members) |m| {
-            try self.emitField(m.name, m.type_ref, m.dimensions, m.annotations.is_optional);
+            try self.emitField(m.name, m.type_ref, m.dimensions, m.annotations.is_optional, m.annotations.default_value);
         }
         // Emit serialize fns when full typesupport is requested, or when
         // --zig-pl-cdr is set (PL_CDR fns are part of the struct, not TypeSupport).
@@ -1094,7 +1094,7 @@ const Generator = struct {
         try self.ind();
         try self.print("pub const {s}{s} = struct {{\n", .{ pfx, e.name });
         for (e.members) |m| {
-            try self.emitField(m.name, m.type_ref, m.dimensions, false);
+            try self.emitField(m.name, m.type_ref, m.dimensions, false, null);
         }
         try self.ind();
         try self.print("}}; // {s}{s}\n\n", .{ pfx, e.name });
@@ -1873,6 +1873,7 @@ const Generator = struct {
         type_ref: ir.TypeRef,
         dims: []const u64,
         is_optional: bool,
+        default_value: ?ir.AnnotationParamValue,
     ) !void {
         const zig_type = try self.typeRefToZig(type_ref);
         defer self.alloc.free(zig_type);
@@ -1880,18 +1881,49 @@ const Generator = struct {
         try self.ind();
 
         if (is_optional) {
-            try self.print("    {s}: ?{s} = null,\n", .{ name, zig_type });
+            if (default_value) |dv| {
+                const dv_str = try self.formatDefaultValueZig(dv, type_ref);
+                defer self.alloc.free(dv_str);
+                try self.print("    {s}: ?{s} = {s},\n", .{ name, zig_type, dv_str });
+            } else {
+                try self.print("    {s}: ?{s} = null,\n", .{ name, zig_type });
+            }
         } else if (dims.len > 0) {
             const arr_type = try self.makeArrayType(zig_type, dims);
             defer self.alloc.free(arr_type);
             const default = try self.defaultForArrayType(arr_type);
             defer self.alloc.free(default);
             try self.print("    {s}: {s} = {s},\n", .{ name, arr_type, default });
+        } else if (default_value) |dv| {
+            const dv_str = try self.formatDefaultValueZig(dv, type_ref);
+            defer self.alloc.free(dv_str);
+            try self.print("    {s}: {s} = {s},\n", .{ name, zig_type, dv_str });
         } else {
             const default = try self.defaultForTypeRef(type_ref);
             defer self.alloc.free(default);
             try self.print("    {s}: {s} = {s},\n", .{ name, zig_type, default });
         }
+    }
+
+    /// Format an `AnnotationParamValue` as a Zig literal expression.
+    fn formatDefaultValueZig(self: *Generator, dv: ir.AnnotationParamValue, type_ref: ir.TypeRef) ![]u8 {
+        _ = type_ref;
+        return switch (dv) {
+            .integer => |v| std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            .float => |v| std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            .boolean => |v| self.alloc.dupe(u8, if (v) "true" else "false"),
+            .character => |v| if (std.ascii.isPrint(v) and v != '\'' and v != '\\')
+                std.fmt.allocPrint(self.alloc, "'{c}'", .{v})
+            else
+                std.fmt.allocPrint(self.alloc, "'\\x{X:0>2}'", .{v}),
+            .string => |s| blk: {
+                const esc = try escapeStringLiteral(self.alloc, s);
+                defer self.alloc.free(esc);
+                break :blk std.fmt.allocPrint(self.alloc, "\"{s}\"", .{esc});
+            },
+            .scoped_name => |n| self.alloc.dupe(u8, n),
+            else => self.alloc.dupe(u8, "undefined"),
+        };
     }
 
     // ── CDR serialization emission ────────────────────────────────────────────
@@ -3830,6 +3862,28 @@ const Generator = struct {
 };
 
 // ── Static helpers ────────────────────────────────────────────────────────────
+
+fn escapeStringLiteral(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    for (s) |c| {
+        switch (c) {
+            '\\' => try buf.appendSlice(alloc, "\\\\"),
+            '"' => try buf.appendSlice(alloc, "\\\""),
+            '\n' => try buf.appendSlice(alloc, "\\n"),
+            '\r' => try buf.appendSlice(alloc, "\\r"),
+            '\t' => try buf.appendSlice(alloc, "\\t"),
+            0 => try buf.appendSlice(alloc, "\\x00"),
+            else => if (c >= 0x20 and c <= 0x7e) {
+                try buf.append(alloc, c);
+            } else {
+                var tmp: [4]u8 = undefined;
+                const hex = std.fmt.bufPrint(&tmp, "\\x{X:0>2}", .{c}) catch unreachable;
+                try buf.appendSlice(alloc, hex);
+            },
+        }
+    }
+    return buf.toOwnedSlice(alloc);
+}
 
 fn baseToZigType(b: ast.BaseTypeSpec) []const u8 {
     return switch (b) {
@@ -5815,4 +5869,64 @@ test "zig_backend: module named 'dds' does not produce duplicate const dds" {
     try testing.expect(!has(s, "const dds = @import(\"dds\");"));
     try testing.expect(has(s, "pub const TopicDataWriter = struct {"));
     try testing.expect(has(s, "_dw: _dds.DataWriter,"));
+}
+
+test "zig_backend: @default on non-optional field sets initializer" {
+    var h = try testGen(
+        \\struct Cfg {
+        \\    @default(7400) unsigned short base_port;
+        \\    @default(TRUE) boolean active;
+        \\    @default("hello") string label;
+        \\};
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    const s = h.items;
+    try testing.expect(has(s, "base_port: u16 = 7400,"));
+    try testing.expect(has(s, "active: bool = true,"));
+    try testing.expect(has(s, "label: []const u8 = \"hello\","));
+}
+
+test "zig_backend: @optional with @default sets typed optional initializer" {
+    var h = try testGen(
+        \\struct Cfg {
+        \\    @optional @default(42) long val;
+        \\};
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "val: ?i32 = 42,"));
+}
+
+test "zig_backend: @optional without @default initializes to null" {
+    var h = try testGen(
+        \\struct Cfg {
+        \\    @optional long val;
+        \\};
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "val: ?i32 = null,"));
+}
+
+test "zig_backend: @default float field sets initializer" {
+    var h = try testGen(
+        \\struct Cfg { @default(3.14) float speed; };
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "speed: f32 = 3.14,"));
+}
+
+test "zig_backend: @default char field emits character literal" {
+    var h = try testGen(
+        \\struct Cfg { @default('A') char c; };
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "c: u8 = 'A',"));
+}
+
+test "zig_backend: @default scoped_name emits identifier" {
+    var h = try testGen(
+        \\const long MY_MAX = 100;
+        \\struct Cfg { @default(MY_MAX) long limit; };
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "limit: i32 = MY_MAX,"));
 }

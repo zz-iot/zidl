@@ -146,6 +146,16 @@ pub const Parser = struct {
         return self.fail(tok.span, "expected identifier, got '{s}'", .{tok.source});
     }
 
+    /// Like `expectIdent` but also accepts keyword tokens used as annotation
+    /// names (e.g. `@default`, `@in`, `@abstract`).
+    fn expectIdentOrKeyword(self: *Parser) ParseError!Token {
+        const tok = self.peek();
+        if (tok.kind == .identifier or tok.kind.isKeyword()) {
+            return self.advance();
+        }
+        return self.fail(tok.span, "expected identifier, got '{s}'", .{tok.source});
+    }
+
     /// Append an error diagnostic and return `error.UnexpectedToken`.
     /// Returns `error.OutOfMemory` if the allocator fails while formatting.
     pub fn fail(
@@ -457,6 +467,39 @@ pub const Parser = struct {
         while (self.peek().kind == .scope) {
             _ = self.advance(); // consume ::
             const part = try self.expectIdent();
+            try parts.append(self.alloc, part.source);
+        }
+
+        const parts_slice = try parts.toOwnedSlice(self.alloc);
+        const span_end = self.peek().span.start;
+        return ast.ScopedName{
+            .absolute = absolute,
+            .parts = parts_slice,
+            .span = .{
+                .start = start,
+                .end = span_end,
+            },
+        };
+    }
+
+    /// Like `parseScopedName` but accepts keywords as name parts, needed for
+    /// annotation names such as `@default` or `@in`.
+    fn parseAnnotationName(self: *Parser) ParseError!ast.ScopedName {
+        const start = self.peek().span.start;
+
+        var absolute = false;
+        if (self.peek().kind == .scope) {
+            _ = self.advance();
+            absolute = true;
+        }
+
+        var parts = std.ArrayListUnmanaged([]const u8).empty;
+        const first = try self.expectIdentOrKeyword();
+        try parts.append(self.alloc, first.source);
+
+        while (self.peek().kind == .scope) {
+            _ = self.advance(); // consume ::
+            const part = try self.expectIdentOrKeyword();
             try parts.append(self.alloc, part.source);
         }
 
@@ -1151,7 +1194,7 @@ pub const Parser = struct {
     /// Parse a single `@name [(params)]` annotation application (rule 225).
     pub fn parseAnnotationAppl(self: *Parser) ParseError!ast.AnnotationAppl {
         const at_tok = try self.expect(.at);
-        const name = try self.parseScopedName();
+        const name = try self.parseAnnotationName();
         if (self.eat(.lparen) == null) {
             return .{
                 .name = name,
@@ -5146,4 +5189,24 @@ test "annotation_dcl: const member" {
     const ann = def.kind.annotation_dcl;
     try testing.expect(ann.members[0] == .const_dcl);
     try testing.expectEqualStrings("MAX", ann.members[0].const_dcl.name);
+}
+
+test "annotation: keyword used as annotation name" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var p = testParser("@default(42)", arena.allocator());
+    const appl = try p.parseAnnotationAppl();
+    try testing.expectEqualStrings("default", appl.name.parts[0]);
+    try testing.expect(appl.params == .positional);
+}
+
+test "annotation: scoped name with keyword part and absolute prefix" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var p = testParser("@::Foo::in", arena.allocator());
+    const appl = try p.parseAnnotationAppl();
+    try testing.expect(appl.name.absolute);
+    try testing.expectEqual(@as(usize, 2), appl.name.parts.len);
+    try testing.expectEqualStrings("Foo", appl.name.parts[0]);
+    try testing.expectEqualStrings("in", appl.name.parts[1]);
 }

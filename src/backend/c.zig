@@ -502,6 +502,16 @@ const Generator = struct {
         const c_name = try self.prefixedCName(s.qualified_name);
         defer self.alloc.free(c_name);
 
+        const has_optional = structHasOptional(s);
+
+        if (has_optional) {
+            var opt_count: u32 = 0;
+            for (s.members) |m| {
+                if (m.annotations.is_optional) opt_count += 1;
+            }
+            if (opt_count > 64) return error.TooManyOptionalMembers;
+        }
+
         try self.emitVerbatimForPlacement(s.annotations.raw, "before-declaration");
         try self.print("typedef struct {s}_s {{\n", .{c_name});
         if (s.base) |base| {
@@ -509,13 +519,48 @@ const Generator = struct {
             defer self.alloc.free(base_c);
             try self.print("    {s} _base;\n", .{base_c});
         }
+        if (has_optional) {
+            try self.write("    uint64_t _present;\n");
+        }
         for (s.members) |m| {
             try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, "    ");
         }
         try self.print("}} {s};\n\n", .{c_name});
 
+        if (has_optional) {
+            for (s.members, 0..) |m, idx| {
+                if (!m.annotations.is_optional) continue;
+                const bit_idx = optBitIdxForMember(s.*, idx);
+                try self.print(
+                    "#define {s}_has_{s}(p)   ((p)->_present & (1ULL << {d}u))\n",
+                    .{ c_name, m.name, bit_idx },
+                );
+                // _set_ macros use scalar assignment; skip for array-backed fields
+                // (fixed-length arrays and bounded strings/wstrings).
+                const is_array_backed = m.dimensions.len > 0 or switch (m.type_ref) {
+                    .string => |b| b != null,
+                    .wstring => |b| b != null,
+                    else => false,
+                };
+                if (!is_array_backed) {
+                    const ct = try self.typeRefToC(m.type_ref);
+                    defer self.alloc.free(ct);
+                    try self.print(
+                        "#define {s}_set_{s}(p, v) ((p)->{s} = ({s})(v), (void)((p)->_present |= (1ULL << {d}u)))\n",
+                        .{ c_name, m.name, m.name, ct, bit_idx },
+                    );
+                }
+            }
+            try self.write("\n");
+        }
+
         if (!self.opts.no_typesupport) {
             try self.emitStructCdrProtos(c_name, s);
+            if (structHasDefault(s)) {
+                const em = self.opts.export_macro;
+                const sp: []const u8 = if (em.len > 0) " " else "";
+                try self.print("{s}{s}void {s}_apply_defaults({s} *_v);\n\n", .{ em, sp, c_name, c_name });
+            }
         }
         try self.emitVerbatimForPlacement(s.annotations.raw, "after-declaration");
     }
@@ -1090,6 +1135,43 @@ fn memberIdAtC(m: ir.StructMember, idx: usize) u32 {
     return if (m.annotations.id) |id| id else @intCast(idx);
 }
 
+/// Returns the sequential index of `s.members[target_idx]` among optional
+/// members (0, 1, 2, …).  Used as the bit position in `_present`; distinct
+/// from the XTYPES `@id` value which is used only for EMHEADER member IDs.
+fn optBitIdxForMember(s: ir.Struct, target_idx: usize) u32 {
+    var count: u32 = 0;
+    for (s.members[0..target_idx]) |m| {
+        if (m.annotations.is_optional) count += 1;
+    }
+    return count;
+}
+
+/// Re-escape a decoded string value for embedding in a C/C++ string literal.
+fn escapeStringC(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    for (s) |c| {
+        switch (c) {
+            '\\' => try buf.appendSlice(alloc, "\\\\"),
+            '"' => try buf.appendSlice(alloc, "\\\""),
+            '\n' => try buf.appendSlice(alloc, "\\n"),
+            '\r' => try buf.appendSlice(alloc, "\\r"),
+            '\t' => try buf.appendSlice(alloc, "\\t"),
+            0 => try buf.appendSlice(alloc, "\\000"),
+            else => if (c >= 0x20 and c <= 0x7e) {
+                try buf.append(alloc, c);
+            } else {
+                // Octal escapes (\OOO) instead of \xHH: C/C++ \x is greedy
+                // and would consume any following hex digit as part of the
+                // escape, silently producing the wrong character.
+                var tmp: [4]u8 = undefined;
+                const oct = std.fmt.bufPrint(&tmp, "\\{o:0>3}", .{c}) catch unreachable;
+                try buf.appendSlice(alloc, oct);
+            },
+        }
+    }
+    return buf.toOwnedSlice(alloc);
+}
+
 fn typeDeclHasKeyC(td: ir.TypeDecl) bool {
     return switch (td) {
         .struct_ => |s| structHasKeyC(s),
@@ -1111,6 +1193,20 @@ fn isDefaultUnionCase(cas: ir.UnionCase) bool {
     if (cas.labels.len == 0) return true;
     for (cas.labels) |lbl| {
         if (lbl == .default) return true;
+    }
+    return false;
+}
+
+fn structHasOptional(s: *const ir.Struct) bool {
+    for (s.members) |m| {
+        if (m.annotations.is_optional) return true;
+    }
+    return false;
+}
+
+fn structHasDefault(s: *const ir.Struct) bool {
+    for (s.members) |m| {
+        if (m.annotations.is_optional and m.annotations.default_value != null) return true;
     }
     return false;
 }
@@ -1311,7 +1407,10 @@ const CdrGenerator = struct {
 
     fn emitTypeDecl(self: *CdrGenerator, td: ir.TypeDecl) !void {
         switch (td) {
-            .struct_ => |s| try self.emitStructFns(s),
+            .struct_ => |s| {
+                try self.emitStructFns(s);
+                if (structHasDefault(s)) try self.emitApplyDefaults(s);
+            },
             .exception => |e| try self.emitExceptionFns(e),
             .union_ => |u| try self.emitUnionFns(u),
             else => {},
@@ -1321,6 +1420,14 @@ const CdrGenerator = struct {
     // ── Struct / Exception ────────────────────────────────────────────────────
 
     fn emitStructFns(self: *CdrGenerator, s: *const ir.Struct) !void {
+        if (structHasOptional(s)) {
+            var opt_count: u32 = 0;
+            for (s.members) |m| {
+                if (m.annotations.is_optional) opt_count += 1;
+            }
+            if (opt_count > 64) return error.TooManyOptionalMembers;
+        }
+
         const c_name = try self.prefixedCName(s.qualified_name);
         defer self.alloc.free(c_name);
 
@@ -1343,8 +1450,36 @@ const CdrGenerator = struct {
                 const member_id: u32 = memberIdAtC(m, idx);
                 const mu: u8 = if (m.annotations.must_understand) 1 else 0;
                 if (m.annotations.is_optional) {
-                    // @optional in C is deferred: no has_ field is emitted in the struct.
-                    try self.printI("/* TODO: @optional {s} */\n", .{m.name});
+                    // @mutable + @optional: only emit EMHEADER when the bit is set in _present.
+                    const bit_idx = optBitIdxForMember(s.*, idx);
+                    try self.printI("if (_v->_present & (1ULL << {d}u)) {{\n", .{bit_idx});
+                    self.indent_depth += 1;
+                    const access_opt = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
+                    defer self.alloc.free(access_opt);
+                    if (lcForCTypeRef(m.type_ref, m.dimensions)) |lc| {
+                        try self.printI("_rc = zidl_cdr_write_emheader(_w, {d}, {d}, {d});\n", .{ member_id, mu, lc });
+                        try self.writeI("if (_rc) return _rc;\n");
+                        if (m.dimensions.len > 0) {
+                            try self.emitWriteArray(m.type_ref, access_opt, m.dimensions, 0);
+                        } else {
+                            try self.emitWriteForTypeRef(m.type_ref, m.name, access_opt);
+                        }
+                    } else {
+                        try self.printI("{{ size_t _em{d} = 0, _es{d} = 0;\n", .{ idx, idx });
+                        self.indent_depth += 1;
+                        try self.printI("_rc = zidl_cdr_reserve_emheader(_w, {d}, {d}, &_em{d});\n", .{ member_id, mu, idx });
+                        try self.writeI("if (_rc) return _rc;\n");
+                        try self.printI("_es{d} = _w->len;\n", .{idx});
+                        if (m.dimensions.len > 0) {
+                            try self.emitWriteArray(m.type_ref, access_opt, m.dimensions, 0);
+                        } else {
+                            try self.emitWriteForTypeRef(m.type_ref, m.name, access_opt);
+                        }
+                        try self.printI("zidl_cdr_patch_emheader(_w, _em{d}, _es{d}); }}\n", .{ idx, idx });
+                        self.indent_depth -= 1;
+                    }
+                    self.indent_depth -= 1;
+                    try self.writeI("}\n");
                     continue;
                 }
                 const access = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
@@ -1387,9 +1522,23 @@ const CdrGenerator = struct {
                 try self.printI("_rc = {s}_serialize(_w, &_v->_base);\n", .{base_c});
                 try self.writeI("if (_rc) return _rc;\n");
             }
-            for (s.members) |m| {
+            for (s.members, 0..) |m, idx| {
                 if (m.annotations.is_optional) {
-                    try self.printI("/* TODO: @optional {s} */\n", .{m.name});
+                    // @final/@appendable + @optional: write bool presence flag then value.
+                    const bit_idx = optBitIdxForMember(s.*, idx);
+                    try self.printI("_rc = zidl_cdr_write_bool(_w, (_v->_present & (1ULL << {d}u)) ? 1 : 0);\n", .{bit_idx});
+                    try self.writeI("if (_rc) return _rc;\n");
+                    try self.printI("if (_v->_present & (1ULL << {d}u)) {{\n", .{bit_idx});
+                    self.indent_depth += 1;
+                    const access_opt = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
+                    defer self.alloc.free(access_opt);
+                    if (m.dimensions.len > 0) {
+                        try self.emitWriteArray(m.type_ref, access_opt, m.dimensions, 0);
+                    } else {
+                        try self.emitWriteForTypeRef(m.type_ref, m.name, access_opt);
+                    }
+                    self.indent_depth -= 1;
+                    try self.writeI("}\n");
                     continue;
                 }
                 const access = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
@@ -1412,6 +1561,7 @@ const CdrGenerator = struct {
         try self.print("int {s}_deserialize(ZidlCdrReader *_r, {s} *_v) {{\n", .{ c_name, c_name });
         if (mutable) {
             try self.writeI("int _rc;\n");
+            if (structHasOptional(s)) try self.writeI("_v->_present = 0;\n");
             try self.writeI("size_t _em_end;\n");
             try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_em_end);\n");
             try self.writeI("if (_rc) return _rc;\n");
@@ -1427,9 +1577,11 @@ const CdrGenerator = struct {
                 try self.printI("case {d}: {{\n", .{member_id});
                 self.indent_depth += 1;
                 if (m.annotations.is_optional) {
-                    // @optional in C is deferred: no has_ field is emitted in the struct.
-                    try self.printI("/* TODO: @optional {s} */\n", .{m.name});
-                } else {
+                    // @mutable + @optional: receiving the EMHEADER means the field is present.
+                    const bit_idx = optBitIdxForMember(s.*, idx);
+                    try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit_idx});
+                }
+                {
                     const lval = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
                     defer self.alloc.free(lval);
                     if (m.dimensions.len > 0) {
@@ -1457,6 +1609,7 @@ const CdrGenerator = struct {
             try self.write("}\n\n");
         } else {
             try self.writeI("int _rc;\n");
+            if (structHasOptional(s)) try self.writeI("_v->_present = 0;\n");
             if (appendable) {
                 try self.writeI("_rc = zidl_cdr_skip_dheader_if_xcdr2(_r);\n");
                 try self.writeI("if (_rc) return _rc;\n");
@@ -1467,9 +1620,28 @@ const CdrGenerator = struct {
                 try self.printI("_rc = {s}_deserialize(_r, &_v->_base);\n", .{base_c});
                 try self.writeI("if (_rc) return _rc;\n");
             }
-            for (s.members) |m| {
+            for (s.members, 0..) |m, idx| {
                 if (m.annotations.is_optional) {
-                    try self.printI("/* TODO: @optional {s} */\n", .{m.name});
+                    // @final/@appendable + @optional: read bool flag then value.
+                    const bit_idx = optBitIdxForMember(s.*, idx);
+                    try self.printI("{{ bool _ip_{s};\n", .{m.name});
+                    self.indent_depth += 1;
+                    try self.printI("_rc = zidl_cdr_read_bool(_r, &_ip_{s});\n", .{m.name});
+                    try self.writeI("if (_rc) return _rc;\n");
+                    try self.printI("if (_ip_{s}) {{\n", .{m.name});
+                    self.indent_depth += 1;
+                    const lval_opt = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
+                    defer self.alloc.free(lval_opt);
+                    if (m.dimensions.len > 0) {
+                        try self.emitReadArray(m.type_ref, m.name, lval_opt, m.dimensions, 0);
+                    } else {
+                        try self.emitReadForTypeRef(m.type_ref, m.name, lval_opt);
+                    }
+                    try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit_idx});
+                    self.indent_depth -= 1;
+                    try self.writeI("}\n");
+                    self.indent_depth -= 1;
+                    try self.writeI("}\n");
                     continue;
                 }
                 const lval = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
@@ -1569,7 +1741,7 @@ const CdrGenerator = struct {
                     const member_id: u32 = memberIdAtC(m, idx);
                     try self.printI("case {d}: {{\n", .{member_id});
                     self.indent_depth += 1;
-                    try self.emitReadPresentMember(m);
+                    try self.emitReadPresentMember(m, optBitIdxForMember(s.*, idx));
                     try self.writeI("break;\n");
                     self.indent_depth -= 1;
                     try self.writeI("}\n");
@@ -1627,9 +1799,9 @@ const CdrGenerator = struct {
                         }
                     }
                 }
-                for (s.members) |m| {
+                for (s.members, 0..) |m, idx| {
                     if (m.annotations.is_key) {
-                        try self.emitReadMember(m);
+                        try self.emitReadPresentMember(m, optBitIdxForMember(s.*, idx));
                     }
                 }
                 if (appendable) {
@@ -1696,7 +1868,7 @@ const CdrGenerator = struct {
                     const member_id: u32 = memberIdAtC(m, idx);
                     try self.printI("case {d}: {{\n", .{member_id});
                     self.indent_depth += 1;
-                    try self.emitReadPresentMember(m);
+                    try self.emitReadPresentMember(m, optBitIdxForMember(s.*, idx));
                     try self.writeI("break;\n");
                     self.indent_depth -= 1;
                     try self.writeI("}\n");
@@ -1730,9 +1902,9 @@ const CdrGenerator = struct {
                 try self.writeI("_key_end = _r->pos + (size_t)_dh_size;\n");
                 self.indent_depth -= 1;
                 try self.writeI("}\n");
-                for (s.members) |m| {
+                for (s.members, 0..) |m, idx| {
                     if (m.annotations.is_key) {
-                        try self.emitReadMember(m);
+                        try self.emitReadPresentMember(m, optBitIdxForMember(s.*, idx));
                     }
                     // Non-key members are NOT skipped: seek_to(_key_end) handles
                     // both trailing non-key bytes (full payload) and their absence
@@ -1745,9 +1917,9 @@ const CdrGenerator = struct {
                 }
             } else {
                 // @final: key fields are leading — read them and stop.
-                for (s.members) |m| {
+                for (s.members, 0..) |m, idx| {
                     if (m.annotations.is_key) {
-                        try self.emitReadMember(m);
+                        try self.emitReadPresentMember(m, optBitIdxForMember(s.*, idx));
                     }
                 }
             }
@@ -2411,10 +2583,6 @@ const CdrGenerator = struct {
     }
 
     fn emitReadMember(self: *CdrGenerator, m: ir.StructMember) anyerror!void {
-        if (m.annotations.is_optional) {
-            try self.printI("/* TODO: @optional key member {s} */\n", .{m.name});
-            return;
-        }
         const lval = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
         defer self.alloc.free(lval);
         if (m.dimensions.len > 0) {
@@ -2424,9 +2592,9 @@ const CdrGenerator = struct {
         }
     }
 
-    fn emitReadPresentMember(self: *CdrGenerator, m: ir.StructMember) anyerror!void {
+    fn emitReadPresentMember(self: *CdrGenerator, m: ir.StructMember, bit_idx: u32) anyerror!void {
         if (m.annotations.is_optional) {
-            try self.printI("_v->has_{s} = 1;\n", .{m.name});
+            try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit_idx});
         }
         const lval = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
         defer self.alloc.free(lval);
@@ -2747,6 +2915,70 @@ const CdrGenerator = struct {
 
     fn prefixedCName(self: *CdrGenerator, qname: []const u8) ![]u8 {
         return interface.prefixedCNameFromQualified(self.alloc, qname, self.opts.type_prefix);
+    }
+
+    /// Emit `void <CName>_apply_defaults(<CName> *_v)` which sets each absent
+    /// @optional field that carries a @default annotation to its default value.
+    fn emitApplyDefaults(self: *CdrGenerator, s: *const ir.Struct) !void {
+        const c_name = try self.prefixedCName(s.qualified_name);
+        defer self.alloc.free(c_name);
+
+        try self.print("void {s}_apply_defaults({s} *_v) {{\n", .{ c_name, c_name });
+        for (s.members, 0..) |m, idx| {
+            if (!m.annotations.is_optional) continue;
+            const dv = m.annotations.default_value orelse continue;
+            const bit_idx = optBitIdxForMember(s.*, idx);
+            const is_string = switch (dv) {
+                .string => true,
+                else => false,
+            };
+            const dv_str = try self.defaultValueToC(dv, m.type_ref);
+            defer self.alloc.free(dv_str);
+            try self.printI("if (!(_v->_present & (1ULL << {d}u))) {{\n", .{bit_idx});
+            self.indent_depth += 1;
+            if (is_string) {
+                // strdup can return NULL on OOM; only assign on success.
+                try self.printI("char *_s = {s};\n", .{dv_str});
+                try self.printI("if (_s) {{\n", .{});
+                self.indent_depth += 1;
+                try self.printI("_v->{s} = _s;\n", .{m.name});
+                try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit_idx});
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            } else {
+                try self.printI("_v->{s} = {s};\n", .{ m.name, dv_str });
+                try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit_idx});
+            }
+            self.indent_depth -= 1;
+            try self.writeI("}\n");
+        }
+        try self.write("}\n\n");
+    }
+
+    /// Format an `AnnotationParamValue` as a C literal expression.
+    fn defaultValueToC(self: *CdrGenerator, dv: ir.AnnotationParamValue, type_ref: ir.TypeRef) ![]u8 {
+        return switch (dv) {
+            .integer => |v| std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            .float => |v| switch (type_ref) {
+                .base => |b| switch (b) {
+                    .float => std.fmt.allocPrint(self.alloc, "{d}f", .{v}),
+                    else => std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+                },
+                else => std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            },
+            .boolean => |v| self.alloc.dupe(u8, if (v) "1" else "0"),
+            .character => |v| if (std.ascii.isPrint(v) and v != '\'' and v != '\\')
+                std.fmt.allocPrint(self.alloc, "'{c}'", .{v})
+            else
+                std.fmt.allocPrint(self.alloc, "((char)0x{X:0>2})", .{v}),
+            .string => |s| blk: {
+                const esc = try escapeStringC(self.alloc, s);
+                defer self.alloc.free(esc);
+                break :blk std.fmt.allocPrint(self.alloc, "strdup(\"{s}\")", .{esc});
+            },
+            .scoped_name => |n| self.alloc.dupe(u8, n),
+            else => self.alloc.dupe(u8, "0"),
+        };
     }
 
     /// Return the C type string for a sequence element (used in malloc cast).
@@ -3161,6 +3393,7 @@ fn testGenFullOpts(source: []const u8, stem: []const u8, extra: struct {
     pragma_once: bool = false,
     extern_c: bool = false,
     export_macro: []const u8 = "",
+    no_typesupport: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
 
@@ -3187,6 +3420,7 @@ fn testGenFullOpts(source: []const u8, stem: []const u8, extra: struct {
         .pragma_once = extra.pragma_once,
         .extern_c = extra.extern_c,
         .export_macro = extra.export_macro,
+        .no_typesupport = extra.no_typesupport,
     };
     try generateHeader(alloc, &ir_spec, opts, &out);
 
@@ -4083,4 +4317,207 @@ test "c_backend: @verbatim language=cpp not emitted in C output" {
     , "foo");
     defer out.deinit(testing.allocator);
     try testing.expect(!has(out.items, "/* cpp only */"));
+}
+
+test "c_backend: @optional field emits _present bitmask and macros" {
+    var h = try testGen(
+        \\@mutable struct Cfg {
+        \\    @id(3) @optional unsigned short port_base;
+        \\    long always_present;
+        \\};
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    const s = h.items;
+    try testing.expect(has(s, "uint64_t _present;"));
+    try testing.expect(has(s, "uint16_t port_base;"));
+    try testing.expect(has(s, "int32_t always_present;"));
+    try testing.expect(has(s, "Cfg_has_port_base(p)"));
+    try testing.expect(has(s, "(1ULL << 0u)"));
+    try testing.expect(has(s, "Cfg_set_port_base(p, v)"));
+    try testing.expect(!has(s, "TODO"));
+}
+
+test "c_backend: @optional array member emits _has_ but no _set_ macro" {
+    var h = try testGen(
+        \\struct Cfg {
+        \\    @optional long values[2];
+        \\    @optional string<8> name;
+        \\    @optional long scalar;
+        \\};
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    const s = h.items;
+    try testing.expect(has(s, "Cfg_has_values(p)"));
+    try testing.expect(!has(s, "Cfg_set_values(p, v)"));
+    try testing.expect(has(s, "Cfg_has_name(p)"));
+    try testing.expect(!has(s, "Cfg_set_name(p, v)"));
+    try testing.expect(has(s, "Cfg_has_scalar(p)"));
+    try testing.expect(has(s, "Cfg_set_scalar(p, v)"));
+}
+
+test "c_backend: struct without @optional has no _present field" {
+    var h = try testGen("struct Plain { long x; long y; };", "p");
+    defer h.deinit(testing.allocator);
+    try testing.expect(!has(h.items, "_present"));
+}
+
+test "c_backend cdr: @mutable @optional serialize checks _present" {
+    var src = try testGenCdr(
+        \\@mutable struct Cfg {
+        \\    @id(3) @optional unsigned short port_base;
+        \\};
+    , "cfg");
+    defer src.deinit(testing.allocator);
+    const s = src.items;
+    try testing.expect(has(s, "_v->_present & (1ULL << 0u)"));
+    try testing.expect(!has(s, "TODO"));
+}
+
+test "c_backend cdr: @mutable @optional deserialize sets _present" {
+    var src = try testGenCdr(
+        \\@mutable struct Cfg {
+        \\    @id(3) @optional unsigned short port_base;
+        \\};
+    , "cfg");
+    defer src.deinit(testing.allocator);
+    const s = src.items;
+    try testing.expect(has(s, "_v->_present |= (1ULL << 0u)"));
+    try testing.expect(!has(s, "TODO"));
+}
+
+test "c_backend cdr: @final @optional serialize writes bool flag" {
+    var src = try testGenCdr(
+        \\struct Cfg {
+        \\    @id(1) @optional unsigned short port_base;
+        \\};
+    , "cfg");
+    defer src.deinit(testing.allocator);
+    const s = src.items;
+    try testing.expect(has(s, "zidl_cdr_write_bool"));
+    try testing.expect(has(s, "_v->_present & (1ULL << 0u)"));
+    try testing.expect(!has(s, "TODO"));
+}
+
+test "c_backend cdr: @final @optional deserialize reads bool flag" {
+    var src = try testGenCdr(
+        \\struct Cfg {
+        \\    @id(1) @optional unsigned short port_base;
+        \\};
+    , "cfg");
+    defer src.deinit(testing.allocator);
+    const s = src.items;
+    try testing.expect(has(s, "bool _ip_port_base;"));
+    try testing.expect(has(s, "zidl_cdr_read_bool(_r, &_ip_port_base)"));
+    try testing.expect(has(s, "_v->_present |= (1ULL << 0u)"));
+    try testing.expect(!has(s, "int8_t _ip_"));
+    try testing.expect(!has(s, "TODO"));
+}
+
+test "c_backend cdr: @mutable @optional deserialize clears _present first" {
+    var src = try testGenCdr(
+        \\@mutable struct Cfg {
+        \\    @id(3) @optional unsigned short port_base;
+        \\};
+    , "cfg");
+    defer src.deinit(testing.allocator);
+    try testing.expect(has(src.items, "_v->_present = 0;"));
+}
+
+test "c_backend cdr: @final @optional deserialize clears _present first" {
+    var src = try testGenCdr(
+        \\struct Cfg {
+        \\    @optional unsigned short port_base;
+        \\};
+    , "cfg");
+    defer src.deinit(testing.allocator);
+    try testing.expect(has(src.items, "_v->_present = 0;"));
+}
+
+test "c_backend cdr: struct without @optional has no _present clear in deserialize" {
+    var src = try testGenCdr("struct Plain { long x; long y; };", "p");
+    defer src.deinit(testing.allocator);
+    try testing.expect(!has(src.items, "_present = 0"));
+}
+
+test "c_backend cdr: @default emits apply_defaults prototype and implementation" {
+    const idl =
+        \\@mutable struct UdpConfig {
+        \\    @id(3) @optional @default(7400) unsigned short port_base;
+        \\    @id(6) @optional @default("239.255.0.1") string multicast_group_v4;
+        \\};
+    ;
+    var h = try testGen(idl, "udp");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "void UdpConfig_apply_defaults(UdpConfig *_v);"));
+    try testing.expect(!has(h.items, "TODO"));
+
+    var src = try testGenCdr(idl, "udp");
+    defer src.deinit(testing.allocator);
+    const s = src.items;
+    try testing.expect(has(s, "void UdpConfig_apply_defaults(UdpConfig *_v)"));
+    try testing.expect(has(s, "_v->port_base = 7400;"));
+    try testing.expect(has(s, "char *_s = strdup(\"239.255.0.1\");"));
+    try testing.expect(has(s, "_v->multicast_group_v4 = _s;"));
+    try testing.expect(!has(s, "TODO"));
+}
+
+test "c_backend: >64 @optional members returns TooManyOptionalMembers" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    try buf.appendSlice(testing.allocator, "struct Big {\n");
+    for (0..65) |i| {
+        const line = try std.fmt.allocPrint(testing.allocator, "    @optional long m{d};\n", .{i});
+        defer testing.allocator.free(line);
+        try buf.appendSlice(testing.allocator, line);
+    }
+    try buf.appendSlice(testing.allocator, "};\n");
+    const result = testGen(buf.items, "big");
+    try testing.expectError(error.TooManyOptionalMembers, result);
+    const cdr_result = testGenCdr(buf.items, "big");
+    try testing.expectError(error.TooManyOptionalMembers, cdr_result);
+}
+
+test "c_backend cdr: @default char in apply_defaults" {
+    const idl =
+        \\struct Cfg {
+        \\    @optional @default('A') char c;
+        \\};
+    ;
+    var src = try testGenCdr(idl, "cfg");
+    defer src.deinit(testing.allocator);
+    try testing.expect(has(src.items, "_v->c = 'A';"));
+}
+
+test "c_backend cdr: @default scoped_name in apply_defaults" {
+    const idl =
+        \\const long MY_MAX = 100;
+        \\struct Cfg {
+        \\    @optional @default(MY_MAX) long limit;
+        \\};
+    ;
+    var src = try testGenCdr(idl, "cfg");
+    defer src.deinit(testing.allocator);
+    try testing.expect(has(src.items, "_v->limit = MY_MAX;"));
+}
+
+test "c_backend cdr: @default string with non-ASCII uses octal escape" {
+    const idl =
+        \\struct Cfg {
+        \\    @optional @default("\001") string s;
+        \\};
+    ;
+    var src = try testGenCdr(idl, "cfg");
+    defer src.deinit(testing.allocator);
+    try testing.expect(has(src.items, "strdup(\"\\001\")"));
+}
+
+test "c_backend: @default prototype absent when no_typesupport" {
+    const idl =
+        \\struct Cfg {
+        \\    @optional @default(42) long val;
+        \\};
+    ;
+    var h = try testGenFullOpts(idl, "cfg", .{ .no_typesupport = true });
+    defer h.deinit(testing.allocator);
+    try testing.expect(!has(h.items, "apply_defaults"));
 }
