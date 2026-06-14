@@ -2917,12 +2917,27 @@ const CdrGenerator = struct {
             if (!m.annotations.is_optional) continue;
             const dv = m.annotations.default_value orelse continue;
             const bit_idx = optBitIdxForMember(s.*, idx);
+            const is_string = switch (dv) {
+                .string => true,
+                else => false,
+            };
             const dv_str = try self.defaultValueToC(dv, m.type_ref);
             defer self.alloc.free(dv_str);
             try self.printI("if (!(_v->_present & (1ULL << {d}u))) {{\n", .{bit_idx});
             self.indent_depth += 1;
-            try self.printI("_v->{s} = {s};\n", .{ m.name, dv_str });
-            try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit_idx});
+            if (is_string) {
+                // strdup can return NULL on OOM; only assign on success.
+                try self.printI("char *_s = {s};\n", .{dv_str});
+                try self.printI("if (_s) {{\n", .{});
+                self.indent_depth += 1;
+                try self.printI("_v->{s} = _s;\n", .{m.name});
+                try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit_idx});
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            } else {
+                try self.printI("_v->{s} = {s};\n", .{ m.name, dv_str });
+                try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit_idx});
+            }
             self.indent_depth -= 1;
             try self.writeI("}\n");
         }
@@ -4384,7 +4399,8 @@ test "c_backend cdr: @default emits apply_defaults prototype and implementation"
     const s = src.items;
     try testing.expect(has(s, "void UdpConfig_apply_defaults(UdpConfig *_v)"));
     try testing.expect(has(s, "_v->port_base = 7400;"));
-    try testing.expect(has(s, "_v->multicast_group_v4 = strdup(\"239.255.0.1\");"));
+    try testing.expect(has(s, "char *_s = strdup(\"239.255.0.1\");"));
+    try testing.expect(has(s, "_v->multicast_group_v4 = _s;"));
     try testing.expect(!has(s, "TODO"));
 }
 
