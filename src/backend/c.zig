@@ -514,13 +514,13 @@ const Generator = struct {
 
         try self.emitVerbatimForPlacement(s.annotations.raw, "before-declaration");
         try self.print("typedef struct {s}_s {{\n", .{c_name});
-        if (has_optional) {
-            try self.write("    uint64_t _present;\n");
-        }
         if (s.base) |base| {
             const base_c = try self.prefixedCName(ir.typeDeclQualifiedName(base));
             defer self.alloc.free(base_c);
             try self.print("    {s} _base;\n", .{base_c});
+        }
+        if (has_optional) {
+            try self.write("    uint64_t _present;\n");
         }
         for (s.members) |m| {
             try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, "    ");
@@ -2917,7 +2917,7 @@ const CdrGenerator = struct {
             if (!m.annotations.is_optional) continue;
             const dv = m.annotations.default_value orelse continue;
             const bit_idx = optBitIdxForMember(s.*, idx);
-            const dv_str = try self.defaultValueToC(dv);
+            const dv_str = try self.defaultValueToC(dv, m.type_ref);
             defer self.alloc.free(dv_str);
             try self.printI("if (!(_v->_present & (1ULL << {d}u))) {{\n", .{bit_idx});
             self.indent_depth += 1;
@@ -2930,10 +2930,16 @@ const CdrGenerator = struct {
     }
 
     /// Format an `AnnotationParamValue` as a C literal expression.
-    fn defaultValueToC(self: *CdrGenerator, dv: ir.AnnotationParamValue) ![]u8 {
+    fn defaultValueToC(self: *CdrGenerator, dv: ir.AnnotationParamValue, type_ref: ir.TypeRef) ![]u8 {
         return switch (dv) {
             .integer => |v| std.fmt.allocPrint(self.alloc, "{d}", .{v}),
-            .float => |v| std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            .float => |v| switch (type_ref) {
+                .base => |b| switch (b) {
+                    .float => std.fmt.allocPrint(self.alloc, "{d}f", .{v}),
+                    else => std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+                },
+                else => std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+            },
             .boolean => |v| self.alloc.dupe(u8, if (v) "1" else "0"),
             .character => |v| if (std.ascii.isPrint(v) and v != '\'' and v != '\\')
                 std.fmt.allocPrint(self.alloc, "'{c}'", .{v})
