@@ -535,12 +535,21 @@ const Generator = struct {
                     "#define {s}_has_{s}(p)   ((p)->_present & (1ULL << {d}u))\n",
                     .{ c_name, m.name, bit_idx },
                 );
-                const ct = try self.typeRefToC(m.type_ref);
-                defer self.alloc.free(ct);
-                try self.print(
-                    "#define {s}_set_{s}(p, v) ((p)->{s} = ({s})(v), (void)((p)->_present |= (1ULL << {d}u)))\n",
-                    .{ c_name, m.name, m.name, ct, bit_idx },
-                );
+                // _set_ macros use scalar assignment; skip for array-backed fields
+                // (fixed-length arrays and bounded strings/wstrings).
+                const is_array_backed = m.dimensions.len > 0 or switch (m.type_ref) {
+                    .string => |b| b != null,
+                    .wstring => |b| b != null,
+                    else => false,
+                };
+                if (!is_array_backed) {
+                    const ct = try self.typeRefToC(m.type_ref);
+                    defer self.alloc.free(ct);
+                    try self.print(
+                        "#define {s}_set_{s}(p, v) ((p)->{s} = ({s})(v), (void)((p)->_present |= (1ULL << {d}u)))\n",
+                        .{ c_name, m.name, m.name, ct, bit_idx },
+                    );
+                }
             }
             try self.write("\n");
         }
@@ -1552,6 +1561,7 @@ const CdrGenerator = struct {
         try self.print("int {s}_deserialize(ZidlCdrReader *_r, {s} *_v) {{\n", .{ c_name, c_name });
         if (mutable) {
             try self.writeI("int _rc;\n");
+            if (structHasOptional(s)) try self.writeI("_v->_present = 0;\n");
             try self.writeI("size_t _em_end;\n");
             try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_em_end);\n");
             try self.writeI("if (_rc) return _rc;\n");
@@ -1599,6 +1609,7 @@ const CdrGenerator = struct {
             try self.write("}\n\n");
         } else {
             try self.writeI("int _rc;\n");
+            if (structHasOptional(s)) try self.writeI("_v->_present = 0;\n");
             if (appendable) {
                 try self.writeI("_rc = zidl_cdr_skip_dheader_if_xcdr2(_r);\n");
                 try self.writeI("if (_rc) return _rc;\n");
@@ -1613,7 +1624,7 @@ const CdrGenerator = struct {
                 if (m.annotations.is_optional) {
                     // @final/@appendable + @optional: read bool flag then value.
                     const bit_idx = optBitIdxForMember(s.*, idx);
-                    try self.printI("{{ int8_t _ip_{s};\n", .{m.name});
+                    try self.printI("{{ bool _ip_{s};\n", .{m.name});
                     self.indent_depth += 1;
                     try self.printI("_rc = zidl_cdr_read_bool(_r, &_ip_{s});\n", .{m.name});
                     try self.writeI("if (_rc) return _rc;\n");
@@ -4326,6 +4337,24 @@ test "c_backend: @optional field emits _present bitmask and macros" {
     try testing.expect(!has(s, "TODO"));
 }
 
+test "c_backend: @optional array member emits _has_ but no _set_ macro" {
+    var h = try testGen(
+        \\struct Cfg {
+        \\    @optional long values[2];
+        \\    @optional string<8> name;
+        \\    @optional long scalar;
+        \\};
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    const s = h.items;
+    try testing.expect(has(s, "Cfg_has_values(p)"));
+    try testing.expect(!has(s, "Cfg_set_values(p, v)"));
+    try testing.expect(has(s, "Cfg_has_name(p)"));
+    try testing.expect(!has(s, "Cfg_set_name(p, v)"));
+    try testing.expect(has(s, "Cfg_has_scalar(p)"));
+    try testing.expect(has(s, "Cfg_set_scalar(p, v)"));
+}
+
 test "c_backend: struct without @optional has no _present field" {
     var h = try testGen("struct Plain { long x; long y; };", "p");
     defer h.deinit(testing.allocator);
@@ -4377,9 +4406,37 @@ test "c_backend cdr: @final @optional deserialize reads bool flag" {
     , "cfg");
     defer src.deinit(testing.allocator);
     const s = src.items;
-    try testing.expect(has(s, "zidl_cdr_read_bool"));
+    try testing.expect(has(s, "bool _ip_port_base;"));
+    try testing.expect(has(s, "zidl_cdr_read_bool(_r, &_ip_port_base)"));
     try testing.expect(has(s, "_v->_present |= (1ULL << 0u)"));
+    try testing.expect(!has(s, "int8_t _ip_"));
     try testing.expect(!has(s, "TODO"));
+}
+
+test "c_backend cdr: @mutable @optional deserialize clears _present first" {
+    var src = try testGenCdr(
+        \\@mutable struct Cfg {
+        \\    @id(3) @optional unsigned short port_base;
+        \\};
+    , "cfg");
+    defer src.deinit(testing.allocator);
+    try testing.expect(has(src.items, "_v->_present = 0;"));
+}
+
+test "c_backend cdr: @final @optional deserialize clears _present first" {
+    var src = try testGenCdr(
+        \\struct Cfg {
+        \\    @optional unsigned short port_base;
+        \\};
+    , "cfg");
+    defer src.deinit(testing.allocator);
+    try testing.expect(has(src.items, "_v->_present = 0;"));
+}
+
+test "c_backend cdr: struct without @optional has no _present clear in deserialize" {
+    var src = try testGenCdr("struct Plain { long x; long y; };", "p");
+    defer src.deinit(testing.allocator);
+    try testing.expect(!has(src.items, "_present = 0"));
 }
 
 test "c_backend cdr: @default emits apply_defaults prototype and implementation" {
