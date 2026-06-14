@@ -1143,9 +1143,12 @@ fn escapeStringC(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
             else => if (c >= 0x20 and c <= 0x7e) {
                 try buf.append(alloc, c);
             } else {
+                // Octal escapes (\OOO) instead of \xHH: C/C++ \x is greedy
+                // and would consume any following hex digit as part of the
+                // escape, silently producing the wrong character.
                 var tmp: [4]u8 = undefined;
-                const hex = std.fmt.bufPrint(&tmp, "\\x{X:0>2}", .{c}) catch unreachable;
-                try buf.appendSlice(alloc, hex);
+                const oct = std.fmt.bufPrint(&tmp, "\\{o:0>3}", .{c}) catch unreachable;
+                try buf.appendSlice(alloc, oct);
             },
         }
     }
