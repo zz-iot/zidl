@@ -769,7 +769,11 @@ const Generator = struct {
                 std.fmt.allocPrint(self.alloc, "'{c}'", .{v})
             else
                 std.fmt.allocPrint(self.alloc, "'\\x{X:0>2}'", .{v}),
-            .string => |s| std.fmt.allocPrint(self.alloc, "\"{s}\"", .{s}),
+            .string => |s| blk: {
+                const esc = try escapeStringLiteral(self.alloc, s);
+                defer self.alloc.free(esc);
+                break :blk std.fmt.allocPrint(self.alloc, "\"{s}\"", .{esc});
+            },
             else => self.alloc.dupe(u8, "{}"),
         };
     }
@@ -807,6 +811,28 @@ const Generator = struct {
 };
 
 // ── Static helpers ────────────────────────────────────────────────────────────
+
+fn escapeStringLiteral(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    for (s) |c| {
+        switch (c) {
+            '\\' => try buf.appendSlice(alloc, "\\\\"),
+            '"' => try buf.appendSlice(alloc, "\\\""),
+            '\n' => try buf.appendSlice(alloc, "\\n"),
+            '\r' => try buf.appendSlice(alloc, "\\r"),
+            '\t' => try buf.appendSlice(alloc, "\\t"),
+            0 => try buf.appendSlice(alloc, "\\0"),
+            else => if (c >= 0x20 and c <= 0x7e) {
+                try buf.append(alloc, c);
+            } else {
+                var tmp: [4]u8 = undefined;
+                const hex = std.fmt.bufPrint(&tmp, "\\x{X:0>2}", .{c}) catch unreachable;
+                try buf.appendSlice(alloc, hex);
+            },
+        }
+    }
+    return buf.toOwnedSlice(alloc);
+}
 
 fn baseToCppType(b: ast.BaseTypeSpec) []const u8 {
     return switch (b) {

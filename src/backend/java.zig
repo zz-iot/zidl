@@ -2544,7 +2544,11 @@ const Generator = struct {
                 std.fmt.allocPrint(self.alloc, "'{c}'", .{v})
             else
                 std.fmt.allocPrint(self.alloc, "'\\u{X:0>4}'", .{v}),
-            .string => |s| std.fmt.allocPrint(self.alloc, "\"{s}\"", .{s}),
+            .string => |s| blk: {
+                const esc = try escapeStringLiteral(self.alloc, s);
+                defer self.alloc.free(esc);
+                break :blk std.fmt.allocPrint(self.alloc, "\"{s}\"", .{esc});
+            },
             else => self.alloc.dupe(u8, "null"),
         };
     }
@@ -2657,6 +2661,28 @@ const Generator = struct {
 
 /// Determine the EMHEADER LC value (0–3) for a fixed-size scalar type in Java.
 /// Returns null if the type requires LC=4 (NEXTINT) — variable-length or complex.
+fn escapeStringLiteral(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    for (s) |c| {
+        switch (c) {
+            '\\' => try buf.appendSlice(alloc, "\\\\"),
+            '"' => try buf.appendSlice(alloc, "\\\""),
+            '\n' => try buf.appendSlice(alloc, "\\n"),
+            '\r' => try buf.appendSlice(alloc, "\\r"),
+            '\t' => try buf.appendSlice(alloc, "\\t"),
+            0 => try buf.appendSlice(alloc, "\\u0000"),
+            else => if (c >= 0x20 and c <= 0x7e) {
+                try buf.append(alloc, c);
+            } else {
+                var tmp: [6]u8 = undefined;
+                const hex = std.fmt.bufPrint(&tmp, "\\u{X:0>4}", .{c}) catch unreachable;
+                try buf.appendSlice(alloc, hex);
+            },
+        }
+    }
+    return buf.toOwnedSlice(alloc);
+}
+
 fn lcForJavaTypeRef(type_ref: ir.TypeRef, dimensions: []const u64) ?u2 {
     if (dimensions.len > 0) return null;
     return switch (type_ref) {
