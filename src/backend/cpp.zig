@@ -4375,3 +4375,40 @@ test "cpp_backend: impl simple return with string param forwards correctly" {
     try testing.expect(has(s, "return zidl_Foo_compute(ptr_, key.c_str());"));
     try testing.expect(!has(s, "TODO"));
 }
+
+test "cpp_backend: @default on non-optional field sets initializer" {
+    var h = try testGen(
+        \\struct Cfg {
+        \\    @default(7400) unsigned short base_port;
+        \\    @default(TRUE) boolean active;
+        \\    @default(3.14) double threshold;
+        \\    @default("hi") string label;
+        \\};
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    const s = h.items;
+    try testing.expect(has(s, "uint16_t base_port{7400};"));
+    try testing.expect(has(s, "bool active{true};"));
+    try testing.expect(has(s, "double threshold{"));
+    try testing.expect(has(s, "std::string label{\"hi\"};"));
+}
+
+test "cpp_backend: @optional with @default sets optional initializer" {
+    var h = try testGen(
+        \\struct Cfg {
+        \\    @optional @default(42) long value;
+        \\};
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "std::optional<int32_t> value{42};"));
+}
+
+test "cpp_backend: @optional without @default uses empty braces" {
+    var h = try testGen(
+        \\struct Cfg {
+        \\    @optional long val;
+        \\};
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "std::optional<int32_t> val{};"));
+}

@@ -1620,3 +1620,32 @@ test "builder: @pl_repeated on string member is rejected" {
         testBuild("struct S { @pl_repeated string name; };"),
     );
 }
+
+test "builder: @default positional integer is stored in default_value" {
+    var ir_spec = try testBuild(
+        \\struct Cfg { @default(7400) unsigned short base_port; };
+    );
+    defer ir_spec.deinit();
+    const m = ir_spec.items[0].type_decl.struct_.members[0];
+    try testing.expect(m.annotations.default_value != null);
+    try testing.expectEqual(@as(i64, 7400), m.annotations.default_value.?.integer);
+}
+
+test "builder: @default named form (value=N) is stored in default_value" {
+    var ir_spec = try testBuild(
+        \\struct Cfg { @default(value=42) long x; };
+    );
+    defer ir_spec.deinit();
+    const m = ir_spec.items[0].type_decl.struct_.members[0];
+    try testing.expect(m.annotations.default_value != null);
+    try testing.expectEqual(@as(i64, 42), m.annotations.default_value.?.integer);
+}
+
+test "builder: @default with no parameter leaves default_value null" {
+    var ir_spec = try testBuild(
+        \\struct Cfg { @default() long x; };
+    );
+    defer ir_spec.deinit();
+    const m = ir_spec.items[0].type_decl.struct_.members[0];
+    try testing.expect(m.annotations.default_value == null);
+}

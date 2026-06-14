@@ -4460,6 +4460,34 @@ test "java: fixed<5,2> field type is double and serializes as BCD" {
     try testGen(alloc, "struct S { fixed<5,2> price; };", "fp", "_out.price = _cdrReadFixed(_buf, 5, 2)");
 }
 
+test "java: @default integer sets constructor assignment" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @default(7400) unsigned short base_port; };
+    , "cfg", "this.base_port = 7400;");
+}
+
+test "java: @default boolean sets constructor assignment" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @default(TRUE) boolean enabled; };
+    , "cfg", "this.enabled = true;");
+}
+
+test "java: @default string sets constructor assignment" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @default("hello") string label; };
+    , "cfg", "this.label = \"hello\";");
+}
+
+test "java: @optional overrides @default and uses null" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\struct Cfg { @optional @default(42) long val; };
+    , "cfg", "this.val = null;");
+}
+
 test "java: CDR helpers include _cdrWriteFixed and _cdrReadFixed" {
     const alloc = testing.allocator;
     try testGen(alloc, "struct S { long x; };", "s", "private static void _cdrWriteFixed");

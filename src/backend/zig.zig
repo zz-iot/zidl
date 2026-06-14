@@ -5869,3 +5869,38 @@ test "zig_backend: module named 'dds' does not produce duplicate const dds" {
     try testing.expect(has(s, "pub const TopicDataWriter = struct {"));
     try testing.expect(has(s, "_dw: _dds.DataWriter,"));
 }
+
+test "zig_backend: @default on non-optional field sets initializer" {
+    var h = try testGen(
+        \\struct Cfg {
+        \\    @default(7400) unsigned short base_port;
+        \\    @default(TRUE) boolean active;
+        \\    @default("hello") string label;
+        \\};
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    const s = h.items;
+    try testing.expect(has(s, "base_port: u16 = 7400,"));
+    try testing.expect(has(s, "active: bool = true,"));
+    try testing.expect(has(s, "label: []const u8 = \"hello\","));
+}
+
+test "zig_backend: @optional with @default sets typed optional initializer" {
+    var h = try testGen(
+        \\struct Cfg {
+        \\    @optional @default(42) long val;
+        \\};
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "val: ?i32 = 42,"));
+}
+
+test "zig_backend: @optional without @default initializes to null" {
+    var h = try testGen(
+        \\struct Cfg {
+        \\    @optional long val;
+        \\};
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "val: ?i32 = null,"));
+}
