@@ -2559,6 +2559,7 @@ const Generator = struct {
                 defer self.alloc.free(esc);
                 break :blk std.fmt.allocPrint(self.alloc, "\"{s}\"", .{esc});
             },
+            .scoped_name => |n| self.alloc.dupe(u8, n),
             else => self.alloc.dupe(u8, "null"),
         };
     }

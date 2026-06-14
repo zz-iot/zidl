@@ -1780,9 +1780,9 @@ const CdrGenerator = struct {
                         }
                     }
                 }
-                for (s.members) |m| {
+                for (s.members, 0..) |m, idx| {
                     if (m.annotations.is_key) {
-                        try self.emitReadMember(m);
+                        try self.emitReadPresentMember(m, optBitIdxForMember(s.*, idx));
                     }
                 }
                 if (appendable) {
@@ -1883,9 +1883,9 @@ const CdrGenerator = struct {
                 try self.writeI("_key_end = _r->pos + (size_t)_dh_size;\n");
                 self.indent_depth -= 1;
                 try self.writeI("}\n");
-                for (s.members) |m| {
+                for (s.members, 0..) |m, idx| {
                     if (m.annotations.is_key) {
-                        try self.emitReadMember(m);
+                        try self.emitReadPresentMember(m, optBitIdxForMember(s.*, idx));
                     }
                     // Non-key members are NOT skipped: seek_to(_key_end) handles
                     // both trailing non-key bytes (full payload) and their absence
@@ -1898,9 +1898,9 @@ const CdrGenerator = struct {
                 }
             } else {
                 // @final: key fields are leading — read them and stop.
-                for (s.members) |m| {
+                for (s.members, 0..) |m, idx| {
                     if (m.annotations.is_key) {
-                        try self.emitReadMember(m);
+                        try self.emitReadPresentMember(m, optBitIdxForMember(s.*, idx));
                     }
                 }
             }
@@ -2936,6 +2936,7 @@ const CdrGenerator = struct {
                 defer self.alloc.free(esc);
                 break :blk std.fmt.allocPrint(self.alloc, "\"{s}\"", .{esc});
             },
+            .scoped_name => |n| self.alloc.dupe(u8, n),
             else => self.alloc.dupe(u8, "0"),
         };
     }
