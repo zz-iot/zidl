@@ -516,3 +516,36 @@ pub const Greeter = extern struct {
         self.vtable.deinit(self.ptr);
     }
 }; // Greeter
+
+pub const AdvancedGreeter = extern struct {
+    ptr: *anyopaque,
+    vtable: *const Vtable,
+
+    pub const Vtable = struct {
+        greet: *const fn (*anyopaque, name: [*:0]const u8) [*:0]const u8,
+        reset: *const fn (*anyopaque) void,
+        greetAdvanced: *const fn (*anyopaque, name: [*:0]const u8) void,
+        get_count: *const fn (*anyopaque) i32,
+        deinit: *const fn (*anyopaque) void,
+    };
+
+    pub fn greet(self: @This(), name: [:0]const u8) []const u8 {
+        return std.mem.span(self.vtable.greet(self.ptr, name.ptr));
+    }
+
+    pub fn reset(self: @This()) void {
+        return self.vtable.reset(self.ptr);
+    }
+
+    pub fn greetAdvanced(self: @This(), name: [:0]const u8) void {
+        return self.vtable.greetAdvanced(self.ptr, name.ptr);
+    }
+
+    pub fn get_count(self: @This()) i32 {
+        return self.vtable.get_count(self.ptr);
+    }
+
+    pub fn deinit(self: @This()) void {
+        self.vtable.deinit(self.ptr);
+    }
+}; // AdvancedGreeter

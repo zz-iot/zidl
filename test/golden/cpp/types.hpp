@@ -59,6 +59,12 @@ public:
     virtual int32_t count() const = 0;
 }; // class Greeter
 
+class AdvancedGreeter : public ::Greeter {
+public:
+    virtual ~AdvancedGreeter() = default;
+    virtual void greetAdvanced(std::string name) = 0;
+}; // class AdvancedGreeter
+
 // --- CDR type support ---
 
 #define Point_has_key 0

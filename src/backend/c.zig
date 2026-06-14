@@ -1006,11 +1006,30 @@ const Generator = struct {
 
 // ── Static helpers ────────────────────────────────────────────────────────────
 
+/// Recursively unwrap typedef chains to the underlying base or enum TypeRef.
+/// Array typedefs (dimensions.len > 0) are not unwrapped.
+fn resolveTypeRef(tr: ir.TypeRef) ir.TypeRef {
+    var current = tr;
+    while (true) {
+        switch (current) {
+            .named => |td| switch (td) {
+                .typedef => |t| if (t.dimensions.len == 0) {
+                    current = t.type_ref;
+                    continue;
+                },
+                else => {},
+            },
+            else => {},
+        }
+        return current;
+    }
+}
+
 /// Returns true if a union case is the `default:` arm.
 /// EMHEADER LC value (0–3) for a fixed-size scalar type, or null for LC=4.
 fn lcForCTypeRef(type_ref: ir.TypeRef, dimensions: []const u64) ?u2 {
     if (dimensions.len > 0) return null;
-    return switch (type_ref) {
+    return switch (resolveTypeRef(type_ref)) {
         .base => |b| switch (b) {
             .boolean, .octet, .char, .int8, .uint8 => 0,
             .short, .int16, .unsigned_short, .uint16, .wchar => 1,
@@ -2019,7 +2038,7 @@ const CdrGenerator = struct {
 
     /// Emit CDR write statement(s) for the union discriminant.
     fn emitDiscWriteC(self: *CdrGenerator, disc: ir.TypeRef, access: []const u8) anyerror!void {
-        switch (disc) {
+        switch (resolveTypeRef(disc)) {
             .base => |b| {
                 const fn_name = baseCWriteFn(b);
                 if (std.mem.startsWith(u8, fn_name, "//")) {
@@ -2044,7 +2063,7 @@ const CdrGenerator = struct {
 
     /// Emit CDR read statement(s) for the union discriminant into `lval`.
     fn emitDiscReadC(self: *CdrGenerator, disc: ir.TypeRef, lval: []const u8) anyerror!void {
-        switch (disc) {
+        switch (resolveTypeRef(disc)) {
             .base => |b| {
                 const fn_name = baseCReadFn(b);
                 const c_type = baseToCType(b);
@@ -2079,7 +2098,7 @@ const CdrGenerator = struct {
                 .default => try self.writeI("default:\n"),
                 .integer => |v| try self.printI("case {d}:\n", .{v}),
                 .boolean => |b| try self.printI("case {d}:\n", .{@intFromBool(b)}),
-                .enumerator => |name| switch (disc) {
+                .enumerator => |name| switch (resolveTypeRef(disc)) {
                     .named => |td| switch (td) {
                         .enum_ => |e| {
                             const enum_c = try self.prefixedCName(e.qualified_name);
@@ -3963,4 +3982,34 @@ test "c_backend: fixed<5,2> field type is double" {
     var h = try testGenTypeHeader("struct S { fixed<5,2> price; };", "fp", 0);
     defer h.deinit(testing.allocator);
     try testing.expect(has(h.items, "double price;"));
+}
+
+test "c_backend: union with typedef discriminant CDR" {
+    var out = try testGenCdr(
+        \\typedef long MyDisc;
+        \\union Var switch (MyDisc) { case 0: long i; case 1: double d; };
+    , "var");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Typedef resolves to long → zidl_cdr_write_i32 / zidl_cdr_read_i32
+    try testing.expect(has(s, "zidl_cdr_write_i32"));
+    try testing.expect(has(s, "zidl_cdr_read_i32"));
+    try testing.expect(!has(s, "TODO"));
+}
+
+test "c_backend: union with enum typedef discriminant CDR" {
+    var out = try testGenCdr(
+        \\enum Kind { A, B };
+        \\typedef Kind KindAlias;
+        \\union Var switch (KindAlias) { case A: long i; case B: double d; };
+    , "var");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Enum typedef resolves to Kind → zidl_cdr_write_u32
+    try testing.expect(has(s, "zidl_cdr_write_u32"));
+    try testing.expect(has(s, "zidl_cdr_read_u32"));
+    // Case labels use the C enum constant prefix
+    try testing.expect(has(s, "case Kind_A:"));
+    try testing.expect(has(s, "case Kind_B:"));
+    try testing.expect(!has(s, "TODO"));
 }

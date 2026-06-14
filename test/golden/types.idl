@@ -56,3 +56,7 @@ interface Greeter {
     void reset();
     readonly attribute long count;
 };
+
+interface AdvancedGreeter : Greeter {
+    void greetAdvanced(in string name);
+};

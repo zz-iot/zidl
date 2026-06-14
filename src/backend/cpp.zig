@@ -397,6 +397,7 @@ const Generator = struct {
     // ── Struct ────────────────────────────────────────────────────────────────
 
     fn emitStruct(self: *Generator, s: *const ir.Struct) !void {
+        try self.emitVerbatimForPlacement(s.annotations.raw, "before-declaration");
         try self.print("struct {s}", .{s.name});
         if (s.base) |base| {
             try self.print(" : ::{s}", .{ir.typeDeclQualifiedName(base)});
@@ -406,11 +407,13 @@ const Generator = struct {
             try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, m.annotations.is_optional, "    ");
         }
         try self.print("}}; // struct {s}\n\n", .{s.name});
+        try self.emitVerbatimForPlacement(s.annotations.raw, "after-declaration");
     }
 
     // ── Union ─────────────────────────────────────────────────────────────────
 
     fn emitUnion(self: *Generator, u: *const ir.Union) !void {
+        try self.emitVerbatimForPlacement(u.annotations.raw, "before-declaration");
         const disc_cpp = try self.typeRefToCpp(u.discriminant);
         defer self.alloc.free(disc_cpp);
 
@@ -466,11 +469,13 @@ const Generator = struct {
             try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
             try self.write("\n");
         }
+        try self.emitVerbatimForPlacement(u.annotations.raw, "after-declaration");
     }
 
     // ── Enum ──────────────────────────────────────────────────────────────────
 
     fn emitEnum(self: *Generator, e: *const ir.Enum) !void {
+        try self.emitVerbatimForPlacement(e.annotations.raw, "before-declaration");
         const storage = enumStorageType(e.annotations);
         try self.print("enum class {s} : {s} {{\n", .{ e.name, storage });
         for (e.enumerators, 0..) |en, i| {
@@ -478,6 +483,7 @@ const Generator = struct {
             try self.print("    {s} = {d}{s}\n", .{ en.name, en.value, comma });
         }
         try self.print("}}; // enum class {s}\n\n", .{e.name});
+        try self.emitVerbatimForPlacement(e.annotations.raw, "after-declaration");
     }
 
     // ── Bitmask ───────────────────────────────────────────────────────────────
@@ -672,6 +678,42 @@ const Generator = struct {
                 "// {s}: fixed-point const {s}\n",
                 .{ c.name, fp },
             ),
+        }
+    }
+
+    // ── @verbatim emission ────────────────────────────────────────────────────
+
+    /// Emit raw `@verbatim` annotation text filtered by `language="cpp"` (or
+    /// `"*"`) and matching `placement`.  The standard IDL 4.2 placements
+    /// "before-declaration" and "after-declaration" are the ones supported here.
+    fn emitVerbatimForPlacement(
+        self: *Generator,
+        raw: []const ir.RawAnnotation,
+        placement: []const u8,
+    ) anyerror!void {
+        for (raw) |ann| {
+            if (!std.mem.eql(u8, ann.name, "verbatim")) continue;
+            var lang: []const u8 = "*";
+            var place: []const u8 = "after-declaration";
+            var text: []const u8 = "";
+            for (ann.params) |p| {
+                if (p.name) |pname| {
+                    if (std.mem.eql(u8, pname, "language")) {
+                        if (p.value == .string) lang = p.value.string;
+                    } else if (std.mem.eql(u8, pname, "placement")) {
+                        if (p.value == .string) place = p.value.string;
+                    } else if (std.mem.eql(u8, pname, "text")) {
+                        if (p.value == .string) text = p.value.string;
+                    }
+                } else {
+                    // positional first param = text
+                    if (p.value == .string) text = p.value.string;
+                }
+            }
+            if (!std.mem.eql(u8, lang, "*") and !std.mem.eql(u8, lang, "cpp")) continue;
+            if (!std.mem.eql(u8, place, placement)) continue;
+            try self.write(text);
+            if (text.len > 0 and text[text.len - 1] != '\n') try self.write("\n");
         }
     }
 
@@ -1708,7 +1750,7 @@ const CdrGenerator = struct {
 
     /// Emit CDR write for union discriminant, using the getter expression.
     fn emitDiscWriteCpp(self: *CdrGenerator, disc: ir.TypeRef, getter_expr: []const u8) anyerror!void {
-        switch (disc) {
+        switch (resolveTypeRef(disc)) {
             .base => |b| {
                 const fn_name = baseCWriteFn(b);
                 if (std.mem.startsWith(u8, fn_name, "//")) {
@@ -1734,7 +1776,7 @@ const CdrGenerator = struct {
 
     /// Emit CDR read for union discriminant, then call `_v->_d(val)` setter.
     fn emitDiscReadCpp(self: *CdrGenerator, disc: ir.TypeRef, v_expr: []const u8) anyerror!void {
-        switch (disc) {
+        switch (resolveTypeRef(disc)) {
             .base => |b| {
                 const fn_name = baseCReadFn(b);
                 const c_type = baseToCType(b);
@@ -1760,7 +1802,7 @@ const CdrGenerator = struct {
 
     /// Emit local declaration/read for a union discriminant, used by generated skip code.
     fn emitDiscReadLocalCpp(self: *CdrGenerator, disc: ir.TypeRef, lval: []const u8) anyerror!void {
-        switch (disc) {
+        switch (resolveTypeRef(disc)) {
             .base => |b| {
                 const fn_name = baseCReadFn(b);
                 const c_type = baseToCType(b);
@@ -1798,7 +1840,7 @@ const CdrGenerator = struct {
                 .default => try self.writeI("default:\n"),
                 .integer => |v| try self.printI("case {d}:\n", .{v}),
                 .boolean => |b| try self.printI("case {s}:\n", .{if (b) "true" else "false"}),
-                .enumerator => |name| switch (disc) {
+                .enumerator => |name| switch (resolveTypeRef(disc)) {
                     .named => |td| switch (td) {
                         .enum_ => |e| try self.printI("case ::{s}::{s}:\n", .{ e.qualified_name, name }),
                         else => try self.printI("case {s}:\n", .{name}),
@@ -2699,10 +2741,29 @@ fn isDefaultUnionCase(cas: ir.UnionCase) bool {
     return false;
 }
 
+/// Recursively unwrap typedef chains to the underlying base or enum TypeRef.
+/// Array typedefs (dimensions.len > 0) are not unwrapped.
+fn resolveTypeRef(tr: ir.TypeRef) ir.TypeRef {
+    var current = tr;
+    while (true) {
+        switch (current) {
+            .named => |td| switch (td) {
+                .typedef => |t| if (t.dimensions.len == 0) {
+                    current = t.type_ref;
+                    continue;
+                },
+                else => {},
+            },
+            else => {},
+        }
+        return current;
+    }
+}
+
 /// EMHEADER LC value (0–3) for a fixed-size scalar type, or null for LC=4.
 fn lcForCppTypeRef(type_ref: ir.TypeRef, dimensions: []const u64) ?u2 {
     if (dimensions.len > 0) return null;
-    return switch (type_ref) {
+    return switch (resolveTypeRef(type_ref)) {
         .base => |b| switch (b) {
             .boolean, .octet, .char, .int8, .uint8 => 0,
             .short, .int16, .unsigned_short, .uint16, .wchar => 1,
@@ -4126,4 +4187,97 @@ test "cpp_backend: fixed<5,2> field type is double" {
     var h = try testGen("struct S { fixed<5,2> price; };", "fp");
     defer h.deinit(testing.allocator);
     try testing.expect(has(h.items, "double price{}")); // C++ brace-initialization
+}
+
+test "cpp_backend: union with typedef discriminant decl" {
+    var out = try testGen(
+        \\typedef long MyDisc;
+        \\union Var switch (MyDisc) { case 0: long i; case 1: double d; };
+    , "var");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "class Var {"));
+    // Discriminant getter/setter use the typedef type
+    try testing.expect(has(s, "::MyDisc _d() const noexcept"));
+    try testing.expect(has(s, "}; // class Var"));
+}
+
+test "cpp_backend: union with typedef discriminant CDR" {
+    var out = try testGenCdr(
+        \\typedef long MyDisc;
+        \\union Var switch (MyDisc) { case 0: long i; case 1: double d; };
+    , "var");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Serialize: typedef resolves to long → zidl_cdr_write_i32
+    try testing.expect(has(s, "zidl_cdr_write_i32"));
+    // Deserialize: typedef resolves to long → zidl_cdr_read_i32
+    try testing.expect(has(s, "zidl_cdr_read_i32"));
+    // No TODO stubs
+    try testing.expect(!has(s, "TODO"));
+}
+
+test "cpp_backend: union with enum typedef discriminant CDR" {
+    var out = try testGenCdr(
+        \\enum Kind { A, B };
+        \\typedef Kind KindAlias;
+        \\union Var switch (KindAlias) { case A: long i; case B: double d; };
+    , "var");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Enum typedef resolves to Kind → zidl_cdr_write_u32
+    try testing.expect(has(s, "zidl_cdr_write_u32"));
+    try testing.expect(has(s, "zidl_cdr_read_u32"));
+    // Case labels use the underlying enum's qualified name
+    try testing.expect(has(s, "case ::Kind::A:"));
+    try testing.expect(has(s, "case ::Kind::B:"));
+    try testing.expect(!has(s, "TODO"));
+}
+
+test "cpp_backend: @verbatim before-declaration on struct" {
+    var out = try testGen(
+        \\@verbatim(language="cpp", placement="before-declaration", text="// injected before")
+        \\struct Foo { long x; };
+    , "foo");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "// injected before"));
+    // Verbatim text appears before the struct declaration
+    const before_pos = std.mem.indexOf(u8, s, "// injected before").?;
+    const struct_pos = std.mem.indexOf(u8, s, "struct Foo {").?;
+    try testing.expect(before_pos < struct_pos);
+}
+
+test "cpp_backend: @verbatim after-declaration on struct" {
+    var out = try testGen(
+        \\@verbatim(language="cpp", placement="after-declaration", text="// injected after")
+        \\struct Foo { long x; };
+    , "foo");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "// injected after"));
+    // Verbatim text appears after the closing brace
+    const struct_end_pos = std.mem.indexOf(u8, s, "}; // struct Foo").?;
+    const after_pos = std.mem.indexOf(u8, s, "// injected after").?;
+    try testing.expect(after_pos > struct_end_pos);
+}
+
+test "cpp_backend: @verbatim language filter" {
+    // language="c" should NOT appear in C++ output
+    var out = try testGen(
+        \\@verbatim(language="c", placement="before-declaration", text="/* C only */")
+        \\struct Foo { long x; };
+    , "foo");
+    defer out.deinit(testing.allocator);
+    try testing.expect(!has(out.items, "/* C only */"));
+}
+
+test "cpp_backend: @verbatim language wildcard" {
+    // language="*" should appear in all backends
+    var out = try testGen(
+        \\@verbatim(language="*", placement="before-declaration", text="// all languages")
+        \\struct Foo { long x; };
+    , "foo");
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "// all languages"));
 }
