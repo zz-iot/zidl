@@ -2572,14 +2572,31 @@ const ImplGenerator = struct {
             }
             try self.write(");\n");
         } else {
-            // String return type: wrap in std::string.
+            // Not all params/return are simple; check what can be adapted.
             const is_str_return = if (op.return_type) |rt| (rt == .string) else false;
-            if (is_str_return) {
+            const is_void_return = op.return_type == null;
+            const is_simple_return = if (op.return_type) |rt| self.isSimpleType(rt) else false;
+            // Params are "adaptable" if each is a simple type or a string.
+            const all_adaptable = blk: {
+                for (op.params) |p| {
+                    if (!self.isSimpleType(p.type_ref) and p.type_ref != .string) break :blk false;
+                }
+                break :blk true;
+            };
+            if (is_str_return and all_adaptable) {
                 try self.print("        return std::string(zidl_{s}_{s}(ptr_", .{ c_name, op.name });
                 for (op.params) |p| try self.emitParamAdapt(p);
                 try self.write("));\n");
+            } else if ((is_void_return or is_simple_return) and all_adaptable) {
+                if (is_simple_return) {
+                    try self.print("        return zidl_{s}_{s}(ptr_", .{ c_name, op.name });
+                } else {
+                    try self.print("        zidl_{s}_{s}(ptr_", .{ c_name, op.name });
+                }
+                for (op.params) |p| try self.emitParamAdapt(p);
+                try self.write(");\n");
             } else {
-                // General TODO stub.
+                // General TODO stub for operations with complex unadaptable types.
                 try self.print(
                     "        /* TODO: adapt C++ types to C ABI for {s}::{s} */\n",
                     .{ c_name, op.name },
@@ -4280,4 +4297,26 @@ test "cpp_backend: @verbatim language wildcard" {
     , "foo");
     defer out.deinit(testing.allocator);
     try testing.expect(has(out.items, "// all languages"));
+}
+
+test "cpp_backend: impl void op with string param forwards via c_str" {
+    var out = try testGenImpl(
+        \\interface Greeter { void greetAdvanced(in string name); };
+    , "greeter");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "void greetAdvanced(std::string name) override {"));
+    try testing.expect(has(s, "zidl_Greeter_greetAdvanced(ptr_, name.c_str());"));
+    try testing.expect(!has(s, "TODO"));
+}
+
+test "cpp_backend: impl simple return with string param forwards correctly" {
+    var out = try testGenImpl(
+        \\interface Foo { long compute(in string key); };
+    , "foo");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "int32_t compute(std::string key) override {"));
+    try testing.expect(has(s, "return zidl_Foo_compute(ptr_, key.c_str());"));
+    try testing.expect(!has(s, "TODO"));
 }

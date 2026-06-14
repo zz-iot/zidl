@@ -462,12 +462,47 @@ const Generator = struct {
         }
     }
 
+    // ── @verbatim emission ────────────────────────────────────────────────────
+
+    /// Emit raw `@verbatim` annotation text filtered by `language="c"` (or
+    /// `"*"`) and matching `placement`.
+    fn emitVerbatimForPlacement(
+        self: *Generator,
+        raw: []const ir.RawAnnotation,
+        placement: []const u8,
+    ) anyerror!void {
+        for (raw) |ann| {
+            if (!std.mem.eql(u8, ann.name, "verbatim")) continue;
+            var lang: []const u8 = "*";
+            var place: []const u8 = "after-declaration";
+            var text: []const u8 = "";
+            for (ann.params) |p| {
+                if (p.name) |pname| {
+                    if (std.mem.eql(u8, pname, "language")) {
+                        if (p.value == .string) lang = p.value.string;
+                    } else if (std.mem.eql(u8, pname, "placement")) {
+                        if (p.value == .string) place = p.value.string;
+                    } else if (std.mem.eql(u8, pname, "text")) {
+                        if (p.value == .string) text = p.value.string;
+                    }
+                } else {
+                    if (p.value == .string) text = p.value.string;
+                }
+            }
+            if (!std.mem.eql(u8, lang, "*") and !std.mem.eql(u8, lang, "c")) continue;
+            if (!std.mem.eql(u8, place, placement)) continue;
+            try self.write(text);
+            if (text.len > 0 and text[text.len - 1] != '\n') try self.write("\n");
+        }
+    }
+
     // ── Struct ────────────────────────────────────────────────────────────────
 
     fn emitStruct(self: *Generator, s: *const ir.Struct) !void {
         const c_name = try self.prefixedCName(s.qualified_name);
         defer self.alloc.free(c_name);
 
+        try self.emitVerbatimForPlacement(s.annotations.raw, "before-declaration");
         try self.print("typedef struct {s}_s {{\n", .{c_name});
         if (s.base) |base| {
             const base_c = try self.prefixedCName(ir.typeDeclQualifiedName(base));
@@ -482,6 +517,7 @@ const Generator = struct {
         if (!self.opts.no_typesupport) {
             try self.emitStructCdrProtos(c_name, s);
         }
+        try self.emitVerbatimForPlacement(s.annotations.raw, "after-declaration");
     }
 
     fn emitStructCdrProtos(self: *Generator, c_name: []const u8, s: *const ir.Struct) !void {
@@ -510,6 +546,7 @@ const Generator = struct {
         const disc_c = try self.typeRefToC(u.discriminant);
         defer self.alloc.free(disc_c);
 
+        try self.emitVerbatimForPlacement(u.annotations.raw, "before-declaration");
         try self.print("typedef struct {s}_s {{\n", .{c_name});
         try self.print("    {s}{s}_d;\n", .{ disc_c, ptrSep(disc_c) });
         try self.write("    union {\n");
@@ -522,6 +559,7 @@ const Generator = struct {
         if (!self.opts.no_typesupport) {
             try self.emitUnionCdrProtos(c_name);
         }
+        try self.emitVerbatimForPlacement(u.annotations.raw, "after-declaration");
     }
 
     fn emitUnionCdrProtos(self: *Generator, c_name: []const u8) !void {
@@ -545,12 +583,14 @@ const Generator = struct {
         errdefer self.alloc.free(k);
         try self.enum_emitted.put(self.alloc, k, {});
 
+        try self.emitVerbatimForPlacement(e.annotations.raw, "before-declaration");
         try self.write("typedef enum {\n");
         for (e.enumerators, 0..) |en, i| {
             const comma = if (i + 1 < e.enumerators.len) "," else "";
             try self.print("    {s}_{s} = {d}{s}\n", .{ c_name, en.name, en.value, comma });
         }
         try self.print("}} {s};\n\n", .{c_name});
+        try self.emitVerbatimForPlacement(e.annotations.raw, "after-declaration");
     }
 
     // ── Bitmask ───────────────────────────────────────────────────────────────
@@ -4012,4 +4052,35 @@ test "c_backend: union with enum typedef discriminant CDR" {
     try testing.expect(has(s, "case Kind_A:"));
     try testing.expect(has(s, "case Kind_B:"));
     try testing.expect(!has(s, "TODO"));
+}
+
+test "c_backend: @verbatim language=c before-declaration on struct" {
+    var out = try testGen(
+        \\@verbatim(language="c", placement="before-declaration", text="/* c only */")
+        \\struct Foo { long x; };
+    , "foo");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "/* c only */"));
+    const before_pos = std.mem.indexOf(u8, s, "/* c only */").?;
+    const struct_pos = std.mem.indexOf(u8, s, "typedef struct Foo_s").?;
+    try testing.expect(before_pos < struct_pos);
+}
+
+test "c_backend: @verbatim language=* wildcard emitted in C output" {
+    var out = try testGen(
+        \\@verbatim(language="*", placement="before-declaration", text="/* all */")
+        \\struct Foo { long x; };
+    , "foo");
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "/* all */"));
+}
+
+test "c_backend: @verbatim language=cpp not emitted in C output" {
+    var out = try testGen(
+        \\@verbatim(language="cpp", placement="before-declaration", text="/* cpp only */")
+        \\struct Foo { long x; };
+    , "foo");
+    defer out.deinit(testing.allocator);
+    try testing.expect(!has(out.items, "/* cpp only */"));
 }

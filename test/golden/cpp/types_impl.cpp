@@ -51,7 +51,7 @@ public:
         zidl_AdvancedGreeter_reset(ptr_);
     }
     void greetAdvanced(std::string name) override {
-        /* TODO: adapt C++ types to C ABI for AdvancedGreeter::greetAdvanced */
+        zidl_AdvancedGreeter_greetAdvanced(ptr_, name.c_str());
     }
     int32_t count() const override {
         return zidl_AdvancedGreeter_get_count(ptr_);
