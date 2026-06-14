@@ -41,3 +41,48 @@ JNIEXPORT void JNICALL Java_GreeterImpl_deinit(
     zidl_Greeter_deinit((void *)(intptr_t)ptr);
 }
 
+/* ── interface AdvancedGreeter ── */
+
+/* Zig DDS runtime exports (provided at link time). */
+extern const char * zidl_AdvancedGreeter_greet(void *ptr, const char * name);
+extern void zidl_AdvancedGreeter_reset(void *ptr);
+extern void zidl_AdvancedGreeter_greetAdvanced(void *ptr, const char * name);
+extern int32_t zidl_AdvancedGreeter_get_count(void *ptr);
+extern void zidl_AdvancedGreeter_deinit(void *ptr);
+
+/* JNI bridge for AdvancedGreeterImpl */
+JNIEXPORT jstring JNICALL Java_AdvancedGreeterImpl_n_1greet(
+    JNIEnv *env, jobject self, jlong ptr, jstring name)
+{
+    (void)env; (void)self;
+    return (jstring)zidl_AdvancedGreeter_greet((void *)(intptr_t)ptr, (const char *)name);
+}
+
+JNIEXPORT void JNICALL Java_AdvancedGreeterImpl_n_1reset(
+    JNIEnv *env, jobject self, jlong ptr)
+{
+    (void)env; (void)self;
+    zidl_AdvancedGreeter_reset((void *)(intptr_t)ptr);
+}
+
+JNIEXPORT void JNICALL Java_AdvancedGreeterImpl_n_1greetAdvanced(
+    JNIEnv *env, jobject self, jlong ptr, jstring name)
+{
+    (void)env; (void)self;
+    zidl_AdvancedGreeter_greetAdvanced((void *)(intptr_t)ptr, (const char *)name);
+}
+
+JNIEXPORT jint JNICALL Java_AdvancedGreeterImpl_n_1get_1count(
+    JNIEnv *env, jobject self, jlong ptr)
+{
+    (void)env; (void)self;
+    return (jint)zidl_AdvancedGreeter_get_count((void *)(intptr_t)ptr);
+}
+
+JNIEXPORT void JNICALL Java_AdvancedGreeterImpl_deinit(
+    JNIEnv *env, jobject self, jlong ptr)
+{
+    (void)env; (void)self;
+    zidl_AdvancedGreeter_deinit((void *)(intptr_t)ptr);
+}
+

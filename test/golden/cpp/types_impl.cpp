@@ -29,3 +29,34 @@ private:
     void *ptr_;
 };
 
+// ── interface AdvancedGreeter ──
+
+extern "C" {
+char * zidl_AdvancedGreeter_greet(void *ptr, char * name);
+void zidl_AdvancedGreeter_reset(void *ptr);
+void zidl_AdvancedGreeter_greetAdvanced(void *ptr, char * name);
+int32_t zidl_AdvancedGreeter_get_count(void *ptr);
+void zidl_AdvancedGreeter_deinit(void *ptr);
+}
+
+class AdvancedGreeterZigImpl : public ::AdvancedGreeter {
+public:
+    explicit AdvancedGreeterZigImpl(void *ptr) : ptr_(ptr) {}
+    ~AdvancedGreeterZigImpl() override { zidl_AdvancedGreeter_deinit(ptr_); }
+
+    std::string greet(std::string name) override {
+        return std::string(zidl_AdvancedGreeter_greet(ptr_, name.c_str()));
+    }
+    void reset() override {
+        zidl_AdvancedGreeter_reset(ptr_);
+    }
+    void greetAdvanced(std::string name) override {
+        zidl_AdvancedGreeter_greetAdvanced(ptr_, name.c_str());
+    }
+    int32_t count() const override {
+        return zidl_AdvancedGreeter_get_count(ptr_);
+    }
+private:
+    void *ptr_;
+};
+

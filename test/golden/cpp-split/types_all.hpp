@@ -9,5 +9,6 @@
 #include "Frame.hpp"
 #include "Beacon.hpp"
 #include "Greeter.hpp"
+#include "AdvancedGreeter.hpp"
 
 #endif // TYPES_ALL_HPP

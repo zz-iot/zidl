@@ -14,6 +14,7 @@ typedef enum {
 } Color;
 
 typedef struct { void *ptr; const void *vtable; } Greeter;
+typedef struct { void *ptr; const void *vtable; } AdvancedGreeter;
 
 #ifndef INT32_T_SEQ_DEFINED
 #define INT32_T_SEQ_DEFINED
@@ -92,5 +93,11 @@ int Beacon_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8
 char *Greeter_greet(Greeter self, char *name);
 void Greeter_reset(Greeter self);
 int32_t Greeter_get_count(Greeter self);
+
+/* IDL interface: AdvancedGreeter */
+char *AdvancedGreeter_greet(AdvancedGreeter self, char *name);
+void AdvancedGreeter_reset(AdvancedGreeter self);
+void AdvancedGreeter_greetAdvanced(AdvancedGreeter self, char *name);
+int32_t AdvancedGreeter_get_count(AdvancedGreeter self);
 
 #endif /* TYPES_H */

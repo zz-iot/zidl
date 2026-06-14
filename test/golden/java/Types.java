@@ -484,4 +484,8 @@ public class Types {
         int get_count();
     } // interface Greeter
 
+    public interface AdvancedGreeter extends Greeter {
+        void greetAdvanced(String name);
+    } // interface AdvancedGreeter
+
 }

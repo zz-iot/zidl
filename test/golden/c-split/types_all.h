@@ -9,5 +9,6 @@
 #include "Frame.h"
 #include "Beacon.h"
 #include "Greeter.h"
+#include "AdvancedGreeter.h"
 
 #endif /* TYPES_ALL_H */
