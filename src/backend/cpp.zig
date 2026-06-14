@@ -822,7 +822,7 @@ fn escapeStringLiteral(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
             '\n' => try buf.appendSlice(alloc, "\\n"),
             '\r' => try buf.appendSlice(alloc, "\\r"),
             '\t' => try buf.appendSlice(alloc, "\\t"),
-            0 => try buf.appendSlice(alloc, "\\0"),
+            0 => try buf.appendSlice(alloc, "\\000"),
             else => if (c >= 0x20 and c <= 0x7e) {
                 try buf.append(alloc, c);
             } else {
