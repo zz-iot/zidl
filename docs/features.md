@@ -27,7 +27,8 @@ All four backends generate the same core set of outputs for every IDL input:
 | `@key` → `serializeKey` | Implemented |
 | `@key` → `deserializeKey` | Implemented |
 | `@key` → `computeKeyHash` (RTPS PLAIN_CDR2 + MD5 rule) | Implemented |
-| `@optional` members | C: deferred; C++/Java/Zig: implemented |
+| `@optional` members | C: `uint64_t _present` bitmask + `_has_`/`_set_` macros (max 64 per struct); C++: `std::optional<T>`; Zig: `?T`; Java: nullable field |
+| `@default(value)` on members | C++/Zig/Java: inline field initializer (optional and non-optional); C: `apply_defaults()` function for `@optional` members only — `@default` on non-optional C members is rejected at codegen time |
 | CDR `@final` (no framing) | Implemented |
 | CDR `@appendable` (DHEADER) | Implemented |
 | CDR `@mutable` (XCDR2 EMHEADER) | Implemented in all backends |
@@ -50,7 +51,7 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 **Reference**: [`backend_zig.md`](backend_zig.md)  
 **Output**: `.zig` source  
 **Runtime**: `zidl-rt` (included in this repo)  
-**Tests**: 102 codegen + 8 integration + 61 runtime + 15 PL_CDR + 10 interop
+**Tests**: 132 codegen + 11 integration + 61 runtime + 15 PL_CDR + 10 interop
 
 ### IDL → Zig type mapping
 
@@ -104,7 +105,7 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 **Reference**: [`backend_c.md`](backend_c.md)  
 **Output**: `.h` (declarations) + `.c` (CDR serialize/deserialize)  
 **Runtime**: `zidl-cdr` (included in this repo)  
-**Tests**: 55 codegen + C integration suite + 44 cross-validation
+**Tests**: 87 codegen + C integration suite + 44 cross-validation
 
 ### IDL → C type mapping
 
@@ -131,7 +132,7 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 | `sequence<T>` | `typedef struct { T *data; uint32_t size; uint32_t maximum; } FooSeq;` |
 | `T[N]` | `T name[N]` |
 | `map<K,V>` | **Not supported** — error at codegen time |
-| `@optional T` | **Deferred** — emits `/* TODO: @optional name */` |
+| `@optional T` | Supported — `uint64_t _present` bitmask; `_has_`/`_set_` macros |
 | `enum` | `typedef enum { ... } Foo; ` (CDR: `uint32_t`) |
 | `bitmask` | `typedef uint8/16/32/64_t Foo;` (storage sized by `@bit_bound`) |
 | `bitset` | `typedef uint8/16/32/64_t Foo;` |
@@ -144,8 +145,10 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 | Feature | Status |
 |---|---|
 | `map<K,V>` | Not supported (`error.MapTypeNotSupportedInCBackend`) |
-| `@optional` members | Deferred — emits `/* TODO */` comment |
-| `@optional` key fields | Deferred — key serialization emits `/* TODO */` |
+| `@optional`: more than 64 members per struct | Returns `error.TooManyOptionalMembers` at codegen time |
+| `@optional`: `_set_` macro omitted for array-backed members | Use direct field assignment + manual `_present` bit update |
+| `@default` on non-optional members | Returns `error.DefaultOnNonOptionalNotSupportedInCBackend` at codegen time |
+| User-supplied allocator for strings/sequences | Not yet implemented — `zidl_cdr_read_string` and sequence reads use `malloc`; a `ZidlCdrAllocator` interface is planned |
 | `--zig-pl-cdr` (PL_CDR emit) | Flag parsed but C backend does not emit PL_CDR functions |
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
 | `--generate-interfaces`: complex-type adaptation | `emitImplOp` emits `/* TODO */` stubs |
@@ -157,7 +160,7 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 **Reference**: [`backend_cpp.md`](backend_cpp.md)  
 **Output**: `.hpp` (header-only — declarations + inline serialize/deserialize)  
 **Runtime**: `zidl-cdr` (included in this repo)  
-**Tests**: 72 codegen + C++ integration suite
+**Tests**: 88 codegen + C++ integration suite
 
 ### IDL → C++ type mapping
 
@@ -195,7 +198,9 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 
 | Feature | Status |
 |---|---|
+| Custom allocators for `std::string` / `std::vector` / `std::map` | Not yet implemented — all STL containers use default allocators; `std::pmr` support is planned |
 | `--zig-pl-cdr` (PL_CDR emit) | Flag parsed but C++ backend does not emit PL_CDR functions |
+| `@verbatim` annotations | Parsed and stored in IR but not yet injected into generated output |
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
 | `--generate-interfaces`: complex-type adaptation | `emitImplOp` emits `/* TODO: adapt C++ types */` stubs |
 
@@ -206,7 +211,7 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 **Reference**: [`backend_java.md`](backend_java.md)  
 **Output**: `.java` (one file per module or one per type with `--split-files`)  
 **Runtime**: none — CDR is inline  
-**Tests**: 56 codegen + Java integration suite
+**Tests**: 68 codegen + Java integration suite
 
 ### IDL → Java type mapping
 
@@ -244,6 +249,7 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 |---|---|
 | `bitset` CDR serialization | Emits `// TODO: bitset` (no standard Java mapping defined) |
 | `any` / `object` / `value_base` member access | Emits `// TODO: any/object` |
+| Sequence element CDR deserialization (non-primitive elements) | Emits `// TODO: seq elem deserialize` stub |
 | PL_CDR (RTPS ParameterList) | Not implemented (Zig `--zig-pl-cdr` only) |
 
 ---

@@ -7,7 +7,7 @@
 > current feature coverage, see [`features.md`](features.md).
 
 Current verification inventory:
-- `zig build test`: 687 tests passed (678 library tests, 1 CLI test, 8 Zig integration tests) plus golden-output comparison.
+- `zig build test`: 783 tests passed (771 library tests, 1 CLI test, 11 Zig integration tests) plus golden-output comparison. C/C++/Java integration tests run separately via `zig build integration-test`.
 - `zig build integration-test`: compile-and-run integration for generated C, C++, and Java code.
 - `zig build interop-test`: 10 committed CDR interop vector tests.
 - `packages/zidl-rt`: 61 Zig runtime tests.
@@ -26,14 +26,15 @@ Current verification inventory:
 - Enum: `typedef enum { … } Foo;` → CDR encodes as `uint32_t` always.
 - Sequence: `typedef struct { T* data; uint32_t size; uint32_t maximum; } FooSeq;`
 - CDR serialize functions: `int Foo_serialize(ZidlCdrWriter* w, const Foo* v)`.
-- CDR deserialize functions: `int Foo_deserialize(ZidlCdrReader* r, Foo* v, …allocator…)`.
+- CDR deserialize functions: `int Foo_deserialize(ZidlCdrReader* r, Foo* v)`. Unbounded strings and sequences are currently heap-allocated by `zidl_cdr_read_string` / `zidl_cdr_read_seq_*` using `malloc`; callers are responsible for freeing them. A `ZidlCdrAllocator` user-supplied allocator interface is planned but not yet implemented.
 - Keyed structs emit `Foo_serialize_key`, `Foo_deserialize_key`, and
   `Foo_compute_key_hash`. Key hashes serialize keys as canonical PLAIN_CDR2
   big-endian, then apply the RTPS <=16-byte padding / MD5 rule via `zidl-cdr`.
-- `@optional` not yet supported (requires invasive struct change — deferred).
+- `@optional` members: `uint64_t _present` bitmask (bit N = optional member N, counted in declaration order). Max 64 per struct (error at codegen); `_has_NAME(p)` and `_set_NAME(p, v)` macros; `_set_` suppressed for array-backed members (fixed arrays and bounded strings/wstrings). Deserialize clears `_present` before reading.
+- `@default` on `@optional` members: emits `void Foo_apply_defaults(Foo *v)` that fills absent optional members with their IDL defaults. `@default` on non-optional members is rejected at codegen time (`error.DefaultOnNonOptionalNotSupportedInCBackend`).
 - Include guards: `#ifndef PREFIX_FOO_H` / `#define PREFIX_FOO_H` / `#endif`.
 
-**Tests:** 55.
+**Tests:** 87.
 
 ---
 
@@ -46,9 +47,9 @@ Current verification inventory:
 - Namespaces: IDL modules → C++ namespaces, nested correctly.
 - Structs: plain `struct` with public member fields, default member initializers.
 - Inheritance: `: public Base`.
-- Sequences: `std::vector<T>`.
+- Sequences: `std::vector<T>` (default allocator; `std::pmr` / custom allocator support planned).
 - Strings: `std::string` for both unbounded and bounded variants (bound enforced
-  at CDR serialize time; no separate C++ bounded-string type is generated).
+  at CDR serialize time; no separate C++ bounded-string type is generated; default allocator).
 - Enums: `enum class Foo : uint32_t { … }`.
 - Optional members: `std::optional<T>`.
 - Serialize/deserialize declared as free functions `zidl_serialize(w, v)` /
@@ -60,7 +61,7 @@ Current verification inventory:
   yet acted on by the C++ backend (planned: injection at `BEGIN_FILE`,
   `BEFORE_DECLARATION`, etc. filtered by `language == "c++"` or `language == "*"`).
 
-**Tests:** 72.
+**Tests:** 88.
 
 ---
 
@@ -82,7 +83,7 @@ Current verification inventory:
   `System.loadLibrary(jni_library)`.
 - Package annotation: `package com.example;` header per file.
 
-**Tests:** 56.
+**Tests:** 68.
 
 ---
 
@@ -93,7 +94,7 @@ Keyed structs emit `serializeKey`, `deserializeKey`, `deserializeKeyInto`, and
 `computeKeyHash`. `computeKeyHash` uses `zidl_rt.KeyHashWriter` for canonical
 PLAIN_CDR2 big-endian key serialization and RTPS key-hash finalization.
 
-**Tests:** 104.
+**Tests:** 132.
 
 ### PL_CDR (`--zig-pl-cdr`)
 
@@ -213,7 +214,7 @@ Integration tests. Run with `zig build integration-test`.
 Compile-and-run tests for generated C, C++, and Java backends. Zig generated-code
 integration tests run as part of `zig build test`.
 
-**Tests:** 8 Zig integration tests plus C/C++/Java executable integration suites.
+**Tests:** 11 integration tests (Zig integration tests run as part of `zig build test`; C/C++/Java integration tests run via `zig build integration-test`).
 
 ---
 
@@ -222,8 +223,12 @@ integration tests run as part of `zig build test`.
 | Feature | Status |
 |---|---|
 | C backend: `map<K,V>` | Not supported (`error.MapTypeNotSupportedInCBackend`); no DDS vendor generates C maps; banned in XRCE |
-| C backend: `@optional` | Deferred — requires invasive `has_NAME` bool field alongside each optional, breaking ABI |
-| C backend: `@optional` key fields | Deferred with C `@optional`; generated key code emits a TODO comment for this case |
+| C backend: `@optional` > 64 members | Returns `error.TooManyOptionalMembers` at codegen time |
+| C backend: `_set_` macro for array-backed `@optional` | Not emitted — use direct field assignment + manual `_present` bit update |
+| C backend: `@default` on non-optional member | Returns `error.DefaultOnNonOptionalNotSupportedInCBackend` at codegen time |
+| C backend: `@optional` `_set_` macro shape-aware setter | No `memcpy`-based setter for fixed arrays / bounded strings — future work |
+| C backend: user-supplied allocator | `ZidlCdrAllocator` interface planned; strings/sequences currently use `malloc` |
+| C++ backend: custom STL allocators | `std::string`, `std::vector`, `std::map` use default allocators; `std::pmr` support planned |
 | C/C++ backends: PL_CDR codegen | `--zig-pl-cdr` flag is parsed and wired but C/C++ backends do not yet emit PL_CDR functions |
 | Zig 0.15.1 / MicroZig output | Partially implemented: `--zig-version 0.15.1` is wired and bounded strings/sequences use fixed-capacity `zidl_rt.BoundedArray`; full freestanding/no-heap runtime path remains planned |
 | `--generate-interfaces` C++: complex-type adaptation | `ImplGenerator.emitImplOp` emits `/* TODO */` stubs — ABI boundary must be decided with DDS runtime |

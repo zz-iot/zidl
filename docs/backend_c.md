@@ -42,7 +42,7 @@ derived from the IDL source file.
 | `sequence<T>` | `typedef struct { T *data; uint32_t size; uint32_t maximum; } FooSeq;` |
 | `T[N]` | `T name[N]` |
 | `map<K,V>` | **Not supported** — error at codegen time |
-| `@optional T` | **Deferred** — emits `/* TODO: @optional name */` |
+| `@optional T` | Supported — see [`@optional` members](#optional-members) below |
 | `enum` | `typedef enum { ... } Foo;` (CDR: `uint32_t`) |
 | `bitmask` | `typedef uint8/16/32/64_t Foo;` (storage sized by `@bit_bound`) |
 | `bitset` | `typedef uint8/16/32/64_t Foo;` |
@@ -74,7 +74,7 @@ typedef struct _MyStruct { ... } MyStruct;
 
 /* CDR function prototypes */
 int MyStruct_serialize(ZidlCdrWriter *w, const MyStruct *v);
-int MyStruct_deserialize(ZidlCdrReader *r, MyStruct *v, ZidlCdrAllocator *alloc);
+int MyStruct_deserialize(ZidlCdrReader *r, MyStruct *v);
 
 /* Key function prototypes (keyed types only) */
 int MyStruct_serialize_key(ZidlCdrWriter *w, const MyStruct *v);
@@ -100,8 +100,8 @@ int MyStruct_serialize(ZidlCdrWriter *w, const MyStruct *v) {
     /* CDR serialize each member in declaration order */
 }
 
-int MyStruct_deserialize(ZidlCdrReader *r, MyStruct *v, ZidlCdrAllocator *alloc) {
-    /* CDR deserialize each member; allocator used for strings/sequences */
+int MyStruct_deserialize(ZidlCdrReader *r, MyStruct *v) {
+    /* CDR deserialize each member */
 }
 ```
 
@@ -110,12 +110,13 @@ int MyStruct_deserialize(ZidlCdrReader *r, MyStruct *v, ZidlCdrAllocator *alloc)
 ## CDR Serialize/Deserialize Signatures
 
 ```c
-/* Serialize v into the CDR writer w. Returns 0 on success, -1 on error. */
+/* Serialize v into the CDR writer w. Returns ZIDL_CDR_OK on success. */
 int Foo_serialize(ZidlCdrWriter *w, const Foo *v);
 
-/* Deserialize from CDR reader r into v. alloc used for strings/sequences.
-   Returns 0 on success, -1 on error. */
-int Foo_deserialize(ZidlCdrReader *r, Foo *v, ZidlCdrAllocator *alloc);
+/* Deserialize from CDR reader r into v. Returns ZIDL_CDR_OK on success.
+   Unbounded string and sequence fields are heap-allocated (malloc); caller
+   must free them when done. */
+int Foo_deserialize(ZidlCdrReader *r, Foo *v);
 ```
 
 ---
@@ -145,7 +146,7 @@ The generated `.c` file includes `zidl_cdr.h` and uses the following from `zidl-
 |---|---|
 | `ZidlCdrWriter` | Write buffer with position tracking |
 | `ZidlCdrReader` | Read buffer with position tracking |
-| `ZidlCdrAllocator` | Callback allocator for strings/sequences |
+| `ZidlCdrAllocator` | **Planned, not yet implemented.** Unbounded strings and sequences currently allocate via `malloc` inside `zidl_cdr_read_string` / `zidl_cdr_read_seq_*`; callers must `free` them. A user-supplied allocator interface (`ZidlCdrAllocator`) is intended for targets where heap allocation is unavailable or must be controlled. |
 | `zidl_cdr_write_*` | Typed write helpers (alignment, byte-swap) |
 | `zidl_cdr_read_*` | Typed read helpers |
 | `zidl_cdr_compute_key_hash` | RTPS key-hash rule implementation |
@@ -168,13 +169,83 @@ Add `packages/zidl-cdr/include` to your include paths.
 
 ---
 
+## `@optional` Members
+
+`@optional` struct members use a `uint64_t _present` bitmask added to the struct.
+Bits are assigned sequentially (0, 1, 2, …) in member declaration order, counting
+only optional members.
+
+```c
+typedef struct _Cfg_s {
+    uint64_t _present;   /* bit N = member N (among optional members) is present */
+    uint16_t port;       /* optional member 0 */
+    int32_t  timeout;    /* optional member 1 */
+    int32_t  always;     /* non-optional: no bit */
+} Cfg;
+
+/* Test/set presence */
+#define Cfg_has_port(p)      ((p)->_present & (1ULL << 0u))
+#define Cfg_set_port(p, v)   ((p)->port = (uint16_t)(v), (void)((p)->_present |= (1ULL << 0u)))
+#define Cfg_has_timeout(p)   ((p)->_present & (1ULL << 1u))
+#define Cfg_set_timeout(p, v) ((p)->timeout = (int32_t)(v), (void)((p)->_present |= (1ULL << 1u)))
+```
+
+`_set_` macros use scalar assignment and are **not** emitted for array-backed
+optional members (fixed-length arrays `T[N]`, bounded strings `string<N>`, and
+bounded wide strings `wstring<N>`).
+For those, assign the field directly and update `_present` manually.
+
+At most 64 optional members per struct are supported; exceeding this returns
+`error.TooManyOptionalMembers` at codegen time.
+
+`Foo_deserialize` clears `_present` to zero before reading any members, so
+deserializing into a reused or non-zero-initialized struct is safe — stale
+presence bits from a previous use will not carry over.
+
+### `@optional @key` members
+
+An `@optional` member may also carry `@key`. The generated `Foo_serialize_key`
+and `Foo_deserialize_key` functions include such members unconditionally — key
+serialization does not gate on the `_present` bit, because a key field must
+always be present for DDS to identify the instance. `Foo_deserialize_key` sets
+the `_present` bit when it reads the field, so the bitmask remains consistent
+after a key-only deserialize.
+
+> **Note:** `Foo_serialize_key` always writes the raw field bytes regardless of
+> whether `_present` is set. If the struct was not initialized (e.g. zero-filled),
+> the key serialized for an "absent" optional key field will be the zero value of
+> its type. Callers should ensure `@optional @key` members are always populated
+> before calling `serialize_key`.
+
+### `apply_defaults`
+
+When any `@optional` member also carries `@default`, the backend emits an
+`apply_defaults` function that sets each absent optional member to its default:
+
+```c
+void Cfg_apply_defaults(Cfg *v);
+```
+
+Call this after zero-initializing a struct or after deserialization to ensure
+absent members hold their IDL-specified defaults. The function is idempotent:
+it only writes fields whose presence bit is clear.
+
+`@default` on a **non-optional** member is not supported in the C backend and
+returns `error.DefaultOnNonOptionalNotSupportedInCBackend` at codegen time.
+Use `@optional @default(v)` together, or switch to the C++/Zig/Java backends
+which emit inline field initializers for non-optional defaults.
+
+---
+
 ## Known Limitations
 
 | Feature | Status |
 |---|---|
 | `map<K,V>` | Not supported — returns `error.MapTypeNotSupportedInCBackend` |
-| `@optional` members | Deferred — emits `/* TODO: @optional name */` comment |
-| `@optional` key fields | Deferred — key functions emit `/* TODO */` for optional key fields |
+| User-supplied allocator for strings/sequences | Not yet implemented — `zidl_cdr_read_string` and sequence reads use `malloc` internally; a `ZidlCdrAllocator` interface is planned |
+| `@optional`: more than 64 members per struct | Returns `error.TooManyOptionalMembers` at codegen time |
+| `@optional`: `_set_` macro omitted for array-backed members | Use direct assignment + manual `_present` bit update |
+| `@default` on non-optional members | Returns `error.DefaultOnNonOptionalNotSupportedInCBackend` at codegen time |
 | `--zig-pl-cdr` (PL_CDR emit) | Flag parsed but C backend does not emit PL_CDR functions |
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
 | `--generate-interfaces`: complex-type adaptation | `emitImplOp` emits `/* TODO */` stubs |
