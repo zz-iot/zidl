@@ -195,6 +195,15 @@ For those, assign the field directly and update `_present` manually.
 At most 64 optional members per struct are supported; exceeding this returns
 `error.TooManyOptionalMembers` at codegen time.
 
+### `@optional @key` members
+
+An `@optional` member may also carry `@key`. The generated `Foo_serialize_key`
+and `Foo_deserialize_key` functions include such members unconditionally — key
+serialization does not gate on the `_present` bit, because a key field must
+always be present for DDS to identify the instance. `Foo_deserialize_key` sets
+the `_present` bit when it reads the field, so the bitmask remains consistent
+after a key-only deserialize.
+
 ### `apply_defaults`
 
 When any `@optional` member also carries `@default`, the backend emits an
