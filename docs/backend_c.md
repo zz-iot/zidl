@@ -113,7 +113,9 @@ int MyStruct_deserialize(ZidlCdrReader *r, MyStruct *v) {
 /* Serialize v into the CDR writer w. Returns ZIDL_CDR_OK on success. */
 int Foo_serialize(ZidlCdrWriter *w, const Foo *v);
 
-/* Deserialize from CDR reader r into v. Returns ZIDL_CDR_OK on success. */
+/* Deserialize from CDR reader r into v. Returns ZIDL_CDR_OK on success.
+   Unbounded string and sequence fields are heap-allocated (malloc); caller
+   must free them when done. */
 int Foo_deserialize(ZidlCdrReader *r, Foo *v);
 ```
 

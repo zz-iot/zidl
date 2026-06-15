@@ -28,6 +28,7 @@ All four backends generate the same core set of outputs for every IDL input:
 | `@key` → `deserializeKey` | Implemented |
 | `@key` → `computeKeyHash` (RTPS PLAIN_CDR2 + MD5 rule) | Implemented |
 | `@optional` members | C: `uint64_t _present` bitmask + `_has_`/`_set_` macros (max 64 per struct); C++: `std::optional<T>`; Zig: `?T`; Java: nullable field |
+| `@default(value)` on members | C++/Zig/Java: inline field initializer (optional and non-optional); C: `apply_defaults()` function for `@optional` members only — `@default` on non-optional C members is rejected at codegen time |
 | CDR `@final` (no framing) | Implemented |
 | CDR `@appendable` (DHEADER) | Implemented |
 | CDR `@mutable` (XCDR2 EMHEADER) | Implemented in all backends |
