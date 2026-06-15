@@ -8,7 +8,8 @@ zidl-specific extensions.
 | Annotation | Target | Effect |
 |---|---|---|
 | `@key` | struct member | Member participates in the DDS key. |
-| `@optional` | struct member | Member may be absent; Zig type becomes `?T`. |
+| `@optional` | struct member | Member may be absent. C: `uint64_t _present` bitmask + `_has_`/`_set_` macros. C++: `std::optional<T>`. Zig: `?T`. Java: nullable field. |
+| `@default(value)` | struct member | Default value when absent. C: only valid combined with `@optional`; emits `apply_defaults()`. C++/Zig/Java: inline field initializer (non-optional members also supported). |
 | `@id(N)` | struct member | Explicit XTYPES member ID. |
 | `@topic` | struct | Declares a DDS topic type. |
 | `@nested` | struct | Suppresses DataWriter/DataReader generation. |
