@@ -50,7 +50,7 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 **Reference**: [`backend_zig.md`](backend_zig.md)  
 **Output**: `.zig` source  
 **Runtime**: `zidl-rt` (included in this repo)  
-**Tests**: 132 codegen + 8 integration + 61 runtime + 15 PL_CDR + 10 interop
+**Tests**: 132 codegen + 11 integration + 61 runtime + 15 PL_CDR + 10 interop
 
 ### IDL → Zig type mapping
 
