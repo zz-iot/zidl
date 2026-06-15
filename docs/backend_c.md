@@ -74,7 +74,7 @@ typedef struct _MyStruct { ... } MyStruct;
 
 /* CDR function prototypes */
 int MyStruct_serialize(ZidlCdrWriter *w, const MyStruct *v);
-int MyStruct_deserialize(ZidlCdrReader *r, MyStruct *v, ZidlCdrAllocator *alloc);
+int MyStruct_deserialize(ZidlCdrReader *r, MyStruct *v);
 
 /* Key function prototypes (keyed types only) */
 int MyStruct_serialize_key(ZidlCdrWriter *w, const MyStruct *v);
@@ -144,7 +144,7 @@ The generated `.c` file includes `zidl_cdr.h` and uses the following from `zidl-
 |---|---|
 | `ZidlCdrWriter` | Write buffer with position tracking |
 | `ZidlCdrReader` | Read buffer with position tracking |
-| `ZidlCdrAllocator` | Callback allocator for strings/sequences |
+| `ZidlCdrAllocator` | **Planned, not yet implemented.** Unbounded strings and sequences currently allocate via `malloc` inside `zidl_cdr_read_string` / `zidl_cdr_read_seq_*`; callers must `free` them. A user-supplied allocator interface (`ZidlCdrAllocator`) is intended for targets where heap allocation is unavailable or must be controlled. |
 | `zidl_cdr_write_*` | Typed write helpers (alignment, byte-swap) |
 | `zidl_cdr_read_*` | Typed read helpers |
 | `zidl_cdr_compute_key_hash` | RTPS key-hash rule implementation |
@@ -220,6 +220,7 @@ which emit inline field initializers for non-optional defaults.
 | Feature | Status |
 |---|---|
 | `map<K,V>` | Not supported — returns `error.MapTypeNotSupportedInCBackend` |
+| User-supplied allocator for strings/sequences | Not yet implemented — `zidl_cdr_read_string` and sequence reads use `malloc` internally; a `ZidlCdrAllocator` interface is planned |
 | `@optional`: more than 64 members per struct | Returns `error.TooManyOptionalMembers` at codegen time |
 | `@optional`: `_set_` macro omitted for array-backed members | Use direct assignment + manual `_present` bit update |
 | `@default` on non-optional members | Returns `error.DefaultOnNonOptionalNotSupportedInCBackend` at codegen time |

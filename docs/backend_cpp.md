@@ -75,7 +75,7 @@ struct MyStruct {
 };
 
 inline void zidl_serialize(ZidlCdrWriter *w, const MyStruct &v) { ... }
-inline void zidl_deserialize(ZidlCdrReader *r, MyStruct &v, ZidlCdrAllocator *alloc) { ... }
+inline void zidl_deserialize(ZidlCdrReader *r, MyStruct &v) { ... }
 
 // For keyed types:
 inline int MyStruct_serialize_key(ZidlCdrWriter *w, const MyStruct &v) { ... }
@@ -99,8 +99,8 @@ Serialize and deserialize are free functions overloaded per type:
 /* Serialize v into the CDR writer w. */
 void zidl_serialize(ZidlCdrWriter *w, const Foo &v);
 
-/* Deserialize from CDR reader r into v. alloc used for strings/sequences. */
-void zidl_deserialize(ZidlCdrReader *r, Foo &v, ZidlCdrAllocator *alloc);
+/* Deserialize from CDR reader r into v. */
+void zidl_deserialize(ZidlCdrReader *r, Foo &v);
 ```
 
 ---
@@ -136,7 +136,9 @@ or emit them. The planned placement positions are `BEGIN_FILE`,
 ## `zidl-cdr` Dependency
 
 The generated `.hpp` includes `zidl_cdr.h` and uses `ZidlCdrWriter`, `ZidlCdrReader`,
-`ZidlCdrAllocator`, `zidl_cdr_compute_key_hash`, and `zidl_md5` from `zidl-cdr`.
+`zidl_cdr_compute_key_hash`, and `zidl_md5` from `zidl-cdr`. `std::string`,
+`std::vector<T>`, and `std::map<K,V>` members use default STL allocators; custom
+allocator support (STL allocator template parameters or `std::pmr`) is not yet implemented.
 
 Build by including the header in your C++ project and compiling
 `packages/zidl-cdr/src/zidl_cdr.c` as a C source file alongside your C++ files.
@@ -160,6 +162,7 @@ Add `packages/zidl-cdr/include` to your include paths.
 
 | Feature | Status |
 |---|---|
+| Custom allocators for `std::string` / `std::vector` / `std::map` | Not yet implemented — all STL containers use default allocators; `std::pmr` or allocator template parameter support is planned |
 | `--zig-pl-cdr` (PL_CDR emit) | Flag parsed but C++ backend does not emit PL_CDR functions |
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
 | `--generate-interfaces`: complex-type adaptation | `emitImplOp` emits `/* TODO: adapt C++ types */` stubs (ABI boundary not yet decided) |

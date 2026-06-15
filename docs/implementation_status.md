@@ -26,7 +26,7 @@ Current verification inventory:
 - Enum: `typedef enum { … } Foo;` → CDR encodes as `uint32_t` always.
 - Sequence: `typedef struct { T* data; uint32_t size; uint32_t maximum; } FooSeq;`
 - CDR serialize functions: `int Foo_serialize(ZidlCdrWriter* w, const Foo* v)`.
-- CDR deserialize functions: `int Foo_deserialize(ZidlCdrReader* r, Foo* v, …allocator…)`.
+- CDR deserialize functions: `int Foo_deserialize(ZidlCdrReader* r, Foo* v)`. Unbounded strings and sequences are currently heap-allocated by `zidl_cdr_read_string` / `zidl_cdr_read_seq_*` using `malloc`; callers are responsible for freeing them. A `ZidlCdrAllocator` user-supplied allocator interface is planned but not yet implemented.
 - Keyed structs emit `Foo_serialize_key`, `Foo_deserialize_key`, and
   `Foo_compute_key_hash`. Key hashes serialize keys as canonical PLAIN_CDR2
   big-endian, then apply the RTPS <=16-byte padding / MD5 rule via `zidl-cdr`.
@@ -47,9 +47,9 @@ Current verification inventory:
 - Namespaces: IDL modules → C++ namespaces, nested correctly.
 - Structs: plain `struct` with public member fields, default member initializers.
 - Inheritance: `: public Base`.
-- Sequences: `std::vector<T>`.
+- Sequences: `std::vector<T>` (default allocator; `std::pmr` / custom allocator support planned).
 - Strings: `std::string` for both unbounded and bounded variants (bound enforced
-  at CDR serialize time; no separate C++ bounded-string type is generated).
+  at CDR serialize time; no separate C++ bounded-string type is generated; default allocator).
 - Enums: `enum class Foo : uint32_t { … }`.
 - Optional members: `std::optional<T>`.
 - Serialize/deserialize declared as free functions `zidl_serialize(w, v)` /
@@ -214,7 +214,7 @@ Integration tests. Run with `zig build integration-test`.
 Compile-and-run tests for generated C, C++, and Java backends. Zig generated-code
 integration tests run as part of `zig build test`.
 
-**Tests:** 8 Zig integration tests plus C/C++/Java executable integration suites.
+**Tests:** 11 integration tests (Zig integration tests run as part of `zig build test`; C/C++/Java integration tests run via `zig build integration-test`).
 
 ---
 
@@ -227,6 +227,8 @@ integration tests run as part of `zig build test`.
 | C backend: `_set_` macro for array-backed `@optional` | Not emitted — use direct field assignment + manual `_present` bit update |
 | C backend: `@default` on non-optional member | Returns `error.DefaultOnNonOptionalNotSupportedInCBackend` at codegen time |
 | C backend: `@optional` `_set_` macro shape-aware setter | No `memcpy`-based setter for fixed arrays / bounded strings — future work |
+| C backend: user-supplied allocator | `ZidlCdrAllocator` interface planned; strings/sequences currently use `malloc` |
+| C++ backend: custom STL allocators | `std::string`, `std::vector`, `std::map` use default allocators; `std::pmr` support planned |
 | C/C++ backends: PL_CDR codegen | `--zig-pl-cdr` flag is parsed and wired but C/C++ backends do not yet emit PL_CDR functions |
 | Zig 0.15.1 / MicroZig output | Partially implemented: `--zig-version 0.15.1` is wired and bounded strings/sequences use fixed-capacity `zidl_rt.BoundedArray`; full freestanding/no-heap runtime path remains planned |
 | `--generate-interfaces` C++: complex-type adaptation | `ImplGenerator.emitImplOp` emits `/* TODO */` stubs — ABI boundary must be decided with DDS runtime |
