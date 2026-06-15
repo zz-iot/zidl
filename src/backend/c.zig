@@ -1430,6 +1430,7 @@ const CdrGenerator = struct {
             }
         }
         if (opt_count > 64) return error.TooManyOptionalMembers;
+        const has_optional = opt_count > 0;
 
         const c_name = try self.prefixedCName(s.qualified_name);
         defer self.alloc.free(c_name);
@@ -1564,7 +1565,7 @@ const CdrGenerator = struct {
         try self.print("int {s}_deserialize(ZidlCdrReader *_r, {s} *_v) {{\n", .{ c_name, c_name });
         if (mutable) {
             try self.writeI("int _rc;\n");
-            if (structHasOptional(s)) try self.writeI("_v->_present = 0;\n");
+            if (has_optional) try self.writeI("_v->_present = 0;\n");
             try self.writeI("size_t _em_end;\n");
             try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_em_end);\n");
             try self.writeI("if (_rc) return _rc;\n");
@@ -1612,7 +1613,7 @@ const CdrGenerator = struct {
             try self.write("}\n\n");
         } else {
             try self.writeI("int _rc;\n");
-            if (structHasOptional(s)) try self.writeI("_v->_present = 0;\n");
+            if (has_optional) try self.writeI("_v->_present = 0;\n");
             if (appendable) {
                 try self.writeI("_rc = zidl_cdr_skip_dheader_if_xcdr2(_r);\n");
                 try self.writeI("if (_rc) return _rc;\n");
