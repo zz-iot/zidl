@@ -7,7 +7,7 @@
 > current feature coverage, see [`features.md`](features.md).
 
 Current verification inventory:
-- `zig build test`: 783 tests passed (771 library tests, 1 CLI test, 11 integration tests) plus golden-output comparison.
+- `zig build test`: 783 tests passed (771 library tests, 1 CLI test, 11 Zig integration tests) plus golden-output comparison. C/C++/Java integration tests run separately via `zig build integration-test`.
 - `zig build integration-test`: compile-and-run integration for generated C, C++, and Java code.
 - `zig build interop-test`: 10 committed CDR interop vector tests.
 - `packages/zidl-rt`: 61 Zig runtime tests.
