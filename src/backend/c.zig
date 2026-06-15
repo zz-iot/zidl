@@ -502,15 +502,16 @@ const Generator = struct {
         const c_name = try self.prefixedCName(s.qualified_name);
         defer self.alloc.free(c_name);
 
-        const has_optional = structHasOptional(s);
-
-        if (has_optional) {
-            var opt_count: u32 = 0;
-            for (s.members) |m| {
-                if (m.annotations.is_optional) opt_count += 1;
+        var opt_count: u32 = 0;
+        for (s.members) |m| {
+            if (m.annotations.is_optional) {
+                opt_count += 1;
+            } else if (m.annotations.default_value != null) {
+                return error.DefaultOnNonOptionalNotSupportedInCBackend;
             }
-            if (opt_count > 64) return error.TooManyOptionalMembers;
         }
+        const has_optional = opt_count > 0;
+        if (opt_count > 64) return error.TooManyOptionalMembers;
 
         try self.emitVerbatimForPlacement(s.annotations.raw, "before-declaration");
         try self.print("typedef struct {s}_s {{\n", .{c_name});
@@ -1420,13 +1421,16 @@ const CdrGenerator = struct {
     // ── Struct / Exception ────────────────────────────────────────────────────
 
     fn emitStructFns(self: *CdrGenerator, s: *const ir.Struct) !void {
-        if (structHasOptional(s)) {
-            var opt_count: u32 = 0;
-            for (s.members) |m| {
-                if (m.annotations.is_optional) opt_count += 1;
+        var opt_count: u32 = 0;
+        for (s.members) |m| {
+            if (m.annotations.is_optional) {
+                opt_count += 1;
+            } else if (m.annotations.default_value != null) {
+                return error.DefaultOnNonOptionalNotSupportedInCBackend;
             }
-            if (opt_count > 64) return error.TooManyOptionalMembers;
         }
+        if (opt_count > 64) return error.TooManyOptionalMembers;
+        const has_optional = opt_count > 0;
 
         const c_name = try self.prefixedCName(s.qualified_name);
         defer self.alloc.free(c_name);
@@ -1561,7 +1565,7 @@ const CdrGenerator = struct {
         try self.print("int {s}_deserialize(ZidlCdrReader *_r, {s} *_v) {{\n", .{ c_name, c_name });
         if (mutable) {
             try self.writeI("int _rc;\n");
-            if (structHasOptional(s)) try self.writeI("_v->_present = 0;\n");
+            if (has_optional) try self.writeI("_v->_present = 0;\n");
             try self.writeI("size_t _em_end;\n");
             try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_em_end);\n");
             try self.writeI("if (_rc) return _rc;\n");
@@ -1609,7 +1613,7 @@ const CdrGenerator = struct {
             try self.write("}\n\n");
         } else {
             try self.writeI("int _rc;\n");
-            if (structHasOptional(s)) try self.writeI("_v->_present = 0;\n");
+            if (has_optional) try self.writeI("_v->_present = 0;\n");
             if (appendable) {
                 try self.writeI("_rc = zidl_cdr_skip_dheader_if_xcdr2(_r);\n");
                 try self.writeI("if (_rc) return _rc;\n");
@@ -4437,6 +4441,13 @@ test "c_backend cdr: struct without @optional has no _present clear in deseriali
     var src = try testGenCdr("struct Plain { long x; long y; };", "p");
     defer src.deinit(testing.allocator);
     try testing.expect(!has(src.items, "_present = 0"));
+}
+
+test "c_backend cdr: @default on non-optional member returns error" {
+    const result_h = testGen("struct Cfg { @default(42) long x; };", "cfg");
+    try testing.expectError(error.DefaultOnNonOptionalNotSupportedInCBackend, result_h);
+    const result_cdr = testGenCdr("struct Cfg { @default(42) long x; };", "cfg");
+    try testing.expectError(error.DefaultOnNonOptionalNotSupportedInCBackend, result_cdr);
 }
 
 test "c_backend cdr: @default emits apply_defaults prototype and implementation" {
