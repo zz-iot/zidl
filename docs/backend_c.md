@@ -198,6 +198,10 @@ For those, assign the field directly and update `_present` manually.
 At most 64 optional members per struct are supported; exceeding this returns
 `error.TooManyOptionalMembers` at codegen time.
 
+`Foo_deserialize` clears `_present` to zero before reading any members, so
+deserializing into a reused or non-zero-initialized struct is safe — stale
+presence bits from a previous use will not carry over.
+
 ### `@optional @key` members
 
 An `@optional` member may also carry `@key`. The generated `Foo_serialize_key`
@@ -206,6 +210,12 @@ serialization does not gate on the `_present` bit, because a key field must
 always be present for DDS to identify the instance. `Foo_deserialize_key` sets
 the `_present` bit when it reads the field, so the bitmask remains consistent
 after a key-only deserialize.
+
+> **Note:** `Foo_serialize_key` always writes the raw field bytes regardless of
+> whether `_present` is set. If the struct was not initialized (e.g. zero-filled),
+> the key serialized for an "absent" optional key field will be the zero value of
+> its type. Callers should ensure `@optional @key` members are always populated
+> before calling `serialize_key`.
 
 ### `apply_defaults`
 
