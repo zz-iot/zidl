@@ -191,7 +191,8 @@ typedef struct _Cfg_s {
 ```
 
 `_set_` macros use scalar assignment and are **not** emitted for array-backed
-optional members (fixed-length arrays `T[N]` and bounded strings `string<N>`).
+optional members (fixed-length arrays `T[N]`, bounded strings `string<N>`, and
+bounded wide strings `wstring<N>`).
 For those, assign the field directly and update `_present` manually.
 
 At most 64 optional members per struct are supported; exceeding this returns
