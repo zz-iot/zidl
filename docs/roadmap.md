@@ -73,11 +73,11 @@ this roadmap. New language backends have their own sections below.
   interfaces become plain C callback structs with a `void *listener_data` context
   pointer.  The existing vtable structs in the generated header become an internal
   artifact; they should not appear in the public C API header.
-- ~~**Zig backend `--generate-c-api`**~~: **Implemented.** Because the Zig vtable
+- ~~**Zig backend `--zig-generate-c-api`**~~: **Implemented.** Because the Zig vtable
   slots use C-ABI types from the start, the generated `pub export fn callconv(.c)`
   wrappers are trivial one-line forwarders with no type conversion.  No
   `CXxxListenerAdapter` is generated; listener structs are passed and stored by
-  value directly.  See `docs/ecosystem.md` §"`--generate-c-api`" for details.
+  value directly.  See `docs/ecosystem.md` §"`--zig-generate-c-api`" for details.
 
 ### All backends (annotation support)
 
@@ -126,7 +126,7 @@ this roadmap. New language backends have their own sections below.
 
 | Item | Notes |
 |---|---|
-| `--generate-c-api` trivial forwarders (Zig backend) | Vtable slots are C-ABI; exports are one-liners. No type conversion. |
+| `--zig-generate-c-api` trivial forwarders (Zig backend) | Vtable slots are C-ABI; exports are one-liners. No type conversion. |
 | `extern struct` for C-compatible IDL types | Structs whose fields are all C-compatible use `extern struct`; others use plain `struct`. |
 | `deinit(alloc)` on sequence-containing types | Recursively frees heap-owned sequence buffers (`_release == true`). |
 | `clone(alloc)` on sequence-containing types | Deep copy symmetric to `deinit`; used by vtable `init` to own QoS with sequence fields. |

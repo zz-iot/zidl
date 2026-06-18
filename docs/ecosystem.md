@@ -107,8 +107,8 @@ EquivalenceHash.
 
 When `--generate-interfaces` is set, each IDL `interface` declaration and each
 topic-type struct get typed DataWriter/DataReader wrappers in the
-**language-idiomatic** form for the target backend. (For Zig, topic-type wrappers
-are opt-in via `--zig-generate-dds-wrappers` and require a `dds` module in the build).
+**language-idiomatic** form for the target backend. (Topic-type wrappers
+are opt-in via `--generate-dds-wrappers`. For Zig, they require a `dds` module in the build).
 
 **How topic types are determined:**
 - A struct with `@topic` annotation: `TypeAnnotations.is_topic == true`.
@@ -156,7 +156,7 @@ function pointer per callback), matching the same convention.
 
 ---
 
-## `--generate-c-api`: C-ABI Export Layer (Zig backend, implemented)
+## `--zig-generate-c-api`: C-ABI Export Layer (Zig backend, implemented)
 
 A companion flag to `--generate-interfaces` for the Zig backend.  Because the
 Zig vtable slots already use C-ABI types throughout (see per-language shapes

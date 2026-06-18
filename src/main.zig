@@ -4,25 +4,39 @@
 //!   zidl [options] <file.idl> [<file.idl>…]
 //!
 //! Options:
-//!   -b <lang>     Backend language: c (default), cpp, java, zig
-//!   -o <dir>      Output directory (default: .)
-//!   -I <dir>      Add include search path (repeatable)
-//!   -D <M>[=V]    Define preprocessor macro (repeatable)
-//!   -E            Preprocess only; print expanded IDL, no code gen
-//!   --no-typesupport              Suppress CDR serialize/deserialize (all backends)
-//!   --no-typeobject-support       Suppress TypeObject/TypeIdentifier (all backends)
-//!   --c-header-guard-prefix <pfx> Prefix for include guard macros (C, C++ backends)
-//!   --c-export-macro <macro>      DLL export macro for function declarations (C, C++ backends)
-//!   --c-pragma-once               Use #pragma once instead of #ifndef guards (C, C++ backends)
-//!   --c-extern-c                  Wrap header in extern "C" {} (C backend)
-//!   --cpp-namespace <ns>          Wrap output in an outer namespace (C++ backend)
-//!   --java-package <pkg>          Java package prefix (Java backend)
-//!   --java-jni-library <name>     System.loadLibrary() name for JNI impls (Java backend)
-//!   --zig-pl-cdr                  Generate PL_CDR functions for @mutable types (Zig backend)
-//!   --zig-version <0.16.0|0.15.1> Zig output compatibility target (Zig backend)
-//!   --profile <full|xrce>         Target profile (default: full)
-//!   -h / --help   Show this help
-//!   -v / --version  Show version
+//!   -b <lang>                      Backend language: c (default), cpp, java, zig
+//!   -o <dir>                       Output directory (default: .)
+//!   -I <dir>                       Add include search path (repeatable)
+//!   -D <M>[=V]                     Define preprocessor macro (repeatable)
+//!   -E                             Preprocess only; emit expanded IDL
+//!
+//!   --default-extensibility <ext>  Default extensibility when no @extensibility present
+//!                                  (default: final, per IDL4 §8.3.1) (all backends)
+//!   --generate-dds-wrappers        Emit typed DDS DataWriter/DataReader wrappers (all backends)
+//!   --generate-interfaces          Emit DDS DataWriter/DataReader binding layer (all backends)
+//!   --no-typeobject-support        Suppress TypeObject/TypeIdentifier (all backends, currently Zig only)
+//!   --no-typesupport               Suppress CDR serialize/deserialize (all backends)
+//!   --profile <full|xrce>          Target profile: full (default) or xrce (all backends)
+//!                                    xrce: XCDR1 only, @final types, bounded sequences/strings
+//!   --single-file                  Single monolithic output file — default (all backends)
+//!   --split-files                  One file per type (C/C++/Java) or per module (Zig) (all backends)
+//!   --type-prefix <pfx>            Prefix for all generated type names (all backends)
+//!
+//!   --c-export-macro <macro>       DLL export macro for function declarations (C, C++ backends)
+//!   --c-extern-c                   Wrap header in extern "C" {} (C backend)
+//!   --c-header-guard-prefix <pfx>  Prefix for include guard macros (C, C++ backends)
+//!   --c-pragma-once                Use #pragma once instead of #ifndef guards (C, C++ backends)
+//!   --cpp-namespace <ns>           Wrap all output in an outer namespace (C++ backend)
+//!
+//!   --java-jni-library <name>      System.loadLibrary() name for JNI impls (Java backend)
+//!   --java-package <pkg>           Package prefix, e.g. com.example (Java backend)
+//!
+//!   --zig-generate-c-api           Emit pub export fn callconv(.c) wrappers for C free-function API (Zig backend)
+//!   --zig-pl-cdr                   Generate PL_CDR functions for @mutable types (Zig backend)
+//!   --zig-version <0.16.0|0.15.1>  Output compatibility target (Zig backend)
+//!
+//!   -h, --help                     Show this help
+//!   -v, --version                  Show version
 //!
 //! Drives the full pipeline per input file:
 //!   preprocessor → lexer → parser → semantic analysis → IR → backend
@@ -58,8 +72,8 @@ const Opts = struct {
     extern_c: bool = false,
     cpp_namespace: []const u8 = "",
     pl_cdr: bool = false,
-    zig_generate_dds_wrappers: bool = false,
-    generate_c_api: bool = false,
+    generate_dds_wrappers: bool = false,
+    zig_generate_c_api: bool = false,
     preprocess_timestamp_seconds: ?u64 = null,
     inputs: std.ArrayListUnmanaged([]const u8) = .empty,
 };
@@ -212,12 +226,12 @@ pub fn main(init: std.process.Init) !void {
             opts.split_files = true;
         } else if (std.mem.eql(u8, arg, "--single-file")) {
             opts.split_files = false;
-        } else if (std.mem.eql(u8, arg, "--zig-generate-dds-wrappers")) {
-            opts.zig_generate_dds_wrappers = true;
+        } else if (std.mem.eql(u8, arg, "--generate-dds-wrappers")) {
+            opts.generate_dds_wrappers = true;
         } else if (std.mem.eql(u8, arg, "--zig-pl-cdr")) {
             opts.pl_cdr = true;
-        } else if (std.mem.eql(u8, arg, "--generate-c-api")) {
-            opts.generate_c_api = true;
+        } else if (std.mem.eql(u8, arg, "--zig-generate-c-api")) {
+            opts.zig_generate_c_api = true;
         } else if (std.mem.eql(u8, arg, "--c-pragma-once")) {
             opts.pragma_once = true;
         } else if (std.mem.eql(u8, arg, "--c-extern-c")) {
@@ -433,8 +447,8 @@ fn processFile(
         .extern_c = opts.extern_c,
         .cpp_namespace = opts.cpp_namespace,
         .pl_cdr = opts.pl_cdr,
-        .generate_c_api = opts.generate_c_api,
-        .zig_generate_dds_wrappers = opts.zig_generate_dds_wrappers,
+        .zig_generate_c_api = opts.zig_generate_c_api,
+        .generate_dds_wrappers = opts.generate_dds_wrappers,
         .zig_version = opts.zig_version,
     };
     try be.generate(&ir_spec, gen_opts);
@@ -495,35 +509,39 @@ fn printUsage(w: *Io.Writer) !void {
         \\Usage: zidl [options] <file.idl> [<file.idl>…]
         \\
         \\Options:
-        \\  -b <lang>     Backend language: c (default), cpp, java, zig
-        \\  -o <dir>      Output directory (default: .)
-        \\  -I <dir>      Add include search path (repeatable)
-        \\  -D <M>[=V]    Define preprocessor macro (repeatable)
-        \\  -E            Preprocess only; emit expanded IDL
-        \\  --no-typesupport         Suppress CDR serialize/deserialize (all backends)
-        \\  --no-typeobject-support  Suppress TypeObject/TypeIdentifier (all backends, currently Zig only)
-        \\  --generate-interfaces    Emit DDS DataWriter/DataReader binding layer (all backends)
-        \\  --type-prefix <pfx>      Prefix for all generated type names (all backends)
-        \\  --split-files            One file per type (C/C++/Java) or per module (Zig) (all backends)
-        \\  --single-file            Single monolithic output file — default (all backends)
-        \\  --default-extensibility <final|appendable|mutable>
-        \\                           Default extensibility when no @extensibility present
-        \\                           (default: final, per IDL4 §8.3.1) (all backends)
-        \\  --profile <full|xrce>    Target profile: full (default) or xrce (all backends)
-        \\                             xrce: XCDR1 only, @final types, bounded sequences/strings
-        \\  --c-header-guard-prefix <pfx>  Prefix for include guard macros (C, C++ backends)
+        \\  -b <lang>                      Backend language: c (default), cpp, java, zig
+        \\  -o <dir>                       Output directory (default: .)
+        \\  -I <dir>                       Add include search path (repeatable)
+        \\  -D <M>[=V]                     Define preprocessor macro (repeatable)
+        \\  -E                             Preprocess only; emit expanded IDL
+        \\
+        \\  --default-extensibility <ext>  Default extensibility when no @extensibility present
+        \\                                 (default: final, per IDL4 §8.3.1) (all backends)
+        \\  --generate-dds-wrappers        Emit typed DDS DataWriter/DataReader wrappers (all backends)
+        \\  --generate-interfaces          Emit DDS DataWriter/DataReader binding layer (all backends)
+        \\  --no-typeobject-support        Suppress TypeObject/TypeIdentifier (all backends, currently Zig only)
+        \\  --no-typesupport               Suppress CDR serialize/deserialize (all backends)
+        \\  --profile <full|xrce>          Target profile: full (default) or xrce (all backends)
+        \\                                   xrce: XCDR1 only, @final types, bounded sequences/strings
+        \\  --single-file                  Single monolithic output file — default (all backends)
+        \\  --split-files                  One file per type (C/C++/Java) or per module (Zig) (all backends)
+        \\  --type-prefix <pfx>            Prefix for all generated type names (all backends)
+        \\
         \\  --c-export-macro <macro>       DLL export macro for function declarations (C, C++ backends)
-        \\  --c-pragma-once                Use #pragma once instead of #ifndef guards (C, C++ backends)
         \\  --c-extern-c                   Wrap header in extern "C" {{}} (C backend)
+        \\  --c-header-guard-prefix <pfx>  Prefix for include guard macros (C, C++ backends)
+        \\  --c-pragma-once                Use #pragma once instead of #ifndef guards (C, C++ backends)
         \\  --cpp-namespace <ns>           Wrap all output in an outer namespace (C++ backend)
-        \\  --java-package <pkg>           Package prefix, e.g. com.example (Java backend)
+        \\
         \\  --java-jni-library <name>      System.loadLibrary() name for JNI impls (Java backend)
-        \\  --zig-generate-dds-wrappers    Emit typed DDS DataWriter/DataReader wrappers (Zig backend)
+        \\  --java-package <pkg>           Package prefix, e.g. com.example (Java backend)
+        \\
+        \\  --zig-generate-c-api           Emit pub export fn callconv(.c) wrappers for C free-function API (Zig backend)
         \\  --zig-pl-cdr                   Generate PL_CDR functions for @mutable types (Zig backend)
-        \\  --generate-c-api               Emit pub export fn callconv(.c) wrappers for C free-function API (Zig backend)
         \\  --zig-version <0.16.0|0.15.1>  Output compatibility target (Zig backend)
-        \\  -h / --help   Show this help
-        \\  -v / --version  Show version
+        \\
+        \\  -h, --help                     Show this help
+        \\  -v, --version                  Show version
         \\
     , .{});
     try w.flush();

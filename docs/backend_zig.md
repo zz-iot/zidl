@@ -88,7 +88,7 @@ pub const MyStruct = struct {
     pub fn deserializeKeyInto(out: *MyStruct, reader: *zidl_rt.CdrReader, alloc: std.mem.Allocator) !void { ... }
     pub fn computeKeyHash(value: MyStruct) [16]u8 { ... }
 
-    // Typed DDS wrappers (requires --zig-generate-dds-wrappers flag and a `dds` module):
+    // Typed DDS wrappers (requires --generate-dds-wrappers flag and a `dds` module):
     // pub const MyStructDataWriter = struct { ... };
     // pub const MyStructDataReader = struct { ... };
 
@@ -173,7 +173,7 @@ pub const MyException = struct {
 Entity interfaces (those NOT annotated with `@callback`) emit a C-ABI-compatible
 fat-pointer vtable struct.  Vtable slots use C-ABI types throughout: strings are
 `[*:0]const u8`, struct params are `*const T`, and callback interfaces are
-`?*const CallbackStruct`.  The C export functions (`--generate-c-api`) are trivial
+`?*const CallbackStruct`.  The C export functions (`--zig-generate-c-api`) are trivial
 one-line forwarders — no conversion code is emitted.
 
 ```zig

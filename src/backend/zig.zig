@@ -166,7 +166,7 @@ pub fn generateSplitFiles(
         if (!opts.no_typesupport or opts.pl_cdr) {
             try gen.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
-        if (opts.zig_generate_dds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(m.items)) {
+        if (opts.generate_dds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(m.items)) {
             try gen.write("const _dds = @import(\"dds\");\n");
         }
         // Self-reference alias: allows Module.SomeType syntax within this file.
@@ -211,7 +211,7 @@ pub fn generateSplitFiles(
         if (!opts.no_typesupport or opts.pl_cdr) {
             try gen.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
-        if (opts.zig_generate_dds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(non_module.items)) {
+        if (opts.generate_dds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(non_module.items)) {
             try gen.write("const _dds = @import(\"dds\");\n");
         }
         try gen.write("\n");
@@ -273,7 +273,7 @@ const Generator = struct {
         if (!self.opts.no_typesupport or self.opts.pl_cdr) {
             try self.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
-        if (self.opts.zig_generate_dds_wrappers and !self.opts.no_typesupport and itemsHaveTopicTypes(spec.items)) {
+        if (self.opts.generate_dds_wrappers and !self.opts.no_typesupport and itemsHaveTopicTypes(spec.items)) {
             try self.write("const _dds = @import(\"dds\");\n");
         }
         try self.write("\n");
@@ -344,7 +344,7 @@ const Generator = struct {
         }
         try self.ind();
         try self.print("}}; // {s}{s}\n\n", .{ pfx, s.name });
-        if (self.opts.zig_generate_dds_wrappers and !self.opts.no_typesupport and structHasKey(s) and s.annotations.extensibility != .mutable) {
+        if (self.opts.generate_dds_wrappers and !self.opts.no_typesupport and structHasKey(s) and s.annotations.extensibility != .mutable) {
             try self.emitStructTypedWrapper(s);
         }
     }
@@ -1295,7 +1295,7 @@ const Generator = struct {
         try self.ind();
         try self.print("}}; // {s}{s}\n\n", .{ pfx, iface.name });
 
-        if (self.opts.generate_c_api) {
+        if (self.opts.zig_generate_c_api) {
             try self.emitCApiExports(iface, pfx, ops.items, attrs.items);
         }
     }
@@ -4179,9 +4179,9 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
     generate_interfaces: bool = false,
     type_prefix: []const u8 = "",
     pl_cdr: bool = false,
-    zig_generate_dds_wrappers: bool = false,
+    generate_dds_wrappers: bool = false,
     zig_version: interface.ZigVersion = .@"0.16.0",
-    generate_c_api: bool = false,
+    zig_generate_c_api: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
 
@@ -4208,9 +4208,9 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
         .generate_interfaces = extra_opts.generate_interfaces,
         .type_prefix = extra_opts.type_prefix,
         .pl_cdr = extra_opts.pl_cdr,
-        .zig_generate_dds_wrappers = extra_opts.zig_generate_dds_wrappers,
+        .generate_dds_wrappers = extra_opts.generate_dds_wrappers,
         .zig_version = extra_opts.zig_version,
-        .generate_c_api = extra_opts.generate_c_api,
+        .zig_generate_c_api = extra_opts.zig_generate_c_api,
     };
     try generateFile(alloc, &ir_spec, opts, &out);
     return out;
@@ -5188,7 +5188,7 @@ test "zig_backend: interface in module" {
 test "zig_backend: --generate-c-api emits callconv(.c) wrappers for entity interfaces" {
     var out = try testGenOpts(
         \\interface Writer { long write_val(in long x, in string label); void reset(); };
-    , "w", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    , "w", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Trivial forwarder: string param is [*:0]const u8, passed directly to vtable
@@ -5205,7 +5205,7 @@ test "zig_backend: --generate-c-api emits C_XxxListener and adapter for listener
         \\struct Status { long count; };
         \\interface Source { long enable(); };
         \\interface SourceListener { void on_change(in Source src, in Status st); };
-    , "sl", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    , "sl", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // @callback interfaces now produce C callback struct (no C_ prefix, no fat-pointer, no adapter)
@@ -5268,7 +5268,7 @@ test "zig_backend: --generate-c-api entity wrappers use C_XxxListener and adapte
         \\    long create_writer(in long qos, in WriterListener a_listener);
         \\    long set_listener(in WriterListener a_listener, in long mask);
         \\};
-    , "pw", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    , "pw", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Vtable and export both use ?*const WriterListener (the callback struct)
@@ -5283,7 +5283,7 @@ test "zig_backend: --generate-c-api emits C_XxxSeq and out-seq write-back" {
         \\typedef long long Handle;
         \\typedef sequence<Handle> HandleSeq;
         \\interface Obj { long get_handles(out HandleSeq handles); };
-    , "sq", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    , "sq", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Sequence typedef is now the extern struct itself (no C_ prefix companion)
@@ -5300,7 +5300,7 @@ test "zig_backend: --generate-c-api in-StringSeq allocates span conversion" {
     var out = try testGenOpts(
         \\typedef sequence<string> StringSeq;
         \\interface F { long filter(in StringSeq params); };
-    , "sf", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    , "sf", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // StringSeq typedef is the extern struct; [*:0]const u8 buffer (C strings)
@@ -5318,7 +5318,7 @@ test "zig_backend: --generate-c-api emits noop vtable for listener interfaces" {
     var out = try testGenOpts(
         \\interface Writer { long write_val(in long x); };
         \\interface WriterListener { void on_change(in Writer w); };
-    , "wl", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    , "wl", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Listener gets a noop constant, not a free function
@@ -5348,7 +5348,7 @@ test "zig_backend: @callback thunk unwraps ?*const T params (seq typedef and cal
 test "zig_backend: --generate-c-api with --type-prefix uses prefix in export name" {
     var out = try testGenOpts(
         \\interface Greeter { string greet(in string name); };
-    , "g", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true, .type_prefix = "DDS_" });
+    , "g", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true, .type_prefix = "DDS_" });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Exported symbol must carry the prefix so it matches the C header's declaration
@@ -5359,7 +5359,7 @@ test "zig_backend: --generate-c-api with --type-prefix uses prefix in export nam
 test "zig_backend: --generate-c-api string return uses ptrCast" {
     var out = try testGenOpts(
         \\interface Named { string get_name(); };
-    , "n", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    , "n", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Vtable returns [*:0]const u8; trivial forwarder passes it through
@@ -5374,7 +5374,7 @@ test "zig_backend: --generate-c-api struct in-param passed by pointer" {
     var out = try testGenOpts(
         \\struct Qos { long depth; };
         \\interface Writer { long set_qos(in Qos qos); };
-    , "sq", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    , "sq", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Struct in-param → *const T in both vtable slot and C-ABI export signature
@@ -5759,7 +5759,7 @@ test "zig_backend: no typed DataWriter/DataReader by default for keyed struct" {
 test "zig_backend: typed DataWriter/DataReader for keyed @appendable struct" {
     var out = try testGenOpts(
         \\@appendable struct ShapeType { @key string<128> color; long x; long y; long shapesize; };
-    , "shape", .{ .zig_generate_dds_wrappers = true });
+    , "shape", .{ .generate_dds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // dds import emitted
@@ -5800,7 +5800,7 @@ test "zig_backend: typed DataWriter/DataReader for keyed @appendable struct" {
 test "zig_backend: typed DataWriter uses writeEncapHeader for @final struct" {
     var out = try testGenOpts(
         \\@final struct SensorData { @key long id; double value; };
-    , "sensor", .{ .zig_generate_dds_wrappers = true });
+    , "sensor", .{ .generate_dds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "pub const SensorDataDataWriter = struct {"));
@@ -5811,7 +5811,7 @@ test "zig_backend: typed DataWriter uses writeEncapHeader for @final struct" {
 }
 
 test "zig_backend: no DataWriter/DataReader for struct without @key" {
-    var out = try testGenOpts("struct NoKey { long x; long y; };", "nk", .{ .zig_generate_dds_wrappers = true });
+    var out = try testGenOpts("struct NoKey { long x; long y; };", "nk", .{ .generate_dds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(!has(s, "DataWriter"));
@@ -5823,7 +5823,7 @@ test "zig_backend: no_typesupport suppresses DataWriter/DataReader" {
     var out = try testGenOpts(
         "@appendable struct ShapeType { @key string<128> color; long x; };",
         "shape",
-        .{ .no_typesupport = true, .zig_generate_dds_wrappers = true },
+        .{ .no_typesupport = true, .generate_dds_wrappers = true },
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
@@ -5836,7 +5836,7 @@ test "zig_backend: no DataWriter/DataReader for @mutable keyed struct" {
     var out = try testGenOpts(
         "@mutable struct MutableTopic { @key long id; string data; };",
         "mt",
-        .{ .zig_generate_dds_wrappers = true },
+        .{ .generate_dds_wrappers = true },
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
@@ -5847,7 +5847,7 @@ test "zig_backend: no DataWriter/DataReader for @mutable keyed struct" {
 test "zig_backend: Sample.deinit emitted when struct has unbounded sequence" {
     var out = try testGenOpts(
         \\@appendable struct BagTopic { @key long id; sequence<long> items; };
-    , "bag", .{ .zig_generate_dds_wrappers = true });
+    , "bag", .{ .generate_dds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "pub const BagTopicDataReader = struct {"));
@@ -5860,7 +5860,7 @@ test "zig_backend: Sample.deinit emitted when struct has unbounded sequence" {
 test "zig_backend: DataWriter/DataReader inside module" {
     var out = try testGenOpts(
         \\module DDS { @appendable struct Shape { @key string<64> color; long x; }; };
-    , "dds", .{ .zig_generate_dds_wrappers = true });
+    , "dds", .{ .generate_dds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // _dds import at file level (prefixed to avoid clash with any IDL module named "dds")
@@ -5877,7 +5877,7 @@ test "zig_backend: module named 'dds' does not produce duplicate const dds" {
     // makes the clash structurally impossible (IDL names cannot start with '_').
     var out = try testGenOpts(
         \\module dds { @appendable struct Topic { @key long id; }; };
-    , "types", .{ .zig_generate_dds_wrappers = true });
+    , "types", .{ .generate_dds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "const _dds = @import(\"dds\");"));
