@@ -88,7 +88,7 @@ pub const MyStruct = struct {
     pub fn deserializeKeyInto(out: *MyStruct, reader: *zidl_rt.CdrReader, alloc: std.mem.Allocator) !void { ... }
     pub fn computeKeyHash(value: MyStruct) [16]u8 { ... }
 
-    // Typed DDS wrappers (requires --generate-dds-wrappers flag and a `dds` module):
+    // Typed DDS wrappers (requires --generate-dds-wrappers flag and a `dds` adapter module):
     // pub const MyStructDataWriter = struct { ... };
     // pub const MyStructDataReader = struct { ... };
 
@@ -98,6 +98,22 @@ pub const MyStruct = struct {
     pub const type_identifier: [32]u8 = [32]u8{ ... };
 }; // MyStruct
 ```
+
+The Zig `dds` adapter module is supplied by the consuming build, not generated
+with the topic type. Its wrapper contract is:
+
+```zig
+pub const DDS = ...; // exposes DataWriter, DataReader, InstanceStateKind, InstanceHandle_t
+pub const WriteKind = enum { alive, dispose, unregister };
+
+pub fn writeRaw(dw: DDS.DataWriter, kind: WriteKind, key_hash: [16]u8, payload: []const u8) !void;
+pub fn takeRaw(dr: DDS.DataReader) ?TakenSample;
+```
+
+`TakenSample` must expose `.data`, `.instance_state`, `.instance_handle`, and
+`.deinit()`. In zzdds, this adapter should wrap the hand-written DCPS runtime
+(`DataWriterImpl.writeRaw` / `DataReaderImpl.takeRaw`) rather than the C ABI
+exports from `--zig-generate-c-api`.
 
 ### Union
 IDL unions map to a struct with a discriminant field `_d` and a Zig anonymous union `_u`:

@@ -105,10 +105,12 @@ EquivalenceHash.
 
 ## `--generate-interfaces`: DCPS API Generation
 
-When `--generate-interfaces` is set, each IDL `interface` declaration and each
-topic-type struct get typed DataWriter/DataReader wrappers in the
-**language-idiomatic** form for the target backend. (Topic-type wrappers
-are opt-in via `--generate-dds-wrappers`. For Zig, they require a `dds` module in the build).
+When `--generate-interfaces` is set, IDL `interface` declarations are emitted
+in the **language-idiomatic** form for the target backend. Topic-type
+DataWriter/DataReader wrappers are separate and opt-in via
+`--generate-dds-wrappers`. For Zig, those wrappers require a consuming build to
+provide a `dds` adapter module exposing a `DDS` namespace plus raw serialized
+write/take functions.
 
 **How topic types are determined:**
 - A struct with `@topic` annotation: `TypeAnnotations.is_topic == true`.

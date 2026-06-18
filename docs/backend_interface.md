@@ -216,7 +216,10 @@ For a struct `Foo`:
   not topic types — skip DataWriter/DataReader generation.
 - normal CDR serialize/deserialize is still default. Typed DDS wrappers
   for topic types are opt-in via `--generate-dds-wrappers` (currently implemented in the Zig backend).
-  For Zig, the wrappers require a consuming build to provide a `dds` module with the existing contract.
+  For Zig, the wrappers require a consuming build to provide a `dds` adapter
+  module exposing a `DDS` namespace plus raw serialized write/take functions.
+  This adapter targets the native DDS runtime, not the `--zig-generate-c-api`
+  C export layer.
 
 **Interface declarations in IDL:**
 - When `generate_interfaces` is true, IDL `interface` declarations are emitted
