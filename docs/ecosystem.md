@@ -105,9 +105,12 @@ EquivalenceHash.
 
 ## `--generate-interfaces`: DCPS API Generation
 
-When `--generate-interfaces` is set, each IDL `interface` declaration and each
-topic-type struct get typed DataWriter/DataReader wrappers in the
-**language-idiomatic** form for the target backend.
+When `--generate-interfaces` is set, IDL `interface` declarations are emitted
+in the **language-idiomatic** form for the target backend. Topic-type
+DataWriter/DataReader wrappers are separate and opt-in via
+`--generate-dds-wrappers`. For Zig, those wrappers require a consuming build to
+provide a `dds` adapter module exposing a `DDS` namespace plus raw serialized
+write/take functions.
 
 **How topic types are determined:**
 - A struct with `@topic` annotation: `TypeAnnotations.is_topic == true`.
@@ -155,7 +158,7 @@ function pointer per callback), matching the same convention.
 
 ---
 
-## `--generate-c-api`: C-ABI Export Layer (Zig backend, implemented)
+## `--zig-generate-c-api`: C-ABI Export Layer (Zig backend, implemented)
 
 A companion flag to `--generate-interfaces` for the Zig backend.  Because the
 Zig vtable slots already use C-ABI types throughout (see per-language shapes

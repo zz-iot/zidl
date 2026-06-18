@@ -166,7 +166,7 @@ pub fn generateSplitFiles(
         if (!opts.no_typesupport or opts.pl_cdr) {
             try gen.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
-        if (!opts.no_typesupport and itemsHaveTopicTypes(m.items)) {
+        if (opts.generate_dds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(m.items)) {
             try gen.write("const _dds = @import(\"dds\");\n");
         }
         // Self-reference alias: allows Module.SomeType syntax within this file.
@@ -211,7 +211,7 @@ pub fn generateSplitFiles(
         if (!opts.no_typesupport or opts.pl_cdr) {
             try gen.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
-        if (!opts.no_typesupport and itemsHaveTopicTypes(non_module.items)) {
+        if (opts.generate_dds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(non_module.items)) {
             try gen.write("const _dds = @import(\"dds\");\n");
         }
         try gen.write("\n");
@@ -273,7 +273,7 @@ const Generator = struct {
         if (!self.opts.no_typesupport or self.opts.pl_cdr) {
             try self.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
-        if (!self.opts.no_typesupport and itemsHaveTopicTypes(spec.items)) {
+        if (self.opts.generate_dds_wrappers and !self.opts.no_typesupport and itemsHaveTopicTypes(spec.items)) {
             try self.write("const _dds = @import(\"dds\");\n");
         }
         try self.write("\n");
@@ -344,7 +344,7 @@ const Generator = struct {
         }
         try self.ind();
         try self.print("}}; // {s}{s}\n\n", .{ pfx, s.name });
-        if (!self.opts.no_typesupport and structHasKey(s) and s.annotations.extensibility != .mutable) {
+        if (self.opts.generate_dds_wrappers and !self.opts.no_typesupport and structHasKey(s) and s.annotations.extensibility != .mutable) {
             try self.emitStructTypedWrapper(s);
         }
     }
@@ -1143,7 +1143,7 @@ const Generator = struct {
 
         // ── Outer struct ──────────────────────────────────────────────────
         // extern struct makes the two-pointer {ptr, vtable} layout C-ABI
-        // compatible, which --generate-c-api relies on to pass entity values
+        // compatible, which --zig-generate-c-api relies on to pass entity values
         // through callconv(.c) functions without an extra heap indirection.
         try self.ind();
         try self.print("pub const {s}{s} = extern struct {{\n", .{ pfx, iface.name });
@@ -1295,12 +1295,12 @@ const Generator = struct {
         try self.ind();
         try self.print("}}; // {s}{s}\n\n", .{ pfx, iface.name });
 
-        if (self.opts.generate_c_api) {
+        if (self.opts.zig_generate_c_api) {
             try self.emitCApiExports(iface, pfx, ops.items, attrs.items);
         }
     }
 
-    // ── C-API exports (--generate-c-api) ─────────────────────────────────────
+    // ── C-API exports (--zig-generate-c-api) ─────────────────────────────────
 
     /// Emit `pub export fn callconv(.c)` trivial forwarders for all operations and
     /// attributes of an entity interface.  Callback interfaces are handled by
@@ -2567,12 +2567,12 @@ const Generator = struct {
     /// @key and is not @mutable.  These are the generated equivalents of what
     /// the DDS-DCPS spec (Annex A) calls `FooDataWriter` / `FooDataReader`.
     ///
-    /// The `dds` module contract (must be provided by the consuming build):
-    ///   - `_dds.DataWriter`, `_dds.DataReader`
-    ///   - `_dds.InstanceStateKind`, `_dds.InstanceHandle_t`
+    /// The `dds` module adapter contract (must be provided by the consuming build):
+    ///   - `_dds.DDS.DataWriter`, `_dds.DDS.DataReader`
+    ///   - `_dds.DDS.InstanceStateKind`, `_dds.DDS.InstanceHandle_t`
     ///   - `_dds.WriteKind` enum: `.alive`, `.dispose`, `.unregister`
-    ///   - `_dds.writeCdr(dw, kind, key_hash: [16]u8, payload: []const u8) !void`
-    ///   - `_dds.takeCdr(dr) ?RawSample` — `.data`, `.instance_state`,
+    ///   - `_dds.writeRaw(dw, kind, key_hash: [16]u8, payload: []const u8) !void`
+    ///   - `_dds.takeRaw(dr) ?RawSample` — `.data`, `.instance_state`,
     ///     `.instance_handle`, `.deinit() void`
     fn emitStructTypedWrapper(self: *Generator, s: *const ir.Struct) !void {
         const pfx = self.opts.type_prefix;
@@ -2584,14 +2584,14 @@ const Generator = struct {
         try self.ind();
         try self.print("pub const {s}DataWriter = struct {{\n", .{type_name});
         try self.ind();
-        try self.write("    _dw: _dds.DataWriter,\n");
+        try self.write("    _dw: _dds.DDS.DataWriter,\n");
         try self.ind();
         try self.write("    _alloc: std.mem.Allocator,\n");
         try self.ind();
         try self.write("    _xcdr2: bool,\n");
         try self.write("\n");
         try self.ind();
-        try self.write("    pub fn init(dw: _dds.DataWriter, alloc: std.mem.Allocator, xcdr2: bool) @This() {\n");
+        try self.write("    pub fn init(dw: _dds.DDS.DataWriter, alloc: std.mem.Allocator, xcdr2: bool) @This() {\n");
         try self.ind();
         try self.write("        return .{ ._dw = dw, ._alloc = alloc, ._xcdr2 = xcdr2 };\n");
         try self.ind();
@@ -2608,10 +2608,10 @@ const Generator = struct {
         try self.ind();
         try self.print("pub const {s}DataReader = struct {{\n", .{type_name});
         try self.ind();
-        try self.write("    _dr: _dds.DataReader,\n");
+        try self.write("    _dr: _dds.DDS.DataReader,\n");
         try self.write("\n");
         try self.ind();
-        try self.write("    pub fn init(dr: _dds.DataReader) @This() {\n");
+        try self.write("    pub fn init(dr: _dds.DDS.DataReader) @This() {\n");
         try self.ind();
         try self.write("        return .{ ._dr = dr };\n");
         try self.ind();
@@ -2627,9 +2627,9 @@ const Generator = struct {
         try self.ind();
         try self.print("        value: {s},\n", .{type_name});
         try self.ind();
-        try self.write("        instance_state: _dds.InstanceStateKind,\n");
+        try self.write("        instance_state: _dds.DDS.InstanceStateKind,\n");
         try self.ind();
-        try self.write("        instance_handle: _dds.InstanceHandle_t,\n");
+        try self.write("        instance_handle: _dds.DDS.InstanceHandle_t,\n");
         if (structNeedsSeqDeinit(s)) {
             try self.write("\n");
             try self.ind();
@@ -2648,7 +2648,7 @@ const Generator = struct {
         try self.ind();
         try self.write("    pub fn take(self: @This(), alloc: std.mem.Allocator) anyerror!?TakenSample {\n");
         try self.ind();
-        try self.write("        const _raw = _dds.takeCdr(self._dr) orelse return null;\n");
+        try self.write("        const _raw = _dds.takeRaw(self._dr) orelse return null;\n");
         try self.ind();
         try self.write("        defer _raw.deinit();\n");
         try self.ind();
@@ -2712,7 +2712,7 @@ const Generator = struct {
         try self.ind();
         try self.print("        const _hash = {s}.computeKeyHash({s});\n", .{ type_name, param_name });
         try self.ind();
-        try self.print("        try _dds.writeCdr(self._dw, .{s}, _hash, _buf.items);\n", .{kind_str});
+        try self.print("        try _dds.writeRaw(self._dw, .{s}, _hash, _buf.items);\n", .{kind_str});
         try self.ind();
         try self.write("    }\n");
     }
@@ -4179,8 +4179,9 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
     generate_interfaces: bool = false,
     type_prefix: []const u8 = "",
     pl_cdr: bool = false,
+    generate_dds_wrappers: bool = false,
     zig_version: interface.ZigVersion = .@"0.16.0",
-    generate_c_api: bool = false,
+    zig_generate_c_api: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
 
@@ -4207,8 +4208,9 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
         .generate_interfaces = extra_opts.generate_interfaces,
         .type_prefix = extra_opts.type_prefix,
         .pl_cdr = extra_opts.pl_cdr,
+        .generate_dds_wrappers = extra_opts.generate_dds_wrappers,
         .zig_version = extra_opts.zig_version,
-        .generate_c_api = extra_opts.generate_c_api,
+        .zig_generate_c_api = extra_opts.zig_generate_c_api,
     };
     try generateFile(alloc, &ir_spec, opts, &out);
     return out;
@@ -5183,10 +5185,10 @@ test "zig_backend: interface in module" {
     try testing.expect(has(s, "get_id: *const fn (*anyopaque) i32,"));
 }
 
-test "zig_backend: --generate-c-api emits callconv(.c) wrappers for entity interfaces" {
+test "zig_backend: --zig-generate-c-api emits callconv(.c) wrappers for entity interfaces" {
     var out = try testGenOpts(
         \\interface Writer { long write_val(in long x, in string label); void reset(); };
-    , "w", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    , "w", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Trivial forwarder: string param is [*:0]const u8, passed directly to vtable
@@ -5198,12 +5200,12 @@ test "zig_backend: --generate-c-api emits callconv(.c) wrappers for entity inter
     try testing.expect(has(s, "pub export fn Writer_reset(self: Writer) callconv(.c) void"));
 }
 
-test "zig_backend: --generate-c-api emits C_XxxListener and adapter for listener interfaces" {
+test "zig_backend: --zig-generate-c-api emits C_XxxListener and adapter for listener interfaces" {
     var out = try testGenOpts(
         \\struct Status { long count; };
         \\interface Source { long enable(); };
         \\interface SourceListener { void on_change(in Source src, in Status st); };
-    , "sl", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    , "sl", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // @callback interfaces now produce C callback struct (no C_ prefix, no fat-pointer, no adapter)
@@ -5259,14 +5261,14 @@ test "zig_backend: @callback thunk wraps string params with std.mem.span" {
     try testing.expect(has(s, "_h(@ptrCast(@alignCast(_ld)), std.mem.span(_msg), _level);"));
 }
 
-test "zig_backend: --generate-c-api entity wrappers use C_XxxListener and adapter" {
+test "zig_backend: --zig-generate-c-api entity wrappers use C_XxxListener and adapter" {
     var out = try testGenOpts(
         \\interface WriterListener { void on_miss(); };
         \\interface Pub {
         \\    long create_writer(in long qos, in WriterListener a_listener);
         \\    long set_listener(in WriterListener a_listener, in long mask);
         \\};
-    , "pw", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    , "pw", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Vtable and export both use ?*const WriterListener (the callback struct)
@@ -5276,12 +5278,12 @@ test "zig_backend: --generate-c-api entity wrappers use C_XxxListener and adapte
     try testing.expect(!has(s, "std.heap.c_allocator.create(C"));
 }
 
-test "zig_backend: --generate-c-api emits C_XxxSeq and out-seq write-back" {
+test "zig_backend: --zig-generate-c-api emits C_XxxSeq and out-seq write-back" {
     var out = try testGenOpts(
         \\typedef long long Handle;
         \\typedef sequence<Handle> HandleSeq;
         \\interface Obj { long get_handles(out HandleSeq handles); };
-    , "sq", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    , "sq", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Sequence typedef is now the extern struct itself (no C_ prefix companion)
@@ -5294,11 +5296,11 @@ test "zig_backend: --generate-c-api emits C_XxxSeq and out-seq write-back" {
     try testing.expect(!has(s, "pub const C_HandleSeq"));
 }
 
-test "zig_backend: --generate-c-api in-StringSeq allocates span conversion" {
+test "zig_backend: --zig-generate-c-api in-StringSeq allocates span conversion" {
     var out = try testGenOpts(
         \\typedef sequence<string> StringSeq;
         \\interface F { long filter(in StringSeq params); };
-    , "sf", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    , "sf", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // StringSeq typedef is the extern struct; [*:0]const u8 buffer (C strings)
@@ -5312,11 +5314,11 @@ test "zig_backend: --generate-c-api in-StringSeq allocates span conversion" {
     try testing.expect(!has(s, "fn DDS_F_filter") or !has(s, "std.mem.span(params)"));
 }
 
-test "zig_backend: --generate-c-api emits noop vtable for listener interfaces" {
+test "zig_backend: --zig-generate-c-api emits noop vtable for listener interfaces" {
     var out = try testGenOpts(
         \\interface Writer { long write_val(in long x); };
         \\interface WriterListener { void on_change(in Writer w); };
-    , "wl", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    , "wl", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Listener gets a noop constant, not a free function
@@ -5343,10 +5345,10 @@ test "zig_backend: @callback thunk unwraps ?*const T params (seq typedef and cal
     try testing.expect(has(s, "on_missed: ?*const fn (*Ctx, NumSeq) void = null,"));
 }
 
-test "zig_backend: --generate-c-api with --type-prefix uses prefix in export name" {
+test "zig_backend: --zig-generate-c-api with --type-prefix uses prefix in export name" {
     var out = try testGenOpts(
         \\interface Greeter { string greet(in string name); };
-    , "g", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true, .type_prefix = "DDS_" });
+    , "g", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true, .type_prefix = "DDS_" });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Exported symbol must carry the prefix so it matches the C header's declaration
@@ -5354,10 +5356,10 @@ test "zig_backend: --generate-c-api with --type-prefix uses prefix in export nam
     try testing.expect(!has(s, "pub export fn Greeter_greet("));
 }
 
-test "zig_backend: --generate-c-api string return uses ptrCast" {
+test "zig_backend: --zig-generate-c-api string return uses ptrCast" {
     var out = try testGenOpts(
         \\interface Named { string get_name(); };
-    , "n", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    , "n", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Vtable returns [*:0]const u8; trivial forwarder passes it through
@@ -5368,11 +5370,11 @@ test "zig_backend: --generate-c-api string return uses ptrCast" {
     try testing.expect(!has(s, "@ptrCast(_r.ptr)"));
 }
 
-test "zig_backend: --generate-c-api struct in-param passed by pointer" {
+test "zig_backend: --zig-generate-c-api struct in-param passed by pointer" {
     var out = try testGenOpts(
         \\struct Qos { long depth; };
         \\interface Writer { long set_qos(in Qos qos); };
-    , "sq", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .generate_c_api = true });
+    , "sq", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Struct in-param → *const T in both vtable slot and C-ABI export signature
@@ -5742,51 +5744,63 @@ test "zig_backend: fixed<4,0> (even digits) serialize emits writeFixed(4,0)" {
 
 // ── Typed DataWriter / DataReader tests ───────────────────────────────────────
 
-test "zig_backend: typed DataWriter/DataReader for keyed @appendable struct" {
+test "zig_backend: no typed DataWriter/DataReader by default for keyed struct" {
     var out = try testGen(
         \\@appendable struct ShapeType { @key string<128> color; long x; long y; long shapesize; };
     , "shape");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(!has(s, "DataWriter"));
+    try testing.expect(!has(s, "DataReader"));
+    try testing.expect(!has(s, "const _dds ="));
+    try testing.expect(has(s, "pub fn serialize"));
+}
+
+test "zig_backend: typed DataWriter/DataReader for keyed @appendable struct" {
+    var out = try testGenOpts(
+        \\@appendable struct ShapeType { @key string<128> color; long x; long y; long shapesize; };
+    , "shape", .{ .generate_dds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // dds import emitted
     try testing.expect(has(s, "const _dds = @import(\"dds\");"));
     // DataWriter struct
     try testing.expect(has(s, "pub const ShapeTypeDataWriter = struct {"));
-    try testing.expect(has(s, "_dw: _dds.DataWriter,"));
+    try testing.expect(has(s, "_dw: _dds.DDS.DataWriter,"));
     try testing.expect(has(s, "_alloc: std.mem.Allocator,"));
     try testing.expect(has(s, "_xcdr2: bool,"));
-    try testing.expect(has(s, "pub fn init(dw: _dds.DataWriter, alloc: std.mem.Allocator, xcdr2: bool) @This() {"));
+    try testing.expect(has(s, "pub fn init(dw: _dds.DDS.DataWriter, alloc: std.mem.Allocator, xcdr2: bool) @This() {"));
     // write() — @appendable uses writeEncapHeaderDelimited for xcdr2
     try testing.expect(has(s, "pub fn write(self: @This(), value: ShapeType) !void {"));
     try testing.expect(has(s, "try _w.writeEncapHeaderDelimited();"));
     try testing.expect(has(s, "try ShapeType.serialize(&_w, value);"));
-    try testing.expect(has(s, "try _dds.writeCdr(self._dw, .alive, _hash, _buf.items);"));
+    try testing.expect(has(s, "try _dds.writeRaw(self._dw, .alive, _hash, _buf.items);"));
     // dispose()
     try testing.expect(has(s, "pub fn dispose(self: @This(), key: ShapeType) !void {"));
     try testing.expect(has(s, "try ShapeType.serializeKey(&_w, key);"));
-    try testing.expect(has(s, "try _dds.writeCdr(self._dw, .dispose, _hash, _buf.items);"));
+    try testing.expect(has(s, "try _dds.writeRaw(self._dw, .dispose, _hash, _buf.items);"));
     // unregister()
     try testing.expect(has(s, "pub fn unregister(self: @This(), key: ShapeType) !void {"));
-    try testing.expect(has(s, "try _dds.writeCdr(self._dw, .unregister, _hash, _buf.items);"));
+    try testing.expect(has(s, "try _dds.writeRaw(self._dw, .unregister, _hash, _buf.items);"));
     // DataReader struct
     try testing.expect(has(s, "pub const ShapeTypeDataReader = struct {"));
-    try testing.expect(has(s, "_dr: _dds.DataReader,"));
-    try testing.expect(has(s, "pub fn init(dr: _dds.DataReader) @This() {"));
+    try testing.expect(has(s, "_dr: _dds.DDS.DataReader,"));
+    try testing.expect(has(s, "pub fn init(dr: _dds.DDS.DataReader) @This() {"));
     try testing.expect(has(s, "pub const TakenSample = struct {"));
     try testing.expect(has(s, "value: ShapeType,"));
-    try testing.expect(has(s, "instance_state: _dds.InstanceStateKind,"));
-    try testing.expect(has(s, "instance_handle: _dds.InstanceHandle_t,"));
+    try testing.expect(has(s, "instance_state: _dds.DDS.InstanceStateKind,"));
+    try testing.expect(has(s, "instance_handle: _dds.DDS.InstanceHandle_t,"));
     try testing.expect(has(s, "pub fn take(self: @This(), alloc: std.mem.Allocator) anyerror!?TakenSample {"));
-    try testing.expect(has(s, "_dds.takeCdr(self._dr)"));
+    try testing.expect(has(s, "_dds.takeRaw(self._dr)"));
     try testing.expect(has(s, "ShapeType.deserialize(&_reader, alloc)"));
     // no TakenSample.deinit — ShapeType has no unbounded sequences
     try testing.expect(!has(s, "pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {"));
 }
 
 test "zig_backend: typed DataWriter uses writeEncapHeader for @final struct" {
-    var out = try testGen(
+    var out = try testGenOpts(
         \\@final struct SensorData { @key long id; double value; };
-    , "sensor");
+    , "sensor", .{ .generate_dds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "pub const SensorDataDataWriter = struct {"));
@@ -5797,7 +5811,7 @@ test "zig_backend: typed DataWriter uses writeEncapHeader for @final struct" {
 }
 
 test "zig_backend: no DataWriter/DataReader for struct without @key" {
-    var out = try testGen("struct NoKey { long x; long y; };", "nk");
+    var out = try testGenOpts("struct NoKey { long x; long y; };", "nk", .{ .generate_dds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(!has(s, "DataWriter"));
@@ -5809,7 +5823,7 @@ test "zig_backend: no_typesupport suppresses DataWriter/DataReader" {
     var out = try testGenOpts(
         "@appendable struct ShapeType { @key string<128> color; long x; };",
         "shape",
-        .{ .no_typesupport = true },
+        .{ .no_typesupport = true, .generate_dds_wrappers = true },
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
@@ -5819,9 +5833,10 @@ test "zig_backend: no_typesupport suppresses DataWriter/DataReader" {
 }
 
 test "zig_backend: no DataWriter/DataReader for @mutable keyed struct" {
-    var out = try testGen(
+    var out = try testGenOpts(
         "@mutable struct MutableTopic { @key long id; string data; };",
         "mt",
+        .{ .generate_dds_wrappers = true },
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
@@ -5830,9 +5845,9 @@ test "zig_backend: no DataWriter/DataReader for @mutable keyed struct" {
 }
 
 test "zig_backend: Sample.deinit emitted when struct has unbounded sequence" {
-    var out = try testGen(
+    var out = try testGenOpts(
         \\@appendable struct BagTopic { @key long id; sequence<long> items; };
-    , "bag");
+    , "bag", .{ .generate_dds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "pub const BagTopicDataReader = struct {"));
@@ -5843,9 +5858,9 @@ test "zig_backend: Sample.deinit emitted when struct has unbounded sequence" {
 }
 
 test "zig_backend: DataWriter/DataReader inside module" {
-    var out = try testGen(
+    var out = try testGenOpts(
         \\module DDS { @appendable struct Shape { @key string<64> color; long x; }; };
-    , "dds");
+    , "dds", .{ .generate_dds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // _dds import at file level (prefixed to avoid clash with any IDL module named "dds")
@@ -5860,15 +5875,15 @@ test "zig_backend: module named 'dds' does not produce duplicate const dds" {
     // alias 'pub const dds = struct { ... }' (single-file) or 'const dds = @This()'
     // (split-file) would clash with 'const dds = @import("dds")'.  Using '_dds'
     // makes the clash structurally impossible (IDL names cannot start with '_').
-    var out = try testGen(
+    var out = try testGenOpts(
         \\module dds { @appendable struct Topic { @key long id; }; };
-    , "types");
+    , "types", .{ .generate_dds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "const _dds = @import(\"dds\");"));
     try testing.expect(!has(s, "const dds = @import(\"dds\");"));
     try testing.expect(has(s, "pub const TopicDataWriter = struct {"));
-    try testing.expect(has(s, "_dw: _dds.DataWriter,"));
+    try testing.expect(has(s, "_dw: _dds.DDS.DataWriter,"));
 }
 
 test "zig_backend: @default on non-optional field sets initializer" {

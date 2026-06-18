@@ -36,7 +36,7 @@ interface WriterListener {
 };
 ```
 
-**Zig output (`--generate-interfaces` or `--generate-c-api`):**
+**Zig output (`--generate-interfaces` or `--zig-generate-c-api`):**
 ```zig
 pub const WriterListener = extern struct {
     listener_data: ?*anyopaque = null,
