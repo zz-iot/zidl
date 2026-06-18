@@ -12,7 +12,7 @@
 //!
 //!   --default-extensibility <ext>  Default extensibility when no @extensibility present
 //!                                  (default: final, per IDL4 §8.3.1) (all backends)
-//!   --generate-dds-wrappers        Emit typed DDS DataWriter/DataReader wrappers (all backends)
+//!   --generate-dds-wrappers        Emit typed DDS DataWriter/DataReader wrappers (all backends, currently Zig only)
 //!   --generate-interfaces          Emit DDS DataWriter/DataReader binding layer (all backends)
 //!   --no-typeobject-support        Suppress TypeObject/TypeIdentifier (all backends, currently Zig only)
 //!   --no-typesupport               Suppress CDR serialize/deserialize (all backends)
@@ -517,7 +517,7 @@ fn printUsage(w: *Io.Writer) !void {
         \\
         \\  --default-extensibility <ext>  Default extensibility when no @extensibility present
         \\                                 (default: final, per IDL4 §8.3.1) (all backends)
-        \\  --generate-dds-wrappers        Emit typed DDS DataWriter/DataReader wrappers (all backends)
+        \\  --generate-dds-wrappers        Emit typed DDS DataWriter/DataReader wrappers (all backends, currently Zig only)
         \\  --generate-interfaces          Emit DDS DataWriter/DataReader binding layer (all backends)
         \\  --no-typeobject-support        Suppress TypeObject/TypeIdentifier (all backends, currently Zig only)
         \\  --no-typesupport               Suppress CDR serialize/deserialize (all backends)
