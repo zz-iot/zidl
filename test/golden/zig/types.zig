@@ -2,7 +2,6 @@
 
 const std = @import("std");
 const zidl_rt = @import("zidl_rt");
-const _dds = @import("dds");
 
 pub const Color = enum(u32) {
     RED = 0,
@@ -217,90 +216,6 @@ pub const Sample = struct {
     pub const type_identifier: [32]u8 = [32]u8{ 0x6A, 0xEF, 0xC7, 0x65, 0x43, 0x37, 0x7E, 0xE8, 0xFE, 0x10, 0x85, 0xE3, 0x97, 0xF4, 0xD3, 0xAE, 0x66, 0x1E, 0xC5, 0xD4, 0xD9, 0x62, 0x61, 0xAE, 0x08, 0x36, 0x66, 0x99, 0x50, 0xD7, 0x74, 0xCE };
 }; // Sample
 
-pub const SampleDataWriter = struct {
-    _dw: _dds.DataWriter,
-    _alloc: std.mem.Allocator,
-    _xcdr2: bool,
-
-    pub fn init(dw: _dds.DataWriter, alloc: std.mem.Allocator, xcdr2: bool) @This() {
-        return .{ ._dw = dw, ._alloc = alloc, ._xcdr2 = xcdr2 };
-    }
-
-    pub fn write(self: @This(), value: Sample) !void {
-        var _buf = std.ArrayList(u8).empty;
-        defer _buf.deinit(self._alloc);
-        if (self._xcdr2) {
-            var _w = zidl_rt.CdrWriter(.xcdr2).init(&_buf, self._alloc);
-            try _w.writeEncapHeader();
-            try Sample.serialize(&_w, value);
-        } else {
-            var _w = zidl_rt.CdrWriter(.xcdr1).init(&_buf, self._alloc);
-            try _w.writeEncapHeader();
-            try Sample.serialize(&_w, value);
-        }
-        const _hash = Sample.computeKeyHash(value);
-        try _dds.writeCdr(self._dw, .alive, _hash, _buf.items);
-    }
-
-    pub fn dispose(self: @This(), key: Sample) !void {
-        var _buf = std.ArrayList(u8).empty;
-        defer _buf.deinit(self._alloc);
-        if (self._xcdr2) {
-            var _w = zidl_rt.CdrWriter(.xcdr2).init(&_buf, self._alloc);
-            try _w.writeEncapHeader();
-            try Sample.serializeKey(&_w, key);
-        } else {
-            var _w = zidl_rt.CdrWriter(.xcdr1).init(&_buf, self._alloc);
-            try _w.writeEncapHeader();
-            try Sample.serializeKey(&_w, key);
-        }
-        const _hash = Sample.computeKeyHash(key);
-        try _dds.writeCdr(self._dw, .dispose, _hash, _buf.items);
-    }
-
-    pub fn unregister(self: @This(), key: Sample) !void {
-        var _buf = std.ArrayList(u8).empty;
-        defer _buf.deinit(self._alloc);
-        if (self._xcdr2) {
-            var _w = zidl_rt.CdrWriter(.xcdr2).init(&_buf, self._alloc);
-            try _w.writeEncapHeader();
-            try Sample.serializeKey(&_w, key);
-        } else {
-            var _w = zidl_rt.CdrWriter(.xcdr1).init(&_buf, self._alloc);
-            try _w.writeEncapHeader();
-            try Sample.serializeKey(&_w, key);
-        }
-        const _hash = Sample.computeKeyHash(key);
-        try _dds.writeCdr(self._dw, .unregister, _hash, _buf.items);
-    }
-}; // SampleDataWriter
-
-pub const SampleDataReader = struct {
-    _dr: _dds.DataReader,
-
-    pub fn init(dr: _dds.DataReader) @This() {
-        return .{ ._dr = dr };
-    }
-
-    pub const TakenSample = struct {
-        value: Sample,
-        instance_state: _dds.InstanceStateKind,
-        instance_handle: _dds.InstanceHandle_t,
-
-        pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
-            self.value.deinit(alloc);
-        }
-    };
-
-    pub fn take(self: @This(), alloc: std.mem.Allocator) anyerror!?TakenSample {
-        const _raw = _dds.takeCdr(self._dr) orelse return null;
-        defer _raw.deinit();
-        var _reader = try zidl_rt.CdrReader.init(_raw.data);
-        const _value = try Sample.deserialize(&_reader, alloc);
-        return .{ .value = _value, .instance_state = _raw.instance_state, .instance_handle = _raw.instance_handle };
-    }
-}; // SampleDataReader
-
 pub const Frame = struct {
     seq_num: u32 = 0,
     topic: []const u8 = "",
@@ -408,86 +323,6 @@ pub const Beacon = struct {
     pub const equivalence_hash: [14]u8 = [14]u8{ 0xCA, 0xA7, 0xE9, 0x76, 0x2E, 0xA3, 0xCD, 0x81, 0x89, 0xC1, 0x11, 0x2B, 0x50, 0x66 };
     pub const type_identifier: [32]u8 = [32]u8{ 0x52, 0xCC, 0xDE, 0xA4, 0xF8, 0x7F, 0x65, 0x1A, 0xF2, 0x73, 0xD0, 0x3E, 0xD2, 0x41, 0xAD, 0x10, 0x38, 0x63, 0x46, 0x5E, 0xD6, 0x23, 0xA7, 0xFB, 0xB0, 0x34, 0xD6, 0x2B, 0x15, 0x10, 0xAD, 0xFC };
 }; // Beacon
-
-pub const BeaconDataWriter = struct {
-    _dw: _dds.DataWriter,
-    _alloc: std.mem.Allocator,
-    _xcdr2: bool,
-
-    pub fn init(dw: _dds.DataWriter, alloc: std.mem.Allocator, xcdr2: bool) @This() {
-        return .{ ._dw = dw, ._alloc = alloc, ._xcdr2 = xcdr2 };
-    }
-
-    pub fn write(self: @This(), value: Beacon) !void {
-        var _buf = std.ArrayList(u8).empty;
-        defer _buf.deinit(self._alloc);
-        if (self._xcdr2) {
-            var _w = zidl_rt.CdrWriter(.xcdr2).init(&_buf, self._alloc);
-            try _w.writeEncapHeaderDelimited();
-            try Beacon.serialize(&_w, value);
-        } else {
-            var _w = zidl_rt.CdrWriter(.xcdr1).init(&_buf, self._alloc);
-            try _w.writeEncapHeader();
-            try Beacon.serialize(&_w, value);
-        }
-        const _hash = Beacon.computeKeyHash(value);
-        try _dds.writeCdr(self._dw, .alive, _hash, _buf.items);
-    }
-
-    pub fn dispose(self: @This(), key: Beacon) !void {
-        var _buf = std.ArrayList(u8).empty;
-        defer _buf.deinit(self._alloc);
-        if (self._xcdr2) {
-            var _w = zidl_rt.CdrWriter(.xcdr2).init(&_buf, self._alloc);
-            try _w.writeEncapHeaderDelimited();
-            try Beacon.serializeKey(&_w, key);
-        } else {
-            var _w = zidl_rt.CdrWriter(.xcdr1).init(&_buf, self._alloc);
-            try _w.writeEncapHeader();
-            try Beacon.serializeKey(&_w, key);
-        }
-        const _hash = Beacon.computeKeyHash(key);
-        try _dds.writeCdr(self._dw, .dispose, _hash, _buf.items);
-    }
-
-    pub fn unregister(self: @This(), key: Beacon) !void {
-        var _buf = std.ArrayList(u8).empty;
-        defer _buf.deinit(self._alloc);
-        if (self._xcdr2) {
-            var _w = zidl_rt.CdrWriter(.xcdr2).init(&_buf, self._alloc);
-            try _w.writeEncapHeaderDelimited();
-            try Beacon.serializeKey(&_w, key);
-        } else {
-            var _w = zidl_rt.CdrWriter(.xcdr1).init(&_buf, self._alloc);
-            try _w.writeEncapHeader();
-            try Beacon.serializeKey(&_w, key);
-        }
-        const _hash = Beacon.computeKeyHash(key);
-        try _dds.writeCdr(self._dw, .unregister, _hash, _buf.items);
-    }
-}; // BeaconDataWriter
-
-pub const BeaconDataReader = struct {
-    _dr: _dds.DataReader,
-
-    pub fn init(dr: _dds.DataReader) @This() {
-        return .{ ._dr = dr };
-    }
-
-    pub const TakenSample = struct {
-        value: Beacon,
-        instance_state: _dds.InstanceStateKind,
-        instance_handle: _dds.InstanceHandle_t,
-    };
-
-    pub fn take(self: @This(), alloc: std.mem.Allocator) anyerror!?TakenSample {
-        const _raw = _dds.takeCdr(self._dr) orelse return null;
-        defer _raw.deinit();
-        var _reader = try zidl_rt.CdrReader.init(_raw.data);
-        const _value = try Beacon.deserialize(&_reader, alloc);
-        return .{ .value = _value, .instance_state = _raw.instance_state, .instance_handle = _raw.instance_handle };
-    }
-}; // BeaconDataReader
 
 pub const Greeter = extern struct {
     ptr: *anyopaque,

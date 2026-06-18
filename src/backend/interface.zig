@@ -107,6 +107,9 @@ pub const Options = struct {
     /// PL_CDR functions).  Enables RTPS ParameterList wire format for DDS
     /// discovery types.  Requires `no_typesupport == false`.
     pl_cdr: bool = false,
+    /// Emit typed DDS DataWriter / DataReader wrappers (Zig backend only).
+    /// These require the consuming build to provide a `dds` module.
+    zig_generate_dds_wrappers: bool = false,
     /// Zig backend only: generated source compatibility target. zidl itself may
     /// run on a newer Zig toolchain while emitting code for MicroZig-era Zig.
     zig_version: ZigVersion = .@"0.16.0",

@@ -88,6 +88,10 @@ pub const MyStruct = struct {
     pub fn deserializeKeyInto(out: *MyStruct, reader: *zidl_rt.CdrReader, alloc: std.mem.Allocator) !void { ... }
     pub fn computeKeyHash(value: MyStruct) [16]u8 { ... }
 
+    // Typed DDS wrappers (requires --zig-generate-dds-wrappers flag and a `dds` module):
+    // pub const MyStructDataWriter = struct { ... };
+    // pub const MyStructDataReader = struct { ... };
+
     // TypeObject/TypeIdentifier (unless --no-typeobject-support):
     pub const type_object: []const u8 = &[_]u8{ 0x00, 0x07, ... };
     pub const equivalence_hash: [14]u8 = [14]u8{ ... };

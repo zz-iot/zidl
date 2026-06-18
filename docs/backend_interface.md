@@ -214,6 +214,9 @@ For a struct `Foo`:
   OR if `TypeAnnotations.is_nested == false` (the default when no `@nested` is present).
 - `@nested` types (or types with `is_nested = true`) are helper/embedded types,
   not topic types — skip DataWriter/DataReader generation.
+- **Zig backend note:** normal Zig CDR serialize/deserialize is still default. Typed DDS wrappers
+  for topic types are Zig-only and opt-in via `--zig-generate-dds-wrappers`. The wrappers require
+  a consuming build to provide a `dds` module with the existing contract.
 
 **Interface declarations in IDL:**
 - When `generate_interfaces` is true, IDL `interface` declarations are emitted

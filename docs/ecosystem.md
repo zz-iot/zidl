@@ -107,7 +107,8 @@ EquivalenceHash.
 
 When `--generate-interfaces` is set, each IDL `interface` declaration and each
 topic-type struct get typed DataWriter/DataReader wrappers in the
-**language-idiomatic** form for the target backend.
+**language-idiomatic** form for the target backend. (For Zig, topic-type wrappers
+are opt-in via `--zig-generate-dds-wrappers` and require a `dds` module in the build).
 
 **How topic types are determined:**
 - A struct with `@topic` annotation: `TypeAnnotations.is_topic == true`.
