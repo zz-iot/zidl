@@ -12,8 +12,8 @@
 //!
 //!   --default-extensibility <ext>  Default extensibility when no @extensibility present
 //!                                  (default: final, per IDL4 §8.3.1) (all backends)
-//!   --generate-zzdds-wrappers      Emit typed zzdds DataWriter/DataReader wrappers (Zig, C, C++)
-//!   --generate-interfaces          Emit DDS DataWriter/DataReader binding layer (all backends)
+//!   --generate-zzdds-wrappers      Emit typed zzdds topic wrappers (Zig, C, C++)
+//!   --generate-interfaces          Emit binding layer for IDL interface declarations (all backends)
 //!   --no-typeobject-support        Suppress TypeObject/TypeIdentifier (all backends, currently Zig only)
 //!   --no-typesupport               Suppress CDR serialize/deserialize (all backends)
 //!   --profile <full|xrce>          Target profile: full (default) or xrce (all backends)
@@ -517,8 +517,8 @@ fn printUsage(w: *Io.Writer) !void {
         \\
         \\  --default-extensibility <ext>  Default extensibility when no @extensibility present
         \\                                 (default: final, per IDL4 §8.3.1) (all backends)
-        \\  --generate-zzdds-wrappers      Emit typed zzdds DataWriter/DataReader wrappers (Zig, C, C++)
-        \\  --generate-interfaces          Emit DDS DataWriter/DataReader binding layer (all backends)
+        \\  --generate-zzdds-wrappers      Emit typed zzdds topic wrappers (Zig, C, C++)
+        \\  --generate-interfaces          Emit binding layer for IDL interface declarations (all backends)
         \\  --no-typeobject-support        Suppress TypeObject/TypeIdentifier (all backends, currently Zig only)
         \\  --no-typesupport               Suppress CDR serialize/deserialize (all backends)
         \\  --profile <full|xrce>          Target profile: full (default) or xrce (all backends)

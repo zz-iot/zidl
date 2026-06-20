@@ -58,7 +58,7 @@ Current verification inventory:
   and `Foo_compute_key_hash` using the same canonical PLAIN_CDR2 big-endian key
   hash rule as C.
 - `--generate-zzdds-wrappers` emits typed `FooTypeSupport`, `FooDataWriter`,
-  and `FooDataReader` wrappers for keyed topic structs. The wrappers call the
+  and `FooDataReader` wrappers for keyed, non-mutable topic structs. The wrappers call the
   zzdds C ABI declared by `zzdds_c.h`.
 - `--generate-interfaces` emits abstract interface classes plus C ABI-backed
   `Impl` classes. Primitive and string operation signatures are adapted; richer

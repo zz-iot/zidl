@@ -155,7 +155,7 @@ Add `packages/zidl-cdr/include` to your include paths.
 | `--cpp-namespace <ns>` | Wrap all output in an outer namespace |
 | `--c-export-macro <macro>` | DLL export macro prepended to CDR function declarations |
 | `--no-typesupport` | Suppress CDR serialize/deserialize output |
-| `--generate-zzdds-wrappers` | Emit typed zzdds TypeSupport/DataWriter/DataReader wrappers for keyed topic structs |
+| `--generate-zzdds-wrappers` | Emit typed zzdds TypeSupport/DataWriter/DataReader wrappers for keyed, non-mutable topic structs |
 
 ---
 

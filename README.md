@@ -16,6 +16,7 @@ for all supported targets.
   - C# / .NET — planned
   - Rust — planned
 - Generate DCPS abstract API from IDL for bootstrapping a Zig DDS runtime (`--generate-interfaces`)
+- Generate optional typed zzdds topic wrappers for DDS topic structs (`--generate-zzdds-wrappers`)
 - Extensible backend interface so new mappings can be added cleanly
 - Hand-written recursive descent parser (no parser generator, no combinator library)
 - Ship companion runtime packages (`zidl-rt`, `zidl-xtypes`, `zidl-cdr`)
@@ -42,7 +43,8 @@ zig build -Doptimize=ReleaseFast  # optimised release build
 | `--default-extensibility <final\|appendable\|mutable>` | Default extensibility (spec default: `final`) |
 | `--no-typesupport` | Suppress CDR serialization output |
 | `--no-typeobject-support` | Suppress TypeObject/TypeIdentifier output (all backends) |
-| `--generate-interfaces` | Emit DDS API binding layer for IDL `interface` declarations |
+| `--generate-interfaces` | Emit binding layer for IDL `interface` declarations |
+| `--generate-zzdds-wrappers` | Emit typed zzdds topic wrappers for keyed, non-mutable topic structs (Zig, C, C++) |
 | `--split-files` | One file per type instead of single output file |
 | `--single-file` | Single monolithic output file (default) |
 | `--type-prefix <pfx>` | Prefix prepended to all generated type names (all backends) |
@@ -54,6 +56,7 @@ zig build -Doptimize=ReleaseFast  # optimised release build
 | `--cpp-namespace <ns>` | Wrap all output in an outer namespace (C++ backend) |
 | `--java-package <pkg>` | Java package prefix (Java backend) |
 | `--java-jni-library <name>` | `System.loadLibrary()` name for JNI bridge (Java backend) |
+| `--zig-generate-c-api` | Emit Zig-backend C ABI exports for generated interface operations |
 | `--zig-pl-cdr` | Generate PL_CDR functions for `@mutable` types (Zig backend) |
 | `--zig-version <0.16.0\|0.15.1>` | Output compatibility target (Zig backend) |
 | `--version` / `--help` | Standard |

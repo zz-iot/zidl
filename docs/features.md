@@ -34,7 +34,7 @@ All four backends generate the same core set of outputs for every IDL input:
 | CDR `@mutable` (XCDR2 EMHEADER) | Implemented in all backends |
 | CDR `@mutable` (PL_CDR / RTPS ParameterList) | Zig only, via `--zig-pl-cdr` flag |
 | `--generate-interfaces` DCPS binding layer | Zig/C/Java: implemented; C++ abstract classes plus primitive/string C ABI adapters implemented, complex adapters remain TODO stubs |
-| `--generate-zzdds-wrappers` | Opt-in typed zzdds TypeSupport/DataWriter/DataReader wrappers for keyed topic structs in Zig, C, and C++ |
+| `--generate-zzdds-wrappers` | Opt-in typed zzdds TypeSupport/DataWriter/DataReader wrappers for keyed, non-mutable topic structs in Zig, C, and C++ |
 | `--zig-generate-c-api` C-ABI export functions (Zig backend) | Implemented — trivial forwarders from `DDS_*` C symbols to vtable |
 | `--split-files` (one file per type) | Implemented |
 | `deinit(alloc)` on types with sequence fields (Zig) | Implemented |
@@ -152,7 +152,7 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 | User-supplied allocator for strings/sequences | Not yet implemented — `zidl_cdr_read_string` and sequence reads use `malloc`; a `ZidlCdrAllocator` interface is planned |
 | `--zig-pl-cdr` (PL_CDR emit) | Flag parsed but C backend does not emit PL_CDR functions |
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
-| `--generate-interfaces`: complex-type adaptation | `emitImplOp` emits `/* TODO */` stubs |
+| `--generate-interfaces`: full DDS object/resource adaptation | Basic C interface/vtable shapes are generated; richer DDS object binding semantics remain runtime-specific future work |
 
 ---
 
@@ -203,7 +203,7 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 | `--zig-pl-cdr` (PL_CDR emit) | Flag parsed but C++ backend does not emit PL_CDR functions |
 | `@verbatim` annotations | Parsed and stored in IR but not yet injected into generated output |
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
-| `--generate-interfaces`: complex-type adaptation | `emitImplOp` emits `/* TODO: adapt C++ types */` stubs |
+| `--generate-interfaces`: complex-type adaptation | Primitive and string operation signatures are adapted; richer signatures emit `/* TODO: adapt C++ types */` stubs |
 
 ---
 
