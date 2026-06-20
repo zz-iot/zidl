@@ -106,7 +106,7 @@ Every backend receives the same `Options` struct:
 | `type_prefix` | `[]const u8` | Prefix for all generated type names |
 | `export_macro` | `[]const u8` | DLL export macro for function declarations (C, C++ backends) — `--c-export-macro` |
 | `java_package` | `[]const u8` | Java package prefix |
-| `generate_interfaces` | `bool` | Emit DDS DataWriter/DataReader/TypeSupport |
+| `generate_interfaces` | `bool` | Emit binding layer for IDL `interface` declarations |
 | `jni_library` | `[]const u8` | Java `System.loadLibrary()` name |
 | `profile` | `Profile` | `.full` or `.xrce` |
 | `split_files` | `bool` | One file per type/module vs monolithic |
@@ -114,7 +114,9 @@ Every backend receives the same `Options` struct:
 | `extern_c` | `bool` | Wrap header in `extern "C" {}` (C backend) — `--c-extern-c` |
 | `cpp_namespace` | `[]const u8` | C++: outer namespace wrapping all output |
 | `pl_cdr` | `bool` | Generate PL_CDR functions for `@mutable` types (Zig backend) — `--zig-pl-cdr` |
+| `generate_zzdds_wrappers` | `bool` | Emit typed zzdds topic wrappers for keyed, non-mutable topic structs — `--generate-zzdds-wrappers` |
 | `zig_version` | `ZigVersion` | Zig backend output compatibility: `.@"0.16.0"` or `.@"0.15.1"` |
+| `zig_generate_c_api` | `bool` | Emit Zig-backend C ABI exports for generated interface operations — `--zig-generate-c-api` |
 
 ---
 
@@ -195,37 +197,34 @@ to suppress features unavailable in XRCE (e.g. DHEADER emission, TypeObject).
 
 ---
 
-## DDS Type Support (`--generate-interfaces`)
+## DDS Interfaces and zzdds Topic Wrappers
 
-When `opts.generate_interfaces` is true, backends should emit the DDS
-DataWriter/DataReader/TypeSupport binding layer for each IDL `interface`
-declaration — and for each struct that is a DDS topic type (not `@nested`).
+`--generate-interfaces` and `--generate-zzdds-wrappers` are separate features.
 
-The full normative interface IDL is in `docs/dcps_idl.md`. The key pattern
-(using the "implied IDL" from §2.2.2.3.9):
+When `opts.generate_interfaces` is true, backends emit the language binding
+layer for IDL `interface` declarations. The full normative DDS interface IDL is
+in `docs/dcps_idl.md`. Interface declarations are emitted as Zig fat-pointer
+vtable structs (see `src/backend/zig.zig`), Java interfaces plus JNI bridge
+classes, C++ abstract classes with C ABI-backed `Impl` classes, or C vtable
+structs.
+
+Typed DDS topic wrappers are opt-in via `--generate-zzdds-wrappers` and are
+implemented in the Zig, C, and C++ backends. They are generated for keyed,
+non-`@nested`, non-`@mutable` topic structs. The key DDS pattern, using the
+"implied IDL" from §2.2.2.3.9, is:
 
 For a struct `Foo`:
-- `FooTypeSupport` — derives from `DDS::TypeSupport`; implements `register_type` / `get_type_name`.
-- `FooDataWriter` — derives from `DDS::DataWriter`; typed write/dispose/register operations.
-- `FooDataReader` — derives from `DDS::DataReader`; typed read/take operations.
+- `FooTypeSupport` — registers the topic type with zzdds (C and C++ backends).
+- `FooDataWriter` — typed write/dispose/unregister operations.
+- `FooDataReader` — typed take/loaned-take operations.
 
-**Determining which types get DDS binding:**
-- A struct is a DDS topic type if `TypeAnnotations.is_topic == true`
-  OR if `TypeAnnotations.is_nested == false` (the default when no `@nested` is present).
-- `@nested` types (or types with `is_nested = true`) are helper/embedded types,
-  not topic types — skip DataWriter/DataReader generation.
-- normal CDR serialize/deserialize is still default. Typed DDS wrappers
-  for topic types are opt-in via `--generate-dds-wrappers` (currently implemented in the Zig backend).
-  For Zig, the wrappers require a consuming build to provide a `dds` adapter
-  module exposing a `DDS` namespace plus raw serialized write/take functions.
-  This adapter targets the native DDS runtime, not the `--zig-generate-c-api`
-  C export layer.
+For Zig, the wrappers require a consuming build to provide a `dds` adapter
+module exposing a `DDS` namespace plus raw serialized write/take functions.
+This adapter targets the native DDS runtime, not the `--zig-generate-c-api`
+C export layer. C and C++ wrappers call the zzdds C ABI declared by `zzdds_c.h`.
 
-**Interface declarations in IDL:**
-- When `generate_interfaces` is true, IDL `interface` declarations are emitted
-  as Zig fat-pointer vtable structs (see `src/backend/zig.zig`), Java interfaces,
-  C++ abstract classes, or C vtable structs.
-- When false, a comment placeholder is emitted.
+When `generate_interfaces` is false, IDL `interface` declarations are emitted
+as comments/placeholders only.
 
 ---
 

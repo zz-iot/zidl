@@ -60,7 +60,7 @@ pub const Options = struct {
     /// Basename stem of the input file (e.g. `"foo"` from `"foo.idl"`).
     /// Used to derive output filenames such as `"foo.h"` or `"Foo.java"`.
     input_stem: []const u8,
-    /// Suppress DDS DataWriter / DataReader / TypeSupport output.
+    /// Suppress generated CDR serialize/deserialize functions.
     no_typesupport: bool = false,
     /// Suppress XTYPES TypeObject / TypeIdentifier output.
     /// All backends; currently only the Zig backend emits TypeObjects.
@@ -107,9 +107,9 @@ pub const Options = struct {
     /// PL_CDR functions).  Enables RTPS ParameterList wire format for DDS
     /// discovery types.  Requires `no_typesupport == false`.
     pl_cdr: bool = false,
-    /// Emit typed DDS DataWriter / DataReader wrappers.
-    /// For Zig, these require the consuming build to provide a `dds` module.
-    generate_dds_wrappers: bool = false,
+    /// Emit typed zzdds topic wrappers for keyed, non-mutable topic structs.
+    /// Zig uses a consuming-build `dds` adapter; C/C++ call zzdds C ABI helpers.
+    generate_zzdds_wrappers: bool = false,
     /// Zig backend only: generated source compatibility target. zidl itself may
     /// run on a newer Zig toolchain while emitting code for MicroZig-era Zig.
     zig_version: ZigVersion = .@"0.16.0",
