@@ -170,6 +170,7 @@ const Generator = struct {
         map: bool = false,
         optional: bool = false,
         union_arrays: bool = false,
+        memory: bool = false,
     };
 
     fn scanIncludes(items: []const ir.ModuleItem) IncludeNeeds {
@@ -201,6 +202,7 @@ const Generator = struct {
                             scanIncludesTypeRef(mem.type_ref, needs);
                         }
                     },
+                    .interface => |iface| scanIncludesInterface(iface, needs),
                     else => {},
                 },
                 .const_ => {},
@@ -212,9 +214,20 @@ const Generator = struct {
         switch (tr) {
             .map => needs.map = true,
             .sequence => |s| scanIncludesTypeRef(s.element.*, needs),
-            .named => {},
+            .named => |td| {
+                if (td == .interface) needs.memory = true;
+            },
             else => {},
         }
+    }
+
+    fn scanIncludesInterface(iface: *const ir.Interface, needs: *IncludeNeeds) void {
+        for (iface.type_decls) |td| scanIncludesTypeDecl(td, needs);
+        for (iface.operations) |op| {
+            if (op.return_type) |rt| scanIncludesTypeRef(rt, needs);
+            for (op.params) |p| scanIncludesTypeRef(p.type_ref, needs);
+        }
+        for (iface.attributes) |attr| scanIncludesTypeRef(attr.type_ref, needs);
     }
 
     fn emitHeader(self: *Generator, spec: *const ir.Spec) !void {
@@ -235,6 +248,7 @@ const Generator = struct {
         try self.write("#include <cstdint>\n");
         try self.write("#include <string>\n");
         try self.write("#include <vector>\n");
+        if (self.opts.generate_interfaces and needs.memory) try self.write("#include <memory>\n");
         if (needs.map) try self.write("#include <map>\n");
         if (needs.optional) try self.write("#include <optional>\n");
         if (needs.union_arrays) try self.write("#include <cstring>\n");
@@ -242,6 +256,9 @@ const Generator = struct {
         try self.write("#include <stdexcept>\n");
         if (!self.opts.no_typesupport) {
             try self.write("#include \"zidl_cdr.h\"\n");
+        }
+        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructCpp(spec.items)) {
+            try self.write("#include \"zzdds_c.h\"\n");
         }
         try self.write("\n");
         if (self.opts.cpp_namespace.len > 0) {
@@ -324,6 +341,54 @@ const Generator = struct {
             try self.print("{s}{s}int {s}_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);\n", .{ em, sp, c_name });
         }
         try self.write("\n");
+        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and isZzddsTopicStructCpp(s)) {
+            try self.emitStructZzddsWrapperDecls(c_name, cpp_qname);
+        }
+    }
+
+    fn emitStructZzddsWrapperDecls(self: *Generator, c_name: []const u8, cpp_qname: []const u8) !void {
+        try self.print("class {s}TypeSupport {{\n", .{c_name});
+        try self.write("public:\n");
+        try self.print("    static int register_type(DDS_DomainParticipant participant, const char *type_name = \"{s}\");\n", .{c_name});
+        try self.write("};\n\n");
+
+        try self.print("class {s}DataWriter {{\n", .{c_name});
+        try self.write("public:\n");
+        try self.print("    {s}DataWriter(DDS_DataWriter writer, int xcdr_version = ZIDL_XCDR1) : writer_(writer), xcdr_version_(xcdr_version) {{}}\n", .{c_name});
+        try self.print("    int write(const {s}& value);\n", .{cpp_qname});
+        try self.print("    int dispose(const {s}& key);\n", .{cpp_qname});
+        try self.print("    int unregister_instance(const {s}& key);\n", .{cpp_qname});
+        try self.write("private:\n");
+        try self.write("    DDS_DataWriter writer_;\n");
+        try self.write("    int xcdr_version_;\n");
+        try self.write("};\n\n");
+
+        try self.print("class {s}DataReader {{\n", .{c_name});
+        try self.write("public:\n");
+        try self.print("    struct Sample {{ {s} value; zzdds_sample_info info; }};\n", .{cpp_qname});
+        try self.write("    class Loan {\n");
+        try self.write("    public:\n");
+        try self.write("        Loan() = default;\n");
+        try self.print("        Loan({s}DataReader *reader, zzdds_loaned_sample loan, Sample sample) : reader_(reader), loan_(loan), sample_(sample), active_(true) {{}}\n", .{c_name});
+        try self.write("        Loan(const Loan&) = delete;\n");
+        try self.write("        Loan& operator=(const Loan&) = delete;\n");
+        try self.write("        Loan(Loan&& other) noexcept : reader_(other.reader_), loan_(other.loan_), sample_(other.sample_), active_(other.active_) { other.active_ = false; }\n");
+        try self.write("        Loan& operator=(Loan&& other) noexcept { if (this != &other) { reset(); reader_ = other.reader_; loan_ = other.loan_; sample_ = other.sample_; active_ = other.active_; other.active_ = false; } return *this; }\n");
+        try self.write("        ~Loan() { reset(); }\n");
+        try self.write("        const Sample& sample() const { return sample_; }\n");
+        try self.write("        void reset();\n");
+        try self.write("    private:\n");
+        try self.print("        {s}DataReader *reader_ = nullptr;\n", .{c_name});
+        try self.write("        zzdds_loaned_sample loan_{};\n");
+        try self.write("        Sample sample_{};\n");
+        try self.write("        bool active_ = false;\n");
+        try self.write("    };\n");
+        try self.print("    explicit {s}DataReader(DDS_DataReader reader) : reader_(reader) {{}}\n", .{c_name});
+        try self.write("    int take(Sample& out, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n");
+        try self.write("    int take_loaned(Loan& out);\n");
+        try self.write("private:\n");
+        try self.write("    DDS_DataReader reader_;\n");
+        try self.write("};\n\n");
     }
 
     fn emitExceptionCdrProtos(self: *Generator, e: *const ir.Exception) !void {
@@ -792,11 +857,7 @@ const Generator = struct {
     fn typeRefToCpp(self: *Generator, tr: ir.TypeRef) anyerror![]u8 {
         return switch (tr) {
             .base => |b| self.alloc.dupe(u8, baseToCppType(b)),
-            .named => |td| std.fmt.allocPrint(
-                self.alloc,
-                "::{s}",
-                .{ir.typeDeclQualifiedName(td)},
-            ),
+            .named => |td| self.namedTypeRefToCpp(td),
             .sequence => |seq| blk: {
                 const elem = try self.typeRefToCpp(seq.element.*);
                 defer self.alloc.free(elem);
@@ -812,6 +873,13 @@ const Generator = struct {
                 defer self.alloc.free(val_s);
                 break :blk std.fmt.allocPrint(self.alloc, "std::map<{s}, {s}>", .{ key_s, val_s });
             },
+        };
+    }
+
+    fn namedTypeRefToCpp(self: *Generator, td: ir.TypeDecl) ![]u8 {
+        return switch (td) {
+            .interface => std.fmt.allocPrint(self.alloc, "std::shared_ptr<::{s}>", .{ir.typeDeclQualifiedName(td)}),
+            else => std.fmt.allocPrint(self.alloc, "::{s}", .{ir.typeDeclQualifiedName(td)}),
         };
     }
 };
@@ -970,6 +1038,9 @@ const CdrGenerator = struct {
         );
         try self.print("#include \"{s}.hpp\"\n", .{self.opts.input_stem});
         try self.write("#include \"zidl_cdr.h\"\n");
+        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructCpp(spec.items)) {
+            try self.write("#include \"zzdds_c.h\"\n");
+        }
         try self.write("#include <cstring>\n\n");
         try self.emitItems(spec.items);
     }
@@ -1477,6 +1548,70 @@ const CdrGenerator = struct {
             try self.printI("return {s}_compute_key_hash(_v, _hash);\n", .{c_name});
             try self.write("}\n\n");
         }
+        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and isZzddsTopicStructCpp(s)) {
+            try self.emitStructZzddsWrappers(c_name, cpp_qname);
+        }
+    }
+
+    fn emitStructZzddsWrappers(self: *CdrGenerator, c_name: []const u8, cpp_qname: []const u8) !void {
+        try self.print("int {s}TypeSupport::register_type(DDS_DomainParticipant participant, const char *type_name) {{\n", .{c_name});
+        try self.printI("return zzdds_register_type_support_c(participant, type_name ? type_name : \"{s}\", {s}_compute_key_hash_from_cdr);\n", .{ c_name, c_name });
+        try self.write("}\n\n");
+
+        try self.print("static int {s}_write_kind(DDS_DataWriter writer, int xcdr_version, zzdds_write_kind kind, const {s}& value, bool key_only) {{\n", .{ c_name, cpp_qname });
+        try self.writeI("ZidlCdrWriter _w;\n");
+        try self.writeI("uint8_t _hash[16];\n");
+        try self.writeI("int _rc = zidl_cdr_writer_init(&_w, xcdr_version);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.writeI("_rc = zidl_cdr_write_encap(&_w);\n");
+        try self.printI("if (!_rc) _rc = key_only ? {s}_serialize_key(&_w, &value) : {s}_serialize(&_w, &value);\n", .{ c_name, c_name });
+        try self.printI("if (!_rc) _rc = {s}_compute_key_hash(&value, _hash);\n", .{c_name});
+        try self.writeI("if (!_rc) _rc = zzdds_write_raw_kind(writer, kind, _hash, _w.buf, _w.len);\n");
+        try self.writeI("zidl_cdr_writer_deinit(&_w);\n");
+        try self.writeI("return _rc;\n");
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataWriter::write(const {s}& value) {{\n", .{ c_name, cpp_qname });
+        try self.printI("return {s}_write_kind(writer_, xcdr_version_, ZZDDS_WRITE_ALIVE, value, false);\n", .{c_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataWriter::dispose(const {s}& key) {{\n", .{ c_name, cpp_qname });
+        try self.printI("return {s}_write_kind(writer_, xcdr_version_, ZZDDS_WRITE_DISPOSE, key, true);\n", .{c_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataWriter::unregister_instance(const {s}& key) {{\n", .{ c_name, cpp_qname });
+        try self.printI("return {s}_write_kind(writer_, xcdr_version_, ZZDDS_WRITE_UNREGISTER, key, true);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader::take(Sample& out, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{c_name});
+        try self.writeI("int _n = zzdds_take_one_raw(reader_, buf, buf_size, cdr_len_out, &out.info);\n");
+        try self.writeI("if (_n != 1) return _n;\n");
+        try self.writeI("ZidlCdrReader _r;\n");
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.printI("return {s}_deserialize(&_r, &out.value);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader::take_loaned(Loan& out) {{\n", .{c_name});
+        try self.writeI("zzdds_loaned_sample _loan{};\n");
+        try self.writeI("Sample _sample{};\n");
+        try self.writeI("int _n = zzdds_take_loaned_raw(reader_, &_loan, &_sample.info);\n");
+        try self.writeI("if (_n != 1) return _n;\n");
+        try self.writeI("ZidlCdrReader _r;\n");
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _loan.data, _loan.data_len);\n");
+        try self.writeI("if (_rc) { zzdds_return_loaned_raw(reader_, &_loan); return _rc; }\n");
+        try self.printI("_rc = {s}_deserialize(&_r, &_sample.value);\n", .{c_name});
+        try self.writeI("if (_rc) { zzdds_return_loaned_raw(reader_, &_loan); return _rc; }\n");
+        try self.writeI("out = Loan(this, _loan, _sample);\n");
+        try self.writeI("return 1;\n");
+        try self.write("}\n\n");
+
+        try self.print("void {s}DataReader::Loan::reset() {{\n", .{c_name});
+        try self.writeI("if (active_ && reader_) {\n");
+        self.indent_depth += 1;
+        try self.writeI("zzdds_return_loaned_raw(reader_->reader_, &loan_);\n");
+        try self.writeI("active_ = false;\n");
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.write("}\n\n");
     }
 
     fn emitExceptionFns(self: *CdrGenerator, e: *const ir.Exception) !void {
@@ -2470,9 +2605,9 @@ const CdrGenerator = struct {
 /// Generate the interface binding source file `<stem>_impl.cpp` into `out`.
 ///
 /// For each IDL `interface`, emits:
-///   - An `extern "C" { ... }` block declaring Zig DDS runtime exports
-///   - A concrete `FooZigImpl : public ::Foo` subclass that forwards every
-///     pure-virtual method to the corresponding Zig export via `ptr_`
+///   - An `extern "C" { ... }` block declaring C ABI runtime exports
+///   - A concrete `FooImpl : public ::Foo` subclass that forwards every
+///     pure-virtual method to the corresponding C ABI export via `ptr_`
 ///
 /// Method bodies perform direct forwarding for void returns and primitive
 /// parameters.  Complex parameters / return types (std::string, std::vector,
@@ -2533,28 +2668,28 @@ const ImplGenerator = struct {
         defer attrs.deinit(self.alloc);
         try self.collectInterfaceMembers(iface, &ops, &attrs);
 
-        // Derive the C-flat name used for Zig export symbols.
+        // Derive the C-flat name used for C ABI export symbols.
         const c_name = try self.prefixedCName(qname);
         defer self.alloc.free(c_name);
 
         try self.print("// ── interface {s} ──\n\n", .{c_name});
 
-        // extern "C" declarations for Zig DDS runtime exports.
+        // extern "C" declarations for C ABI runtime exports.
         try self.write("extern \"C\" {\n");
         for (ops.items) |op| try self.emitExternDecl(c_name, &op);
         for (attrs.items) |attr| try self.emitExternAttrDecls(c_name, &attr);
         try self.print("void zidl_{s}_deinit(void *ptr);\n", .{c_name});
         try self.write("}\n\n");
 
-        // Concrete ZigImpl subclass.
-        try self.print("class {s}ZigImpl : public ::{s} {{\n", .{ c_name, qname });
+        // Concrete Impl subclass.
+        try self.print("class {s}Impl : public ::{s} {{\n", .{ c_name, qname });
         try self.write("public:\n");
         try self.print(
-            "    explicit {s}ZigImpl(void *ptr) : ptr_(ptr) {{}}\n",
+            "    explicit {s}Impl(void *ptr) : ptr_(ptr) {{}}\n",
             .{c_name},
         );
         try self.print(
-            "    ~{s}ZigImpl() override {{ zidl_{s}_deinit(ptr_); }}\n\n",
+            "    ~{s}Impl() override {{ zidl_{s}_deinit(ptr_); }}\n\n",
             .{ c_name, c_name },
         );
 
@@ -2790,7 +2925,7 @@ const ImplGenerator = struct {
     fn typeRefToCpp(self: *ImplGenerator, tr: ir.TypeRef) ![]u8 {
         return switch (tr) {
             .base => |b| self.alloc.dupe(u8, baseToCppType(b)),
-            .named => |td| std.fmt.allocPrint(self.alloc, "::{s}", .{ir.typeDeclQualifiedName(td)}),
+            .named => |td| self.namedTypeRefToCpp(td),
             .sequence => |seq| blk: {
                 const elem = try self.typeRefToCpp(seq.element.*);
                 defer self.alloc.free(elem);
@@ -2806,6 +2941,13 @@ const ImplGenerator = struct {
                 defer self.alloc.free(vs);
                 break :blk std.fmt.allocPrint(self.alloc, "std::map<{s}, {s}>", .{ ks, vs });
             },
+        };
+    }
+
+    fn namedTypeRefToCpp(self: *ImplGenerator, td: ir.TypeDecl) ![]u8 {
+        return switch (td) {
+            .interface => std.fmt.allocPrint(self.alloc, "std::shared_ptr<::{s}>", .{ir.typeDeclQualifiedName(td)}),
+            else => std.fmt.allocPrint(self.alloc, "::{s}", .{ir.typeDeclQualifiedName(td)}),
         };
     }
 };
@@ -2875,6 +3017,24 @@ fn structHasKeyCpp(s: *const ir.Struct) bool {
     }
     for (s.members) |m| {
         if (m.annotations.is_key) return true;
+    }
+    return false;
+}
+
+fn isZzddsTopicStructCpp(s: *const ir.Struct) bool {
+    return structHasKeyCpp(s) and !s.annotations.is_nested and s.annotations.extensibility != .mutable;
+}
+
+fn itemsHaveZzddsTopicStructCpp(items: []const ir.ModuleItem) bool {
+    for (items) |item| {
+        switch (item) {
+            .type_decl => |td| switch (td) {
+                .struct_ => |s| if (isZzddsTopicStructCpp(s)) return true,
+                else => {},
+            },
+            .module => |m| if (itemsHaveZzddsTopicStructCpp(m.items)) return true,
+            else => {},
+        }
     }
     return false;
 }
@@ -3067,6 +3227,7 @@ fn scanIncludesTypeDecl(td: ir.TypeDecl, needs: *Generator.IncludeNeeds) void {
                 Generator.scanIncludesTypeRef(m.type_ref, needs);
             }
         },
+        .interface => |iface| Generator.scanIncludesInterface(iface, needs),
         else => {},
     }
 }
@@ -3190,6 +3351,7 @@ fn generateTypeHeader(
     try gen.write("#include <cstdint>\n");
     try gen.write("#include <string>\n");
     try gen.write("#include <vector>\n");
+    if (opts.generate_interfaces and needs.memory) try gen.write("#include <memory>\n");
     if (needs.map) try gen.write("#include <map>\n");
     if (needs.optional) try gen.write("#include <optional>\n");
     try gen.write("#include <array>\n");
@@ -3197,6 +3359,12 @@ fn generateTypeHeader(
     if (!opts.no_typesupport) {
         switch (td) {
             .struct_, .exception, .union_ => try gen.write("#include \"zidl_cdr.h\"\n"),
+            else => {},
+        }
+    }
+    if (opts.generate_zzdds_wrappers and !opts.no_typesupport) {
+        switch (td) {
+            .struct_ => |s| if (isZzddsTopicStructCpp(s)) try gen.write("#include \"zzdds_c.h\"\n"),
             else => {},
         }
     }
@@ -3350,6 +3518,8 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra: struct {
     pragma_once: bool = false,
     cpp_namespace: []const u8 = "",
     export_macro: []const u8 = "",
+    no_typesupport: bool = false,
+    generate_zzdds_wrappers: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
     var ast_arena = std.heap.ArenaAllocator.init(alloc);
@@ -3370,6 +3540,8 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra: struct {
         .pragma_once = extra.pragma_once,
         .cpp_namespace = extra.cpp_namespace,
         .export_macro = extra.export_macro,
+        .no_typesupport = extra.no_typesupport,
+        .generate_zzdds_wrappers = extra.generate_zzdds_wrappers,
     };
     try generateHeader(alloc, &ir_spec, opts, &out);
     return out;
@@ -3382,6 +3554,7 @@ fn testGenCdr(source: []const u8, stem: []const u8) !std.ArrayList(u8) {
 
 fn testGenCdrOpts(source: []const u8, stem: []const u8, extra: struct {
     type_prefix: []const u8 = "",
+    generate_zzdds_wrappers: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
     var ast_arena = std.heap.ArenaAllocator.init(alloc);
@@ -3395,7 +3568,11 @@ fn testGenCdrOpts(source: []const u8, stem: []const u8, extra: struct {
     defer ir_spec.deinit();
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
-    const opts = interface.Options{ .input_stem = stem, .type_prefix = extra.type_prefix };
+    const opts = interface.Options{
+        .input_stem = stem,
+        .type_prefix = extra.type_prefix,
+        .generate_zzdds_wrappers = extra.generate_zzdds_wrappers,
+    };
     try generateCdrSource(alloc, &ir_spec, opts, &out);
     return out;
 }
@@ -3414,6 +3591,64 @@ test "cpp_backend: header guard and includes" {
     try testing.expect(has(s, "#include <vector>"));
     try testing.expect(has(s, "#include <string>"));
     try testing.expect(has(s, "endif // MY_TYPES_HPP"));
+}
+
+test "cpp_backend: memory include only when interface signatures need shared_ptr" {
+    var primitive_iface = try testGenOpts(
+        \\interface Greeter { string greet(in string name); };
+    , "greeter", .{ .generate_interfaces = true });
+    defer primitive_iface.deinit(testing.allocator);
+    try testing.expect(!has(primitive_iface.items, "#include <memory>"));
+
+    var interface_ref = try testGenOpts(
+        \\interface DataWriter {};
+        \\interface Listener { void on_data(in DataWriter writer); };
+    , "listener", .{ .generate_interfaces = true });
+    defer interface_ref.deinit(testing.allocator);
+    try testing.expect(has(interface_ref.items, "#include <memory>"));
+    try testing.expect(has(interface_ref.items, "std::shared_ptr<::DataWriter> writer"));
+}
+
+test "cpp_backend: zzdds wrappers suppressed when no_typesupport" {
+    var out = try testGenOpts(
+        "@appendable struct Topic { @key long id; string<16> name; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true, .no_typesupport = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(!has(s, "zzdds_c.h"));
+    try testing.expect(!has(s, "DDS_DataWriter"));
+    try testing.expect(!has(s, "TopicDataWriter"));
+}
+
+test "cpp_backend: zzdds_c omitted when no qualifying topic struct" {
+    var out = try testGenOpts(
+        "struct Plain { long id; }; @nested struct NestedKey { @key long id; }; @mutable struct MutableKey { @key long id; };",
+        "plain",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(!has(s, "zzdds_c.h"));
+    try testing.expect(!has(s, "DataWriter"));
+}
+
+test "cpp_backend: zzdds wrapper declarations for keyed topic" {
+    var out = try testGenOpts(
+        "@appendable struct Topic { @key long id; string<16> name; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "#include \"zzdds_c.h\""));
+    try testing.expect(has(s, "class TopicTypeSupport {"));
+    try testing.expect(has(s, "static int register_type(DDS_DomainParticipant participant, const char *type_name = \"Topic\");"));
+    try testing.expect(has(s, "class TopicDataWriter {"));
+    try testing.expect(has(s, "DDS_DataWriter writer_;"));
+    try testing.expect(has(s, "class Loan {"));
+    try testing.expect(has(s, "zzdds_loaned_sample loan_{};"));
 }
 
 test "cpp_backend: header guard prefix" {
@@ -4083,15 +4318,15 @@ test "cpp_backend: impl source extern C block" {
     try testing.expect(has(s, "void zidl_Calc_deinit(void *ptr);"));
 }
 
-test "cpp_backend: impl source ZigImpl class" {
+test "cpp_backend: impl source Impl class" {
     var out = try testGenImpl(
         \\interface Calc { long add(in long a, in long b); void reset(); };
     , "calc");
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "class CalcZigImpl : public ::Calc {"));
-    try testing.expect(has(s, "explicit CalcZigImpl(void *ptr) : ptr_(ptr) {}"));
-    try testing.expect(has(s, "~CalcZigImpl() override { zidl_Calc_deinit(ptr_); }"));
+    try testing.expect(has(s, "class CalcImpl : public ::Calc {"));
+    try testing.expect(has(s, "explicit CalcImpl(void *ptr) : ptr_(ptr) {}"));
+    try testing.expect(has(s, "~CalcImpl() override { zidl_Calc_deinit(ptr_); }"));
     try testing.expect(has(s, "int32_t add(int32_t a, int32_t b) override {"));
     try testing.expect(has(s, "return zidl_Calc_add(ptr_, a, b);"));
     try testing.expect(has(s, "void reset() override {"));
@@ -4104,6 +4339,13 @@ test "cpp_backend: impl source ZigImpl class" {
 
 /// Build IR from `source`, call `generateTypeHeader` for the TypeDecl at `idx`.
 fn testGenTypeHeader(source: []const u8, stem: []const u8, idx: usize) !std.ArrayList(u8) {
+    return testGenTypeHeaderOpts(source, stem, idx, .{});
+}
+
+fn testGenTypeHeaderOpts(source: []const u8, stem: []const u8, idx: usize, extra: struct {
+    generate_zzdds_wrappers: bool = false,
+    no_typesupport: bool = false,
+}) !std.ArrayList(u8) {
     const alloc = testing.allocator;
     var ast_arena = std.heap.ArenaAllocator.init(alloc);
     defer ast_arena.deinit();
@@ -4117,7 +4359,11 @@ fn testGenTypeHeader(source: []const u8, stem: []const u8, idx: usize) !std.Arra
     var decls = std.ArrayListUnmanaged(ir.TypeDecl).empty;
     defer decls.deinit(alloc);
     try collectTypeDeclsFlat(alloc, ir_spec.items, &decls);
-    const opts = interface.Options{ .input_stem = stem };
+    const opts = interface.Options{
+        .input_stem = stem,
+        .generate_zzdds_wrappers = extra.generate_zzdds_wrappers,
+        .no_typesupport = extra.no_typesupport,
+    };
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
     try generateTypeHeader(alloc, decls.items[idx], opts, &out);
@@ -4145,6 +4391,20 @@ test "cpp_backend split: struct includes deps" {
     try testing.expect(has(s, "#include \"Color.hpp\""));
     try testing.expect(has(s, "#include \"zidl_cdr.h\""));
     try testing.expect(has(s, "struct Foo"));
+}
+
+test "cpp_backend split: zzdds wrapper header includes zzdds_c" {
+    var out = try testGenTypeHeaderOpts(
+        "@appendable struct Topic { @key long id; string<16> name; };",
+        "topic",
+        0,
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "#include \"zidl_cdr.h\""));
+    try testing.expect(has(s, "#include \"zzdds_c.h\""));
+    try testing.expect(has(s, "class TopicDataWriter"));
 }
 
 test "cpp_backend split: aggregate header includes all types" {
@@ -4312,6 +4572,33 @@ test "cpp_backend: union with enum typedef discriminant CDR" {
     try testing.expect(!has(s, "TODO"));
 }
 
+test "cpp_backend cdr: zzdds wrapper implementations for keyed topic" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; string<16> name; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "#include \"zzdds_c.h\""));
+    try testing.expect(has(s, "int TopicTypeSupport::register_type(DDS_DomainParticipant participant, const char *type_name) {"));
+    try testing.expect(has(s, "static int Topic_write_kind(DDS_DataWriter writer, int xcdr_version, zzdds_write_kind kind, const ::Topic& value, bool key_only) {"));
+    try testing.expect(has(s, "return Topic_write_kind(writer_, xcdr_version_, ZZDDS_WRITE_ALIVE, value, false);"));
+    try testing.expect(has(s, "int TopicDataReader::take_loaned(Loan& out) {"));
+    try testing.expect(has(s, "out = Loan(this, _loan, _sample);"));
+    try testing.expect(has(s, "void TopicDataReader::Loan::reset() {"));
+}
+
+test "cpp_backend cdr: zzdds_c omitted when no qualifying topic struct" {
+    var out = try testGenCdrOpts(
+        "struct Plain { long id; }; @nested struct NestedKey { @key long id; }; @mutable struct MutableKey { @key long id; };",
+        "plain",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    try testing.expect(!has(out.items, "zzdds_c.h"));
+}
+
 test "cpp_backend: @verbatim before-declaration on struct" {
     var out = try testGen(
         \\@verbatim(language="cpp", placement="before-declaration", text="// injected before")
@@ -4369,6 +4656,17 @@ test "cpp_backend: impl void op with string param forwards via c_str" {
     try testing.expect(has(s, "void greetAdvanced(std::string name) override {"));
     try testing.expect(has(s, "zidl_Greeter_greetAdvanced(ptr_, name.c_str());"));
     try testing.expect(!has(s, "TODO"));
+}
+
+test "cpp_backend: impl interface parameter uses shared_ptr signature" {
+    var out = try testGenImpl(
+        \\interface DataWriter {};
+        \\interface Listener { void on_data(in DataWriter writer); };
+    , "listener");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "void on_data(std::shared_ptr<::DataWriter> writer) override {"));
+    try testing.expect(has(s, "/* TODO: adapt C++ types to C ABI for Listener::on_data */"));
 }
 
 test "cpp_backend: impl simple return with string param forwards correctly" {

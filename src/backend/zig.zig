@@ -166,7 +166,7 @@ pub fn generateSplitFiles(
         if (!opts.no_typesupport or opts.pl_cdr) {
             try gen.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
-        if (opts.generate_dds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(m.items)) {
+        if (opts.generate_zzdds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(m.items)) {
             try gen.write("const _dds = @import(\"dds\");\n");
         }
         // Self-reference alias: allows Module.SomeType syntax within this file.
@@ -211,7 +211,7 @@ pub fn generateSplitFiles(
         if (!opts.no_typesupport or opts.pl_cdr) {
             try gen.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
-        if (opts.generate_dds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(non_module.items)) {
+        if (opts.generate_zzdds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(non_module.items)) {
             try gen.write("const _dds = @import(\"dds\");\n");
         }
         try gen.write("\n");
@@ -273,7 +273,7 @@ const Generator = struct {
         if (!self.opts.no_typesupport or self.opts.pl_cdr) {
             try self.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
-        if (self.opts.generate_dds_wrappers and !self.opts.no_typesupport and itemsHaveTopicTypes(spec.items)) {
+        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveTopicTypes(spec.items)) {
             try self.write("const _dds = @import(\"dds\");\n");
         }
         try self.write("\n");
@@ -344,7 +344,7 @@ const Generator = struct {
         }
         try self.ind();
         try self.print("}}; // {s}{s}\n\n", .{ pfx, s.name });
-        if (self.opts.generate_dds_wrappers and !self.opts.no_typesupport and structHasKey(s) and s.annotations.extensibility != .mutable) {
+        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and isZzddsTopicStruct(s)) {
             try self.emitStructTypedWrapper(s);
         }
     }
@@ -4145,13 +4145,12 @@ fn structKeyNeedsAllocator(s: *const ir.Struct) bool {
 }
 
 /// Returns true when `items` (or any nested module) contains at least one
-/// struct that will get a typed DataWriter/DataReader wrapper: has a @key
-/// member and is not @mutable.
+/// struct that will get a typed DataWriter/DataReader wrapper.
 fn itemsHaveTopicTypes(items: []const ir.ModuleItem) bool {
     for (items) |item| {
         switch (item) {
             .type_decl => |td| switch (td) {
-                .struct_ => |s| if (structHasKey(s) and s.annotations.extensibility != .mutable) return true,
+                .struct_ => |s| if (isZzddsTopicStruct(s)) return true,
                 else => {},
             },
             .module => |m| if (itemsHaveTopicTypes(m.items)) return true,
@@ -4159,6 +4158,10 @@ fn itemsHaveTopicTypes(items: []const ir.ModuleItem) bool {
         }
     }
     return false;
+}
+
+fn isZzddsTopicStruct(s: *const ir.Struct) bool {
+    return structHasKey(s) and !s.annotations.is_nested and s.annotations.extensibility != .mutable;
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -4179,7 +4182,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
     generate_interfaces: bool = false,
     type_prefix: []const u8 = "",
     pl_cdr: bool = false,
-    generate_dds_wrappers: bool = false,
+    generate_zzdds_wrappers: bool = false,
     zig_version: interface.ZigVersion = .@"0.16.0",
     zig_generate_c_api: bool = false,
 }) !std.ArrayList(u8) {
@@ -4208,7 +4211,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
         .generate_interfaces = extra_opts.generate_interfaces,
         .type_prefix = extra_opts.type_prefix,
         .pl_cdr = extra_opts.pl_cdr,
-        .generate_dds_wrappers = extra_opts.generate_dds_wrappers,
+        .generate_zzdds_wrappers = extra_opts.generate_zzdds_wrappers,
         .zig_version = extra_opts.zig_version,
         .zig_generate_c_api = extra_opts.zig_generate_c_api,
     };
@@ -5759,7 +5762,7 @@ test "zig_backend: no typed DataWriter/DataReader by default for keyed struct" {
 test "zig_backend: typed DataWriter/DataReader for keyed @appendable struct" {
     var out = try testGenOpts(
         \\@appendable struct ShapeType { @key string<128> color; long x; long y; long shapesize; };
-    , "shape", .{ .generate_dds_wrappers = true });
+    , "shape", .{ .generate_zzdds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // dds import emitted
@@ -5800,7 +5803,7 @@ test "zig_backend: typed DataWriter/DataReader for keyed @appendable struct" {
 test "zig_backend: typed DataWriter uses writeEncapHeader for @final struct" {
     var out = try testGenOpts(
         \\@final struct SensorData { @key long id; double value; };
-    , "sensor", .{ .generate_dds_wrappers = true });
+    , "sensor", .{ .generate_zzdds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "pub const SensorDataDataWriter = struct {"));
@@ -5811,7 +5814,7 @@ test "zig_backend: typed DataWriter uses writeEncapHeader for @final struct" {
 }
 
 test "zig_backend: no DataWriter/DataReader for struct without @key" {
-    var out = try testGenOpts("struct NoKey { long x; long y; };", "nk", .{ .generate_dds_wrappers = true });
+    var out = try testGenOpts("struct NoKey { long x; long y; };", "nk", .{ .generate_zzdds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(!has(s, "DataWriter"));
@@ -5823,7 +5826,7 @@ test "zig_backend: no_typesupport suppresses DataWriter/DataReader" {
     var out = try testGenOpts(
         "@appendable struct ShapeType { @key string<128> color; long x; };",
         "shape",
-        .{ .no_typesupport = true, .generate_dds_wrappers = true },
+        .{ .no_typesupport = true, .generate_zzdds_wrappers = true },
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
@@ -5836,7 +5839,7 @@ test "zig_backend: no DataWriter/DataReader for @mutable keyed struct" {
     var out = try testGenOpts(
         "@mutable struct MutableTopic { @key long id; string data; };",
         "mt",
-        .{ .generate_dds_wrappers = true },
+        .{ .generate_zzdds_wrappers = true },
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
@@ -5844,10 +5847,23 @@ test "zig_backend: no DataWriter/DataReader for @mutable keyed struct" {
     try testing.expect(!has(s, "DataReader"));
 }
 
+test "zig_backend: no DataWriter/DataReader or dds import for @nested keyed struct" {
+    var out = try testGenOpts(
+        "@nested struct NestedKey { @key long id; string data; };",
+        "nk",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(!has(s, "DataWriter"));
+    try testing.expect(!has(s, "DataReader"));
+    try testing.expect(!has(s, "const _dds ="));
+}
+
 test "zig_backend: Sample.deinit emitted when struct has unbounded sequence" {
     var out = try testGenOpts(
         \\@appendable struct BagTopic { @key long id; sequence<long> items; };
-    , "bag", .{ .generate_dds_wrappers = true });
+    , "bag", .{ .generate_zzdds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "pub const BagTopicDataReader = struct {"));
@@ -5860,7 +5876,7 @@ test "zig_backend: Sample.deinit emitted when struct has unbounded sequence" {
 test "zig_backend: DataWriter/DataReader inside module" {
     var out = try testGenOpts(
         \\module DDS { @appendable struct Shape { @key string<64> color; long x; }; };
-    , "dds", .{ .generate_dds_wrappers = true });
+    , "dds", .{ .generate_zzdds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // _dds import at file level (prefixed to avoid clash with any IDL module named "dds")
@@ -5877,7 +5893,7 @@ test "zig_backend: module named 'dds' does not produce duplicate const dds" {
     // makes the clash structurally impossible (IDL names cannot start with '_').
     var out = try testGenOpts(
         \\module dds { @appendable struct Topic { @key long id; }; };
-    , "types", .{ .generate_dds_wrappers = true });
+    , "types", .{ .generate_zzdds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "const _dds = @import(\"dds\");"));

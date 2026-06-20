@@ -57,6 +57,14 @@ Current verification inventory:
 - Keyed structs emit C ABI helpers `Foo_serialize_key`, `Foo_deserialize_key`,
   and `Foo_compute_key_hash` using the same canonical PLAIN_CDR2 big-endian key
   hash rule as C.
+- `--generate-zzdds-wrappers` emits typed `FooTypeSupport`, `FooDataWriter`,
+  and `FooDataReader` wrappers for keyed, non-mutable topic structs. The wrappers call the
+  zzdds C ABI declared by `zzdds_c.h`.
+- `--generate-interfaces` emits abstract interface classes plus C ABI-backed
+  `Impl` classes. Primitive and string operation signatures are adapted; richer
+  signatures still need explicit adapter support.
+- Generated C++ implementation classes now use the `FooImpl` suffix; older
+  generated output used `FooZigImpl`.
 - `@verbatim` annotations are preserved in the IR as raw annotations but are not
   yet acted on by the C++ backend (planned: injection at `BEGIN_FILE`,
   `BEFORE_DECLARATION`, etc. filtered by `language == "c++"` or `language == "*"`).
@@ -231,7 +239,7 @@ integration tests run as part of `zig build test`.
 | C++ backend: custom STL allocators | `std::string`, `std::vector`, `std::map` use default allocators; `std::pmr` support planned |
 | C/C++ backends: PL_CDR codegen | `--zig-pl-cdr` flag is parsed and wired but C/C++ backends do not yet emit PL_CDR functions |
 | Zig 0.15.1 / MicroZig output | Partially implemented: `--zig-version 0.15.1` is wired and bounded strings/sequences use fixed-capacity `zidl_rt.BoundedArray`; full freestanding/no-heap runtime path remains planned |
-| `--generate-interfaces` C++: complex-type adaptation | `ImplGenerator.emitImplOp` emits `/* TODO */` stubs — ABI boundary must be decided with DDS runtime |
+| `--generate-interfaces` C++: complex-type adaptation | Primitive and string operation signatures are adapted; richer signatures emit `/* TODO */` stubs |
 | Const type-checking | Not implemented (e.g. `const long x = "hello"` is not caught) |
 | Union discriminant type validation | Not implemented |
 | TypeObject for typedef/alias | Deferred |

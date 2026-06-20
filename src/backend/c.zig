@@ -217,6 +217,9 @@ const Generator = struct {
         if (!self.opts.no_typesupport) {
             try self.write("#include \"zidl_cdr.h\"\n");
         }
+        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructC(spec.items)) {
+            try self.write("#include \"zzdds_c.h\"\n");
+        }
         try self.write("\n");
         if (self.opts.extern_c) {
             try self.write("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
@@ -562,6 +565,9 @@ const Generator = struct {
                 const sp: []const u8 = if (em.len > 0) " " else "";
                 try self.print("{s}{s}void {s}_apply_defaults({s} *_v);\n\n", .{ em, sp, c_name, c_name });
             }
+            if (self.opts.generate_zzdds_wrappers and isZzddsTopicStructC(s)) {
+                try self.emitStructZzddsWrapperProtos(c_name);
+            }
         }
         try self.emitVerbatimForPlacement(s.annotations.raw, "after-declaration");
     }
@@ -581,6 +587,30 @@ const Generator = struct {
             try self.print("{s}{s}int {s}_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);\n", .{ em, sp, c_name });
         }
         try self.write("\n");
+    }
+
+    fn emitStructZzddsWrapperProtos(self: *Generator, c_name: []const u8) !void {
+        const em = self.opts.export_macro;
+        const sp: []const u8 = if (em.len > 0) " " else "";
+        try self.print("typedef struct {s}TypeSupport {{\n", .{c_name});
+        try self.write("    const char *type_name;\n");
+        try self.print("}} {s}TypeSupport;\n\n", .{c_name});
+        try self.print("typedef struct {s}DataWriter {{\n", .{c_name});
+        try self.write("    DDS_DataWriter writer;\n");
+        try self.write("    int xcdr_version;\n");
+        try self.print("}} {s}DataWriter;\n\n", .{c_name});
+        try self.print("typedef struct {s}DataReader {{\n", .{c_name});
+        try self.write("    DDS_DataReader reader;\n");
+        try self.print("}} {s}DataReader;\n\n", .{c_name});
+        try self.print("{s}{s}int {s}TypeSupport_register(DDS_DomainParticipant participant, const char *type_name);\n", .{ em, sp, c_name });
+        try self.print("{s}{s}void {s}DataWriter_init({s}DataWriter *self, DDS_DataWriter writer, int xcdr_version);\n", .{ em, sp, c_name, c_name });
+        try self.print("{s}{s}int {s}DataWriter_write({s}DataWriter *self, const {s} *value);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataWriter_dispose({s}DataWriter *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataWriter_unregister({s}DataWriter *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}void {s}DataReader_init({s}DataReader *self, DDS_DataReader reader);\n", .{ em, sp, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_take({s}DataReader *self, {s} *out, zzdds_sample_info *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_take_loaned({s}DataReader *self, {s} *out, zzdds_sample_info *info, zzdds_loaned_sample *loan);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}void {s}DataReader_return_loan({s}DataReader *self, zzdds_loaned_sample *loan);\n\n", .{ em, sp, c_name, c_name });
     }
 
     // ── Union ─────────────────────────────────────────────────────────────────
@@ -1190,6 +1220,24 @@ fn structHasKeyC(s: *const ir.Struct) bool {
     return false;
 }
 
+fn isZzddsTopicStructC(s: *const ir.Struct) bool {
+    return structHasKeyC(s) and !s.annotations.is_nested and s.annotations.extensibility != .mutable;
+}
+
+fn itemsHaveZzddsTopicStructC(items: []const ir.ModuleItem) bool {
+    for (items) |item| {
+        switch (item) {
+            .type_decl => |td| switch (td) {
+                .struct_ => |s| if (isZzddsTopicStructC(s)) return true,
+                else => {},
+            },
+            .module => |m| if (itemsHaveZzddsTopicStructC(m.items)) return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
 fn isDefaultUnionCase(cas: ir.UnionCase) bool {
     if (cas.labels.len == 0) return true;
     for (cas.labels) |lbl| {
@@ -1391,6 +1439,9 @@ const CdrGenerator = struct {
         );
         try self.print("#include \"{s}.h\"\n", .{self.opts.input_stem});
         try self.write("#include \"zidl_cdr.h\"\n");
+        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructC(spec.items)) {
+            try self.write("#include \"zzdds_c.h\"\n");
+        }
         try self.write("#include <stdlib.h>\n");
         try self.write("#include <string.h>\n\n");
         try self.emitItems(spec.items);
@@ -1946,6 +1997,73 @@ const CdrGenerator = struct {
             }
             try self.write("}\n\n");
         }
+        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and isZzddsTopicStructC(s)) {
+            try self.emitStructZzddsWrappers(c_name);
+        }
+    }
+
+    fn emitStructZzddsWrappers(self: *CdrGenerator, c_name: []const u8) !void {
+        try self.print("int {s}TypeSupport_register(DDS_DomainParticipant participant, const char *type_name) {{\n", .{c_name});
+        try self.printI("return zzdds_register_type_support_c(participant, type_name ? type_name : \"{s}\", {s}_compute_key_hash_from_cdr);\n", .{ c_name, c_name });
+        try self.write("}\n\n");
+
+        try self.print("void {s}DataWriter_init({s}DataWriter *self, DDS_DataWriter writer, int xcdr_version) {{\n", .{ c_name, c_name });
+        try self.writeI("self->writer = writer;\n");
+        try self.writeI("self->xcdr_version = xcdr_version;\n");
+        try self.write("}\n\n");
+
+        try self.print("static int {s}DataWriter_write_kind({s}DataWriter *self, zzdds_write_kind kind, const {s} *value, int key_only) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("ZidlCdrWriter _w;\n");
+        try self.writeI("uint8_t _hash[16];\n");
+        try self.writeI("int _rc = zidl_cdr_writer_init(&_w, self->xcdr_version);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.writeI("_rc = zidl_cdr_write_encap(&_w);\n");
+        try self.writeI("if (!_rc) _rc = key_only ? ");
+        try self.print("{s}_serialize_key(&_w, value) : {s}_serialize(&_w, value);\n", .{ c_name, c_name });
+        try self.writeI("if (!_rc) _rc = ");
+        try self.print("{s}_compute_key_hash(value, _hash);\n", .{c_name});
+        try self.writeI("if (!_rc) _rc = zzdds_write_raw_kind(self->writer, kind, _hash, _w.buf, _w.len);\n");
+        try self.writeI("zidl_cdr_writer_deinit(&_w);\n");
+        try self.writeI("return _rc;\n");
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataWriter_write({s}DataWriter *self, const {s} *value) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataWriter_write_kind(self, ZZDDS_WRITE_ALIVE, value, 0);\n", .{c_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataWriter_dispose({s}DataWriter *self, const {s} *key) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataWriter_write_kind(self, ZZDDS_WRITE_DISPOSE, key, 1);\n", .{c_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataWriter_unregister({s}DataWriter *self, const {s} *key) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataWriter_write_kind(self, ZZDDS_WRITE_UNREGISTER, key, 1);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("void {s}DataReader_init({s}DataReader *self, DDS_DataReader reader) {{\n", .{ c_name, c_name });
+        try self.writeI("self->reader = reader;\n");
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader_take({s}DataReader *self, {s} *out, zzdds_sample_info *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("int _n = zzdds_take_one_raw(self->reader, buf, buf_size, cdr_len_out, info);\n");
+        try self.writeI("if (_n != 1) return _n;\n");
+        try self.writeI("ZidlCdrReader _r;\n");
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.printI("return {s}_deserialize(&_r, out);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader_take_loaned({s}DataReader *self, {s} *out, zzdds_sample_info *info, zzdds_loaned_sample *loan) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("int _n = zzdds_take_loaned_raw(self->reader, loan, info);\n");
+        try self.writeI("if (_n != 1) return _n;\n");
+        try self.writeI("ZidlCdrReader _r;\n");
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, loan->data, loan->data_len);\n");
+        try self.writeI("if (_rc) { zzdds_return_loaned_raw(self->reader, loan); return _rc; }\n");
+        try self.printI("_rc = {s}_deserialize(&_r, out);\n", .{c_name});
+        try self.writeI("if (_rc) zzdds_return_loaned_raw(self->reader, loan);\n");
+        try self.writeI("return _rc;\n");
+        try self.write("}\n\n");
+
+        try self.print("void {s}DataReader_return_loan({s}DataReader *self, zzdds_loaned_sample *loan) {{\n", .{ c_name, c_name });
+        try self.writeI("zzdds_return_loaned_raw(self->reader, loan);\n");
+        try self.write("}\n\n");
     }
 
     fn emitExceptionFns(self: *CdrGenerator, e: *const ir.Exception) !void {
@@ -3398,6 +3516,7 @@ fn testGenFullOpts(source: []const u8, stem: []const u8, extra: struct {
     extern_c: bool = false,
     export_macro: []const u8 = "",
     no_typesupport: bool = false,
+    generate_zzdds_wrappers: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
 
@@ -3425,6 +3544,7 @@ fn testGenFullOpts(source: []const u8, stem: []const u8, extra: struct {
         .extern_c = extra.extern_c,
         .export_macro = extra.export_macro,
         .no_typesupport = extra.no_typesupport,
+        .generate_zzdds_wrappers = extra.generate_zzdds_wrappers,
     };
     try generateHeader(alloc, &ir_spec, opts, &out);
 
@@ -3903,6 +4023,7 @@ fn testGenCdr(source: []const u8, stem: []const u8) !std.ArrayList(u8) {
 fn testGenCdrOpts(source: []const u8, stem: []const u8, opts_extra: struct {
     no_typesupport: bool = false,
     type_prefix: []const u8 = "",
+    generate_zzdds_wrappers: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
 
@@ -3926,6 +4047,7 @@ fn testGenCdrOpts(source: []const u8, stem: []const u8, opts_extra: struct {
         .input_stem = stem,
         .no_typesupport = opts_extra.no_typesupport,
         .type_prefix = opts_extra.type_prefix,
+        .generate_zzdds_wrappers = opts_extra.generate_zzdds_wrappers,
     };
     try generateCdrSource(alloc, &ir_spec, opts, &out);
 
@@ -3956,6 +4078,46 @@ test "c_backend cdr: header omits zidl_cdr.h when no_typesupport" {
     try testing.expect(!has(out.items, "zidl_cdr.h"));
 }
 
+test "c_backend: zzdds wrappers suppressed when no_typesupport" {
+    var out = try testGenFullOpts(
+        "@appendable struct Topic { @key long id; string<16> name; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true, .no_typesupport = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(!has(s, "zzdds_c.h"));
+    try testing.expect(!has(s, "DDS_DataWriter"));
+    try testing.expect(!has(s, "TopicDataWriter"));
+}
+
+test "c_backend: zzdds_c omitted when no qualifying topic struct" {
+    var out = try testGenFullOpts(
+        "struct Plain { long id; }; @nested struct NestedKey { @key long id; }; @mutable struct MutableKey { @key long id; };",
+        "plain",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(!has(s, "zzdds_c.h"));
+    try testing.expect(!has(s, "DataWriter"));
+}
+
+test "c_backend: zzdds wrapper prototypes for keyed topic" {
+    var out = try testGenFullOpts(
+        "@appendable struct Topic { @key long id; string<16> name; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "#include \"zzdds_c.h\""));
+    try testing.expect(has(s, "typedef struct TopicTypeSupport {"));
+    try testing.expect(has(s, "DDS_DataWriter writer;"));
+    try testing.expect(has(s, "int TopicTypeSupport_register(DDS_DomainParticipant participant, const char *type_name);"));
+    try testing.expect(has(s, "int TopicDataReader_take_loaned(TopicDataReader *self, Topic *out, zzdds_sample_info *info, zzdds_loaned_sample *loan);"));
+}
+
 test "c_backend cdr: header emits CDR prototypes after struct" {
     var h = try testGen("struct Pt { long x; long y; };", "pt");
     defer h.deinit(testing.allocator);
@@ -3972,6 +4134,33 @@ test "c_backend cdr: header emits serialize_key proto when @key present" {
     const s = h.items;
     try testing.expect(has(s, "#define Msg_has_key 1"));
     try testing.expect(has(s, "int Msg_serialize_key(ZidlCdrWriter *_w, const Msg *_v);"));
+}
+
+test "c_backend cdr: zzdds wrapper implementations for keyed topic" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; string<16> name; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "#include \"zzdds_c.h\""));
+    try testing.expect(has(s, "int TopicTypeSupport_register(DDS_DomainParticipant participant, const char *type_name) {"));
+    try testing.expect(has(s, "void TopicDataWriter_init(TopicDataWriter *self, DDS_DataWriter writer, int xcdr_version) {"));
+    try testing.expect(has(s, "static int TopicDataWriter_write_kind(TopicDataWriter *self, zzdds_write_kind kind, const Topic *value, int key_only) {"));
+    try testing.expect(has(s, "return TopicDataWriter_write_kind(self, ZZDDS_WRITE_ALIVE, value, 0);"));
+    try testing.expect(has(s, "int TopicDataReader_take_loaned(TopicDataReader *self, Topic *out, zzdds_sample_info *info, zzdds_loaned_sample *loan) {"));
+    try testing.expect(has(s, "zzdds_return_loaned_raw(self->reader, loan);"));
+}
+
+test "c_backend cdr: zzdds_c omitted when no qualifying topic struct" {
+    var out = try testGenCdrOpts(
+        "struct Plain { long id; }; @nested struct NestedKey { @key long id; }; @mutable struct MutableKey { @key long id; };",
+        "plain",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    try testing.expect(!has(out.items, "zzdds_c.h"));
 }
 
 test "c_backend cdr: source file banner and includes" {

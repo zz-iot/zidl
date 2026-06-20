@@ -11,10 +11,10 @@ int32_t zidl_Greeter_get_count(void *ptr);
 void zidl_Greeter_deinit(void *ptr);
 }
 
-class GreeterZigImpl : public ::Greeter {
+class GreeterImpl : public ::Greeter {
 public:
-    explicit GreeterZigImpl(void *ptr) : ptr_(ptr) {}
-    ~GreeterZigImpl() override { zidl_Greeter_deinit(ptr_); }
+    explicit GreeterImpl(void *ptr) : ptr_(ptr) {}
+    ~GreeterImpl() override { zidl_Greeter_deinit(ptr_); }
 
     std::string greet(std::string name) override {
         return std::string(zidl_Greeter_greet(ptr_, name.c_str()));
@@ -39,10 +39,10 @@ int32_t zidl_AdvancedGreeter_get_count(void *ptr);
 void zidl_AdvancedGreeter_deinit(void *ptr);
 }
 
-class AdvancedGreeterZigImpl : public ::AdvancedGreeter {
+class AdvancedGreeterImpl : public ::AdvancedGreeter {
 public:
-    explicit AdvancedGreeterZigImpl(void *ptr) : ptr_(ptr) {}
-    ~AdvancedGreeterZigImpl() override { zidl_AdvancedGreeter_deinit(ptr_); }
+    explicit AdvancedGreeterImpl(void *ptr) : ptr_(ptr) {}
+    ~AdvancedGreeterImpl() override { zidl_AdvancedGreeter_deinit(ptr_); }
 
     std::string greet(std::string name) override {
         return std::string(zidl_AdvancedGreeter_greet(ptr_, name.c_str()));
