@@ -170,6 +170,7 @@ const Generator = struct {
         map: bool = false,
         optional: bool = false,
         union_arrays: bool = false,
+        memory: bool = false,
     };
 
     fn scanIncludes(items: []const ir.ModuleItem) IncludeNeeds {
@@ -201,6 +202,7 @@ const Generator = struct {
                             scanIncludesTypeRef(mem.type_ref, needs);
                         }
                     },
+                    .interface => |iface| scanIncludesInterface(iface, needs),
                     else => {},
                 },
                 .const_ => {},
@@ -212,9 +214,20 @@ const Generator = struct {
         switch (tr) {
             .map => needs.map = true,
             .sequence => |s| scanIncludesTypeRef(s.element.*, needs),
-            .named => {},
+            .named => |td| {
+                if (td == .interface) needs.memory = true;
+            },
             else => {},
         }
+    }
+
+    fn scanIncludesInterface(iface: *const ir.Interface, needs: *IncludeNeeds) void {
+        for (iface.type_decls) |td| scanIncludesTypeDecl(td, needs);
+        for (iface.operations) |op| {
+            if (op.return_type) |rt| scanIncludesTypeRef(rt, needs);
+            for (op.params) |p| scanIncludesTypeRef(p.type_ref, needs);
+        }
+        for (iface.attributes) |attr| scanIncludesTypeRef(attr.type_ref, needs);
     }
 
     fn emitHeader(self: *Generator, spec: *const ir.Spec) !void {
@@ -235,7 +248,7 @@ const Generator = struct {
         try self.write("#include <cstdint>\n");
         try self.write("#include <string>\n");
         try self.write("#include <vector>\n");
-        if (self.opts.generate_interfaces) try self.write("#include <memory>\n");
+        if (self.opts.generate_interfaces and needs.memory) try self.write("#include <memory>\n");
         if (needs.map) try self.write("#include <map>\n");
         if (needs.optional) try self.write("#include <optional>\n");
         if (needs.union_arrays) try self.write("#include <cstring>\n");
@@ -3200,6 +3213,7 @@ fn scanIncludesTypeDecl(td: ir.TypeDecl, needs: *Generator.IncludeNeeds) void {
                 Generator.scanIncludesTypeRef(m.type_ref, needs);
             }
         },
+        .interface => |iface| Generator.scanIncludesInterface(iface, needs),
         else => {},
     }
 }
@@ -3320,10 +3334,10 @@ fn generateTypeHeader(
     } else {
         try gen.print("#ifndef {s}\n#define {s}\n\n", .{ guard, guard });
     }
-        try gen.write("#include <cstdint>\n");
-        try gen.write("#include <string>\n");
-        try gen.write("#include <vector>\n");
-        if (opts.generate_interfaces) try gen.write("#include <memory>\n");
+    try gen.write("#include <cstdint>\n");
+    try gen.write("#include <string>\n");
+    try gen.write("#include <vector>\n");
+    if (opts.generate_interfaces and needs.memory) try gen.write("#include <memory>\n");
     if (needs.map) try gen.write("#include <map>\n");
     if (needs.optional) try gen.write("#include <optional>\n");
     try gen.write("#include <array>\n");
@@ -3548,6 +3562,22 @@ test "cpp_backend: header guard and includes" {
     try testing.expect(has(s, "#include <vector>"));
     try testing.expect(has(s, "#include <string>"));
     try testing.expect(has(s, "endif // MY_TYPES_HPP"));
+}
+
+test "cpp_backend: memory include only when interface signatures need shared_ptr" {
+    var primitive_iface = try testGenOpts(
+        \\interface Greeter { string greet(in string name); };
+    , "greeter", .{ .generate_interfaces = true });
+    defer primitive_iface.deinit(testing.allocator);
+    try testing.expect(!has(primitive_iface.items, "#include <memory>"));
+
+    var interface_ref = try testGenOpts(
+        \\interface DataWriter {};
+        \\interface Listener { void on_data(in DataWriter writer); };
+    , "listener", .{ .generate_interfaces = true });
+    defer interface_ref.deinit(testing.allocator);
+    try testing.expect(has(interface_ref.items, "#include <memory>"));
+    try testing.expect(has(interface_ref.items, "std::shared_ptr<::DataWriter> writer"));
 }
 
 test "cpp_backend: header guard prefix" {

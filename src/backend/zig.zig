@@ -344,7 +344,7 @@ const Generator = struct {
         }
         try self.ind();
         try self.print("}}; // {s}{s}\n\n", .{ pfx, s.name });
-        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and structHasKey(s) and s.annotations.extensibility != .mutable) {
+        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and isZzddsTopicStruct(s)) {
             try self.emitStructTypedWrapper(s);
         }
     }
@@ -4145,13 +4145,12 @@ fn structKeyNeedsAllocator(s: *const ir.Struct) bool {
 }
 
 /// Returns true when `items` (or any nested module) contains at least one
-/// struct that will get a typed DataWriter/DataReader wrapper: has a @key
-/// member and is not @mutable.
+/// struct that will get a typed DataWriter/DataReader wrapper.
 fn itemsHaveTopicTypes(items: []const ir.ModuleItem) bool {
     for (items) |item| {
         switch (item) {
             .type_decl => |td| switch (td) {
-                .struct_ => |s| if (structHasKey(s) and s.annotations.extensibility != .mutable) return true,
+                .struct_ => |s| if (isZzddsTopicStruct(s)) return true,
                 else => {},
             },
             .module => |m| if (itemsHaveTopicTypes(m.items)) return true,
@@ -4159,6 +4158,10 @@ fn itemsHaveTopicTypes(items: []const ir.ModuleItem) bool {
         }
     }
     return false;
+}
+
+fn isZzddsTopicStruct(s: *const ir.Struct) bool {
+    return structHasKey(s) and !s.annotations.is_nested and s.annotations.extensibility != .mutable;
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -5842,6 +5845,19 @@ test "zig_backend: no DataWriter/DataReader for @mutable keyed struct" {
     const s = out.items;
     try testing.expect(!has(s, "DataWriter"));
     try testing.expect(!has(s, "DataReader"));
+}
+
+test "zig_backend: no DataWriter/DataReader or dds import for @nested keyed struct" {
+    var out = try testGenOpts(
+        "@nested struct NestedKey { @key long id; string data; };",
+        "nk",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(!has(s, "DataWriter"));
+    try testing.expect(!has(s, "DataReader"));
+    try testing.expect(!has(s, "const _dds ="));
 }
 
 test "zig_backend: Sample.deinit emitted when struct has unbounded sequence" {
