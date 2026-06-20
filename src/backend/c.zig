@@ -217,7 +217,7 @@ const Generator = struct {
         if (!self.opts.no_typesupport) {
             try self.write("#include \"zidl_cdr.h\"\n");
         }
-        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport) {
+        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructC(spec.items)) {
             try self.write("#include \"zzdds_c.h\"\n");
         }
         try self.write("\n");
@@ -1224,6 +1224,20 @@ fn isZzddsTopicStructC(s: *const ir.Struct) bool {
     return structHasKeyC(s) and !s.annotations.is_nested and s.annotations.extensibility != .mutable;
 }
 
+fn itemsHaveZzddsTopicStructC(items: []const ir.ModuleItem) bool {
+    for (items) |item| {
+        switch (item) {
+            .type_decl => |td| switch (td) {
+                .struct_ => |s| if (isZzddsTopicStructC(s)) return true,
+                else => {},
+            },
+            .module => |m| if (itemsHaveZzddsTopicStructC(m.items)) return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
 fn isDefaultUnionCase(cas: ir.UnionCase) bool {
     if (cas.labels.len == 0) return true;
     for (cas.labels) |lbl| {
@@ -1425,7 +1439,7 @@ const CdrGenerator = struct {
         );
         try self.print("#include \"{s}.h\"\n", .{self.opts.input_stem});
         try self.write("#include \"zidl_cdr.h\"\n");
-        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport) {
+        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructC(spec.items)) {
             try self.write("#include \"zzdds_c.h\"\n");
         }
         try self.write("#include <stdlib.h>\n");
@@ -4077,6 +4091,18 @@ test "c_backend: zzdds wrappers suppressed when no_typesupport" {
     try testing.expect(!has(s, "TopicDataWriter"));
 }
 
+test "c_backend: zzdds_c omitted when no qualifying topic struct" {
+    var out = try testGenFullOpts(
+        "struct Plain { long id; }; @nested struct NestedKey { @key long id; }; @mutable struct MutableKey { @key long id; };",
+        "plain",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(!has(s, "zzdds_c.h"));
+    try testing.expect(!has(s, "DataWriter"));
+}
+
 test "c_backend: zzdds wrapper prototypes for keyed topic" {
     var out = try testGenFullOpts(
         "@appendable struct Topic { @key long id; string<16> name; };",
@@ -4125,6 +4151,16 @@ test "c_backend cdr: zzdds wrapper implementations for keyed topic" {
     try testing.expect(has(s, "return TopicDataWriter_write_kind(self, ZZDDS_WRITE_ALIVE, value, 0);"));
     try testing.expect(has(s, "int TopicDataReader_take_loaned(TopicDataReader *self, Topic *out, zzdds_sample_info *info, zzdds_loaned_sample *loan) {"));
     try testing.expect(has(s, "zzdds_return_loaned_raw(self->reader, loan);"));
+}
+
+test "c_backend cdr: zzdds_c omitted when no qualifying topic struct" {
+    var out = try testGenCdrOpts(
+        "struct Plain { long id; }; @nested struct NestedKey { @key long id; }; @mutable struct MutableKey { @key long id; };",
+        "plain",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    try testing.expect(!has(out.items, "zzdds_c.h"));
 }
 
 test "c_backend cdr: source file banner and includes" {

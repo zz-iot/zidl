@@ -257,7 +257,7 @@ const Generator = struct {
         if (!self.opts.no_typesupport) {
             try self.write("#include \"zidl_cdr.h\"\n");
         }
-        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport) {
+        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructCpp(spec.items)) {
             try self.write("#include \"zzdds_c.h\"\n");
         }
         try self.write("\n");
@@ -1038,7 +1038,7 @@ const CdrGenerator = struct {
         );
         try self.print("#include \"{s}.hpp\"\n", .{self.opts.input_stem});
         try self.write("#include \"zidl_cdr.h\"\n");
-        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport) {
+        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructCpp(spec.items)) {
             try self.write("#include \"zzdds_c.h\"\n");
         }
         try self.write("#include <cstring>\n\n");
@@ -3025,6 +3025,20 @@ fn isZzddsTopicStructCpp(s: *const ir.Struct) bool {
     return structHasKeyCpp(s) and !s.annotations.is_nested and s.annotations.extensibility != .mutable;
 }
 
+fn itemsHaveZzddsTopicStructCpp(items: []const ir.ModuleItem) bool {
+    for (items) |item| {
+        switch (item) {
+            .type_decl => |td| switch (td) {
+                .struct_ => |s| if (isZzddsTopicStructCpp(s)) return true,
+                else => {},
+            },
+            .module => |m| if (itemsHaveZzddsTopicStructCpp(m.items)) return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
 /// C++ type string for a TypeRef — file-level helper for CdrGenerator.
 /// Caller owns the returned slice.
 fn cppTypeStr(alloc: std.mem.Allocator, tr: ir.TypeRef) anyerror![]u8 {
@@ -3606,6 +3620,18 @@ test "cpp_backend: zzdds wrappers suppressed when no_typesupport" {
     try testing.expect(!has(s, "zzdds_c.h"));
     try testing.expect(!has(s, "DDS_DataWriter"));
     try testing.expect(!has(s, "TopicDataWriter"));
+}
+
+test "cpp_backend: zzdds_c omitted when no qualifying topic struct" {
+    var out = try testGenOpts(
+        "struct Plain { long id; }; @nested struct NestedKey { @key long id; }; @mutable struct MutableKey { @key long id; };",
+        "plain",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(!has(s, "zzdds_c.h"));
+    try testing.expect(!has(s, "DataWriter"));
 }
 
 test "cpp_backend: zzdds wrapper declarations for keyed topic" {
@@ -4561,6 +4587,16 @@ test "cpp_backend cdr: zzdds wrapper implementations for keyed topic" {
     try testing.expect(has(s, "int TopicDataReader::take_loaned(Loan& out) {"));
     try testing.expect(has(s, "out = Loan(this, _loan, _sample);"));
     try testing.expect(has(s, "void TopicDataReader::Loan::reset() {"));
+}
+
+test "cpp_backend cdr: zzdds_c omitted when no qualifying topic struct" {
+    var out = try testGenCdrOpts(
+        "struct Plain { long id; }; @nested struct NestedKey { @key long id; }; @mutable struct MutableKey { @key long id; };",
+        "plain",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    try testing.expect(!has(out.items, "zzdds_c.h"));
 }
 
 test "cpp_backend: @verbatim before-declaration on struct" {
