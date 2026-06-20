@@ -88,7 +88,7 @@ pub const MyStruct = struct {
     pub fn deserializeKeyInto(out: *MyStruct, reader: *zidl_rt.CdrReader, alloc: std.mem.Allocator) !void { ... }
     pub fn computeKeyHash(value: MyStruct) [16]u8 { ... }
 
-    // Typed DDS wrappers (requires --generate-dds-wrappers flag and a `dds` adapter module):
+    // Typed zzdds wrappers (requires --generate-zzdds-wrappers flag and a `dds` adapter module):
     // pub const MyStructDataWriter = struct { ... };
     // pub const MyStructDataReader = struct { ... };
 

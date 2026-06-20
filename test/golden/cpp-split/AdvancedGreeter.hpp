@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <memory>
 #include <array>
 #include <stdexcept>
 #include "Greeter.hpp"

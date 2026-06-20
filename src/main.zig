@@ -12,7 +12,7 @@
 //!
 //!   --default-extensibility <ext>  Default extensibility when no @extensibility present
 //!                                  (default: final, per IDL4 §8.3.1) (all backends)
-//!   --generate-dds-wrappers        Emit typed DDS DataWriter/DataReader wrappers (all backends, currently Zig only)
+//!   --generate-zzdds-wrappers      Emit typed zzdds DataWriter/DataReader wrappers (Zig, C, C++)
 //!   --generate-interfaces          Emit DDS DataWriter/DataReader binding layer (all backends)
 //!   --no-typeobject-support        Suppress TypeObject/TypeIdentifier (all backends, currently Zig only)
 //!   --no-typesupport               Suppress CDR serialize/deserialize (all backends)
@@ -72,7 +72,7 @@ const Opts = struct {
     extern_c: bool = false,
     cpp_namespace: []const u8 = "",
     pl_cdr: bool = false,
-    generate_dds_wrappers: bool = false,
+    generate_zzdds_wrappers: bool = false,
     zig_generate_c_api: bool = false,
     preprocess_timestamp_seconds: ?u64 = null,
     inputs: std.ArrayListUnmanaged([]const u8) = .empty,
@@ -226,8 +226,8 @@ pub fn main(init: std.process.Init) !void {
             opts.split_files = true;
         } else if (std.mem.eql(u8, arg, "--single-file")) {
             opts.split_files = false;
-        } else if (std.mem.eql(u8, arg, "--generate-dds-wrappers")) {
-            opts.generate_dds_wrappers = true;
+        } else if (std.mem.eql(u8, arg, "--generate-zzdds-wrappers")) {
+            opts.generate_zzdds_wrappers = true;
         } else if (std.mem.eql(u8, arg, "--zig-pl-cdr")) {
             opts.pl_cdr = true;
         } else if (std.mem.eql(u8, arg, "--zig-generate-c-api")) {
@@ -448,7 +448,7 @@ fn processFile(
         .cpp_namespace = opts.cpp_namespace,
         .pl_cdr = opts.pl_cdr,
         .zig_generate_c_api = opts.zig_generate_c_api,
-        .generate_dds_wrappers = opts.generate_dds_wrappers,
+        .generate_zzdds_wrappers = opts.generate_zzdds_wrappers,
         .zig_version = opts.zig_version,
     };
     try be.generate(&ir_spec, gen_opts);
@@ -517,7 +517,7 @@ fn printUsage(w: *Io.Writer) !void {
         \\
         \\  --default-extensibility <ext>  Default extensibility when no @extensibility present
         \\                                 (default: final, per IDL4 §8.3.1) (all backends)
-        \\  --generate-dds-wrappers        Emit typed DDS DataWriter/DataReader wrappers (all backends, currently Zig only)
+        \\  --generate-zzdds-wrappers      Emit typed zzdds DataWriter/DataReader wrappers (Zig, C, C++)
         \\  --generate-interfaces          Emit DDS DataWriter/DataReader binding layer (all backends)
         \\  --no-typeobject-support        Suppress TypeObject/TypeIdentifier (all backends, currently Zig only)
         \\  --no-typesupport               Suppress CDR serialize/deserialize (all backends)

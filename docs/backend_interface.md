@@ -214,8 +214,8 @@ For a struct `Foo`:
   OR if `TypeAnnotations.is_nested == false` (the default when no `@nested` is present).
 - `@nested` types (or types with `is_nested = true`) are helper/embedded types,
   not topic types — skip DataWriter/DataReader generation.
-- normal CDR serialize/deserialize is still default. Typed DDS wrappers
-  for topic types are opt-in via `--generate-dds-wrappers` (currently implemented in the Zig backend).
+- normal CDR serialize/deserialize is still default. Typed zzdds wrappers
+  for topic types are opt-in via `--generate-zzdds-wrappers` (implemented in the Zig, C, and C++ backends).
   For Zig, the wrappers require a consuming build to provide a `dds` adapter
   module exposing a `DDS` namespace plus raw serialized write/take functions.
   This adapter targets the native DDS runtime, not the `--zig-generate-c-api`

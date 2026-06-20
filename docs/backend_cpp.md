@@ -155,6 +155,7 @@ Add `packages/zidl-cdr/include` to your include paths.
 | `--cpp-namespace <ns>` | Wrap all output in an outer namespace |
 | `--c-export-macro <macro>` | DLL export macro prepended to CDR function declarations |
 | `--no-typesupport` | Suppress CDR serialize/deserialize output |
+| `--generate-zzdds-wrappers` | Emit typed zzdds TypeSupport/DataWriter/DataReader wrappers for keyed topic structs |
 
 ---
 
@@ -166,4 +167,4 @@ Add `packages/zidl-cdr/include` to your include paths.
 | `@verbatim` annotations | Parsed and stored in IR but not yet injected into generated output — see [`@verbatim` Injection](#verbatim-injection-not-yet-implemented) above |
 | `--zig-pl-cdr` (PL_CDR emit) | Flag parsed but C++ backend does not emit PL_CDR functions |
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
-| `--generate-interfaces`: complex-type adaptation | `emitImplOp` emits `/* TODO: adapt C++ types */` stubs (ABI boundary not yet decided) |
+| `--generate-interfaces`: complex-type adaptation | Primitive and string operation signatures are adapted; richer signatures emit `/* TODO: adapt C++ types */` stubs |

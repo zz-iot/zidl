@@ -33,8 +33,8 @@ All four backends generate the same core set of outputs for every IDL input:
 | CDR `@appendable` (DHEADER) | Implemented |
 | CDR `@mutable` (XCDR2 EMHEADER) | Implemented in all backends |
 | CDR `@mutable` (PL_CDR / RTPS ParameterList) | Zig only, via `--zig-pl-cdr` flag |
-| `--generate-interfaces` DCPS binding layer | Zig/C/Java: implemented; C++: TODO stubs |
-| `--generate-dds-wrappers` | Opt-in typed DataWriter/DataReader wrappers |
+| `--generate-interfaces` DCPS binding layer | Zig/C/Java: implemented; C++ abstract classes plus primitive/string C ABI adapters implemented, complex adapters remain TODO stubs |
+| `--generate-zzdds-wrappers` | Opt-in typed zzdds TypeSupport/DataWriter/DataReader wrappers for keyed topic structs in Zig, C, and C++ |
 | `--zig-generate-c-api` C-ABI export functions (Zig backend) | Implemented — trivial forwarders from `DDS_*` C symbols to vtable |
 | `--split-files` (one file per type) | Implemented |
 | `deinit(alloc)` on types with sequence fields (Zig) | Implemented |
