@@ -341,7 +341,7 @@ const Generator = struct {
             try self.print("{s}{s}int {s}_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);\n", .{ em, sp, c_name });
         }
         try self.write("\n");
-        if (self.opts.generate_zzdds_wrappers and isZzddsTopicStructCpp(s)) {
+        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and isZzddsTopicStructCpp(s)) {
             try self.emitStructZzddsWrapperDecls(c_name, cpp_qname);
         }
     }
@@ -3498,6 +3498,8 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra: struct {
     pragma_once: bool = false,
     cpp_namespace: []const u8 = "",
     export_macro: []const u8 = "",
+    no_typesupport: bool = false,
+    generate_zzdds_wrappers: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
     var ast_arena = std.heap.ArenaAllocator.init(alloc);
@@ -3518,6 +3520,8 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra: struct {
         .pragma_once = extra.pragma_once,
         .cpp_namespace = extra.cpp_namespace,
         .export_macro = extra.export_macro,
+        .no_typesupport = extra.no_typesupport,
+        .generate_zzdds_wrappers = extra.generate_zzdds_wrappers,
     };
     try generateHeader(alloc, &ir_spec, opts, &out);
     return out;
@@ -3578,6 +3582,19 @@ test "cpp_backend: memory include only when interface signatures need shared_ptr
     defer interface_ref.deinit(testing.allocator);
     try testing.expect(has(interface_ref.items, "#include <memory>"));
     try testing.expect(has(interface_ref.items, "std::shared_ptr<::DataWriter> writer"));
+}
+
+test "cpp_backend: zzdds wrappers suppressed when no_typesupport" {
+    var out = try testGenOpts(
+        "@appendable struct Topic { @key long id; string<16> name; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true, .no_typesupport = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(!has(s, "zzdds_c.h"));
+    try testing.expect(!has(s, "DDS_DataWriter"));
+    try testing.expect(!has(s, "TopicDataWriter"));
 }
 
 test "cpp_backend: header guard prefix" {

@@ -63,6 +63,8 @@ Current verification inventory:
 - `--generate-interfaces` emits abstract interface classes plus C ABI-backed
   `Impl` classes. Primitive and string operation signatures are adapted; richer
   signatures still need explicit adapter support.
+- Generated C++ implementation classes now use the `FooImpl` suffix; older
+  generated output used `FooZigImpl`.
 - `@verbatim` annotations are preserved in the IR as raw annotations but are not
   yet acted on by the C++ backend (planned: injection at `BEGIN_FILE`,
   `BEFORE_DECLARATION`, etc. filtered by `language == "c++"` or `language == "*"`).

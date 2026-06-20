@@ -159,6 +159,15 @@ Add `packages/zidl-cdr/include` to your include paths.
 
 ---
 
+## Migration Notes
+
+`--generate-interfaces` now emits C ABI-backed concrete classes named
+`FooImpl` instead of the earlier `FooZigImpl` spelling. Downstream code that
+names those generated implementation classes directly should rename those
+references.
+
+---
+
 ## Known Limitations
 
 | Feature | Status |

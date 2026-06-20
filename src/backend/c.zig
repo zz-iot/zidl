@@ -566,7 +566,7 @@ const Generator = struct {
                 try self.print("{s}{s}void {s}_apply_defaults({s} *_v);\n\n", .{ em, sp, c_name, c_name });
             }
             if (self.opts.generate_zzdds_wrappers and isZzddsTopicStructC(s)) {
-                try self.emitStructZzddsWrapperProtos(c_name, s);
+                try self.emitStructZzddsWrapperProtos(c_name);
             }
         }
         try self.emitVerbatimForPlacement(s.annotations.raw, "after-declaration");
@@ -589,8 +589,7 @@ const Generator = struct {
         try self.write("\n");
     }
 
-    fn emitStructZzddsWrapperProtos(self: *Generator, c_name: []const u8, s: *const ir.Struct) !void {
-        _ = s;
+    fn emitStructZzddsWrapperProtos(self: *Generator, c_name: []const u8) !void {
         const em = self.opts.export_macro;
         const sp: []const u8 = if (em.len > 0) " " else "";
         try self.print("typedef struct {s}TypeSupport {{\n", .{c_name});
@@ -3503,6 +3502,7 @@ fn testGenFullOpts(source: []const u8, stem: []const u8, extra: struct {
     extern_c: bool = false,
     export_macro: []const u8 = "",
     no_typesupport: bool = false,
+    generate_zzdds_wrappers: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
 
@@ -3530,6 +3530,7 @@ fn testGenFullOpts(source: []const u8, stem: []const u8, extra: struct {
         .extern_c = extra.extern_c,
         .export_macro = extra.export_macro,
         .no_typesupport = extra.no_typesupport,
+        .generate_zzdds_wrappers = extra.generate_zzdds_wrappers,
     };
     try generateHeader(alloc, &ir_spec, opts, &out);
 
@@ -4059,6 +4060,19 @@ test "c_backend cdr: header omits zidl_cdr.h when no_typesupport" {
     const opts = interface.Options{ .input_stem = "t", .no_typesupport = true };
     try generateHeader(alloc, &ir_spec, opts, &out);
     try testing.expect(!has(out.items, "zidl_cdr.h"));
+}
+
+test "c_backend: zzdds wrappers suppressed when no_typesupport" {
+    var out = try testGenFullOpts(
+        "@appendable struct Topic { @key long id; string<16> name; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true, .no_typesupport = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(!has(s, "zzdds_c.h"));
+    try testing.expect(!has(s, "DDS_DataWriter"));
+    try testing.expect(!has(s, "TopicDataWriter"));
 }
 
 test "c_backend cdr: header emits CDR prototypes after struct" {
