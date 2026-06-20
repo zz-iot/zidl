@@ -3348,6 +3348,12 @@ fn generateTypeHeader(
             else => {},
         }
     }
+    if (opts.generate_zzdds_wrappers and !opts.no_typesupport) {
+        switch (td) {
+            .struct_ => |s| if (isZzddsTopicStructCpp(s)) try gen.write("#include \"zzdds_c.h\"\n"),
+            else => {},
+        }
+    }
     var it = deps.keyIterator();
     while (it.next()) |k| {
         try gen.print("#include \"{s}.hpp\"\n", .{k.*});
@@ -3534,6 +3540,7 @@ fn testGenCdr(source: []const u8, stem: []const u8) !std.ArrayList(u8) {
 
 fn testGenCdrOpts(source: []const u8, stem: []const u8, extra: struct {
     type_prefix: []const u8 = "",
+    generate_zzdds_wrappers: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
     var ast_arena = std.heap.ArenaAllocator.init(alloc);
@@ -3547,7 +3554,11 @@ fn testGenCdrOpts(source: []const u8, stem: []const u8, extra: struct {
     defer ir_spec.deinit();
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
-    const opts = interface.Options{ .input_stem = stem, .type_prefix = extra.type_prefix };
+    const opts = interface.Options{
+        .input_stem = stem,
+        .type_prefix = extra.type_prefix,
+        .generate_zzdds_wrappers = extra.generate_zzdds_wrappers,
+    };
     try generateCdrSource(alloc, &ir_spec, opts, &out);
     return out;
 }
@@ -3595,6 +3606,23 @@ test "cpp_backend: zzdds wrappers suppressed when no_typesupport" {
     try testing.expect(!has(s, "zzdds_c.h"));
     try testing.expect(!has(s, "DDS_DataWriter"));
     try testing.expect(!has(s, "TopicDataWriter"));
+}
+
+test "cpp_backend: zzdds wrapper declarations for keyed topic" {
+    var out = try testGenOpts(
+        "@appendable struct Topic { @key long id; string<16> name; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "#include \"zzdds_c.h\""));
+    try testing.expect(has(s, "class TopicTypeSupport {"));
+    try testing.expect(has(s, "static int register_type(DDS_DomainParticipant participant, const char *type_name = \"Topic\");"));
+    try testing.expect(has(s, "class TopicDataWriter {"));
+    try testing.expect(has(s, "DDS_DataWriter writer_;"));
+    try testing.expect(has(s, "class Loan {"));
+    try testing.expect(has(s, "zzdds_loaned_sample loan_{};"));
 }
 
 test "cpp_backend: header guard prefix" {
@@ -4285,6 +4313,13 @@ test "cpp_backend: impl source Impl class" {
 
 /// Build IR from `source`, call `generateTypeHeader` for the TypeDecl at `idx`.
 fn testGenTypeHeader(source: []const u8, stem: []const u8, idx: usize) !std.ArrayList(u8) {
+    return testGenTypeHeaderOpts(source, stem, idx, .{});
+}
+
+fn testGenTypeHeaderOpts(source: []const u8, stem: []const u8, idx: usize, extra: struct {
+    generate_zzdds_wrappers: bool = false,
+    no_typesupport: bool = false,
+}) !std.ArrayList(u8) {
     const alloc = testing.allocator;
     var ast_arena = std.heap.ArenaAllocator.init(alloc);
     defer ast_arena.deinit();
@@ -4298,7 +4333,11 @@ fn testGenTypeHeader(source: []const u8, stem: []const u8, idx: usize) !std.Arra
     var decls = std.ArrayListUnmanaged(ir.TypeDecl).empty;
     defer decls.deinit(alloc);
     try collectTypeDeclsFlat(alloc, ir_spec.items, &decls);
-    const opts = interface.Options{ .input_stem = stem };
+    const opts = interface.Options{
+        .input_stem = stem,
+        .generate_zzdds_wrappers = extra.generate_zzdds_wrappers,
+        .no_typesupport = extra.no_typesupport,
+    };
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
     try generateTypeHeader(alloc, decls.items[idx], opts, &out);
@@ -4326,6 +4365,20 @@ test "cpp_backend split: struct includes deps" {
     try testing.expect(has(s, "#include \"Color.hpp\""));
     try testing.expect(has(s, "#include \"zidl_cdr.h\""));
     try testing.expect(has(s, "struct Foo"));
+}
+
+test "cpp_backend split: zzdds wrapper header includes zzdds_c" {
+    var out = try testGenTypeHeaderOpts(
+        "@appendable struct Topic { @key long id; string<16> name; };",
+        "topic",
+        0,
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "#include \"zidl_cdr.h\""));
+    try testing.expect(has(s, "#include \"zzdds_c.h\""));
+    try testing.expect(has(s, "class TopicDataWriter"));
 }
 
 test "cpp_backend split: aggregate header includes all types" {
@@ -4493,6 +4546,23 @@ test "cpp_backend: union with enum typedef discriminant CDR" {
     try testing.expect(!has(s, "TODO"));
 }
 
+test "cpp_backend cdr: zzdds wrapper implementations for keyed topic" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; string<16> name; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "#include \"zzdds_c.h\""));
+    try testing.expect(has(s, "int TopicTypeSupport::register_type(DDS_DomainParticipant participant, const char *type_name) {"));
+    try testing.expect(has(s, "static int Topic_write_kind(DDS_DataWriter writer, int xcdr_version, zzdds_write_kind kind, const ::Topic& value, bool key_only) {"));
+    try testing.expect(has(s, "return Topic_write_kind(writer_, xcdr_version_, ZZDDS_WRITE_ALIVE, value, false);"));
+    try testing.expect(has(s, "int TopicDataReader::take_loaned(Loan& out) {"));
+    try testing.expect(has(s, "out = Loan(this, _loan, _sample);"));
+    try testing.expect(has(s, "void TopicDataReader::Loan::reset() {"));
+}
+
 test "cpp_backend: @verbatim before-declaration on struct" {
     var out = try testGen(
         \\@verbatim(language="cpp", placement="before-declaration", text="// injected before")
@@ -4550,6 +4620,17 @@ test "cpp_backend: impl void op with string param forwards via c_str" {
     try testing.expect(has(s, "void greetAdvanced(std::string name) override {"));
     try testing.expect(has(s, "zidl_Greeter_greetAdvanced(ptr_, name.c_str());"));
     try testing.expect(!has(s, "TODO"));
+}
+
+test "cpp_backend: impl interface parameter uses shared_ptr signature" {
+    var out = try testGenImpl(
+        \\interface DataWriter {};
+        \\interface Listener { void on_data(in DataWriter writer); };
+    , "listener");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "void on_data(std::shared_ptr<::DataWriter> writer) override {"));
+    try testing.expect(has(s, "/* TODO: adapt C++ types to C ABI for Listener::on_data */"));
 }
 
 test "cpp_backend: impl simple return with string param forwards correctly" {

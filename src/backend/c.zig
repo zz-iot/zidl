@@ -4009,6 +4009,7 @@ fn testGenCdr(source: []const u8, stem: []const u8) !std.ArrayList(u8) {
 fn testGenCdrOpts(source: []const u8, stem: []const u8, opts_extra: struct {
     no_typesupport: bool = false,
     type_prefix: []const u8 = "",
+    generate_zzdds_wrappers: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
 
@@ -4032,6 +4033,7 @@ fn testGenCdrOpts(source: []const u8, stem: []const u8, opts_extra: struct {
         .input_stem = stem,
         .no_typesupport = opts_extra.no_typesupport,
         .type_prefix = opts_extra.type_prefix,
+        .generate_zzdds_wrappers = opts_extra.generate_zzdds_wrappers,
     };
     try generateCdrSource(alloc, &ir_spec, opts, &out);
 
@@ -4075,6 +4077,21 @@ test "c_backend: zzdds wrappers suppressed when no_typesupport" {
     try testing.expect(!has(s, "TopicDataWriter"));
 }
 
+test "c_backend: zzdds wrapper prototypes for keyed topic" {
+    var out = try testGenFullOpts(
+        "@appendable struct Topic { @key long id; string<16> name; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "#include \"zzdds_c.h\""));
+    try testing.expect(has(s, "typedef struct TopicTypeSupport {"));
+    try testing.expect(has(s, "DDS_DataWriter writer;"));
+    try testing.expect(has(s, "int TopicTypeSupport_register(DDS_DomainParticipant participant, const char *type_name);"));
+    try testing.expect(has(s, "int TopicDataReader_take_loaned(TopicDataReader *self, Topic *out, zzdds_sample_info *info, zzdds_loaned_sample *loan);"));
+}
+
 test "c_backend cdr: header emits CDR prototypes after struct" {
     var h = try testGen("struct Pt { long x; long y; };", "pt");
     defer h.deinit(testing.allocator);
@@ -4091,6 +4108,23 @@ test "c_backend cdr: header emits serialize_key proto when @key present" {
     const s = h.items;
     try testing.expect(has(s, "#define Msg_has_key 1"));
     try testing.expect(has(s, "int Msg_serialize_key(ZidlCdrWriter *_w, const Msg *_v);"));
+}
+
+test "c_backend cdr: zzdds wrapper implementations for keyed topic" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; string<16> name; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "#include \"zzdds_c.h\""));
+    try testing.expect(has(s, "int TopicTypeSupport_register(DDS_DomainParticipant participant, const char *type_name) {"));
+    try testing.expect(has(s, "void TopicDataWriter_init(TopicDataWriter *self, DDS_DataWriter writer, int xcdr_version) {"));
+    try testing.expect(has(s, "static int TopicDataWriter_write_kind(TopicDataWriter *self, zzdds_write_kind kind, const Topic *value, int key_only) {"));
+    try testing.expect(has(s, "return TopicDataWriter_write_kind(self, ZZDDS_WRITE_ALIVE, value, 0);"));
+    try testing.expect(has(s, "int TopicDataReader_take_loaned(TopicDataReader *self, Topic *out, zzdds_sample_info *info, zzdds_loaned_sample *loan) {"));
+    try testing.expect(has(s, "zzdds_return_loaned_raw(self->reader, loan);"));
 }
 
 test "c_backend cdr: source file banner and includes" {
