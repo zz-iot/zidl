@@ -159,7 +159,7 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 ## C++ Backend (`-b cpp`)
 
 **Reference**: [`backend_cpp.md`](backend_cpp.md)  
-**Output**: `.hpp` (header-only — declarations + inline serialize/deserialize)  
+**Output**: `.hpp` + `_cdr.cpp` (`_impl.cpp` when `--generate-interfaces` is enabled)  
 **Runtime**: `zidl-cdr` (included in this repo)  
 **Tests**: 88 codegen + C++ integration suite
 

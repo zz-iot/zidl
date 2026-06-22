@@ -19,7 +19,7 @@ All backends generate:
 |---|---|---|---|
 | Zig | `-b zig` | `.zig` source | `zidl-rt` (included in this repo) |
 | C | `-b c` | `.h` + `.c` | `zidl-cdr` (included in this repo) |
-| C++11 | `-b cpp` | `.hpp` (header-only) | `zidl-cdr` (included in this repo) |
+| C++11 | `-b cpp` | `.hpp` + `_cdr.cpp` | `zidl-cdr` (included in this repo) |
 | Java | `-b java` | `.java` | none (CDR inlined) |
 | Python *(planned)* | `-b python` | `.py` | none (CDR inlined) |
 | C# *(planned)* | `-b csharp` | `.cs` | none (CDR inlined) |
