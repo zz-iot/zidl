@@ -866,6 +866,57 @@ const Generator = struct {
         try self.write("    _,\n");
         try self.ind();
         try self.print("}}; // {s}{s}\n\n", .{ pfx, e.name });
+        try self.emitEnumStringConverters(e);
+    }
+
+    /// Emit `FooEnum_fromString` and `FooEnum_toString` helpers for `e`.
+    ///
+    /// These are emitted as free functions at the same declaration depth as the
+    /// enum itself (i.e. inside the enclosing module struct when depth > 0, or
+    /// at file level when depth == 0).  Using the enumerator name directly as the
+    /// round-trip string key keeps the mapping unambiguous and machine-readable.
+    ///
+    /// `fromString` returns `null` on no match; `toString` returns `null` for
+    /// unknown integer values (the non-exhaustive `_` catch-all).
+    fn emitEnumStringConverters(self: *Generator, e: *const ir.Enum) !void {
+        const pfx = self.opts.type_prefix;
+
+        // --- fromString ---
+        try self.ind();
+        try self.print(
+            "pub fn {s}{s}_fromString(s: []const u8) ?{s}{s} {{\n",
+            .{ pfx, e.name, pfx, e.name },
+        );
+        for (e.enumerators) |en| {
+            try self.ind();
+            try self.print(
+                "    if (std.ascii.eqlIgnoreCase(s, \"{s}\")) return .{s};\n",
+                .{ en.name, en.name },
+            );
+        }
+        try self.ind();
+        try self.write("    return null;\n");
+        try self.ind();
+        try self.write("}\n\n");
+
+        // --- toString ---
+        try self.ind();
+        try self.print(
+            "pub fn {s}{s}_toString(v: {s}{s}) ?[]const u8 {{\n",
+            .{ pfx, e.name, pfx, e.name },
+        );
+        try self.ind();
+        try self.write("    return switch (v) {\n");
+        for (e.enumerators) |en| {
+            try self.ind();
+            try self.print("        .{s} => \"{s}\",\n", .{ en.name, en.name });
+        }
+        try self.ind();
+        try self.write("        _ => null,\n");
+        try self.ind();
+        try self.write("    };\n");
+        try self.ind();
+        try self.write("}\n\n");
     }
 
     // ── Bitmask ───────────────────────────────────────────────────────────────
@@ -4385,12 +4436,25 @@ test "zig_backend: enum" {
     var out = try testGen("enum Color { RED, GREEN, BLUE };", "color");
     defer out.deinit(testing.allocator);
     const s = out.items;
+    // Declaration
     try testing.expect(has(s, "pub const Color = enum(u32) {"));
     try testing.expect(has(s, "RED = 0,"));
     try testing.expect(has(s, "GREEN = 1,"));
     try testing.expect(has(s, "BLUE = 2,"));
     try testing.expect(has(s, "_,"));
     try testing.expect(has(s, "}; // Color"));
+    // fromString
+    try testing.expect(has(s, "pub fn Color_fromString(s: []const u8) ?Color {"));
+    try testing.expect(has(s, "if (std.mem.eql(u8, s, \"RED\")) return .RED;"));
+    try testing.expect(has(s, "if (std.mem.eql(u8, s, \"GREEN\")) return .GREEN;"));
+    try testing.expect(has(s, "if (std.mem.eql(u8, s, \"BLUE\")) return .BLUE;"));
+    try testing.expect(has(s, "return null;"));
+    // toString
+    try testing.expect(has(s, "pub fn Color_toString(v: Color) ?[]const u8 {"));
+    try testing.expect(has(s, ".RED => \"RED\","));
+    try testing.expect(has(s, ".GREEN => \"GREEN\","));
+    try testing.expect(has(s, ".BLUE => \"BLUE\","));
+    try testing.expect(has(s, "_ => null,"));
 }
 
 test "zig_backend: union" {
