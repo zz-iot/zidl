@@ -4445,9 +4445,9 @@ test "zig_backend: enum" {
     try testing.expect(has(s, "}; // Color"));
     // fromString
     try testing.expect(has(s, "pub fn Color_fromString(s: []const u8) ?Color {"));
-    try testing.expect(has(s, "if (std.mem.eql(u8, s, \"RED\")) return .RED;"));
-    try testing.expect(has(s, "if (std.mem.eql(u8, s, \"GREEN\")) return .GREEN;"));
-    try testing.expect(has(s, "if (std.mem.eql(u8, s, \"BLUE\")) return .BLUE;"));
+    try testing.expect(has(s, "if (std.ascii.eqlIgnoreCase(s, \"RED\")) return .RED;"));
+    try testing.expect(has(s, "if (std.ascii.eqlIgnoreCase(s, \"GREEN\")) return .GREEN;"));
+    try testing.expect(has(s, "if (std.ascii.eqlIgnoreCase(s, \"BLUE\")) return .BLUE;"));
     try testing.expect(has(s, "return null;"));
     // toString
     try testing.expect(has(s, "pub fn Color_toString(v: Color) ?[]const u8 {"));
