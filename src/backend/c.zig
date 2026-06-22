@@ -116,6 +116,7 @@ pub fn generateHeader(
         .out = out,
         .seq_emitted = .empty,
         .scalar_typedef_emitted = .empty,
+        .forward_decl_emitted = .empty,
         .enum_emitted = .empty,
     };
     defer {
@@ -125,6 +126,9 @@ pub fn generateHeader(
         var it2 = gen.scalar_typedef_emitted.keyIterator();
         while (it2.next()) |k| alloc.free(k.*);
         gen.scalar_typedef_emitted.deinit(alloc);
+        var itf = gen.forward_decl_emitted.keyIterator();
+        while (itf.next()) |k| alloc.free(k.*);
+        gen.forward_decl_emitted.deinit(alloc);
         var it3 = gen.enum_emitted.keyIterator();
         while (it3.next()) |k| alloc.free(k.*);
         gen.enum_emitted.deinit(alloc);
@@ -176,6 +180,8 @@ const Generator = struct {
     seq_emitted: std.StringHashMapUnmanaged(void),
     /// C names of scalar typedefs already emitted in pass-0.
     scalar_typedef_emitted: std.StringHashMapUnmanaged(void),
+    /// C names that already have `typedef struct Foo_s Foo;` forward declarations.
+    forward_decl_emitted: std.StringHashMapUnmanaged(void),
     /// C names of enums/bitmasks already emitted in pass-0.
     enum_emitted: std.StringHashMapUnmanaged(void),
     /// When true, wrap each sequence typedef in `#ifndef`/`#define`/`#endif`
@@ -385,25 +391,9 @@ const Generator = struct {
         errdefer self.alloc.free(key_dup);
         try self.seq_emitted.put(self.alloc, key_dup, {});
 
-        // For named struct/exception element types, emit a forward typedef
-        // declaration so `ElemType *_buffer` compiles before the full struct
-        // definition appears.  Interfaces are already handled by the entity
-        // pre-scan pass; scalar/enum types by pass-0.
-        // For struct/exception element types, emit a forward typedef so the
-        // _buffer field compiles.  C11 permits compatible typedef redeclarations,
-        // so emitting this here is safe even if the full struct appears later.
-        switch (elem) {
-            .named => |td| switch (td) {
-                .struct_, .exception => {
-                    const qn = ir.typeDeclQualifiedName(td);
-                    const c_name = try self.prefixedCName(qn);
-                    defer self.alloc.free(c_name);
-                    try self.print("typedef struct {s}_s {s};\n", .{ c_name, c_name });
-                },
-                else => {},
-            },
-            else => {},
-        }
+        // For named struct/exception element types, emit a forward typedef so
+        // `ElemType *_buffer` compiles before the full struct definition appears.
+        try self.emitForwardDeclIfStruct(elem);
 
         const seq_name = try std.fmt.allocPrint(self.alloc, "{s}_seq", .{key});
         defer self.alloc.free(seq_name);
@@ -516,8 +506,14 @@ const Generator = struct {
         const has_optional = opt_count > 0;
         if (opt_count > 64) return error.TooManyOptionalMembers;
 
+        const was_forward_declared = self.forward_decl_emitted.get(c_name) != null;
+
         try self.emitVerbatimForPlacement(s.annotations.raw, "before-declaration");
-        try self.print("typedef struct {s}_s {{\n", .{c_name});
+        if (was_forward_declared) {
+            try self.print("struct {s}_s {{\n", .{c_name});
+        } else {
+            try self.print("typedef struct {s}_s {{\n", .{c_name});
+        }
         if (s.base) |base| {
             const base_c = try self.prefixedCName(ir.typeDeclQualifiedName(base));
             defer self.alloc.free(base_c);
@@ -529,7 +525,11 @@ const Generator = struct {
         for (s.members) |m| {
             try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, "    ");
         }
-        try self.print("}} {s};\n\n", .{c_name});
+        if (was_forward_declared) {
+            try self.write("};\n\n");
+        } else {
+            try self.print("}} {s};\n\n", .{c_name});
+        }
 
         if (has_optional) {
             for (s.members, 0..) |m, idx| {
@@ -752,13 +752,22 @@ const Generator = struct {
     fn emitException(self: *Generator, e: *const ir.Exception) !void {
         const c_name = try self.prefixedCName(e.qualified_name);
         defer self.alloc.free(c_name);
+        const was_forward_declared = self.forward_decl_emitted.get(c_name) != null;
 
         try self.print("/* IDL exception */\n", .{});
-        try self.print("typedef struct {s}_s {{\n", .{c_name});
+        if (was_forward_declared) {
+            try self.print("struct {s}_s {{\n", .{c_name});
+        } else {
+            try self.print("typedef struct {s}_s {{\n", .{c_name});
+        }
         for (e.members) |m| {
             try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, "    ");
         }
-        try self.print("}} {s};\n\n", .{c_name});
+        if (was_forward_declared) {
+            try self.write("};\n\n");
+        } else {
+            try self.print("}} {s};\n\n", .{c_name});
+        }
     }
 
     // ── Interface ─────────────────────────────────────────────────────────────
@@ -873,11 +882,10 @@ const Generator = struct {
                     const qn = ir.typeDeclQualifiedName(td);
                     const c_name = try self.prefixedCName(qn);
                     defer self.alloc.free(c_name);
-                    // Idempotent: guard with scalar_typedef_emitted (re-using it for all forward decls).
-                    if (self.scalar_typedef_emitted.get(c_name) != null) return;
+                    if (self.forward_decl_emitted.get(c_name) != null) return;
                     const k = try self.alloc.dupe(u8, c_name);
                     errdefer self.alloc.free(k);
-                    try self.scalar_typedef_emitted.put(self.alloc, k, {});
+                    try self.forward_decl_emitted.put(self.alloc, k, {});
                     try self.print("typedef struct {s}_s {s};\n", .{ c_name, c_name });
                 },
                 else => {},
@@ -3310,6 +3318,7 @@ fn generateTypeHeader(
         .out = out,
         .seq_emitted = .empty,
         .scalar_typedef_emitted = .empty,
+        .forward_decl_emitted = .empty,
         .enum_emitted = .empty,
         .guarded_seqs = true,
     };
@@ -3320,6 +3329,9 @@ fn generateTypeHeader(
         var it2 = gen.scalar_typedef_emitted.keyIterator();
         while (it2.next()) |k| alloc.free(k.*);
         gen.scalar_typedef_emitted.deinit(alloc);
+        var itf = gen.forward_decl_emitted.keyIterator();
+        while (itf.next()) |k| alloc.free(k.*);
+        gen.forward_decl_emitted.deinit(alloc);
         var it3 = gen.enum_emitted.keyIterator();
         while (it3.next()) |k| alloc.free(k.*);
         gen.enum_emitted.deinit(alloc);
@@ -3413,6 +3425,7 @@ fn generateAggregateHeader(
         .out = out,
         .seq_emitted = .empty,
         .scalar_typedef_emitted = .empty,
+        .forward_decl_emitted = .empty,
         .enum_emitted = .empty,
     };
     defer {
@@ -3422,6 +3435,9 @@ fn generateAggregateHeader(
         var it2 = gen.scalar_typedef_emitted.keyIterator();
         while (it2.next()) |k| alloc.free(k.*);
         gen.scalar_typedef_emitted.deinit(alloc);
+        var itf = gen.forward_decl_emitted.keyIterator();
+        while (itf.next()) |k| alloc.free(k.*);
+        gen.forward_decl_emitted.deinit(alloc);
         var it3 = gen.enum_emitted.keyIterator();
         while (it3.next()) |k| alloc.free(k.*);
         gen.enum_emitted.deinit(alloc);
@@ -3669,6 +3685,18 @@ test "c_backend: simple struct" {
     try testing.expect(has(s, "    int32_t x;"));
     try testing.expect(has(s, "    int32_t y;"));
     try testing.expect(has(s, "} Point;"));
+}
+
+test "c_backend: forward-declared sequence element is not typedef-redeclared" {
+    var out = try testGen(
+        \\struct SampleInfo { long state; };
+        \\typedef sequence<SampleInfo> SampleInfoSeq;
+    , "sample");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "typedef struct SampleInfo_s SampleInfo;"));
+    try testing.expect(has(s, "struct SampleInfo_s {"));
+    try testing.expect(!has(s, "} SampleInfo;"));
 }
 
 test "c_backend: struct in module" {

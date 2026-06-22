@@ -40,7 +40,9 @@ Current verification inventory:
 
 ## src/backend/cpp.zig
 
-**Output:** One `.hpp` file (declarations + inline serialize/deserialize).
+**Output:** One `.hpp` file plus a companion `_cdr.cpp` source file. With
+`--generate-interfaces`, also emits an `_impl.cpp` source file for C ABI-backed
+interface implementations.
 
 **Key decisions:**
 - C++11 target (formal/25-03-03 IDL4-native mapping).
@@ -52,8 +54,8 @@ Current verification inventory:
   at CDR serialize time; no separate C++ bounded-string type is generated; default allocator).
 - Enums: `enum class Foo : uint32_t { … }`.
 - Optional members: `std::optional<T>`.
-- Serialize/deserialize declared as free functions `zidl_serialize(w, v)` /
-  `zidl_deserialize(r, v)` — overloaded per type.
+- Serialize/deserialize declared as C ABI-friendly free functions
+  `Foo_serialize(w, &v)` / `Foo_deserialize(r, &v)` and defined in `_cdr.cpp`.
 - Keyed structs emit C ABI helpers `Foo_serialize_key`, `Foo_deserialize_key`,
   and `Foo_compute_key_hash` using the same canonical PLAIN_CDR2 big-endian key
   hash rule as C.
