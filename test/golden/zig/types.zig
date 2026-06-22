@@ -10,6 +10,22 @@ pub const Color = enum(u32) {
     _,
 }; // Color
 
+pub fn Color_fromString(s: []const u8) ?Color {
+    if (std.ascii.eqlIgnoreCase(s, "RED")) return .RED;
+    if (std.ascii.eqlIgnoreCase(s, "GREEN")) return .GREEN;
+    if (std.ascii.eqlIgnoreCase(s, "BLUE")) return .BLUE;
+    return null;
+}
+
+pub fn Color_toString(v: Color) ?[]const u8 {
+    return switch (v) {
+        .RED => "RED",
+        .GREEN => "GREEN",
+        .BLUE => "BLUE",
+        _ => null,
+    };
+}
+
 pub const Point = extern struct {
     x: i32 = 0,
     y: i32 = 0,
