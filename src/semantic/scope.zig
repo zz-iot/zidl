@@ -102,6 +102,10 @@ pub const Symbol = struct {
     scope: ?*Scope,
     /// Evaluated constant value.  Set only for `.const_dcl` symbols.
     const_value: ?ConstValue,
+    /// True when this symbol was introduced via `Analyzer.preloadScope` from an
+    /// imported file rather than declared in the current source file.  Used by
+    /// the IR builder to avoid re-emitting imported types.
+    is_imported: bool = false,
 };
 
 /// One scope in the scope tree.

@@ -33,11 +33,15 @@ const Scope = scope_mod.Scope;
 /// `backing_alloc` backs `Spec.arena`; all returned data is owned by the Spec.
 /// Call `spec.deinit()` to free everything.
 ///
+/// `imports` is the list of top-level module names that were brought in via
+/// `import "file.idl";` declarations.  Pass `&.{}` when there are none.
+///
 /// The caller must ensure semantic analysis produced no errors.
 pub fn build(
     backing_alloc: std.mem.Allocator,
     ast_spec: *const ast.Specification,
     global_scope: *const Scope,
+    imports: []const []const u8,
 ) anyerror!ir.Spec {
     var spec_arena = std.heap.ArenaAllocator.init(backing_alloc);
     errdefer spec_arena.deinit();
@@ -51,7 +55,7 @@ pub fn build(
     };
 
     // Pass 1 — register skeleton IR nodes from the scope tree.
-    try b.registerTypes(global_scope, "");
+    try b.registerTypes(global_scope, "", false);
 
     // Pass 2 — fill skeletons from the AST in source order.
     var top_items: std.ArrayListUnmanaged(ir.ModuleItem) = .empty;
@@ -60,10 +64,17 @@ pub fn build(
     // Finalise all module item lists.
     try b.finalizeModuleItems();
 
+    // Dupe the imports list into the spec arena.
+    var import_names: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (imports) |name| {
+        try import_names.append(alloc, try alloc.dupe(u8, name));
+    }
+
     return .{
         .arena = spec_arena,
         .items = try top_items.toOwnedSlice(alloc),
         .warnings = try b.warnings.toOwnedSlice(alloc),
+        .imports = try import_names.toOwnedSlice(alloc),
     };
 }
 
@@ -90,30 +101,40 @@ const Builder = struct {
 
     // ── Pass 1: register skeleton IR nodes ───────────────────────────────────
 
-    fn registerTypes(self: *Builder, scope: *const Scope, qpath: []const u8) anyerror!void {
+    /// Register skeleton IR nodes from `scope` into `type_map` and
+    /// `module_entries`.  `is_imported_ctx` is true when we are recursing inside
+    /// a scope that was preloaded from an imported file.  Imported modules are
+    /// NOT added to `module_entries` (they won't be code-generated), but their
+    /// child types ARE registered in `type_map` so that cross-references resolve.
+    fn registerTypes(self: *Builder, scope: *const Scope, qpath: []const u8, is_imported_ctx: bool) anyerror!void {
         var it = scope.symbols.iterator();
         while (it.next()) |entry| {
             const sym = entry.value_ptr.*;
+            const is_imported = is_imported_ctx or sym.is_imported;
             switch (sym.tag) {
                 .module => {
                     const qname = try qualifyName(self.alloc, qpath, sym.name);
-                    const lkey = try toLower(self.alloc, qname);
-                    if (!self.module_entries.contains(lkey)) {
-                        const mod = try self.alloc.create(ir.Module);
-                        mod.* = .{
-                            .name = try self.alloc.dupe(u8, sym.name),
-                            .qualified_name = qname,
-                            .span = sym.span,
-                            .items = &.{},
-                            .raw = &.{},
-                        };
-                        try self.module_entries.put(self.alloc, lkey, .{
-                            .module = mod,
-                            .items = .empty,
-                            .in_parent = false,
-                        });
+                    if (!is_imported) {
+                        const lkey = try toLower(self.alloc, qname);
+                        if (!self.module_entries.contains(lkey)) {
+                            const mod = try self.alloc.create(ir.Module);
+                            mod.* = .{
+                                .name = try self.alloc.dupe(u8, sym.name),
+                                .qualified_name = qname,
+                                .span = sym.span,
+                                .items = &.{},
+                                .raw = &.{},
+                            };
+                            try self.module_entries.put(self.alloc, lkey, .{
+                                .module = mod,
+                                .items = .empty,
+                                .in_parent = false,
+                            });
+                        }
                     }
-                    if (sym.scope) |child| try self.registerTypes(child, qname);
+                    // Always recurse: imported types need to be in type_map for
+                    // cross-reference resolution even though we don't emit them.
+                    if (sym.scope) |child| try self.registerTypes(child, qname, is_imported);
                 },
                 .struct_def => {
                     const qname = try qualifyName(self.alloc, qpath, sym.name);
@@ -169,7 +190,7 @@ const Builder = struct {
                     node.* = .{ .name = try self.alloc.dupe(u8, sym.name), .qualified_name = qname, .span = sym.span, .bases = &.{}, .operations = &.{}, .attributes = &.{}, .type_decls = &.{}, .consts = &.{}, .raw = &.{} };
                     try self.type_map.put(self.alloc, try toLower(self.alloc, qname), .{ .interface = node });
                     // Recurse so nested types inside the interface get registered.
-                    if (sym.scope) |iface_scope| try self.registerTypes(iface_scope, qname);
+                    if (sym.scope) |iface_scope| try self.registerTypes(iface_scope, qname, is_imported);
                 },
                 // Skipped: forward decls, enumerator, const_dcl, operations,
                 //          attributes, CCM, valuetype, component, home, …
@@ -223,9 +244,14 @@ const Builder = struct {
                 },
                 .forward => {},
             },
+            // import_dcl is handled by the driver (main.zig) before IR building:
+            // the imported scope is preloaded into the analyzer, and the imported
+            // module names are passed to build() as the `imports` argument.  There
+            // is nothing left to do here.
+            .import_dcl => {},
             // Unimplemented IDL4 constructs: value_dcl, component_dcl, home_dcl,
             // event_dcl, porttype_dcl, connector_dcl, template_module_dcl/inst,
-            // annotation_dcl, type_id_dcl, type_prefix_dcl, import_dcl.
+            // annotation_dcl, type_id_dcl, type_prefix_dcl.
             // Emit a warning so users know these are silently dropped.
             else => |kind| {
                 const msg = try std.fmt.allocPrint(
@@ -1278,7 +1304,7 @@ fn testBuild(source: []const u8) !ir.Spec {
     defer az.deinit();
     try az.analyze(&spec);
 
-    return build(testing.allocator, &spec, az.global_scope);
+    return build(testing.allocator, &spec, az.global_scope, &.{});
 }
 
 test "builder: simple struct" {

@@ -124,6 +124,13 @@ pub const Options = struct {
     /// Named struct `in` parameters are accepted as `*const T` (pointer hides
     /// potential non-extern struct internals) and dereferenced for the vtable call.
     zig_generate_c_api: bool = false,
+    /// Zig backend only: emit enum tags as lowercase snake_case (e.g.
+    /// `durability_volatile`) instead of the raw IDL name (`DURABILITY_VOLATILE`).
+    /// Zig keywords that collide after lowercasing gain a trailing `_` (e.g.
+    /// `volatile` → `volatile_`).  `fromString`/`toString` helpers continue to
+    /// use the original IDL name as the canonical string representation so that
+    /// config files and wire diagnostics remain language-agnostic.
+    zig_idiomatic_enums: bool = false,
 };
 
 // ── XRCE profile validation ───────────────────────────────────────────────────
@@ -366,7 +373,7 @@ fn buildTestIr(alloc: std.mem.Allocator, source: []const u8) !ir.Spec {
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    return ir.build(alloc, &spec, az.global_scope);
+    return ir.build(alloc, &spec, az.global_scope, &.{});
 }
 
 test "xrce validate: @final struct with bounded sequence passes" {
