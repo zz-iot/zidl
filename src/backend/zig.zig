@@ -4047,23 +4047,24 @@ fn bitsetTotalBits(bs: *const ir.Bitset) u32 {
 /// All reserved words in the Zig language.  Used by `idiomaticEnumTag` to
 /// detect collisions and append a trailing `_` escape.
 const zig_keywords = std.StaticStringMap(void).initComptime(.{
-    .{ "addrspace", {} },      .{ "align", {} },    .{ "allowzero", {} },
-    .{ "and", {} },            .{ "anyframe", {} }, .{ "anytype", {} },
-    .{ "asm", {} },            .{ "async", {} },    .{ "await", {} },
-    .{ "break", {} },          .{ "callconv", {} }, .{ "catch", {} },
-    .{ "comptime", {} },       .{ "const", {} },    .{ "continue", {} },
-    .{ "defer", {} },          .{ "else", {} },     .{ "enum", {} },
-    .{ "errdefer", {} },       .{ "error", {} },    .{ "export", {} },
-    .{ "extern", {} },         .{ "fn", {} },       .{ "for", {} },
-    .{ "if", {} },             .{ "inline", {} },   .{ "linksection", {} },
-    .{ "noalias", {} },        .{ "noinline", {} }, .{ "nosuspend", {} },
-    .{ "opaque", {} },         .{ "or", {} },       .{ "orelse", {} },
-    .{ "packed", {} },         .{ "pub", {} },      .{ "resume", {} },
-    .{ "return", {} },         .{ "struct", {} },   .{ "suspend", {} },
-    .{ "switch", {} },         .{ "test", {} },     .{ "threadlocal", {} },
-    .{ "try", {} },            .{ "union", {} },    .{ "unreachable", {} },
-    .{ "usingnamespace", {} }, .{ "var", {} },      .{ "volatile", {} },
-    .{ "while", {} },
+    .{ "addrspace", {} },   .{ "align", {} },          .{ "allowzero", {} },
+    .{ "and", {} },         .{ "anyframe", {} },       .{ "anytype", {} },
+    .{ "asm", {} },         .{ "async", {} },          .{ "await", {} },
+    .{ "break", {} },       .{ "callconv", {} },       .{ "catch", {} },
+    .{ "comptime", {} },    .{ "const", {} },          .{ "continue", {} },
+    .{ "defer", {} },       .{ "else", {} },           .{ "enum", {} },
+    .{ "errdefer", {} },    .{ "error", {} },          .{ "export", {} },
+    .{ "extern", {} },      .{ "false", {} },          .{ "fn", {} },
+    .{ "for", {} },         .{ "if", {} },             .{ "inline", {} },
+    .{ "linksection", {} }, .{ "noalias", {} },        .{ "noinline", {} },
+    .{ "nosuspend", {} },   .{ "null", {} },           .{ "opaque", {} },
+    .{ "or", {} },          .{ "orelse", {} },         .{ "packed", {} },
+    .{ "pub", {} },         .{ "resume", {} },         .{ "return", {} },
+    .{ "struct", {} },      .{ "suspend", {} },        .{ "switch", {} },
+    .{ "test", {} },        .{ "threadlocal", {} },    .{ "true", {} },
+    .{ "try", {} },         .{ "undefined", {} },      .{ "union", {} },
+    .{ "unreachable", {} }, .{ "usingnamespace", {} }, .{ "var", {} },
+    .{ "volatile", {} },    .{ "while", {} },
 });
 
 fn enumStorageType(annotations: ir.EnumAnnotations) []const u8 {
@@ -4543,6 +4544,21 @@ test "zig_backend: idiomatic enums keyword escape" {
     const s2 = out2.items;
     try testing.expect(has(s2, "volatile_ = 0,"));
     try testing.expect(has(s2, "const_ = 1,"));
+}
+
+test "zig_backend: idiomatic enums keyword escape for primitive values" {
+    // true, false, null, undefined are Zig primitive values — using them as
+    // identifiers produces a compile error, so they must get the _ suffix.
+    // IDL keywords TRUE/FALSE are avoided; use mixed-case variants instead.
+    var out = try testGenOpts(
+        \\enum Flag { True, False, Null, Undefined };
+    , "flag", .{ .zig_idiomatic_enums = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "true_ = 0,"));
+    try testing.expect(has(s, "false_ = 1,"));
+    try testing.expect(has(s, "null_ = 2,"));
+    try testing.expect(has(s, "undefined_ = 3,"));
 }
 
 test "zig_backend: idiomatic enums toString uses IDL name" {

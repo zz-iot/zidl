@@ -475,6 +475,18 @@ fn processFile(
         const sub_az = try ialloc.create(zidl.semantic.Analyzer);
         sub_az.* = try zidl.semantic.Analyzer.init(ialloc);
         try sub_az.analyze(&sub_ast);
+        if (sub_az.diagnostics.items.len > 0) {
+            for (sub_az.diagnostics.items) |diag| {
+                try stderr.print("{s}\n", .{diag.message});
+            }
+            for (sub_az.diagnostics.items) |diag| {
+                if (diag.severity == .err) {
+                    try stderr.flush();
+                    return error.SemanticError;
+                }
+            }
+            try stderr.flush();
+        }
         sub_ast_arena.deinit(); // AST no longer needed; scope data stays in ialloc
         try imported_analyzers.append(ialloc, sub_az);
 
