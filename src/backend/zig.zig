@@ -4319,6 +4319,8 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
     zig_version: interface.ZigVersion = .@"0.16.0",
     zig_generate_c_api: bool = false,
     zig_idiomatic_enums: bool = false,
+    /// Module names to inject as if they came from `import "file.idl";` directives.
+    imports: []const []const u8 = &.{},
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
 
@@ -4332,7 +4334,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
     defer az.deinit();
     try az.analyze(&spec);
 
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, extra_opts.imports);
     defer ir_spec.deinit();
 
     var out = std.ArrayList(u8).empty;
@@ -5784,6 +5786,25 @@ test "zig_backend split: imported module names re-exported in root and imported 
     const app_content = try std.Io.Dir.cwd().readFileAlloc(io, app_path, alloc, std.Io.Limit.limited(64 * 1024));
     defer alloc.free(app_content);
     try testing.expect(has(app_content, "const Base = @import(\"Base.zig\");"));
+}
+
+test "zig_backend single-file: imported module names emitted as @import lines" {
+    // In single-file mode the generated {stem}.zig emits `const X = @import("X.zig")`
+    // for each imported module.  The caller is responsible for ensuring X.zig exists
+    // alongside the output file (e.g. by co-locating split-files output from the
+    // imported IDL into the same output directory).
+    var out = try testGenOpts(
+        \\module App { struct Msg { long id; }; };
+    , "app", .{
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+        .imports = &.{"Base"},
+    });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "const Base = @import(\"Base.zig\");"));
+    // The local module is still emitted inline (not re-exported via @import).
+    try testing.expect(has(s, "pub const App = struct {"));
 }
 
 test "zig_backend type_prefix: struct declaration prefixed" {
