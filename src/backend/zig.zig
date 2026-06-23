@@ -169,6 +169,11 @@ pub fn generateSplitFiles(
         if (opts.generate_zzdds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(m.items)) {
             try gen.write("const _dds = @import(\"dds\");\n");
         }
+        // Import each module imported by the IDL source file so that
+        // cross-module type references (e.g. `DDS.SomeType`) resolve.
+        for (spec.imports) |imp_name| {
+            try gen.print("const {s} = @import(\"{s}.zig\");\n", .{ imp_name, imp_name });
+        }
         // Self-reference alias: allows Module.SomeType syntax within this file.
         try gen.print("// Self-reference alias: allows {s}.SomeType syntax within this file.\n", .{m.name});
         try gen.print("const {s} = @This();\n", .{m.name});
@@ -190,7 +195,11 @@ pub fn generateSplitFiles(
         .{opts.input_stem},
     );
 
-    // Re-export each module file.
+    // Re-export imported module files (their .zig was generated separately).
+    for (spec.imports) |name| {
+        try gen.print("pub const {s} = @import(\"{s}.zig\");\n", .{ name, name });
+    }
+    // Re-export each local module file.
     for (module_names.items) |name| {
         try gen.print("pub const {s} = @import(\"{s}.zig\");\n", .{ name, name });
     }
@@ -275,6 +284,10 @@ const Generator = struct {
         }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveTopicTypes(spec.items)) {
             try self.write("const _dds = @import(\"dds\");\n");
+        }
+        // Emit @import for each module imported via `import "file.idl";`.
+        for (spec.imports) |name| {
+            try self.print("const {s} = @import(\"{s}.zig\");\n", .{ name, name });
         }
         try self.write("\n");
         try self.emitItems(spec.items);
@@ -843,7 +856,15 @@ const Generator = struct {
             switch (lbl) {
                 .integer => |v| try self.print("{d}", .{v}),
                 .boolean => |b| try self.write(if (b) "true" else "false"),
-                .enumerator => |name| try self.print(".{s}", .{name}),
+                .enumerator => |name| {
+                    if (self.opts.zig_idiomatic_enums) {
+                        const tag = try self.idiomaticEnumTag(name);
+                        defer self.alloc.free(tag);
+                        try self.print(".{s}", .{tag});
+                    } else {
+                        try self.print(".{s}", .{name});
+                    }
+                },
                 .default => {},
             }
         }
@@ -852,6 +873,17 @@ const Generator = struct {
 
     // ── Enum ──────────────────────────────────────────────────────────────────
 
+    /// Allocate a Zig-idiomatic tag name for `idl_name`: lowercase the whole
+    /// string, then append `_` if the result is a Zig keyword.
+    fn idiomaticEnumTag(self: *Generator, idl_name: []const u8) ![]u8 {
+        const lower = try std.ascii.allocLowerString(self.alloc, idl_name);
+        if (zig_keywords.has(lower)) {
+            defer self.alloc.free(lower);
+            return std.mem.concat(self.alloc, u8, &.{ lower, "_" });
+        }
+        return lower;
+    }
+
     fn emitEnum(self: *Generator, e: *const ir.Enum) !void {
         const pfx = self.opts.type_prefix;
         const storage = enumStorageType(e.annotations);
@@ -859,7 +891,13 @@ const Generator = struct {
         try self.print("pub const {s}{s} = enum({s}) {{\n", .{ pfx, e.name, storage });
         for (e.enumerators) |en| {
             try self.ind();
-            try self.print("    {s} = {d},\n", .{ en.name, en.value });
+            if (self.opts.zig_idiomatic_enums) {
+                const tag = try self.idiomaticEnumTag(en.name);
+                defer self.alloc.free(tag);
+                try self.print("    {s} = {d},\n", .{ tag, en.value });
+            } else {
+                try self.print("    {s} = {d},\n", .{ en.name, en.value });
+            }
         }
         // Non-exhaustive: allows unknown enumerator values (DDS wire evolution).
         try self.ind();
@@ -889,10 +927,20 @@ const Generator = struct {
         );
         for (e.enumerators) |en| {
             try self.ind();
-            try self.print(
-                "    if (std.ascii.eqlIgnoreCase(s, \"{s}\")) return .{s};\n",
-                .{ en.name, en.name },
-            );
+            if (self.opts.zig_idiomatic_enums) {
+                const tag = try self.idiomaticEnumTag(en.name);
+                defer self.alloc.free(tag);
+                // String key stays as the IDL name for language-agnostic round-trips.
+                try self.print(
+                    "    if (std.ascii.eqlIgnoreCase(s, \"{s}\")) return .{s};\n",
+                    .{ en.name, tag },
+                );
+            } else {
+                try self.print(
+                    "    if (std.ascii.eqlIgnoreCase(s, \"{s}\")) return .{s};\n",
+                    .{ en.name, en.name },
+                );
+            }
         }
         try self.ind();
         try self.write("    return null;\n");
@@ -909,7 +957,14 @@ const Generator = struct {
         try self.write("    return switch (v) {\n");
         for (e.enumerators) |en| {
             try self.ind();
-            try self.print("        .{s} => \"{s}\",\n", .{ en.name, en.name });
+            if (self.opts.zig_idiomatic_enums) {
+                const tag = try self.idiomaticEnumTag(en.name);
+                defer self.alloc.free(tag);
+                // toString returns the IDL name so diagnostics/config are language-agnostic.
+                try self.print("        .{s} => \"{s}\",\n", .{ tag, en.name });
+            } else {
+                try self.print("        .{s} => \"{s}\",\n", .{ en.name, en.name });
+            }
         }
         try self.ind();
         try self.write("        _ => null,\n");
@@ -3866,12 +3921,16 @@ const Generator = struct {
                 self.alloc.dupe(u8, "&.{}"),
             .sequence => self.alloc.dupe(u8, ".{}"), // BoundedArray and extern struct both use .{}
             .named => |td| switch (td) {
-                .enum_ => |e| if (e.enumerators.len > 0)
+                .enum_ => |e| if (e.enumerators.len > 0) blk: {
                     // In a type-inferred context (struct field), .Name resolves
                     // to the first enumerator of the field's declared enum type.
-                    std.fmt.allocPrint(self.alloc, ".{s}", .{e.enumerators[0].name})
-                else
-                    self.alloc.dupe(u8, "@enumFromInt(0)"),
+                    if (self.opts.zig_idiomatic_enums) {
+                        const tag = try self.idiomaticEnumTag(e.enumerators[0].name);
+                        defer self.alloc.free(tag);
+                        break :blk std.fmt.allocPrint(self.alloc, ".{s}", .{tag});
+                    }
+                    break :blk std.fmt.allocPrint(self.alloc, ".{s}", .{e.enumerators[0].name});
+                } else self.alloc.dupe(u8, "@enumFromInt(0)"),
                 .bitmask => self.alloc.dupe(u8, "0"),
                 .native, .interface => self.alloc.dupe(u8, "undefined"),
                 .typedef => |t| blk: {
@@ -3984,6 +4043,29 @@ fn bitsetTotalBits(bs: *const ir.Bitset) u32 {
     }
     return total;
 }
+
+/// All reserved words in the Zig language.  Used by `idiomaticEnumTag` to
+/// detect collisions and append a trailing `_` escape.
+const zig_keywords = std.StaticStringMap(void).initComptime(.{
+    .{ "addrspace", {} },   .{ "align", {} },          .{ "allowzero", {} },
+    .{ "and", {} },         .{ "anyframe", {} },       .{ "anytype", {} },
+    .{ "asm", {} },         .{ "async", {} },          .{ "await", {} },
+    .{ "break", {} },       .{ "callconv", {} },       .{ "catch", {} },
+    .{ "comptime", {} },    .{ "const", {} },          .{ "continue", {} },
+    .{ "defer", {} },       .{ "else", {} },           .{ "enum", {} },
+    .{ "errdefer", {} },    .{ "error", {} },          .{ "export", {} },
+    .{ "extern", {} },      .{ "false", {} },          .{ "fn", {} },
+    .{ "for", {} },         .{ "if", {} },             .{ "inline", {} },
+    .{ "linksection", {} }, .{ "noalias", {} },        .{ "noinline", {} },
+    .{ "nosuspend", {} },   .{ "null", {} },           .{ "opaque", {} },
+    .{ "or", {} },          .{ "orelse", {} },         .{ "packed", {} },
+    .{ "pub", {} },         .{ "resume", {} },         .{ "return", {} },
+    .{ "struct", {} },      .{ "suspend", {} },        .{ "switch", {} },
+    .{ "test", {} },        .{ "threadlocal", {} },    .{ "true", {} },
+    .{ "try", {} },         .{ "undefined", {} },      .{ "union", {} },
+    .{ "unreachable", {} }, .{ "usingnamespace", {} }, .{ "var", {} },
+    .{ "volatile", {} },    .{ "while", {} },
+});
 
 fn enumStorageType(annotations: ir.EnumAnnotations) []const u8 {
     const bound = annotations.bit_bound orelse 32;
@@ -4236,6 +4318,9 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
     generate_zzdds_wrappers: bool = false,
     zig_version: interface.ZigVersion = .@"0.16.0",
     zig_generate_c_api: bool = false,
+    zig_idiomatic_enums: bool = false,
+    /// Module names to inject as if they came from `import "file.idl";` directives.
+    imports: []const []const u8 = &.{},
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
 
@@ -4249,7 +4334,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
     defer az.deinit();
     try az.analyze(&spec);
 
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, extra_opts.imports);
     defer ir_spec.deinit();
 
     var out = std.ArrayList(u8).empty;
@@ -4265,6 +4350,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
         .generate_zzdds_wrappers = extra_opts.generate_zzdds_wrappers,
         .zig_version = extra_opts.zig_version,
         .zig_generate_c_api = extra_opts.zig_generate_c_api,
+        .zig_idiomatic_enums = extra_opts.zig_idiomatic_enums,
     };
     try generateFile(alloc, &ir_spec, opts, &out);
     return out;
@@ -4430,6 +4516,92 @@ test "zig_backend: optional field" {
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "x: ?i32 = null,"));
+}
+
+test "zig_backend: idiomatic enums lowercase full name" {
+    var out = try testGenOpts(
+        \\enum DurabilityKind { DURABILITY_VOLATILE, DURABILITY_TRANSIENT_LOCAL };
+    , "dk", .{ .zig_idiomatic_enums = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "durability_volatile = 0,"));
+    try testing.expect(has(s, "durability_transient_local = 1,"));
+    // IDL name must not appear as an enum tag (it may appear in string converters).
+    try testing.expect(!has(s, "DURABILITY_VOLATILE = 0,"));
+}
+
+test "zig_backend: idiomatic enums keyword escape" {
+    var out = try testGenOpts(
+        \\enum DurabilityQosPolicyKind { DURABILITY_VOLATILE, DURABILITY_TRANSIENT_LOCAL };
+    , "dk", .{ .zig_idiomatic_enums = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // DURABILITY_VOLATILE lowercases to durability_volatile — not a keyword, no escape needed.
+    try testing.expect(has(s, "durability_volatile = 0,"));
+    // Verify volatile alone (a direct keyword) gets escaped.
+    var out2 = try testGenOpts(
+        \\enum Mem { VOLATILE, CONST };
+    , "mem", .{ .zig_idiomatic_enums = true });
+    defer out2.deinit(testing.allocator);
+    const s2 = out2.items;
+    try testing.expect(has(s2, "volatile_ = 0,"));
+    try testing.expect(has(s2, "const_ = 1,"));
+}
+
+test "zig_backend: idiomatic enums keyword escape for primitive values" {
+    // true, false, null, undefined are Zig primitive values — using them as
+    // identifiers produces a compile error, so they must get the _ suffix.
+    // IDL keywords TRUE/FALSE are avoided; use mixed-case variants instead.
+    var out = try testGenOpts(
+        \\enum Flag { True, False, Null, Undefined };
+    , "flag", .{ .zig_idiomatic_enums = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "true_ = 0,"));
+    try testing.expect(has(s, "false_ = 1,"));
+    try testing.expect(has(s, "null_ = 2,"));
+    try testing.expect(has(s, "undefined_ = 3,"));
+}
+
+test "zig_backend: idiomatic enums toString uses IDL name" {
+    var out = try testGenOpts(
+        \\enum DurabilityKind { DURABILITY_VOLATILE, DURABILITY_TRANSIENT_LOCAL };
+    , "dk", .{ .zig_idiomatic_enums = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // toString switch arm uses idiomatic tag but returns original IDL string.
+    try testing.expect(has(s, ".durability_volatile => \"DURABILITY_VOLATILE\""));
+    try testing.expect(has(s, ".durability_transient_local => \"DURABILITY_TRANSIENT_LOCAL\""));
+}
+
+test "zig_backend: idiomatic enums fromString uses IDL name key" {
+    var out = try testGenOpts(
+        \\enum DurabilityKind { DURABILITY_VOLATILE, DURABILITY_TRANSIENT_LOCAL };
+    , "dk", .{ .zig_idiomatic_enums = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // fromString key is the IDL name; return value is the idiomatic tag.
+    try testing.expect(has(s, "eqlIgnoreCase(s, \"DURABILITY_VOLATILE\")) return .durability_volatile"));
+}
+
+test "zig_backend: idiomatic enums struct field default uses idiomatic tag" {
+    var out = try testGenOpts(
+        \\enum Color { RED, GREEN, BLUE };
+        \\struct S { Color c; };
+    , "s", .{ .zig_idiomatic_enums = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "c: Color = .red,"));
+}
+
+test "zig_backend: idiomatic enums off by default" {
+    var out = try testGen(
+        \\enum DurabilityKind { DURABILITY_VOLATILE, DURABILITY_TRANSIENT_LOCAL };
+    , "dk");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "DURABILITY_VOLATILE = 0,"));
+    try testing.expect(!has(s, "durability_volatile"));
 }
 
 test "zig_backend: enum" {
@@ -5502,7 +5674,7 @@ test "zig_backend split: module gets own file and root re-exports" {
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
 
     const opts = interface.Options{
@@ -5548,7 +5720,7 @@ test "zig_backend split: non-module items go in root file" {
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
 
     const opts = interface.Options{
@@ -5567,6 +5739,72 @@ test "zig_backend split: non-module items go in root file" {
     try testing.expect(has(root_content, "pub const Point = extern struct {"));
     // No module re-export lines (those look like: pub const M = @import("M.zig")).
     try testing.expect(!has(root_content, ".zig\");"));
+}
+
+test "zig_backend split: imported module names re-exported in root and imported in module files" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_path = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer alloc.free(tmp_path);
+
+    var ast_arena = std.heap.ArenaAllocator.init(alloc);
+    defer ast_arena.deinit();
+    var p = parser_mod.Parser.init(
+        \\module App { struct Msg { long id; }; };
+    , ast_arena.allocator());
+    const spec = try p.parseSpecification();
+    var az = try semantic_mod.Analyzer.init(alloc);
+    defer az.deinit();
+    try az.analyze(&spec);
+    // Simulate `import "base.idl";` having resolved module "Base".
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{"Base"});
+    defer ir_spec.deinit();
+
+    const opts = interface.Options{
+        .input_stem = "app",
+        .output_dir = tmp_path,
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+    };
+    try generateSplitFiles(alloc, io, &ir_spec, opts);
+
+    // Root re-exports both the imported module and the local one.
+    const root_path = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}/app.zig", .{tmp.sub_path});
+    defer alloc.free(root_path);
+    const root_content = try std.Io.Dir.cwd().readFileAlloc(io, root_path, alloc, std.Io.Limit.limited(64 * 1024));
+    defer alloc.free(root_content);
+    try testing.expect(has(root_content, "pub const Base = @import(\"Base.zig\");"));
+    try testing.expect(has(root_content, "pub const App = @import(\"App.zig\");"));
+
+    // App.zig imports Base so cross-module references resolve.
+    const app_path = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}/App.zig", .{tmp.sub_path});
+    defer alloc.free(app_path);
+    const app_content = try std.Io.Dir.cwd().readFileAlloc(io, app_path, alloc, std.Io.Limit.limited(64 * 1024));
+    defer alloc.free(app_content);
+    try testing.expect(has(app_content, "const Base = @import(\"Base.zig\");"));
+}
+
+test "zig_backend single-file: imported module names emitted as @import lines" {
+    // In single-file mode the generated {stem}.zig emits `const X = @import("X.zig")`
+    // for each imported module.  The caller is responsible for ensuring X.zig exists
+    // alongside the output file (e.g. by co-locating split-files output from the
+    // imported IDL into the same output directory).
+    var out = try testGenOpts(
+        \\module App { struct Msg { long id; }; };
+    , "app", .{
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+        .imports = &.{"Base"},
+    });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "const Base = @import(\"Base.zig\");"));
+    // The local module is still emitted inline (not re-exported via @import).
+    try testing.expect(has(s, "pub const App = struct {"));
 }
 
 test "zig_backend type_prefix: struct declaration prefixed" {

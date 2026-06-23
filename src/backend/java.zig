@@ -3610,7 +3610,7 @@ fn testGen(
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
     var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
@@ -3640,7 +3640,7 @@ fn testGenOpts(
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
     var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
@@ -4120,7 +4120,7 @@ test "java: CDR no typesupport" {
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
     try generateFile(alloc, &ir_spec, opts, &out);
     const content = out.items;
@@ -4195,7 +4195,7 @@ fn buildIrSpec(alloc: std.mem.Allocator, idl: []const u8) !ir.Spec {
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    return ir.build(alloc, &spec, az.global_scope);
+    return ir.build(alloc, &spec, az.global_scope, &.{});
 }
 
 test "java: union basic fields" {

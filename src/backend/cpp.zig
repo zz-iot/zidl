@@ -3529,7 +3529,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra: struct {
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
@@ -3564,7 +3564,7 @@ fn testGenCdrOpts(source: []const u8, stem: []const u8, extra: struct {
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
@@ -3660,7 +3660,7 @@ test "cpp_backend: header guard prefix" {
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
     var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
@@ -4039,7 +4039,7 @@ test "cpp_backend: header omits zidl_cdr.h with --no-typesupport" {
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
     var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
@@ -4291,7 +4291,7 @@ fn testGenImpl(source: []const u8, stem: []const u8) !std.ArrayList(u8) {
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
@@ -4354,7 +4354,7 @@ fn testGenTypeHeaderOpts(source: []const u8, stem: []const u8, idx: usize, extra
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
     var decls = std.ArrayListUnmanaged(ir.TypeDecl).empty;
     defer decls.deinit(alloc);
@@ -4417,7 +4417,7 @@ test "cpp_backend split: aggregate header includes all types" {
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
     var decls = std.ArrayListUnmanaged(ir.TypeDecl).empty;
     defer decls.deinit(alloc);
@@ -4499,7 +4499,7 @@ test "cpp_backend pragma_once split: per-type header uses pragma once" {
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
     var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);

@@ -362,6 +362,10 @@ pub const Module = struct {
     /// All contents in source order.  Module re-opening is merged.
     items: []const ModuleItem,
     raw: []const RawAnnotation,
+    /// True when this module came from an `import "file.idl";` declaration
+    /// rather than the current source file.  Backends skip code generation for
+    /// imported modules and emit `@import` / `#include` references instead.
+    is_imported: bool = false,
 };
 
 // ── Spec root ─────────────────────────────────────────────────────────────────
@@ -376,6 +380,11 @@ pub const Spec = struct {
     /// Currently used to report silently-dropped IDL4 constructs
     /// (valuetypes, components, etc.) that the builder does not yet handle.
     warnings: []const []const u8 = &.{},
+    /// Top-level module names that were brought in via `import "file.idl";`
+    /// declarations in the source file.  Each entry is the simple module name
+    /// (e.g. `"DDS"`), not the file path.  Backends use this list to emit
+    /// `@import` / `#include` lines rather than re-generating the imported types.
+    imports: []const []const u8 = &.{},
 
     pub fn deinit(self: *Spec) void {
         self.arena.deinit();

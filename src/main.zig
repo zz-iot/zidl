@@ -32,6 +32,7 @@
 //!   --java-package <pkg>           Package prefix, e.g. com.example (Java backend)
 //!
 //!   --zig-generate-c-api           Emit pub export fn callconv(.c) wrappers for C free-function API (Zig backend)
+//!   --zig-idiomatic-enums          Generate lowercase snake_case enum tags (e.g. .durability_volatile) (Zig backend)
 //!   --zig-pl-cdr                   Generate PL_CDR functions for @mutable types (Zig backend)
 //!   --zig-version <0.16.0|0.15.1>  Output compatibility target (Zig backend)
 //!
@@ -74,6 +75,7 @@ const Opts = struct {
     pl_cdr: bool = false,
     generate_zzdds_wrappers: bool = false,
     zig_generate_c_api: bool = false,
+    zig_idiomatic_enums: bool = false,
     preprocess_timestamp_seconds: ?u64 = null,
     inputs: std.ArrayListUnmanaged([]const u8) = .empty,
 };
@@ -232,6 +234,8 @@ pub fn main(init: std.process.Init) !void {
             opts.pl_cdr = true;
         } else if (std.mem.eql(u8, arg, "--zig-generate-c-api")) {
             opts.zig_generate_c_api = true;
+        } else if (std.mem.eql(u8, arg, "--zig-idiomatic-enums")) {
+            opts.zig_idiomatic_enums = true;
         } else if (std.mem.eql(u8, arg, "--c-pragma-once")) {
             opts.pragma_once = true;
         } else if (std.mem.eql(u8, arg, "--c-extern-c")) {
@@ -392,9 +396,121 @@ fn processFile(
         return err;
     };
 
+    // ── Phase 2b: Resolve import declarations ────────────────────────────────
+    //
+    // Scan the AST for `import "file.idl";` declarations.  For each, run the
+    // full sub-pipeline (preprocess → parse → analyze) and preload the resulting
+    // scope into the main analyzer so that cross-module type references (e.g.
+    // `DDS::ReturnCode_t`) resolve correctly during semantic analysis.
+    //
+    // All sub-pipeline data lives in `import_arena`, kept alive until after
+    // `ir.build()` because scope pointers in preloaded symbols borrow from the
+    // sub-analyzers' arenas.  The deferred `import_arena.deinit()` runs at the
+    // end of this function, after all IR work is complete.
+    var import_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer import_arena.deinit();
+    const ialloc = import_arena.allocator();
+
+    var imported_analyzers: std.ArrayListUnmanaged(*zidl.semantic.Analyzer) = .empty;
+    var import_module_names: std.ArrayListUnmanaged([]const u8) = .empty;
+    var seen_import_modules = std.StringHashMapUnmanaged(void).empty;
+
+    for (ast_spec.definitions) |*adef| {
+        const imp = switch (adef.kind) {
+            .import_dcl => |*i| i,
+            else => continue,
+        };
+        const import_path = switch (imp.scope) {
+            .string_literal => |s| s,
+            .scoped_name => continue, // error emitted by analyzer below
+        };
+
+        // Resolve the import path: alongside the input file first, then -I dirs.
+        const resolved_path = blk: {
+            const dir = std.fs.path.dirname(path) orelse ".";
+            const by_dir = try std.fs.path.join(ialloc, &.{ dir, import_path });
+            if (fileExists(by_dir)) break :blk by_dir;
+            for (opts.include_paths.items) |inc| {
+                const by_inc = try std.fs.path.join(ialloc, &.{ inc, import_path });
+                if (fileExists(by_inc)) break :blk by_inc;
+            }
+            try stderr.print("error: '{s}': imported file '{s}' not found\n", .{ path, import_path });
+            try stderr.flush();
+            return error.ImportNotFound;
+        };
+
+        // Preprocess the imported file.
+        var sub_pp_diags = zidl.preprocessor.Diagnostics.init(ialloc);
+        var sub_pp = zidl.preprocessor.Preprocessor.initWithOptions(
+            ialloc,
+            zidl.preprocessor.FileLoader.fileSystem(),
+            .{ .diagnostics = &sub_pp_diags },
+        );
+        for (opts.defines.items) |def_str| {
+            const eq_pos = std.mem.indexOf(u8, def_str, "=");
+            const def_name = if (eq_pos) |e| def_str[0..e] else def_str;
+            const def_val = if (eq_pos) |e| def_str[e + 1 ..] else "1";
+            try sub_pp.predefine(def_name, def_val);
+        }
+        for (opts.include_paths.items) |inc| try sub_pp.addIncludePath(inc);
+        const sub_pp_result = try sub_pp.process(resolved_path);
+        if (sub_pp.errors.items.len > 0) {
+            for (sub_pp.errors.items) |e| try stderr.print("{s}\n", .{e});
+            try stderr.flush();
+            return error.PreprocessorError;
+        }
+
+        // Parse + analyze the imported file in the import arena.
+        var sub_ast_arena = std.heap.ArenaAllocator.init(ialloc);
+        var sub_parser = zidl.parser.Parser.init(sub_pp_result.source, sub_ast_arena.allocator());
+        const sub_ast = sub_parser.parseSpecification() catch |err| {
+            for (sub_parser.diags.items) |d| {
+                try stderr.print("{s}:{d}:{d}: error: {s}\n", .{
+                    resolved_path, d.span.start.line, d.span.start.column, d.message,
+                });
+            }
+            try stderr.flush();
+            return err;
+        };
+        const sub_az = try ialloc.create(zidl.semantic.Analyzer);
+        sub_az.* = try zidl.semantic.Analyzer.init(ialloc);
+        try sub_az.analyze(&sub_ast);
+        if (sub_az.diagnostics.items.len > 0) {
+            for (sub_az.diagnostics.items) |diag| {
+                try stderr.print("{s}\n", .{diag.message});
+            }
+            for (sub_az.diagnostics.items) |diag| {
+                if (diag.severity == .err) {
+                    try stderr.flush();
+                    return error.SemanticError;
+                }
+            }
+            try stderr.flush();
+        }
+        sub_ast_arena.deinit(); // AST no longer needed; scope data stays in ialloc
+        try imported_analyzers.append(ialloc, sub_az);
+
+        // Collect unique top-level module names from the imported scope.
+        var sym_it = sub_az.global_scope.symbols.iterator();
+        while (sym_it.next()) |entry| {
+            const sym = entry.value_ptr.*;
+            if (sym.tag != .module) continue;
+            const gop = try seen_import_modules.getOrPut(ialloc, sym.name);
+            if (!gop.found_existing) {
+                try import_module_names.append(ialloc, try ialloc.dupe(u8, sym.name));
+            }
+        }
+    }
+
     // ── Phase 3: Semantic analysis ───────────────────────────────────────────
     var analyzer = try zidl.semantic.Analyzer.init(alloc);
     defer analyzer.deinit();
+
+    // Preload imported scopes before analyzing the main file.
+    for (imported_analyzers.items) |sub_az| {
+        try analyzer.preloadScope(sub_az.global_scope);
+    }
+
     try analyzer.analyze(&ast_spec);
 
     if (analyzer.diagnostics.items.len > 0) {
@@ -410,7 +526,9 @@ fn processFile(
     }
 
     // ── Phase 4: Build IR ────────────────────────────────────────────────────
-    var ir_spec = try zidl.ir.build(alloc, &ast_spec, analyzer.global_scope);
+    // import_arena (and sub-analyzers) remain alive here — scope pointers
+    // inside preloaded symbols borrow from them until ir.build() returns.
+    var ir_spec = try zidl.ir.build(alloc, &ast_spec, analyzer.global_scope, import_module_names.items);
     defer ir_spec.deinit();
 
     for (ir_spec.warnings) |w| {
@@ -448,10 +566,17 @@ fn processFile(
         .cpp_namespace = opts.cpp_namespace,
         .pl_cdr = opts.pl_cdr,
         .zig_generate_c_api = opts.zig_generate_c_api,
+        .zig_idiomatic_enums = opts.zig_idiomatic_enums,
         .generate_zzdds_wrappers = opts.generate_zzdds_wrappers,
         .zig_version = opts.zig_version,
     };
     try be.generate(&ir_spec, gen_opts);
+}
+
+fn fileExists(path_str: []const u8) bool {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    std.Io.Dir.cwd().access(io, path_str, .{}) catch return false;
+    return true;
 }
 
 fn printPreprocessorDiagnostic(

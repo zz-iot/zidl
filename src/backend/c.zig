@@ -3546,7 +3546,7 @@ fn testGenFullOpts(source: []const u8, stem: []const u8, extra: struct {
     defer az.deinit();
     try az.analyze(&spec);
 
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
 
     var out = std.ArrayList(u8).empty;
@@ -3582,7 +3582,7 @@ fn testGenTypeHeader(source: []const u8, stem: []const u8, idx: usize) !std.Arra
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
     var decls = std.ArrayListUnmanaged(ir.TypeDecl).empty;
     defer decls.deinit(alloc);
@@ -3631,7 +3631,7 @@ test "c_backend split: aggregate includes all types" {
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
     var decls = std.ArrayListUnmanaged(ir.TypeDecl).empty;
     defer decls.deinit(alloc);
@@ -3667,7 +3667,7 @@ test "c_backend: header guard prefix" {
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
 
     var out = std.ArrayList(u8).empty;
@@ -3824,7 +3824,7 @@ test "c_backend: map type returns error" {
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
     var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
@@ -3869,7 +3869,7 @@ fn testGenIfaceHeader(source: []const u8, stem: []const u8) !std.ArrayList(u8) {
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
@@ -4065,7 +4065,7 @@ fn testGenCdrOpts(source: []const u8, stem: []const u8, opts_extra: struct {
     defer az.deinit();
     try az.analyze(&spec);
 
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
 
     var out = std.ArrayList(u8).empty;
@@ -4097,7 +4097,7 @@ test "c_backend cdr: header omits zidl_cdr.h when no_typesupport" {
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
     var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
@@ -4451,7 +4451,7 @@ test "c_backend pragma_once split: per-type header uses pragma once" {
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
     try az.analyze(&spec);
-    var ir_spec = try ir.build(alloc, &spec, az.global_scope);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
     var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);

@@ -993,8 +993,41 @@ pub const Analyzer = struct {
 
     fn analyzeImportDcl(self: *Analyzer, imp: *const ast.ImportDcl) !void {
         switch (imp.scope) {
-            .scoped_name => |*sn| _ = try self.resolveScopedName(sn),
-            .string_literal => {},
+            .scoped_name => {
+                // Scoped-name imports (e.g. `import ::Foo;`) are not supported.
+                // Use the string-literal form: import "file.idl";
+                try self.addDiag(
+                    .undeclared_identifier,
+                    imp.span,
+                    "scoped-name import not supported — use: import \"file.idl\";",
+                    .{},
+                );
+            },
+            .string_literal => {
+                // The caller (main.zig) resolved this import and called
+                // preloadScope() before analyze() was invoked.  Nothing to do.
+            },
+        }
+    }
+
+    /// Copy all symbols from `external_scope` into this analyzer's global scope,
+    /// marking each with `is_imported = true`.
+    ///
+    /// Must be called before `analyze()`.  The external analyzer that owns
+    /// `external_scope` must remain alive until after IR building is complete,
+    /// because the `scope` pointers inside the copied symbols borrow from its
+    /// arena.
+    pub fn preloadScope(self: *Analyzer, external_scope: *const Scope) !void {
+        const alloc = self.arena.allocator();
+        var it = external_scope.symbols.iterator();
+        while (it.next()) |entry| {
+            var sym = entry.value_ptr.*;
+            sym.is_imported = true;
+            const lower = try self.toLower(sym.name);
+            // Skip if already present (e.g. duplicate imports).
+            if (!self.global_scope.symbols.contains(lower)) {
+                try self.global_scope.symbols.put(alloc, lower, sym);
+            }
         }
     }
 
