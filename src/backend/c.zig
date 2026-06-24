@@ -34,6 +34,10 @@ const ast = @import("../ast.zig");
 const ir = @import("../ir/root.zig");
 const interface = @import("interface.zig");
 
+// Stack buffer size for get_key_value; zzdds returns an error if the serialized
+// key exceeds this.  Exposed in generated C as ZZDDS_KEY_VALUE_BUF_SIZE.
+const key_value_buf_size: u32 = 4096;
+
 // ── Public backend struct ─────────────────────────────────────────────────────
 
 pub const CBackend = struct {
@@ -1469,7 +1473,11 @@ const CdrGenerator = struct {
             try self.write("#include \"zzdds_c.h\"\n");
         }
         try self.write("#include <stdlib.h>\n");
-        try self.write("#include <string.h>\n\n");
+        try self.write("#include <string.h>\n");
+        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructC(spec.items)) {
+            try self.print("#define ZZDDS_KEY_VALUE_BUF_SIZE {d}\n", .{key_value_buf_size});
+        }
+        try self.write("\n");
         try self.emitItems(spec.items);
     }
 
@@ -2095,7 +2103,7 @@ const CdrGenerator = struct {
         try self.write("}\n\n");
 
         try self.print("int {s}DataWriter_get_key_value({s}DataWriter *self, DDS_InstanceHandle_t handle, {s} *key_out) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("uint8_t _buf[4096];\n");
+        try self.writeI("uint8_t _buf[ZZDDS_KEY_VALUE_BUF_SIZE];\n");
         try self.writeI("size_t _len = 0;\n");
         try self.writeI("int _rc = zzdds_get_key_value_writer(self->writer, handle, _buf, sizeof(_buf), &_len);\n");
         try self.writeI("if (_rc) return _rc;\n");
@@ -2152,7 +2160,7 @@ const CdrGenerator = struct {
         try self.write("}\n\n");
 
         try self.print("int {s}DataReader_get_key_value({s}DataReader *self, DDS_InstanceHandle_t handle, {s} *key_out) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("uint8_t _buf[4096];\n");
+        try self.writeI("uint8_t _buf[ZZDDS_KEY_VALUE_BUF_SIZE];\n");
         try self.writeI("size_t _len = 0;\n");
         try self.writeI("int _rc = zzdds_get_key_value_reader(self->reader, handle, _buf, sizeof(_buf), &_len);\n");
         try self.writeI("if (_rc) return _rc;\n");

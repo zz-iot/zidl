@@ -2927,6 +2927,16 @@ const Generator = struct {
         try self.ind();
         try self.write("        try out.ensureUnusedCapacity(self._alloc, _tmp.items.len);\n");
         try self.ind();
+        try self.write("        const _base = out.items.len;\n");
+        try self.ind();
+        try self.write("        errdefer {\n");
+        try self.ind();
+        try self.write("            for (out.items[_base..]) |_sv| _sv.value.deinit(self._alloc);\n");
+        try self.ind();
+        try self.write("            out.items.len = _base;\n");
+        try self.ind();
+        try self.write("        }\n");
+        try self.ind();
         try self.write("        for (_tmp.items) |_s| {\n");
         try self.ind();
         try self.write("            var _r = try zidl_rt.CdrReader.init(_s.data);\n");
@@ -2938,6 +2948,8 @@ const Generator = struct {
         try self.write("            else blk: {\n");
         try self.ind();
         try self.print("                var _kv: {s} = .{{}};\n", .{type_name});
+        try self.ind();
+        try self.write("                errdefer _kv.deinit(self._alloc);\n");
         try self.ind();
         try self.print("                try {s}.deserializeKeyInto(&_kv, &_r, self._alloc);\n", .{type_name});
         try self.ind();

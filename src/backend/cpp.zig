@@ -43,6 +43,10 @@ const ast = @import("../ast.zig");
 const ir = @import("../ir/root.zig");
 const interface = @import("interface.zig");
 
+// Stack buffer size for get_key_value; zzdds returns an error if the serialized
+// key exceeds this.  Exposed in generated C++ as ZZDDS_KEY_VALUE_BUF_SIZE.
+const key_value_buf_size: u32 = 4096;
+
 // ── Public backend struct ─────────────────────────────────────────────────────
 
 pub const CppBackend = struct {
@@ -416,17 +420,14 @@ const Generator = struct {
 
         // A2: close namespace opened above
         if (ns.len > 0) {
-            var segs: [8][]const u8 = undefined;
-            var seg_n: usize = 0;
+            var segs: std.ArrayListUnmanaged([]const u8) = .empty;
+            defer segs.deinit(self.alloc);
             var it2 = std.mem.splitSequence(u8, ns, "::");
-            while (it2.next()) |seg| {
-                segs[seg_n] = seg;
-                seg_n += 1;
-            }
-            var i = seg_n;
+            while (it2.next()) |seg| try segs.append(self.alloc, seg);
+            var i = segs.items.len;
             while (i > 0) {
                 i -= 1;
-                try self.print("}} // namespace {s}\n", .{segs[i]});
+                try self.print("}} // namespace {s}\n", .{segs.items[i]});
             }
             try self.write("\n");
         }
@@ -1091,7 +1092,11 @@ const CdrGenerator = struct {
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructCpp(spec.items)) {
             try self.write("#include \"zzdds_c.h\"\n");
         }
-        try self.write("#include <cstring>\n\n");
+        try self.write("#include <cstring>\n");
+        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructCpp(spec.items)) {
+            try self.print("#define ZZDDS_KEY_VALUE_BUF_SIZE {d}\n", .{key_value_buf_size});
+        }
+        try self.write("\n");
         try self.emitItems(spec.items);
     }
 
@@ -1670,7 +1675,7 @@ const CdrGenerator = struct {
         try self.printI("return {s}_write_kind_w_timestamp(writer_, xcdr_version_, ZZDDS_WRITE_UNREGISTER, key, true, timestamp);\n", .{class_name});
         try self.write("}\n\n");
         try self.print("int {s}DataWriter::get_key_value(DDS_InstanceHandle_t handle, {s}& key_out) {{\n", .{ class_name, cpp_qname });
-        try self.writeI("uint8_t _buf[4096];\n");
+        try self.writeI("uint8_t _buf[ZZDDS_KEY_VALUE_BUF_SIZE];\n");
         try self.writeI("size_t _len = 0;\n");
         try self.writeI("int _rc = zzdds_get_key_value_writer(writer_, handle, _buf, sizeof(_buf), &_len);\n");
         try self.writeI("if (_rc) return _rc;\n");
@@ -1722,7 +1727,7 @@ const CdrGenerator = struct {
         try self.write("}\n\n");
 
         try self.print("int {s}DataReader::get_key_value(DDS_InstanceHandle_t handle, {s}& key_out) {{\n", .{ class_name, cpp_qname });
-        try self.writeI("uint8_t _buf[4096];\n");
+        try self.writeI("uint8_t _buf[ZZDDS_KEY_VALUE_BUF_SIZE];\n");
         try self.writeI("size_t _len = 0;\n");
         try self.writeI("int _rc = zzdds_get_key_value_reader(reader_, handle, _buf, sizeof(_buf), &_len);\n");
         try self.writeI("if (_rc) return _rc;\n");
@@ -1797,17 +1802,14 @@ const CdrGenerator = struct {
 
         // A2: close namespace opened above
         if (ns.len > 0) {
-            var segs: [8][]const u8 = undefined;
-            var seg_n: usize = 0;
+            var segs: std.ArrayListUnmanaged([]const u8) = .empty;
+            defer segs.deinit(self.alloc);
             var it2 = std.mem.splitSequence(u8, ns, "::");
-            while (it2.next()) |seg| {
-                segs[seg_n] = seg;
-                seg_n += 1;
-            }
-            var i = seg_n;
+            while (it2.next()) |seg| try segs.append(self.alloc, seg);
+            var i = segs.items.len;
             while (i > 0) {
                 i -= 1;
-                try self.print("}} // namespace {s}\n", .{segs[i]});
+                try self.print("}} // namespace {s}\n", .{segs.items[i]});
             }
             try self.write("\n");
         }
