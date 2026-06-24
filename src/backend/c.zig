@@ -607,8 +607,21 @@ const Generator = struct {
         try self.print("{s}{s}int {s}DataWriter_write({s}DataWriter *self, const {s} *value);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataWriter_dispose({s}DataWriter *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataWriter_unregister({s}DataWriter *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}DDS_InstanceHandle_t {s}DataWriter_register_instance({s}DataWriter *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataWriter_write_w_timestamp({s}DataWriter *self, const {s} *value, DDS_Time_t timestamp);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataWriter_dispose_w_timestamp({s}DataWriter *self, const {s} *key, DDS_Time_t timestamp);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataWriter_unregister_w_timestamp({s}DataWriter *self, const {s} *key, DDS_Time_t timestamp);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataWriter_get_key_value({s}DataWriter *self, DDS_InstanceHandle_t handle, {s} *key_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}DDS_InstanceHandle_t {s}DataWriter_lookup_instance({s}DataWriter *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}void {s}DataReader_init({s}DataReader *self, DDS_DataReader reader);\n", .{ em, sp, c_name, c_name });
         try self.print("{s}{s}int {s}DataReader_take({s}DataReader *self, {s} *out, zzdds_sample_info *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_read({s}DataReader *self, {s} *out, zzdds_sample_info *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_take_next_instance({s}DataReader *self, {s} *out, zzdds_sample_info *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_read_next_instance({s}DataReader *self, {s} *out, zzdds_sample_info *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_get_key_value({s}DataReader *self, DDS_InstanceHandle_t handle, {s} *key_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}DDS_InstanceHandle_t {s}DataReader_lookup_instance({s}DataReader *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_take_n({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_read_n({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataReader_take_loaned({s}DataReader *self, {s} *out, zzdds_sample_info *info, zzdds_loaned_sample *loan);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}void {s}DataReader_return_loan({s}DataReader *self, zzdds_loaned_sample *loan);\n\n", .{ em, sp, c_name, c_name });
     }
@@ -2045,6 +2058,53 @@ const CdrGenerator = struct {
         try self.printI("return {s}DataWriter_write_kind(self, ZZDDS_WRITE_UNREGISTER, key, 1);\n", .{c_name});
         try self.write("}\n\n");
 
+        try self.print("DDS_InstanceHandle_t {s}DataWriter_register_instance({s}DataWriter *self, const {s} *key) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("uint8_t _hash[16];\n");
+        try self.printI("if ({s}_compute_key_hash(key, _hash)) return DDS_HANDLE_NIL;\n", .{c_name});
+        try self.writeI("return zzdds_register_instance_raw(self->writer, _hash);\n");
+        try self.write("}\n\n");
+
+        try self.print("static int {s}DataWriter_write_kind_w_timestamp({s}DataWriter *self, zzdds_write_kind kind, const {s} *value, int key_only, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("ZidlCdrWriter _w;\n");
+        try self.writeI("uint8_t _hash[16];\n");
+        try self.writeI("int _rc = zidl_cdr_writer_init(&_w, self->xcdr_version);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.writeI("_rc = zidl_cdr_write_encap(&_w);\n");
+        try self.writeI("if (!_rc) _rc = key_only ? ");
+        try self.print("{s}_serialize_key(&_w, value) : {s}_serialize(&_w, value);\n", .{ c_name, c_name });
+        try self.printI("if (!_rc) _rc = {s}_compute_key_hash(value, _hash);\n", .{c_name});
+        try self.writeI("if (!_rc) _rc = zzdds_write_raw_w_timestamp(self->writer, kind, _hash, _w.buf, _w.len, timestamp);\n");
+        try self.writeI("zidl_cdr_writer_deinit(&_w);\n");
+        try self.writeI("return _rc;\n");
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataWriter_write_w_timestamp({s}DataWriter *self, const {s} *value, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataWriter_write_kind_w_timestamp(self, ZZDDS_WRITE_ALIVE, value, 0, timestamp);\n", .{c_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataWriter_dispose_w_timestamp({s}DataWriter *self, const {s} *key, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataWriter_write_kind_w_timestamp(self, ZZDDS_WRITE_DISPOSE, key, 1, timestamp);\n", .{c_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataWriter_unregister_w_timestamp({s}DataWriter *self, const {s} *key, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataWriter_write_kind_w_timestamp(self, ZZDDS_WRITE_UNREGISTER, key, 1, timestamp);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataWriter_get_key_value({s}DataWriter *self, DDS_InstanceHandle_t handle, {s} *key_out) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("uint8_t _buf[512];\n");
+        try self.writeI("size_t _len = 0;\n");
+        try self.writeI("int _rc = zzdds_get_key_value_writer(self->writer, handle, _buf, sizeof(_buf), &_len);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.writeI("ZidlCdrReader _r;\n");
+        try self.writeI("_rc = zidl_cdr_reader_init(&_r, _buf, _len);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.printI("return {s}_deserialize_key(&_r, key_out);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("DDS_InstanceHandle_t {s}DataWriter_lookup_instance({s}DataWriter *self, const {s} *key) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("uint8_t _hash[16];\n");
+        try self.printI("if ({s}_compute_key_hash(key, _hash)) return DDS_HANDLE_NIL;\n", .{c_name});
+        try self.writeI("return zzdds_lookup_instance_writer(self->writer, _hash);\n");
+        try self.write("}\n\n");
+
         try self.print("void {s}DataReader_init({s}DataReader *self, DDS_DataReader reader) {{\n", .{ c_name, c_name });
         try self.writeI("self->reader = reader;\n");
         try self.write("}\n\n");
@@ -2055,7 +2115,83 @@ const CdrGenerator = struct {
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
         try self.writeI("if (_rc) return _rc;\n");
-        try self.printI("return {s}_deserialize(&_r, out);\n", .{c_name});
+        try self.printI("return info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader_read({s}DataReader *self, {s} *out, zzdds_sample_info *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("int _n = zzdds_read_one_raw(self->reader, buf, buf_size, cdr_len_out, info);\n");
+        try self.writeI("if (_n != 1) return _n;\n");
+        try self.writeI("ZidlCdrReader _r;\n");
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.printI("return info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader_take_next_instance({s}DataReader *self, {s} *out, zzdds_sample_info *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("int _n = zzdds_take_one_raw_instance(self->reader, prev, buf, buf_size, cdr_len_out, info);\n");
+        try self.writeI("if (_n != 1) return _n;\n");
+        try self.writeI("ZidlCdrReader _r;\n");
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.printI("return info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader_read_next_instance({s}DataReader *self, {s} *out, zzdds_sample_info *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("int _n = zzdds_read_one_raw_instance(self->reader, prev, buf, buf_size, cdr_len_out, info);\n");
+        try self.writeI("if (_n != 1) return _n;\n");
+        try self.writeI("ZidlCdrReader _r;\n");
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.printI("return info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader_get_key_value({s}DataReader *self, DDS_InstanceHandle_t handle, {s} *key_out) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("uint8_t _buf[512];\n");
+        try self.writeI("size_t _len = 0;\n");
+        try self.writeI("int _rc = zzdds_get_key_value_reader(self->reader, handle, _buf, sizeof(_buf), &_len);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.writeI("ZidlCdrReader _r;\n");
+        try self.writeI("_rc = zidl_cdr_reader_init(&_r, _buf, _len);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.printI("return {s}_deserialize_key(&_r, key_out);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("DDS_InstanceHandle_t {s}DataReader_lookup_instance({s}DataReader *self, const {s} *key) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("uint8_t _hash[16];\n");
+        try self.printI("if ({s}_compute_key_hash(key, _hash)) return DDS_HANDLE_NIL;\n", .{c_name});
+        try self.writeI("return zzdds_lookup_instance_reader(self->reader, _hash);\n");
+        try self.write("}\n\n");
+
+        try self.print("static int {s}DataReader_n_impl({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is, int destructive) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("zzdds_raw_sample_array _arr = {NULL, 0, 0};\n");
+        try self.writeI("int _n = destructive ?\n");
+        self.indent_depth += 1;
+        try self.writeI("zzdds_take_n_raw(self->reader, ss, vs, is, max, &_arr) :\n");
+        try self.writeI("zzdds_read_n_raw(self->reader, ss, vs, is, max, &_arr);\n");
+        self.indent_depth -= 1;
+        try self.writeI("if (_n <= 0) return _n;\n");
+        try self.writeI("for (int _i = 0; _i < _n; _i++) {\n");
+        self.indent_depth += 1;
+        try self.writeI("infos[_i] = _arr.samples[_i].info;\n");
+        try self.writeI("ZidlCdrReader _r;\n");
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _arr.samples[_i].data, _arr.samples[_i].data_len);\n");
+        try self.writeI("if (!_rc) _rc = infos[_i].valid_data ?\n");
+        self.indent_depth += 1;
+        try self.printI("{s}_deserialize(&_r, &values[_i]) :\n", .{c_name});
+        try self.printI("{s}_deserialize_key(&_r, &values[_i]);\n", .{c_name});
+        self.indent_depth -= 1;
+        try self.writeI("if (_rc) { zzdds_return_raw_samples(self->reader, &_arr); return _rc; }\n");
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.writeI("zzdds_return_raw_samples(self->reader, &_arr);\n");
+        try self.writeI("return _n;\n");
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader_take_n({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataReader_n_impl(self, values, infos, max, ss, vs, is, 1);\n", .{c_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataReader_read_n({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataReader_n_impl(self, values, infos, max, ss, vs, is, 0);\n", .{c_name});
         try self.write("}\n\n");
 
         try self.print("int {s}DataReader_take_loaned({s}DataReader *self, {s} *out, zzdds_sample_info *info, zzdds_loaned_sample *loan) {{\n", .{ c_name, c_name, c_name });
