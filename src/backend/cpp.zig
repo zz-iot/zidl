@@ -342,19 +342,30 @@ const Generator = struct {
         }
         try self.write("\n");
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and isZzddsTopicStructCpp(s)) {
-            try self.emitStructZzddsWrapperDecls(c_name, cpp_qname);
+            try self.emitStructZzddsWrapperDecls(s, cpp_qname);
         }
     }
 
-    fn emitStructZzddsWrapperDecls(self: *Generator, c_name: []const u8, cpp_qname: []const u8) !void {
-        try self.print("class {s}TypeSupport {{\n", .{c_name});
+    fn emitStructZzddsWrapperDecls(self: *Generator, s: *const ir.Struct, cpp_qname: []const u8) !void {
+        const class_name = s.name;
+        const ns = moduleNsOf(s.qualified_name, s.name);
+
+        // A2: open namespace if the struct lives inside an IDL module
+        if (ns.len > 0) {
+            var it = std.mem.splitSequence(u8, ns, "::");
+            while (it.next()) |seg| try self.print("namespace {s} {{\n", .{seg});
+            try self.write("\n");
+        }
+
+        try self.print("class {s}TypeSupport {{\n", .{class_name});
         try self.write("public:\n");
-        try self.print("    static int register_type(DDS_DomainParticipant participant, const char *type_name = \"{s}\");\n", .{c_name});
+        // A1: default type_name uses the IDL-scoped name (e.g. "ovidds::Frame")
+        try self.print("    static int register_type(DDS_DomainParticipant participant, const char *type_name = \"{s}\");\n", .{s.qualified_name});
         try self.write("};\n\n");
 
-        try self.print("class {s}DataWriter {{\n", .{c_name});
+        try self.print("class {s}DataWriter {{\n", .{class_name});
         try self.write("public:\n");
-        try self.print("    {s}DataWriter(DDS_DataWriter writer, int xcdr_version = ZIDL_XCDR1) : writer_(writer), xcdr_version_(xcdr_version) {{}}\n", .{c_name});
+        try self.print("    {s}DataWriter(DDS_DataWriter writer, int xcdr_version = ZIDL_XCDR1) : writer_(writer), xcdr_version_(xcdr_version) {{}}\n", .{class_name});
         try self.print("    DDS_InstanceHandle_t register_instance(const {s}& key);\n", .{cpp_qname});
         try self.print("    int write(const {s}& value);\n", .{cpp_qname});
         try self.print("    int write_w_timestamp(const {s}& value, DDS_Time_t timestamp);\n", .{cpp_qname});
@@ -369,13 +380,13 @@ const Generator = struct {
         try self.write("    int xcdr_version_;\n");
         try self.write("};\n\n");
 
-        try self.print("class {s}DataReader {{\n", .{c_name});
+        try self.print("class {s}DataReader {{\n", .{class_name});
         try self.write("public:\n");
         try self.print("    struct Sample {{ {s} value; zzdds_sample_info info; }};\n", .{cpp_qname});
         try self.write("    class Loan {\n");
         try self.write("    public:\n");
         try self.write("        Loan() = default;\n");
-        try self.print("        Loan({s}DataReader *reader, zzdds_loaned_sample loan, Sample sample) : reader_(reader), loan_(loan), sample_(sample), active_(true) {{}}\n", .{c_name});
+        try self.print("        Loan({s}DataReader *reader, zzdds_loaned_sample loan, Sample sample) : reader_(reader), loan_(loan), sample_(sample), active_(true) {{}}\n", .{class_name});
         try self.write("        Loan(const Loan&) = delete;\n");
         try self.write("        Loan& operator=(const Loan&) = delete;\n");
         try self.write("        Loan(Loan&& other) noexcept : reader_(other.reader_), loan_(other.loan_), sample_(other.sample_), active_(other.active_) { other.active_ = false; }\n");
@@ -384,12 +395,12 @@ const Generator = struct {
         try self.write("        const Sample& sample() const { return sample_; }\n");
         try self.write("        void reset();\n");
         try self.write("    private:\n");
-        try self.print("        {s}DataReader *reader_ = nullptr;\n", .{c_name});
+        try self.print("        {s}DataReader *reader_ = nullptr;\n", .{class_name});
         try self.write("        zzdds_loaned_sample loan_{};\n");
         try self.write("        Sample sample_{};\n");
         try self.write("        bool active_ = false;\n");
         try self.write("    };\n");
-        try self.print("    explicit {s}DataReader(DDS_DataReader reader) : reader_(reader) {{}}\n", .{c_name});
+        try self.print("    explicit {s}DataReader(DDS_DataReader reader) : reader_(reader) {{}}\n", .{class_name});
         try self.write("    int take(Sample& out, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n");
         try self.write("    int read(Sample& out, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n");
         try self.write("    int take_next_instance(Sample& out, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n");
@@ -402,6 +413,23 @@ const Generator = struct {
         try self.write("private:\n");
         try self.write("    DDS_DataReader reader_;\n");
         try self.write("};\n\n");
+
+        // A2: close namespace opened above
+        if (ns.len > 0) {
+            var segs: [8][]const u8 = undefined;
+            var seg_n: usize = 0;
+            var it2 = std.mem.splitSequence(u8, ns, "::");
+            while (it2.next()) |seg| {
+                segs[seg_n] = seg;
+                seg_n += 1;
+            }
+            var i = seg_n;
+            while (i > 0) {
+                i -= 1;
+                try self.print("}} // namespace {s}\n", .{segs[i]});
+            }
+            try self.write("\n");
+        }
     }
 
     fn emitExceptionCdrProtos(self: *Generator, e: *const ir.Exception) !void {
@@ -898,6 +926,15 @@ const Generator = struct {
 };
 
 // ── Static helpers ────────────────────────────────────────────────────────────
+
+// Returns the "::" -separated namespace prefix for a qualified name.
+// "ovidds::Frame" with name "Frame" → "ovidds"
+// "a::b::Foo"    with name "Foo"   → "a::b"
+// "Topic"        with name "Topic" → "" (global scope)
+fn moduleNsOf(qname: []const u8, name: []const u8) []const u8 {
+    if (qname.len == name.len) return "";
+    return qname[0 .. qname.len - name.len - 2];
+}
 
 fn escapeStringLiteral(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -1562,16 +1599,27 @@ const CdrGenerator = struct {
             try self.write("}\n\n");
         }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and isZzddsTopicStructCpp(s)) {
-            try self.emitStructZzddsWrappers(c_name, cpp_qname);
+            try self.emitStructZzddsWrappers(s, c_name, cpp_qname);
         }
     }
 
-    fn emitStructZzddsWrappers(self: *CdrGenerator, c_name: []const u8, cpp_qname: []const u8) !void {
-        try self.print("int {s}TypeSupport::register_type(DDS_DomainParticipant participant, const char *type_name) {{\n", .{c_name});
-        try self.printI("return zzdds_register_type_support_c(participant, type_name ? type_name : \"{s}\", {s}_compute_key_hash_from_cdr);\n", .{ c_name, c_name });
+    fn emitStructZzddsWrappers(self: *CdrGenerator, s: *const ir.Struct, c_name: []const u8, cpp_qname: []const u8) !void {
+        const class_name = s.name;
+        const ns = moduleNsOf(s.qualified_name, s.name);
+
+        // A2: open namespace so TypeSupport/DataWriter/DataReader live in the IDL module scope
+        if (ns.len > 0) {
+            var it = std.mem.splitSequence(u8, ns, "::");
+            while (it.next()) |seg| try self.print("namespace {s} {{\n", .{seg});
+            try self.write("\n");
+        }
+
+        try self.print("int {s}TypeSupport::register_type(DDS_DomainParticipant participant, const char *type_name) {{\n", .{class_name});
+        // A1: fallback type_name uses IDL-scoped name (e.g. "ovidds::Frame")
+        try self.printI("return zzdds_register_type_support_c(participant, type_name ? type_name : \"{s}\", {s}_compute_key_hash_from_cdr);\n", .{ s.qualified_name, c_name });
         try self.write("}\n\n");
 
-        try self.print("static int {s}_write_kind(DDS_DataWriter writer, int xcdr_version, zzdds_write_kind kind, const {s}& value, bool key_only) {{\n", .{ c_name, cpp_qname });
+        try self.print("static int {s}_write_kind(DDS_DataWriter writer, int xcdr_version, zzdds_write_kind kind, const {s}& value, bool key_only) {{\n", .{ class_name, cpp_qname });
         try self.writeI("ZidlCdrWriter _w;\n");
         try self.writeI("uint8_t _hash[16];\n");
         try self.writeI("int _rc = zidl_cdr_writer_init(&_w, xcdr_version);\n");
@@ -1584,13 +1632,13 @@ const CdrGenerator = struct {
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
-        try self.print("DDS_InstanceHandle_t {s}DataWriter::register_instance(const {s}& key) {{\n", .{ c_name, cpp_qname });
+        try self.print("DDS_InstanceHandle_t {s}DataWriter::register_instance(const {s}& key) {{\n", .{ class_name, cpp_qname });
         try self.writeI("uint8_t _hash[16];\n");
         try self.printI("if ({s}_compute_key_hash(&key, _hash)) return DDS_HANDLE_NIL;\n", .{c_name});
         try self.writeI("return zzdds_register_instance_raw(writer_, _hash);\n");
         try self.write("}\n\n");
 
-        try self.print("static int {s}_write_kind_w_timestamp(DDS_DataWriter writer, int xcdr_version, zzdds_write_kind kind, const {s}& value, bool key_only, DDS_Time_t timestamp) {{\n", .{ c_name, cpp_qname });
+        try self.print("static int {s}_write_kind_w_timestamp(DDS_DataWriter writer, int xcdr_version, zzdds_write_kind kind, const {s}& value, bool key_only, DDS_Time_t timestamp) {{\n", .{ class_name, cpp_qname });
         try self.writeI("ZidlCdrWriter _w;\n");
         try self.writeI("uint8_t _hash[16];\n");
         try self.writeI("int _rc = zidl_cdr_writer_init(&_w, xcdr_version);\n");
@@ -1603,25 +1651,25 @@ const CdrGenerator = struct {
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
-        try self.print("int {s}DataWriter::write(const {s}& value) {{\n", .{ c_name, cpp_qname });
-        try self.printI("return {s}_write_kind(writer_, xcdr_version_, ZZDDS_WRITE_ALIVE, value, false);\n", .{c_name});
+        try self.print("int {s}DataWriter::write(const {s}& value) {{\n", .{ class_name, cpp_qname });
+        try self.printI("return {s}_write_kind(writer_, xcdr_version_, ZZDDS_WRITE_ALIVE, value, false);\n", .{class_name});
         try self.write("}\n\n");
-        try self.print("int {s}DataWriter::write_w_timestamp(const {s}& value, DDS_Time_t timestamp) {{\n", .{ c_name, cpp_qname });
-        try self.printI("return {s}_write_kind_w_timestamp(writer_, xcdr_version_, ZZDDS_WRITE_ALIVE, value, false, timestamp);\n", .{c_name});
+        try self.print("int {s}DataWriter::write_w_timestamp(const {s}& value, DDS_Time_t timestamp) {{\n", .{ class_name, cpp_qname });
+        try self.printI("return {s}_write_kind_w_timestamp(writer_, xcdr_version_, ZZDDS_WRITE_ALIVE, value, false, timestamp);\n", .{class_name});
         try self.write("}\n\n");
-        try self.print("int {s}DataWriter::dispose(const {s}& key) {{\n", .{ c_name, cpp_qname });
-        try self.printI("return {s}_write_kind(writer_, xcdr_version_, ZZDDS_WRITE_DISPOSE, key, true);\n", .{c_name});
+        try self.print("int {s}DataWriter::dispose(const {s}& key) {{\n", .{ class_name, cpp_qname });
+        try self.printI("return {s}_write_kind(writer_, xcdr_version_, ZZDDS_WRITE_DISPOSE, key, true);\n", .{class_name});
         try self.write("}\n\n");
-        try self.print("int {s}DataWriter::dispose_w_timestamp(const {s}& key, DDS_Time_t timestamp) {{\n", .{ c_name, cpp_qname });
-        try self.printI("return {s}_write_kind_w_timestamp(writer_, xcdr_version_, ZZDDS_WRITE_DISPOSE, key, true, timestamp);\n", .{c_name});
+        try self.print("int {s}DataWriter::dispose_w_timestamp(const {s}& key, DDS_Time_t timestamp) {{\n", .{ class_name, cpp_qname });
+        try self.printI("return {s}_write_kind_w_timestamp(writer_, xcdr_version_, ZZDDS_WRITE_DISPOSE, key, true, timestamp);\n", .{class_name});
         try self.write("}\n\n");
-        try self.print("int {s}DataWriter::unregister_instance(const {s}& key) {{\n", .{ c_name, cpp_qname });
-        try self.printI("return {s}_write_kind(writer_, xcdr_version_, ZZDDS_WRITE_UNREGISTER, key, true);\n", .{c_name});
+        try self.print("int {s}DataWriter::unregister_instance(const {s}& key) {{\n", .{ class_name, cpp_qname });
+        try self.printI("return {s}_write_kind(writer_, xcdr_version_, ZZDDS_WRITE_UNREGISTER, key, true);\n", .{class_name});
         try self.write("}\n\n");
-        try self.print("int {s}DataWriter::unregister_instance_w_timestamp(const {s}& key, DDS_Time_t timestamp) {{\n", .{ c_name, cpp_qname });
-        try self.printI("return {s}_write_kind_w_timestamp(writer_, xcdr_version_, ZZDDS_WRITE_UNREGISTER, key, true, timestamp);\n", .{c_name});
+        try self.print("int {s}DataWriter::unregister_instance_w_timestamp(const {s}& key, DDS_Time_t timestamp) {{\n", .{ class_name, cpp_qname });
+        try self.printI("return {s}_write_kind_w_timestamp(writer_, xcdr_version_, ZZDDS_WRITE_UNREGISTER, key, true, timestamp);\n", .{class_name});
         try self.write("}\n\n");
-        try self.print("int {s}DataWriter::get_key_value(DDS_InstanceHandle_t handle, {s}& key_out) {{\n", .{ c_name, cpp_qname });
+        try self.print("int {s}DataWriter::get_key_value(DDS_InstanceHandle_t handle, {s}& key_out) {{\n", .{ class_name, cpp_qname });
         try self.writeI("uint8_t _buf[4096];\n");
         try self.writeI("size_t _len = 0;\n");
         try self.writeI("int _rc = zzdds_get_key_value_writer(writer_, handle, _buf, sizeof(_buf), &_len);\n");
@@ -1631,13 +1679,13 @@ const CdrGenerator = struct {
         try self.writeI("if (_rc) return _rc;\n");
         try self.printI("return {s}_deserialize_key(&_r, &key_out);\n", .{c_name});
         try self.write("}\n\n");
-        try self.print("DDS_InstanceHandle_t {s}DataWriter::lookup_instance(const {s}& key) {{\n", .{ c_name, cpp_qname });
+        try self.print("DDS_InstanceHandle_t {s}DataWriter::lookup_instance(const {s}& key) {{\n", .{ class_name, cpp_qname });
         try self.writeI("uint8_t _hash[16];\n");
         try self.printI("if ({s}_compute_key_hash(&key, _hash)) return DDS_HANDLE_NIL;\n", .{c_name});
         try self.writeI("return zzdds_lookup_instance_writer(writer_, _hash);\n");
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader::take(Sample& out, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{c_name});
+        try self.print("int {s}DataReader::take(Sample& out, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{class_name});
         try self.writeI("int _n = zzdds_take_one_raw(reader_, buf, buf_size, cdr_len_out, &out.info);\n");
         try self.writeI("if (_n != 1) return _n;\n");
         try self.writeI("ZidlCdrReader _r;\n");
@@ -1646,7 +1694,7 @@ const CdrGenerator = struct {
         try self.printI("return out.info.valid_data ? {s}_deserialize(&_r, &out.value) : {s}_deserialize_key(&_r, &out.value);\n", .{ c_name, c_name });
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader::read(Sample& out, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{c_name});
+        try self.print("int {s}DataReader::read(Sample& out, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{class_name});
         try self.writeI("int _n = zzdds_read_one_raw(reader_, buf, buf_size, cdr_len_out, &out.info);\n");
         try self.writeI("if (_n != 1) return _n;\n");
         try self.writeI("ZidlCdrReader _r;\n");
@@ -1655,7 +1703,7 @@ const CdrGenerator = struct {
         try self.printI("return out.info.valid_data ? {s}_deserialize(&_r, &out.value) : {s}_deserialize_key(&_r, &out.value);\n", .{ c_name, c_name });
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader::take_next_instance(Sample& out, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{c_name});
+        try self.print("int {s}DataReader::take_next_instance(Sample& out, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{class_name});
         try self.writeI("int _n = zzdds_take_one_raw_instance(reader_, prev, buf, buf_size, cdr_len_out, &out.info);\n");
         try self.writeI("if (_n != 1) return _n;\n");
         try self.writeI("ZidlCdrReader _r;\n");
@@ -1664,7 +1712,7 @@ const CdrGenerator = struct {
         try self.printI("return out.info.valid_data ? {s}_deserialize(&_r, &out.value) : {s}_deserialize_key(&_r, &out.value);\n", .{ c_name, c_name });
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader::read_next_instance(Sample& out, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{c_name});
+        try self.print("int {s}DataReader::read_next_instance(Sample& out, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{class_name});
         try self.writeI("int _n = zzdds_read_one_raw_instance(reader_, prev, buf, buf_size, cdr_len_out, &out.info);\n");
         try self.writeI("if (_n != 1) return _n;\n");
         try self.writeI("ZidlCdrReader _r;\n");
@@ -1673,7 +1721,7 @@ const CdrGenerator = struct {
         try self.printI("return out.info.valid_data ? {s}_deserialize(&_r, &out.value) : {s}_deserialize_key(&_r, &out.value);\n", .{ c_name, c_name });
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader::get_key_value(DDS_InstanceHandle_t handle, {s}& key_out) {{\n", .{ c_name, cpp_qname });
+        try self.print("int {s}DataReader::get_key_value(DDS_InstanceHandle_t handle, {s}& key_out) {{\n", .{ class_name, cpp_qname });
         try self.writeI("uint8_t _buf[4096];\n");
         try self.writeI("size_t _len = 0;\n");
         try self.writeI("int _rc = zzdds_get_key_value_reader(reader_, handle, _buf, sizeof(_buf), &_len);\n");
@@ -1684,13 +1732,13 @@ const CdrGenerator = struct {
         try self.printI("return {s}_deserialize_key(&_r, &key_out);\n", .{c_name});
         try self.write("}\n\n");
 
-        try self.print("DDS_InstanceHandle_t {s}DataReader::lookup_instance(const {s}& key) {{\n", .{ c_name, cpp_qname });
+        try self.print("DDS_InstanceHandle_t {s}DataReader::lookup_instance(const {s}& key) {{\n", .{ class_name, cpp_qname });
         try self.writeI("uint8_t _hash[16];\n");
         try self.printI("if ({s}_compute_key_hash(&key, _hash)) return DDS_HANDLE_NIL;\n", .{c_name});
         try self.writeI("return zzdds_lookup_instance_reader(reader_, _hash);\n");
         try self.write("}\n\n");
 
-        try self.print("static int {s}_reader_n_impl(DDS_DataReader reader, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is, bool destructive) {{\n", .{ c_name, cpp_qname });
+        try self.print("static int {s}_reader_n_impl(DDS_DataReader reader, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is, bool destructive) {{\n", .{ class_name, cpp_qname });
         try self.writeI("zzdds_raw_sample_array _arr{};\n");
         try self.writeI("int _n = destructive ?\n");
         self.indent_depth += 1;
@@ -1715,16 +1763,16 @@ const CdrGenerator = struct {
         try self.writeI("return _n;\n");
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader::take_n({s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, cpp_qname });
+        try self.print("int {s}DataReader::take_n({s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ class_name, cpp_qname });
         try self.writeI("return ");
-        try self.print("{s}_reader_n_impl(reader_, values, infos, max, ss, vs, is, true);\n", .{c_name});
+        try self.print("{s}_reader_n_impl(reader_, values, infos, max, ss, vs, is, true);\n", .{class_name});
         try self.write("}\n\n");
-        try self.print("int {s}DataReader::read_n({s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, cpp_qname });
+        try self.print("int {s}DataReader::read_n({s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ class_name, cpp_qname });
         try self.writeI("return ");
-        try self.print("{s}_reader_n_impl(reader_, values, infos, max, ss, vs, is, false);\n", .{c_name});
+        try self.print("{s}_reader_n_impl(reader_, values, infos, max, ss, vs, is, false);\n", .{class_name});
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader::take_loaned(Loan& out) {{\n", .{c_name});
+        try self.print("int {s}DataReader::take_loaned(Loan& out) {{\n", .{class_name});
         try self.writeI("zzdds_loaned_sample _loan{};\n");
         try self.writeI("Sample _sample{};\n");
         try self.writeI("int _n = zzdds_take_loaned_raw(reader_, &_loan, &_sample.info);\n");
@@ -1738,7 +1786,7 @@ const CdrGenerator = struct {
         try self.writeI("return 1;\n");
         try self.write("}\n\n");
 
-        try self.print("void {s}DataReader::Loan::reset() {{\n", .{c_name});
+        try self.print("void {s}DataReader::Loan::reset() {{\n", .{class_name});
         try self.writeI("if (active_ && reader_) {\n");
         self.indent_depth += 1;
         try self.writeI("zzdds_return_loaned_raw(reader_->reader_, &loan_);\n");
@@ -1746,6 +1794,23 @@ const CdrGenerator = struct {
         self.indent_depth -= 1;
         try self.writeI("}\n");
         try self.write("}\n\n");
+
+        // A2: close namespace opened above
+        if (ns.len > 0) {
+            var segs: [8][]const u8 = undefined;
+            var seg_n: usize = 0;
+            var it2 = std.mem.splitSequence(u8, ns, "::");
+            while (it2.next()) |seg| {
+                segs[seg_n] = seg;
+                seg_n += 1;
+            }
+            var i = seg_n;
+            while (i > 0) {
+                i -= 1;
+                try self.print("}} // namespace {s}\n", .{segs[i]});
+            }
+            try self.write("\n");
+        }
     }
 
     fn emitExceptionFns(self: *CdrGenerator, e: *const ir.Exception) !void {
@@ -4721,6 +4786,45 @@ test "cpp_backend cdr: zzdds wrapper implementations for keyed topic" {
     try testing.expect(has(s, "int TopicDataReader::take_loaned(Loan& out) {"));
     try testing.expect(has(s, "out = Loan(this, _loan, _sample);"));
     try testing.expect(has(s, "void TopicDataReader::Loan::reset() {"));
+}
+
+test "cpp_backend: A1+A2 — namespaced struct uses IDL-scoped type name and namespace wrapper" {
+    // A2: wrapper classes live inside namespace ovidds, not at global scope
+    // A1: default type_name is "ovidds::Frame", not "ovidds_Frame"
+    var out = try testGenOpts(
+        "module ovidds { @appendable struct Frame { @key long id; }; };",
+        "frame",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "namespace ovidds {"));
+    try testing.expect(has(s, "class FrameTypeSupport {"));
+    try testing.expect(has(s, "class FrameDataWriter {"));
+    try testing.expect(has(s, "class FrameDataReader {"));
+    try testing.expect(has(s, "static int register_type(DDS_DomainParticipant participant, const char *type_name = \"ovidds::Frame\");"));
+    try testing.expect(!has(s, "class ovidds_FrameTypeSupport {"));
+    try testing.expect(!has(s, "\"ovidds_Frame\""));
+}
+
+test "cpp_backend cdr: A1+A2 — namespaced struct uses IDL-scoped type name and namespace wrapper" {
+    // A2: wrapper method impls and static helpers live inside namespace ovidds
+    // A1: fallback type_name string is "ovidds::Frame"
+    var out = try testGenCdrOpts(
+        "module ovidds { @appendable struct Frame { @key long id; }; };",
+        "frame",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "namespace ovidds {"));
+    try testing.expect(has(s, "int FrameTypeSupport::register_type(DDS_DomainParticipant participant, const char *type_name) {"));
+    try testing.expect(has(s, "\"ovidds::Frame\""));
+    try testing.expect(has(s, "static int Frame_write_kind("));
+    try testing.expect(has(s, "return Frame_write_kind(writer_,"));
+    try testing.expect(has(s, "void FrameDataReader::Loan::reset() {"));
+    try testing.expect(!has(s, "int ovidds_FrameTypeSupport::"));
+    try testing.expect(!has(s, "\"ovidds_Frame\""));
 }
 
 test "cpp_backend cdr: zzdds_c omitted when no qualifying topic struct" {

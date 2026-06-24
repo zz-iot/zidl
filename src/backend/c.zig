@@ -2019,13 +2019,14 @@ const CdrGenerator = struct {
             try self.write("}\n\n");
         }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and isZzddsTopicStructC(s)) {
-            try self.emitStructZzddsWrappers(c_name);
+            try self.emitStructZzddsWrappers(s, c_name);
         }
     }
 
-    fn emitStructZzddsWrappers(self: *CdrGenerator, c_name: []const u8) !void {
+    fn emitStructZzddsWrappers(self: *CdrGenerator, s: *const ir.Struct, c_name: []const u8) !void {
         try self.print("int {s}TypeSupport_register(DDS_DomainParticipant participant, const char *type_name) {{\n", .{c_name});
-        try self.printI("return zzdds_register_type_support_c(participant, type_name ? type_name : \"{s}\", {s}_compute_key_hash_from_cdr);\n", .{ c_name, c_name });
+        // A1: fallback uses IDL-scoped name (e.g. "ovidds::Frame"), not C-flat "ovidds_Frame"
+        try self.printI("return zzdds_register_type_support_c(participant, type_name ? type_name : \"{s}\", {s}_compute_key_hash_from_cdr);\n", .{ s.qualified_name, c_name });
         try self.write("}\n\n");
 
         try self.print("void {s}DataWriter_init({s}DataWriter *self, DDS_DataWriter writer, int xcdr_version) {{\n", .{ c_name, c_name });
@@ -4315,6 +4316,19 @@ test "c_backend cdr: zzdds wrapper implementations for keyed topic" {
     try testing.expect(has(s, "return TopicDataWriter_write_kind(self, ZZDDS_WRITE_ALIVE, value, 0);"));
     try testing.expect(has(s, "int TopicDataReader_take_loaned(TopicDataReader *self, Topic *out, zzdds_sample_info *info, zzdds_loaned_sample *loan) {"));
     try testing.expect(has(s, "zzdds_return_loaned_raw(self->reader, loan);"));
+}
+
+test "c_backend cdr: A1 — namespaced struct uses IDL-scoped type name in TypeSupport_register" {
+    var out = try testGenCdrOpts(
+        "module ovidds { @appendable struct Frame { @key long id; }; };",
+        "frame",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // fallback type_name must be IDL-scoped, not C-flat
+    try testing.expect(has(s, "\"ovidds::Frame\""));
+    try testing.expect(!has(s, "\"ovidds_Frame\""));
 }
 
 test "c_backend cdr: zzdds_c omitted when no qualifying topic struct" {
