@@ -2089,7 +2089,7 @@ const CdrGenerator = struct {
         try self.write("}\n\n");
 
         try self.print("int {s}DataWriter_get_key_value({s}DataWriter *self, DDS_InstanceHandle_t handle, {s} *key_out) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("uint8_t _buf[512];\n");
+        try self.writeI("uint8_t _buf[4096];\n");
         try self.writeI("size_t _len = 0;\n");
         try self.writeI("int _rc = zzdds_get_key_value_writer(self->writer, handle, _buf, sizeof(_buf), &_len);\n");
         try self.writeI("if (_rc) return _rc;\n");
@@ -2146,7 +2146,7 @@ const CdrGenerator = struct {
         try self.write("}\n\n");
 
         try self.print("int {s}DataReader_get_key_value({s}DataReader *self, DDS_InstanceHandle_t handle, {s} *key_out) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("uint8_t _buf[512];\n");
+        try self.writeI("uint8_t _buf[4096];\n");
         try self.writeI("size_t _len = 0;\n");
         try self.writeI("int _rc = zzdds_get_key_value_reader(self->reader, handle, _buf, sizeof(_buf), &_len);\n");
         try self.writeI("if (_rc) return _rc;\n");
