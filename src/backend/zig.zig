@@ -2947,8 +2947,6 @@ const Generator = struct {
         try self.ind();
         try self.write("        }\n");
         try self.ind();
-        try self.write("        _tmp.items.len = 0;\n");
-        try self.ind();
         try self.write("        return true;\n");
         try self.ind();
         try self.write("    }\n");
