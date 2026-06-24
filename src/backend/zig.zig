@@ -2815,14 +2815,15 @@ const Generator = struct {
         // read_next_instance
         try self.emitReaderSingleMethod(type_name, "read_next_instance", true, true);
 
+        const needs_deinit = structNeedsSeqDeinit(s);
         // take with masks
-        try self.emitReaderBatchMethod(type_name, "take", true, false);
+        try self.emitReaderBatchMethod(type_name, "take", true, false, needs_deinit);
         // read with masks
-        try self.emitReaderBatchMethod(type_name, "read", false, false);
+        try self.emitReaderBatchMethod(type_name, "read", false, false, needs_deinit);
         // take_instance
-        try self.emitReaderBatchMethod(type_name, "take_instance", true, true);
+        try self.emitReaderBatchMethod(type_name, "take_instance", true, true, needs_deinit);
         // read_instance
-        try self.emitReaderBatchMethod(type_name, "read_instance", false, true);
+        try self.emitReaderBatchMethod(type_name, "read_instance", false, true, needs_deinit);
 
         // get_key_value
         try self.write("\n");
@@ -2903,6 +2904,7 @@ const Generator = struct {
         method_name: []const u8,
         destructive: bool,
         with_instance: bool,
+        needs_deinit: bool,
     ) !void {
         const raw_fn = if (destructive) "_zzdds.takeFilteredRaw" else "_zzdds.readFilteredRaw";
         const ih_param = if (with_instance) ", handle: _zzdds.DDS.InstanceHandle_t" else "";
@@ -2929,13 +2931,17 @@ const Generator = struct {
         try self.ind();
         try self.write("        const _base = out.items.len;\n");
         try self.ind();
-        try self.write("        errdefer {\n");
-        try self.ind();
-        try self.write("            for (out.items[_base..]) |_sv| _sv.value.deinit(self._alloc);\n");
-        try self.ind();
-        try self.write("            out.items.len = _base;\n");
-        try self.ind();
-        try self.write("        }\n");
+        if (needs_deinit) {
+            try self.write("        errdefer {\n");
+            try self.ind();
+            try self.write("            for (out.items[_base..]) |_sv| _sv.value.deinit(self._alloc);\n");
+            try self.ind();
+            try self.write("            out.items.len = _base;\n");
+            try self.ind();
+            try self.write("        }\n");
+        } else {
+            try self.write("        errdefer out.items.len = _base;\n");
+        }
         try self.ind();
         try self.write("        for (_tmp.items) |_s| {\n");
         try self.ind();
@@ -2948,8 +2954,10 @@ const Generator = struct {
         try self.write("            else blk: {\n");
         try self.ind();
         try self.print("                var _kv: {s} = .{{}};\n", .{type_name});
-        try self.ind();
-        try self.write("                errdefer _kv.deinit(self._alloc);\n");
+        if (needs_deinit) {
+            try self.ind();
+            try self.write("                errdefer _kv.deinit(self._alloc);\n");
+        }
         try self.ind();
         try self.print("                try {s}.deserializeKeyInto(&_kv, &_r, self._alloc);\n", .{type_name});
         try self.ind();
