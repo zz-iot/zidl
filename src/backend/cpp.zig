@@ -109,6 +109,21 @@ pub const CppBackend = struct {
             defer self.alloc.free(impl_filename);
             try writeOutputFile(self.alloc, io, opts, impl_filename, impl_content.items);
         }
+
+        // ── <stem>_impl.hpp + <stem>_impl.cpp (concrete DDS impls) ──────────
+        if (opts.cpp_generate_impl) {
+            var hdr_content = std.ArrayList(u8).empty;
+            defer hdr_content.deinit(self.alloc);
+            var src_content = std.ArrayList(u8).empty;
+            defer src_content.deinit(self.alloc);
+            try generateConcreteImpl(self.alloc, spec, opts, &hdr_content, &src_content);
+            const hdr_filename = try std.fmt.allocPrint(self.alloc, "{s}_impl.hpp", .{opts.input_stem});
+            defer self.alloc.free(hdr_filename);
+            const src_filename2 = try std.fmt.allocPrint(self.alloc, "{s}_impl.cpp", .{opts.input_stem});
+            defer self.alloc.free(src_filename2);
+            try writeOutputFile(self.alloc, io, opts, hdr_filename, hdr_content.items);
+            try writeOutputFile(self.alloc, io, opts, src_filename2, src_content.items);
+        }
     }
 
     fn vtableDeinit(ctx: *anyopaque) void {
@@ -263,6 +278,7 @@ const Generator = struct {
         }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructCpp(spec.items)) {
             try self.write("#include \"zzdds_c.h\"\n");
+            try self.write("#include <unordered_map>\n");
         }
         try self.write("\n");
         if (self.opts.cpp_namespace.len > 0) {
@@ -379,9 +395,13 @@ const Generator = struct {
         try self.print("    int unregister_instance_w_timestamp(const {s}& key, DDS_Time_t timestamp);\n", .{cpp_qname});
         try self.print("    int get_key_value(DDS_InstanceHandle_t handle, {s}& key_out);\n", .{cpp_qname});
         try self.print("    DDS_InstanceHandle_t lookup_instance(const {s}& key);\n", .{cpp_qname});
+        try self.print("    int write_w_handle(const {s}& value, DDS_InstanceHandle_t handle);\n", .{cpp_qname});
+        try self.print("    int dispose_w_handle(const {s}& key, DDS_InstanceHandle_t handle);\n", .{cpp_qname});
+        try self.print("    int unregister_instance_w_handle(const {s}& key, DDS_InstanceHandle_t handle);\n", .{cpp_qname});
         try self.write("private:\n");
         try self.write("    DDS_DataWriter writer_;\n");
         try self.write("    int xcdr_version_;\n");
+        try self.write("    std::unordered_map<DDS_InstanceHandle_t, std::array<uint8_t, 16>> instance_handles_;\n");
         try self.write("};\n\n");
 
         try self.print("class {s}DataReader {{\n", .{class_name});
@@ -1640,7 +1660,13 @@ const CdrGenerator = struct {
         try self.print("DDS_InstanceHandle_t {s}DataWriter::register_instance(const {s}& key) {{\n", .{ class_name, cpp_qname });
         try self.writeI("uint8_t _hash[16];\n");
         try self.printI("if ({s}_compute_key_hash(&key, _hash)) return DDS_HANDLE_NIL;\n", .{c_name});
-        try self.writeI("return zzdds_register_instance_raw(writer_, _hash);\n");
+        try self.writeI("DDS_InstanceHandle_t _ih = zzdds_register_instance_raw(writer_, _hash);\n");
+        try self.writeI("if (_ih != DDS_HANDLE_NIL) {\n");
+        try self.writeI("    std::array<uint8_t, 16> _arr;\n");
+        try self.writeI("    std::memcpy(_arr.data(), _hash, 16);\n");
+        try self.writeI("    instance_handles_[_ih] = _arr;\n");
+        try self.writeI("}\n");
+        try self.writeI("return _ih;\n");
         try self.write("}\n\n");
 
         try self.print("static int {s}_write_kind_w_timestamp(DDS_DataWriter writer, int xcdr_version, zzdds_write_kind kind, const {s}& value, bool key_only, DDS_Time_t timestamp) {{\n", .{ class_name, cpp_qname });
@@ -1652,6 +1678,17 @@ const CdrGenerator = struct {
         try self.printI("if (!_rc) _rc = key_only ? {s}_serialize_key(&_w, &value) : {s}_serialize(&_w, &value);\n", .{ c_name, c_name });
         try self.printI("if (!_rc) _rc = {s}_compute_key_hash(&value, _hash);\n", .{c_name});
         try self.writeI("if (!_rc) _rc = zzdds_write_raw_w_timestamp(writer, kind, _hash, _w.buf, _w.len, timestamp);\n");
+        try self.writeI("zidl_cdr_writer_deinit(&_w);\n");
+        try self.writeI("return _rc;\n");
+        try self.write("}\n\n");
+
+        try self.print("static int {s}_write_kind_w_hash(DDS_DataWriter writer, int xcdr_version, zzdds_write_kind kind, const {s}& value, bool key_only, const uint8_t *hash) {{\n", .{ class_name, cpp_qname });
+        try self.writeI("ZidlCdrWriter _w;\n");
+        try self.writeI("int _rc = zidl_cdr_writer_init(&_w, xcdr_version);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.writeI("_rc = zidl_cdr_write_encap(&_w);\n");
+        try self.printI("if (!_rc) _rc = key_only ? {s}_serialize_key(&_w, &value) : {s}_serialize(&_w, &value);\n", .{ c_name, c_name });
+        try self.writeI("if (!_rc) _rc = zzdds_write_raw_kind(writer, kind, hash, _w.buf, _w.len);\n");
         try self.writeI("zidl_cdr_writer_deinit(&_w);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
@@ -1688,6 +1725,22 @@ const CdrGenerator = struct {
         try self.writeI("uint8_t _hash[16];\n");
         try self.printI("if ({s}_compute_key_hash(&key, _hash)) return DDS_HANDLE_NIL;\n", .{c_name});
         try self.writeI("return zzdds_lookup_instance_writer(writer_, _hash);\n");
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataWriter::write_w_handle(const {s}& value, DDS_InstanceHandle_t handle) {{\n", .{ class_name, cpp_qname });
+        try self.writeI("auto it = instance_handles_.find(handle);\n");
+        try self.writeI("if (it == instance_handles_.end()) return DDS_RETCODE_BAD_PARAMETER;\n");
+        try self.printI("return {s}_write_kind_w_hash(writer_, xcdr_version_, ZZDDS_WRITE_ALIVE, value, false, it->second.data());\n", .{class_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataWriter::dispose_w_handle(const {s}& key, DDS_InstanceHandle_t handle) {{\n", .{ class_name, cpp_qname });
+        try self.writeI("auto it = instance_handles_.find(handle);\n");
+        try self.writeI("if (it == instance_handles_.end()) return DDS_RETCODE_BAD_PARAMETER;\n");
+        try self.printI("return {s}_write_kind_w_hash(writer_, xcdr_version_, ZZDDS_WRITE_DISPOSE, key, true, it->second.data());\n", .{class_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataWriter::unregister_instance_w_handle(const {s}& key, DDS_InstanceHandle_t handle) {{\n", .{ class_name, cpp_qname });
+        try self.writeI("auto it = instance_handles_.find(handle);\n");
+        try self.writeI("if (it == instance_handles_.end()) return DDS_RETCODE_BAD_PARAMETER;\n");
+        try self.printI("return {s}_write_kind_w_hash(writer_, xcdr_version_, ZZDDS_WRITE_UNREGISTER, key, true, it->second.data());\n", .{class_name});
         try self.write("}\n\n");
 
         try self.print("int {s}DataReader::take(Sample& out, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{class_name});
@@ -2800,6 +2853,739 @@ const CdrGenerator = struct {
         try self.writeI("}\n");
     }
 };
+
+// ── Concrete DDS impl generation (--cpp-generate-impl) ───────────────────────
+
+/// Generate `<stem>_impl.hpp` and `<stem>_impl.cpp` with concrete Impl classes
+/// (wrapping typed C handles) and listener bridge classes (B3).
+pub fn generateConcreteImpl(
+    alloc: std.mem.Allocator,
+    spec: *const ir.Spec,
+    opts: interface.Options,
+    hdr_out: *std.ArrayList(u8),
+    src_out: *std.ArrayList(u8),
+) !void {
+    var gen = ConcreteImplGenerator{ .alloc = alloc, .opts = opts, .hdr = hdr_out, .src = src_out };
+    try gen.emit(spec);
+}
+
+const ConcreteImplGenerator = struct {
+    alloc: std.mem.Allocator,
+    opts: interface.Options,
+    hdr: *std.ArrayList(u8),
+    src: *std.ArrayList(u8),
+
+    fn hdrWrite(self: *ConcreteImplGenerator, s: []const u8) !void {
+        try self.hdr.appendSlice(self.alloc, s);
+    }
+    fn hdrPrint(self: *ConcreteImplGenerator, comptime fmt: []const u8, args: anytype) !void {
+        const s = try std.fmt.allocPrint(self.alloc, fmt, args);
+        defer self.alloc.free(s);
+        try self.hdr.appendSlice(self.alloc, s);
+    }
+    fn srcWrite(self: *ConcreteImplGenerator, s: []const u8) !void {
+        try self.src.appendSlice(self.alloc, s);
+    }
+    fn srcPrint(self: *ConcreteImplGenerator, comptime fmt: []const u8, args: anytype) !void {
+        const s = try std.fmt.allocPrint(self.alloc, fmt, args);
+        defer self.alloc.free(s);
+        try self.src.appendSlice(self.alloc, s);
+    }
+
+    fn emit(self: *ConcreteImplGenerator, spec: *const ir.Spec) !void {
+        try self.hdrPrint(
+            "// Generated by zidl from {s}.idl \u{2014} DO NOT EDIT\n#pragma once\n",
+            .{self.opts.input_stem},
+        );
+        try self.hdrPrint(
+            "#include \"{s}.hpp\"\n#include \"{s}.h\"\n#include \"zzdds_c.h\"\n#include <memory>\n\n",
+            .{ self.opts.input_stem, self.opts.input_stem },
+        );
+        try self.srcPrint(
+            "// Generated by zidl from {s}.idl \u{2014} DO NOT EDIT\n#include \"{s}_impl.hpp\"\n\n",
+            .{ self.opts.input_stem, self.opts.input_stem },
+        );
+        try self.emitItems(spec.items);
+    }
+
+    fn emitItems(self: *ConcreteImplGenerator, items: []const ir.ModuleItem) anyerror!void {
+        for (items) |item| {
+            switch (item) {
+                .module => |m| try self.emitModule(m),
+                .type_decl, .const_ => {},
+            }
+        }
+    }
+
+    fn emitModule(self: *ConcreteImplGenerator, m: *const ir.Module) !void {
+        var entities = std.ArrayListUnmanaged(*const ir.Interface).empty;
+        defer entities.deinit(self.alloc);
+        var callbacks = std.ArrayListUnmanaged(*const ir.Interface).empty;
+        defer callbacks.deinit(self.alloc);
+        try self.collectModuleInterfaces(m.items, &entities, &callbacks);
+
+        // ── Header ────────────────────────────────────────────────────────────
+        try self.hdrPrint("namespace {s} {{\n\n", .{m.name});
+
+        // Forward declarations
+        for (entities.items) |iface| {
+            try self.hdrPrint("class {s}Impl;\n", .{iface.name});
+        }
+        for (callbacks.items) |iface| {
+            try self.hdrPrint("class {s}Bridge;\n", .{iface.name});
+        }
+        if (entities.items.len > 0 or callbacks.items.len > 0) try self.hdrWrite("\n");
+
+        // Class bodies
+        for (entities.items) |iface| try self.emitEntityImplDecl(m.name, iface);
+        for (callbacks.items) |iface| try self.emitListenerBridgeDecl(m.name, iface);
+
+        // Factory (only if DomainParticipant exists in this module)
+        const has_dp = for (entities.items) |iface| {
+            if (std.mem.eql(u8, iface.name, "DomainParticipant")) break true;
+        } else false;
+        if (has_dp) try self.emitFactoryDecl(m.name);
+
+        try self.hdrPrint("}} // namespace {s}\n\n", .{m.name});
+
+        // ── Source ────────────────────────────────────────────────────────────
+        try self.srcPrint("namespace {s} {{\n\n", .{m.name});
+        for (entities.items) |iface| try self.emitEntityImplMethods(iface);
+        for (callbacks.items) |iface| try self.emitListenerBridgeMethods(m.name, iface);
+        if (has_dp) try self.emitFactoryImpl(m.name);
+        try self.srcPrint("}} // namespace {s}\n\n", .{m.name});
+    }
+
+    fn collectModuleInterfaces(
+        self: *ConcreteImplGenerator,
+        items: []const ir.ModuleItem,
+        entities: *std.ArrayListUnmanaged(*const ir.Interface),
+        callbacks: *std.ArrayListUnmanaged(*const ir.Interface),
+    ) anyerror!void {
+        for (items) |item| {
+            switch (item) {
+                .type_decl => |td| switch (td) {
+                    .interface => |iface| {
+                        if (isCallbackIface(iface)) {
+                            try callbacks.append(self.alloc, iface);
+                        } else {
+                            try entities.append(self.alloc, iface);
+                        }
+                    },
+                    else => {},
+                },
+                .module => |m| try self.collectModuleInterfaces(m.items, entities, callbacks),
+                .const_ => {},
+            }
+        }
+    }
+
+    // ── Entity Impl declaration (header) ──────────────────────────────────────
+
+    fn emitEntityImplDecl(self: *ConcreteImplGenerator, ns: []const u8, iface: *const ir.Interface) !void {
+        const c_name = try cNameOf(self.alloc, iface.qualified_name);
+        defer self.alloc.free(c_name);
+
+        var ops = std.ArrayListUnmanaged(ir.Operation).empty;
+        defer ops.deinit(self.alloc);
+        var attrs = std.ArrayListUnmanaged(ir.Attribute).empty;
+        defer attrs.deinit(self.alloc);
+        try collectIfaceMembers(self.alloc, iface, &ops, &attrs);
+
+        try self.hdrPrint("// \u{2500}\u{2500} {s}Impl \u{2500}\u{2500}\n\n", .{iface.name});
+        try self.hdrPrint(
+            "class {s}Impl : public ::{s}::{s} {{\npublic:\n",
+            .{ iface.name, ns, iface.name },
+        );
+        try self.hdrPrint(
+            "    explicit {s}Impl({s} h) noexcept : ptr_(h) {{}}\n",
+            .{ iface.name, c_name },
+        );
+        try self.hdrPrint("    ~{s}Impl() override = default;\n", .{iface.name});
+        try self.hdrPrint(
+            "    {s} native_handle() const noexcept {{ return ptr_; }}\n\n",
+            .{c_name},
+        );
+
+        for (ops.items) |op| {
+            const sig = try self.opSignature(&op);
+            defer self.alloc.free(sig);
+            try self.hdrPrint("    {s} override;\n", .{sig});
+        }
+        for (attrs.items) |attr| {
+            const at = try self.typeRefToCpp(attr.type_ref);
+            defer self.alloc.free(at);
+            try self.hdrPrint("    {s} {s}() const override;\n", .{ at, attr.name });
+            if (!attr.readonly)
+                try self.hdrPrint("    void {s}({s} value) override;\n", .{ attr.name, at });
+        }
+
+        try self.hdrPrint("\nprivate:\n    {s} ptr_;\n}};\n\n", .{c_name});
+    }
+
+    // ── Listener bridge declaration (header) ──────────────────────────────────
+
+    fn emitListenerBridgeDecl(self: *ConcreteImplGenerator, ns: []const u8, iface: *const ir.Interface) !void {
+        const c_name = try cNameOf(self.alloc, iface.qualified_name);
+        defer self.alloc.free(c_name);
+
+        var ops = std.ArrayListUnmanaged(ir.Operation).empty;
+        defer ops.deinit(self.alloc);
+        var attrs = std.ArrayListUnmanaged(ir.Attribute).empty;
+        defer attrs.deinit(self.alloc);
+        try collectIfaceMembers(self.alloc, iface, &ops, &attrs);
+
+        try self.hdrPrint("// \u{2500}\u{2500} {s}Bridge \u{2500}\u{2500}\n\n", .{iface.name});
+        try self.hdrPrint(
+            "class {s}Bridge : public ::{s}::{s} {{\npublic:\n",
+            .{ iface.name, ns, iface.name },
+        );
+        try self.hdrWrite("    virtual ~");
+        try self.hdrPrint("{s}Bridge() = default;\n", .{iface.name});
+
+        // Default no-op overrides
+        for (ops.items) |op| {
+            const sig = try self.opSignature(&op);
+            defer self.alloc.free(sig);
+            try self.hdrPrint("    {s} override {{}}\n", .{sig});
+        }
+
+        // c_listener() declaration
+        try self.hdrPrint("    {s} c_listener() noexcept;\n", .{c_name});
+        try self.hdrWrite("private:\n");
+
+        // Static trampoline declarations
+        for (ops.items) |op| {
+            try self.hdrWrite("    static void s_");
+            try self.hdrWrite(op.name);
+            try self.hdrWrite("(");
+            for (op.params, 0..) |p, i| {
+                if (i > 0) try self.hdrWrite(", ");
+                const ct = try self.paramToCType(p);
+                defer self.alloc.free(ct);
+                try self.hdrWrite(ct);
+            }
+            if (op.params.len > 0) try self.hdrWrite(", ");
+            try self.hdrWrite("void* d);\n");
+        }
+
+        try self.hdrWrite("};\n\n");
+    }
+
+    fn emitFactoryDecl(self: *ConcreteImplGenerator, ns: []const u8) !void {
+        try self.hdrWrite("// \u{2500}\u{2500} Factory \u{2500}\u{2500}\n\n");
+        try self.hdrPrint(
+            "/// Create a DDS participant using the UDP transport (wraps zzdds_create_participant_udp).\n" ++
+                "std::shared_ptr<::{s}::DomainParticipant> create_participant_udp(\n" ++
+                "    ::{s}::DomainId_t domain_id,\n" ++
+                "    std::shared_ptr<::{s}::DomainParticipantListener> listener = nullptr);\n\n",
+            .{ ns, ns, ns },
+        );
+    }
+
+    // ── Entity Impl method implementations (source) ───────────────────────────
+
+    fn emitEntityImplMethods(self: *ConcreteImplGenerator, iface: *const ir.Interface) !void {
+        const c_name = try cNameOf(self.alloc, iface.qualified_name);
+        defer self.alloc.free(c_name);
+
+        var ops = std.ArrayListUnmanaged(ir.Operation).empty;
+        defer ops.deinit(self.alloc);
+        var attrs = std.ArrayListUnmanaged(ir.Attribute).empty;
+        defer attrs.deinit(self.alloc);
+        try collectIfaceMembers(self.alloc, iface, &ops, &attrs);
+
+        try self.srcPrint("// \u{2500}\u{2500} {s}Impl \u{2500}\u{2500}\n\n", .{iface.name});
+
+        for (ops.items) |op| {
+            try self.emitEntityMethod(c_name, iface.name, &op);
+        }
+        for (attrs.items) |attr| {
+            try self.emitEntityAttr(c_name, iface.name, &attr);
+        }
+    }
+
+    fn emitEntityMethod(self: *ConcreteImplGenerator, c_name: []const u8, class_name: []const u8, op: *const ir.Operation) !void {
+        const ret_cpp = if (op.return_type) |rt| try self.typeRefToCpp(rt) else try self.alloc.dupe(u8, "void");
+        defer self.alloc.free(ret_cpp);
+
+        try self.srcPrint("{s} {s}Impl::{s}(", .{ ret_cpp, class_name, op.name });
+        for (op.params, 0..) |p, i| {
+            if (i > 0) try self.srcWrite(", ");
+            const pt = try self.typeRefToCpp(p.type_ref);
+            defer self.alloc.free(pt);
+            switch (p.mode) {
+                .in_ => try self.srcPrint("{s} {s}", .{ pt, p.name }),
+                .out, .inout => try self.srcPrint("{s}& {s}", .{ pt, p.name }),
+            }
+        }
+        try self.srcWrite(") {\n");
+
+        if (!self.opIsAdaptable(op)) {
+            try self.srcWrite("    /* TODO: adapt parameters/return (sequence or complex QoS) */\n");
+            if (op.return_type) |rt| {
+                switch (rt) {
+                    .named => |td| switch (td) {
+                        .interface => try self.srcWrite("    return nullptr;\n"),
+                        else => try self.srcWrite("    return {};\n"),
+                    },
+                    else => try self.srcWrite("    return {};\n"),
+                }
+            }
+            try self.srcWrite("}\n\n");
+            return;
+        }
+
+        // Emit listener local vars first
+        for (op.params) |p| {
+            if (paramAdaptKind(p) == .listener_in) {
+                const lc = try self.listenerCType(p.type_ref);
+                defer self.alloc.free(lc);
+                const bridge_name = try self.listenerBridgeName(p.type_ref);
+                defer self.alloc.free(bridge_name);
+                try self.srcPrint("    {s} _l_{s}{{}};\n", .{ lc, p.name });
+                try self.srcPrint(
+                    "    if (auto* _b = dynamic_cast<{s}*>({s}.get())) _l_{s} = _b->c_listener();\n",
+                    .{ bridge_name, p.name, p.name },
+                );
+            }
+        }
+
+        // Build the C call
+        const ret_kind = returnAdaptKind(op.return_type);
+        switch (ret_kind) {
+            .entity => {
+                const ret_c = try self.typeRefToCType(op.return_type.?);
+                defer self.alloc.free(ret_c);
+                const impl_name = try self.entityImplName(op.return_type.?);
+                defer self.alloc.free(impl_name);
+                try self.srcPrint("    {s} _h = {s}_{s}(ptr_", .{ ret_c, c_name, op.name });
+                try self.emitAdaptedParams(op.params);
+                try self.srcWrite(");\n");
+                try self.srcWrite("    if (!_h.ptr) return nullptr;\n");
+                try self.srcPrint("    return std::make_shared<{s}>(_h);\n", .{impl_name});
+            },
+            .str_ret => {
+                try self.srcPrint("    const char* _r = {s}_{s}(ptr_", .{ c_name, op.name });
+                try self.emitAdaptedParams(op.params);
+                try self.srcWrite(");\n");
+                try self.srcWrite("    return _r ? std::string(_r) : std::string{};\n");
+            },
+            .direct => {
+                if (op.return_type != null) {
+                    try self.srcPrint("    return {s}_{s}(ptr_", .{ c_name, op.name });
+                } else {
+                    try self.srcPrint("    {s}_{s}(ptr_", .{ c_name, op.name });
+                }
+                try self.emitAdaptedParams(op.params);
+                try self.srcWrite(");\n");
+            },
+            .todo => {
+                try self.srcWrite("    /* TODO: return type not adaptable */\n");
+                try self.srcWrite("    return {};\n");
+            },
+        }
+        try self.srcWrite("}\n\n");
+    }
+
+    fn emitEntityAttr(self: *ConcreteImplGenerator, c_name: []const u8, class_name: []const u8, attr: *const ir.Attribute) !void {
+        const at = try self.typeRefToCpp(attr.type_ref);
+        defer self.alloc.free(at);
+
+        // Getter
+        try self.srcPrint("{s} {s}Impl::{s}() const {{\n", .{ at, class_name, attr.name });
+        const rk = returnAdaptKind(.{ .named = .{ .interface = undefined } }); // dummy
+        _ = rk;
+        switch (returnAdaptKind(attr.type_ref)) {
+            .entity => {
+                const ret_c = try self.typeRefToCType(attr.type_ref);
+                defer self.alloc.free(ret_c);
+                const impl_name = try self.entityImplName(attr.type_ref);
+                defer self.alloc.free(impl_name);
+                try self.srcPrint("    {s} _h = {s}_get_{s}(ptr_);\n", .{ ret_c, c_name, attr.name });
+                try self.srcWrite("    if (!_h.ptr) return nullptr;\n");
+                try self.srcPrint("    return std::make_shared<{s}>(_h);\n", .{impl_name});
+            },
+            .str_ret => {
+                try self.srcPrint("    const char* _r = {s}_get_{s}(ptr_);\n", .{ c_name, attr.name });
+                try self.srcWrite("    return _r ? std::string(_r) : std::string{};\n");
+            },
+            .direct => {
+                try self.srcPrint("    return {s}_get_{s}(ptr_);\n", .{ c_name, attr.name });
+            },
+            .todo => {
+                try self.srcWrite("    /* TODO */\n    return {};\n");
+            },
+        }
+        try self.srcWrite("}\n\n");
+
+        if (!attr.readonly) {
+            try self.srcPrint("void {s}Impl::{s}({s} value) {{\n", .{ class_name, attr.name, at });
+            switch (paramAdaptKindForTypeRef(attr.type_ref, .in_)) {
+                .direct => try self.srcPrint("    {s}_set_{s}(ptr_, value);\n", .{ c_name, attr.name }),
+                .str_in => try self.srcPrint("    {s}_set_{s}(ptr_, value.c_str());\n", .{ c_name, attr.name }),
+                else => try self.srcPrint("    /* TODO */\n    (void)value;\n", .{}),
+            }
+            try self.srcWrite("}\n\n");
+        }
+    }
+
+    fn emitAdaptedParams(self: *ConcreteImplGenerator, params: []const ir.Parameter) !void {
+        for (params) |p| {
+            try self.srcWrite(", ");
+            switch (paramAdaptKind(p)) {
+                .direct => try self.srcWrite(p.name),
+                .str_in => try self.srcPrint("{s}.c_str()", .{p.name}),
+                .struct_in => {
+                    const ct = try self.structCType(p.type_ref);
+                    defer self.alloc.free(ct);
+                    try self.srcPrint("reinterpret_cast<const {s}*>(&{s})", .{ ct, p.name });
+                },
+                .struct_inout => {
+                    const ct = try self.structCType(p.type_ref);
+                    defer self.alloc.free(ct);
+                    try self.srcPrint("reinterpret_cast<{s}*>(&{s})", .{ ct, p.name });
+                },
+                .entity_in => {
+                    const impl_name = try self.entityImplName(p.type_ref);
+                    defer self.alloc.free(impl_name);
+                    const ct = try self.typeRefToCType(p.type_ref);
+                    defer self.alloc.free(ct);
+                    try self.srcPrint(
+                        "({s} ? static_cast<{s}*>({s}.get())->native_handle() : {s}{{nullptr, nullptr}})",
+                        .{ p.name, impl_name, p.name, ct },
+                    );
+                },
+                .listener_in => {
+                    try self.srcPrint("({s} ? &_l_{s} : nullptr)", .{ p.name, p.name });
+                },
+                .todo => try self.srcPrint("/* TODO({s}) */", .{p.name}),
+            }
+        }
+    }
+
+    // ── Listener bridge implementations (source) ──────────────────────────────
+
+    fn emitListenerBridgeMethods(self: *ConcreteImplGenerator, _ns: []const u8, iface: *const ir.Interface) !void {
+        _ = _ns;
+        const c_name = try cNameOf(self.alloc, iface.qualified_name);
+        defer self.alloc.free(c_name);
+
+        var ops = std.ArrayListUnmanaged(ir.Operation).empty;
+        defer ops.deinit(self.alloc);
+        var attrs = std.ArrayListUnmanaged(ir.Attribute).empty;
+        defer attrs.deinit(self.alloc);
+        try collectIfaceMembers(self.alloc, iface, &ops, &attrs);
+
+        try self.srcPrint("// \u{2500}\u{2500} {s}Bridge \u{2500}\u{2500}\n\n", .{iface.name});
+
+        // c_listener() implementation
+        try self.srcPrint("{s} {s}Bridge::c_listener() noexcept {{\n    return {{this", .{ c_name, iface.name });
+        for (ops.items) |op| {
+            try self.srcPrint(", s_{s}", .{op.name});
+        }
+        try self.srcWrite("};\n}\n\n");
+
+        // Trampoline static implementations
+        for (ops.items) |op| {
+            try self.srcPrint("void {s}Bridge::s_{s}(", .{ iface.name, op.name });
+            for (op.params, 0..) |p, i| {
+                if (i > 0) try self.srcWrite(", ");
+                const ct = try self.paramToCType(p);
+                defer self.alloc.free(ct);
+                try self.srcPrint("{s} {s}", .{ ct, p.name });
+            }
+            if (op.params.len > 0) try self.srcWrite(", ");
+            try self.srcWrite("void* d) {\n");
+            try self.srcPrint("    static_cast<{s}Bridge*>(d)->{s}(", .{ iface.name, op.name });
+            for (op.params, 0..) |p, i| {
+                if (i > 0) try self.srcWrite(", ");
+                switch (p.type_ref) {
+                    .named => |td| switch (td) {
+                        .interface => |piface| {
+                            if (!isCallbackIface(piface)) {
+                                // Wrap entity handle in Impl
+                                try self.srcPrint("std::make_shared<{s}Impl>({s})", .{ piface.name, p.name });
+                            } else {
+                                try self.srcPrint("/* TODO({s}) */ {s}", .{ p.name, p.name });
+                            }
+                        },
+                        else => {
+                            const ct = try self.paramToCType(p);
+                            defer self.alloc.free(ct);
+                            // status structs: reinterpret_cast to C++ type
+                            const cpp_t = try self.typeRefToCpp(p.type_ref);
+                            defer self.alloc.free(cpp_t);
+                            try self.srcPrint("reinterpret_cast<const ::{s}&>(*{s})", .{ cpp_t[2..], p.name });
+                        },
+                    },
+                    .base => try self.srcWrite(p.name),
+                    else => try self.srcPrint("/* TODO({s}) */ {s}", .{ p.name, p.name }),
+                }
+            }
+            try self.srcWrite(");\n}\n\n");
+        }
+    }
+
+    fn emitFactoryImpl(self: *ConcreteImplGenerator, ns: []const u8) !void {
+        try self.srcWrite("// \u{2500}\u{2500} Factory \u{2500}\u{2500}\n\n");
+        try self.srcPrint(
+            "std::shared_ptr<::{s}::DomainParticipant> create_participant_udp(\n" ++
+                "    ::{s}::DomainId_t domain_id,\n" ++
+                "    std::shared_ptr<::{s}::DomainParticipantListener> listener) {{\n",
+            .{ ns, ns, ns },
+        );
+        try self.srcPrint(
+            "    DDS_DomainParticipantListener _l{{}};\n" ++
+                "    const DDS_DomainParticipantListener* _lp = nullptr;\n" ++
+                "    if (listener) {{\n" ++
+                "        if (auto* _b = dynamic_cast<DomainParticipantListenerBridge*>(listener.get())) {{\n" ++
+                "            _l = _b->c_listener();\n" ++
+                "            _lp = &_l;\n" ++
+                "        }}\n" ++
+                "    }}\n" ++
+                "    DDS_DomainParticipant _h = zzdds_create_participant_udp(\n" ++
+                "        static_cast<uint32_t>(domain_id), _lp);\n" ++
+                "    if (!_h.ptr) return nullptr;\n" ++
+                "    return std::make_shared<DomainParticipantImpl>(_h);\n}}\n\n",
+            .{},
+        );
+    }
+
+    // ── Type helpers ──────────────────────────────────────────────────────────
+
+    fn typeRefToCpp(self: *ConcreteImplGenerator, tr: ir.TypeRef) ![]u8 {
+        return switch (tr) {
+            .base => |b| self.alloc.dupe(u8, baseToCppType(b)),
+            .named => |td| switch (td) {
+                .interface => |iface| std.fmt.allocPrint(
+                    self.alloc,
+                    "std::shared_ptr<::{s}>",
+                    .{iface.qualified_name},
+                ),
+                else => std.fmt.allocPrint(self.alloc, "::{s}", .{ir.typeDeclQualifiedName(td)}),
+            },
+            .sequence => |seq| blk: {
+                const elem = try self.typeRefToCpp(seq.element.*);
+                defer self.alloc.free(elem);
+                break :blk std.fmt.allocPrint(self.alloc, "std::vector<{s}>", .{elem});
+            },
+            .string => self.alloc.dupe(u8, "std::string"),
+            .wstring => self.alloc.dupe(u8, "std::wstring"),
+            .fixed_pt => self.alloc.dupe(u8, "double"),
+            .map => |m| blk: {
+                const ks = try self.typeRefToCpp(m.key.*);
+                defer self.alloc.free(ks);
+                const vs = try self.typeRefToCpp(m.value.*);
+                defer self.alloc.free(vs);
+                break :blk std.fmt.allocPrint(self.alloc, "std::map<{s}, {s}>", .{ ks, vs });
+            },
+        };
+    }
+
+    fn typeRefToCType(self: *ConcreteImplGenerator, tr: ir.TypeRef) ![]u8 {
+        return switch (tr) {
+            .named => |td| cNameOf(self.alloc, ir.typeDeclQualifiedName(td)),
+            else => self.alloc.dupe(u8, "void*"),
+        };
+    }
+
+    /// C type string for a listener callback struct, e.g. DDS_DataWriterListener
+    fn listenerCType(self: *ConcreteImplGenerator, tr: ir.TypeRef) ![]u8 {
+        return switch (tr) {
+            .named => |td| cNameOf(self.alloc, ir.typeDeclQualifiedName(td)),
+            else => self.alloc.dupe(u8, "void*"),
+        };
+    }
+
+    /// Bridge class name for a listener, e.g. DataWriterListenerBridge
+    fn listenerBridgeName(self: *ConcreteImplGenerator, tr: ir.TypeRef) ![]u8 {
+        return switch (tr) {
+            .named => |td| switch (td) {
+                .interface => |iface| std.fmt.allocPrint(self.alloc, "{s}Bridge", .{iface.name}),
+                else => self.alloc.dupe(u8, "ListenerBridge"),
+            },
+            else => self.alloc.dupe(u8, "ListenerBridge"),
+        };
+    }
+
+    /// Impl class name for an entity, e.g. PublisherImpl
+    fn entityImplName(self: *ConcreteImplGenerator, tr: ir.TypeRef) ![]u8 {
+        return switch (tr) {
+            .named => |td| switch (td) {
+                .interface => |iface| std.fmt.allocPrint(self.alloc, "{s}Impl", .{iface.name}),
+                else => self.alloc.dupe(u8, "EntityImpl"),
+            },
+            else => self.alloc.dupe(u8, "EntityImpl"),
+        };
+    }
+
+    /// C type name for a struct param (for reinterpret_cast), e.g. DDS_PublisherQos
+    fn structCType(self: *ConcreteImplGenerator, tr: ir.TypeRef) ![]u8 {
+        return switch (tr) {
+            .named => |td| cNameOf(self.alloc, ir.typeDeclQualifiedName(td)),
+            else => self.alloc.dupe(u8, "void"),
+        };
+    }
+
+    /// C type for a trampoline parameter (for static callback decls and impls).
+    fn paramToCType(self: *ConcreteImplGenerator, p: ir.Parameter) ![]u8 {
+        return switch (p.type_ref) {
+            .base => |b| self.alloc.dupe(u8, baseToCType(b)),
+            .string => self.alloc.dupe(u8, "const char*"),
+            .named => |td| switch (td) {
+                .interface => |iface| blk: {
+                    if (isCallbackIface(iface)) {
+                        // listener structs: const ptr
+                        const cn = try cNameOf(self.alloc, iface.qualified_name);
+                        defer self.alloc.free(cn);
+                        break :blk std.fmt.allocPrint(self.alloc, "const {s}*", .{cn});
+                    } else {
+                        // entity fat-pointer: by value
+                        break :blk cNameOf(self.alloc, iface.qualified_name);
+                    }
+                },
+                else => blk: {
+                    // struct: use const ptr for in, ptr for out/inout
+                    const cn = try cNameOf(self.alloc, ir.typeDeclQualifiedName(td));
+                    defer self.alloc.free(cn);
+                    break :blk switch (p.mode) {
+                        .in_ => std.fmt.allocPrint(self.alloc, "const {s}*", .{cn}),
+                        else => std.fmt.allocPrint(self.alloc, "{s}*", .{cn}),
+                    };
+                },
+            },
+            else => self.alloc.dupe(u8, "void*"),
+        };
+    }
+
+    fn opSignature(self: *ConcreteImplGenerator, op: *const ir.Operation) ![]u8 {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(self.alloc);
+
+        const ret = if (op.return_type) |rt| try self.typeRefToCpp(rt) else try self.alloc.dupe(u8, "void");
+        defer self.alloc.free(ret);
+        try buf.appendSlice(self.alloc, ret);
+        try buf.append(self.alloc, ' ');
+        try buf.appendSlice(self.alloc, op.name);
+        try buf.append(self.alloc, '(');
+
+        for (op.params, 0..) |p, i| {
+            if (i > 0) try buf.appendSlice(self.alloc, ", ");
+            const pt = try self.typeRefToCpp(p.type_ref);
+            defer self.alloc.free(pt);
+            try buf.appendSlice(self.alloc, pt);
+            switch (p.mode) {
+                .in_ => {},
+                .out, .inout => try buf.append(self.alloc, '&'),
+            }
+            try buf.append(self.alloc, ' ');
+            try buf.appendSlice(self.alloc, p.name);
+        }
+        try buf.append(self.alloc, ')');
+        return buf.toOwnedSlice(self.alloc);
+    }
+
+    // ── Adaptation classification ─────────────────────────────────────────────
+
+    fn opIsAdaptable(self: *ConcreteImplGenerator, op: *const ir.Operation) bool {
+        _ = self;
+        for (op.params) |p| {
+            if (paramAdaptKind(p) == .todo) return false;
+        }
+        return returnAdaptKind(op.return_type) != .todo;
+    }
+};
+
+const AdaptKind = enum { direct, str_in, struct_in, struct_inout, entity_in, listener_in, todo };
+const RetAdaptKind = enum { direct, entity, str_ret, todo };
+
+fn paramAdaptKind(p: ir.Parameter) AdaptKind {
+    return paramAdaptKindForTypeRef(p.type_ref, p.mode);
+}
+
+fn paramAdaptKindForTypeRef(tr: ir.TypeRef, mode: ir.ParamMode) AdaptKind {
+    return switch (tr) {
+        .base => .direct,
+        .fixed_pt => .direct,
+        .string => if (mode == .in_) .str_in else .todo,
+        .wstring, .sequence, .map => .todo,
+        .named => |td| switch (td) {
+            .typedef => |t| if (t.dimensions.len == 0) paramAdaptKindForTypeRef(t.type_ref, mode) else .todo,
+            .enum_, .bitmask, .bitset => .direct,
+            .struct_ => |s| if (mode == .in_)
+                (if (isSimpleStruct(s)) .struct_in else .todo)
+            else
+                (if (isSimpleStruct(s)) .struct_inout else .todo),
+            .interface => |iface| if (isCallbackIface(iface))
+                (if (mode == .in_) .listener_in else .todo)
+            else
+                (if (mode == .in_) .entity_in else .todo),
+            else => .todo,
+        },
+    };
+}
+
+fn returnAdaptKind(rt: ?ir.TypeRef) RetAdaptKind {
+    const tr = rt orelse return .direct; // void
+    return switch (tr) {
+        .base => .direct,
+        .fixed_pt => .direct,
+        .string => .str_ret,
+        .wstring, .sequence, .map => .todo,
+        .named => |td| switch (td) {
+            .typedef => |t| if (t.dimensions.len == 0) returnAdaptKind(t.type_ref) else .todo,
+            .enum_, .bitmask, .bitset => .direct,
+            .struct_ => .todo,
+            .interface => |iface| if (isCallbackIface(iface)) .todo else .entity,
+            else => .todo,
+        },
+    };
+}
+
+fn isSimpleTypeRef(tr: ir.TypeRef) bool {
+    return switch (tr) {
+        .base, .fixed_pt => true,
+        .named => |td| switch (td) {
+            .typedef => |t| t.dimensions.len == 0 and isSimpleTypeRef(t.type_ref),
+            .enum_, .bitmask, .bitset => true,
+            .struct_ => |s| isSimpleStruct(s),
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn isSimpleStruct(s: *const ir.Struct) bool {
+    for (s.members) |m| {
+        if (!isSimpleTypeRef(m.type_ref)) return false;
+    }
+    return true;
+}
+
+fn isCallbackIface(iface: *const ir.Interface) bool {
+    for (iface.raw) |ann| {
+        if (std.mem.eql(u8, ann.name, "callback")) return true;
+    }
+    return std.mem.endsWith(u8, iface.name, "Listener");
+}
+
+fn cNameOf(alloc: std.mem.Allocator, qname: []const u8) ![]u8 {
+    return interface.prefixedCNameFromQualified(alloc, qname, "");
+}
+
+fn collectIfaceMembers(
+    alloc: std.mem.Allocator,
+    iface: *const ir.Interface,
+    ops: *std.ArrayListUnmanaged(ir.Operation),
+    attrs: *std.ArrayListUnmanaged(ir.Attribute),
+) anyerror!void {
+    for (iface.bases) |base| {
+        if (base == .interface) try collectIfaceMembers(alloc, base.interface, ops, attrs);
+    }
+    try ops.appendSlice(alloc, iface.operations);
+    try attrs.appendSlice(alloc, iface.attributes);
+}
 
 // ── Interface impl generation ─────────────────────────────────────────────────
 
@@ -4980,4 +5766,165 @@ test "cpp_backend: @default scoped_name emits identifier" {
     , "cfg");
     defer h.deinit(testing.allocator);
     try testing.expect(has(h.items, "int32_t limit{MY_MAX};"));
+}
+
+test "cpp_backend: B2 — write_w_handle/dispose_w_handle/unregister_instance_w_handle declared in header" {
+    var out = try testGenOpts(
+        "@appendable struct Topic { @key long id; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "int write_w_handle(const ::Topic& value, DDS_InstanceHandle_t handle);"));
+    try testing.expect(has(s, "int dispose_w_handle(const ::Topic& key, DDS_InstanceHandle_t handle);"));
+    try testing.expect(has(s, "int unregister_instance_w_handle(const ::Topic& key, DDS_InstanceHandle_t handle);"));
+    try testing.expect(has(s, "std::unordered_map<DDS_InstanceHandle_t, std::array<uint8_t, 16>> instance_handles_;"));
+    try testing.expect(has(s, "#include <unordered_map>"));
+}
+
+test "cpp_backend cdr: B2 — write_w_handle/dispose_w_handle/unregister_instance_w_handle implemented" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // register_instance caches the hash
+    try testing.expect(has(s, "instance_handles_[_ih] = _arr;"));
+    // static helper for hash-based writes
+    try testing.expect(has(s, "static int Topic_write_kind_w_hash("));
+    // three _w_handle implementations
+    try testing.expect(has(s, "int TopicDataWriter::write_w_handle(const ::Topic& value, DDS_InstanceHandle_t handle) {"));
+    try testing.expect(has(s, "int TopicDataWriter::dispose_w_handle(const ::Topic& key, DDS_InstanceHandle_t handle) {"));
+    try testing.expect(has(s, "int TopicDataWriter::unregister_instance_w_handle(const ::Topic& key, DDS_InstanceHandle_t handle) {"));
+    try testing.expect(has(s, "if (it == instance_handles_.end()) return DDS_RETCODE_BAD_PARAMETER;"));
+}
+
+// ── --cpp-generate-impl tests (B1+B3) ────────────────────────────────────────
+
+const ConcreteImplResult = struct {
+    hdr: std.ArrayList(u8),
+    src: std.ArrayList(u8),
+    fn deinit(self: *ConcreteImplResult) void {
+        self.hdr.deinit(testing.allocator);
+        self.src.deinit(testing.allocator);
+    }
+};
+
+fn testGenConcreteImpl(source: []const u8) !ConcreteImplResult {
+    const alloc = testing.allocator;
+    var ast_arena = std.heap.ArenaAllocator.init(alloc);
+    defer ast_arena.deinit();
+    var p = parser_mod.Parser.init(source, ast_arena.allocator());
+    const spec = try p.parseSpecification();
+    var az = try semantic_mod.Analyzer.init(alloc);
+    defer az.deinit();
+    try az.analyze(&spec);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
+    defer ir_spec.deinit();
+    const opts = interface.Options{ .input_stem = "dcps", .cpp_generate_impl = true };
+    var hdr_out = std.ArrayList(u8).empty;
+    errdefer hdr_out.deinit(alloc);
+    var src_out = std.ArrayList(u8).empty;
+    errdefer src_out.deinit(alloc);
+    try generateConcreteImpl(alloc, &ir_spec, opts, &hdr_out, &src_out);
+    return .{ .hdr = hdr_out, .src = src_out };
+}
+
+test "cpp_backend: B1+B3 — entity Impl class generated" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    @callback interface FooListener {};
+        \\    interface Entity { long enable(); };
+        \\    interface Foo : Entity {
+        \\        long do_something();
+        \\        Foo get_foo();
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const hdr = res.hdr.items;
+    const src = res.src.items;
+    try testing.expect(has(hdr, "class FooImpl"));
+    try testing.expect(has(hdr, "DDS_Foo native_handle() const noexcept"));
+    try testing.expect(has(hdr, "class FooListenerBridge"));
+    try testing.expect(has(src, "DDS_Foo_do_something(ptr_)"));
+    try testing.expect(has(src, "DDS_Entity_enable(ptr_)"));
+}
+
+test "cpp_backend: B1+B3 — entity return wraps in Impl" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    interface Bar {};
+        \\    interface Foo { Bar get_bar(); };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "make_shared<BarImpl>"));
+    try testing.expect(has(src, "if (!_h.ptr)"));
+}
+
+test "cpp_backend: B1+B3 — listener bridge has c_listener and trampolines" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    interface DataWriter {};
+        \\    @callback interface DataWriterListener {
+        \\        void on_data(in DataWriter w);
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const hdr = res.hdr.items;
+    const src = res.src.items;
+    try testing.expect(has(hdr, "class DataWriterListenerBridge"));
+    try testing.expect(has(hdr, "c_listener() noexcept;"));
+    try testing.expect(has(hdr, "s_on_data"));
+    try testing.expect(has(src, "DDS_DataWriterListener DataWriterListenerBridge::c_listener()"));
+    try testing.expect(has(src, "make_shared<DataWriterImpl>"));
+}
+
+test "cpp_backend: B1+B3 — simple struct params use reinterpret_cast" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    struct Duration_t { long sec; unsigned long nanosec; };
+        \\    interface Foo { long wait(in Duration_t d); };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "reinterpret_cast<const DDS_Duration_t*>(&d)"));
+}
+
+test "cpp_backend: B1+B3 — complex QoS struct emits TODO stub" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    struct UserDataQosPolicy { sequence<octet> value; };
+        \\    struct DomainParticipantQos { UserDataQosPolicy user_data; };
+        \\    interface Foo { long set_qos(in DomainParticipantQos qos); };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "TODO"));
+    try testing.expect(!has(src, "reinterpret_cast"));
+}
+
+test "cpp_backend: B1+B3 — forward decls and factory emitted" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    @callback interface DomainParticipantListener {};
+        \\    interface DomainParticipant { long enable(); };
+        \\};
+    );
+    defer res.deinit();
+    const hdr = res.hdr.items;
+    const src = res.src.items;
+    try testing.expect(has(hdr, "class DomainParticipantImpl;"));
+    try testing.expect(has(hdr, "class DomainParticipantListenerBridge;"));
+    try testing.expect(has(hdr, "create_participant_udp("));
+    try testing.expect(has(src, "zzdds_create_participant_udp("));
+    try testing.expect(has(src, "make_shared<DomainParticipantImpl>"));
 }

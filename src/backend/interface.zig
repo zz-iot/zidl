@@ -131,6 +131,9 @@ pub const Options = struct {
     /// use the original IDL name as the canonical string representation so that
     /// config files and wire diagnostics remain language-agnostic.
     zig_idiomatic_enums: bool = false,
+    /// C++ backend: generate concrete Impl classes and listener bridges.
+    /// Outputs ${stem}_impl.hpp and ${stem}_impl.cpp alongside the abstract interface header.
+    cpp_generate_impl: bool = false,
 };
 
 // ── XRCE profile validation ───────────────────────────────────────────────────

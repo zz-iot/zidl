@@ -76,6 +76,7 @@ const Opts = struct {
     generate_zzdds_wrappers: bool = false,
     zig_generate_c_api: bool = false,
     zig_idiomatic_enums: bool = false,
+    cpp_generate_impl: bool = false,
     preprocess_timestamp_seconds: ?u64 = null,
     inputs: std.ArrayListUnmanaged([]const u8) = .empty,
 };
@@ -119,6 +120,8 @@ pub fn main(init: std.process.Init) !void {
             opts.no_typeobject_support = true;
         } else if (std.mem.eql(u8, arg, "--generate-interfaces")) {
             opts.generate_interfaces = true;
+        } else if (std.mem.eql(u8, arg, "--cpp-generate-impl")) {
+            opts.cpp_generate_impl = true;
         } else if (std.mem.eql(u8, arg, "-b")) {
             i += 1;
             if (i >= args.len) {
@@ -569,6 +572,7 @@ fn processFile(
         .zig_idiomatic_enums = opts.zig_idiomatic_enums,
         .generate_zzdds_wrappers = opts.generate_zzdds_wrappers,
         .zig_version = opts.zig_version,
+        .cpp_generate_impl = opts.cpp_generate_impl,
     };
     try be.generate(&ir_spec, gen_opts);
 }
@@ -657,6 +661,7 @@ fn printUsage(w: *Io.Writer) !void {
         \\  --c-header-guard-prefix <pfx>  Prefix for include guard macros (C, C++ backends)
         \\  --c-pragma-once                Use #pragma once instead of #ifndef guards (C, C++ backends)
         \\  --cpp-namespace <ns>           Wrap all output in an outer namespace (C++ backend)
+        \\  --cpp-generate-impl            Emit concrete Impl classes and listener bridges (C++ backend)
         \\
         \\  --java-jni-library <name>      System.loadLibrary() name for JNI impls (Java backend)
         \\  --java-package <pkg>           Package prefix, e.g. com.example (Java backend)
