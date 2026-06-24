@@ -1690,12 +1690,12 @@ const CdrGenerator = struct {
         try self.writeI("return zzdds_lookup_instance_reader(reader_, _hash);\n");
         try self.write("}\n\n");
 
-        try self.print("static int {s}_reader_n_impl({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is, bool destructive) {{\n", .{ c_name, c_name, cpp_qname });
+        try self.print("static int {s}_reader_n_impl(DDS_DataReader reader, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is, bool destructive) {{\n", .{ c_name, cpp_qname });
         try self.writeI("zzdds_raw_sample_array _arr{};\n");
         try self.writeI("int _n = destructive ?\n");
         self.indent_depth += 1;
-        try self.writeI("zzdds_take_n_raw(self->reader_, ss, vs, is, max, &_arr) :\n");
-        try self.writeI("zzdds_read_n_raw(self->reader_, ss, vs, is, max, &_arr);\n");
+        try self.writeI("zzdds_take_n_raw(reader, ss, vs, is, max, &_arr) :\n");
+        try self.writeI("zzdds_read_n_raw(reader, ss, vs, is, max, &_arr);\n");
         self.indent_depth -= 1;
         try self.writeI("if (_n <= 0) return _n;\n");
         try self.writeI("for (int _i = 0; _i < _n; _i++) {\n");
@@ -1708,20 +1708,20 @@ const CdrGenerator = struct {
         try self.printI("{s}_deserialize(&_r, &values[_i]) :\n", .{c_name});
         try self.printI("{s}_deserialize_key(&_r, &values[_i]);\n", .{c_name});
         self.indent_depth -= 1;
-        try self.writeI("if (_rc) { zzdds_return_raw_samples(self->reader_, &_arr); return _rc; }\n");
+        try self.writeI("if (_rc) { zzdds_return_raw_samples(reader, &_arr); return _rc; }\n");
         self.indent_depth -= 1;
         try self.writeI("}\n");
-        try self.writeI("zzdds_return_raw_samples(self->reader_, &_arr);\n");
+        try self.writeI("zzdds_return_raw_samples(reader, &_arr);\n");
         try self.writeI("return _n;\n");
         try self.write("}\n\n");
 
         try self.print("int {s}DataReader::take_n({s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, cpp_qname });
         try self.writeI("return ");
-        try self.print("{s}_reader_n_impl(this, values, infos, max, ss, vs, is, true);\n", .{c_name});
+        try self.print("{s}_reader_n_impl(reader_, values, infos, max, ss, vs, is, true);\n", .{c_name});
         try self.write("}\n\n");
         try self.print("int {s}DataReader::read_n({s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, cpp_qname });
         try self.writeI("return ");
-        try self.print("{s}_reader_n_impl(this, values, infos, max, ss, vs, is, false);\n", .{c_name});
+        try self.print("{s}_reader_n_impl(reader_, values, infos, max, ss, vs, is, false);\n", .{c_name});
         try self.write("}\n\n");
 
         try self.print("int {s}DataReader::take_loaned(Loan& out) {{\n", .{c_name});
