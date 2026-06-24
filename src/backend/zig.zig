@@ -2685,6 +2685,7 @@ const Generator = struct {
         const type_name = try std.fmt.allocPrint(self.alloc, "{s}{s}", .{ pfx, s.name });
         defer self.alloc.free(type_name);
         const appendable = s.annotations.extensibility == .appendable;
+        const needs_deinit = structNeedsSeqDeinit(s);
 
         // ── DataWriter ────────────────────────────────────────────────────────
         try self.ind();
@@ -2736,11 +2737,22 @@ const Generator = struct {
         try self.ind();
         try self.print("    pub fn get_key_value(self: @This(), key_holder: *{s}, handle: _zzdds.DDS.InstanceHandle_t) !void {{\n", .{type_name});
         try self.ind();
-        try self.write("        const _kv = _zzdds.getKeyValueRawWriter(self._dw, handle) orelse return error.BadParameter;\n");
+        try self.write("        const _raw = _zzdds.getKeyValueRawWriter(self._dw, handle) orelse return error.BadParameter;\n");
         try self.ind();
-        try self.write("        var _r = try zidl_rt.CdrReader.init(_kv);\n");
-        try self.ind();
-        try self.print("        try {s}.deserializeKeyInto(key_holder, &_r, self._alloc);\n", .{type_name});
+        try self.write("        var _r = try zidl_rt.CdrReader.init(_raw);\n");
+        if (needs_deinit) {
+            try self.ind();
+            try self.print("        var _kv: {s} = .{{}};\n", .{type_name});
+            try self.ind();
+            try self.write("        errdefer _kv.deinit(self._alloc);\n");
+            try self.ind();
+            try self.print("        try {s}.deserializeKeyInto(&_kv, &_r, self._alloc);\n", .{type_name});
+            try self.ind();
+            try self.write("        key_holder.* = _kv;\n");
+        } else {
+            try self.ind();
+            try self.print("        try {s}.deserializeKeyInto(key_holder, &_r, self._alloc);\n", .{type_name});
+        }
         try self.ind();
         try self.write("    }\n");
 
@@ -2807,15 +2819,13 @@ const Generator = struct {
         try self.write("\n");
 
         // take_next_sample
-        try self.emitReaderSingleMethod(type_name, "take_next_sample", false, false);
+        try self.emitReaderSingleMethod(type_name, "take_next_sample", false, false, needs_deinit);
         // read_next_sample
-        try self.emitReaderSingleMethod(type_name, "read_next_sample", false, true);
+        try self.emitReaderSingleMethod(type_name, "read_next_sample", false, true, needs_deinit);
         // take_next_instance
-        try self.emitReaderSingleMethod(type_name, "take_next_instance", true, false);
+        try self.emitReaderSingleMethod(type_name, "take_next_instance", true, false, needs_deinit);
         // read_next_instance
-        try self.emitReaderSingleMethod(type_name, "read_next_instance", true, true);
-
-        const needs_deinit = structNeedsSeqDeinit(s);
+        try self.emitReaderSingleMethod(type_name, "read_next_instance", true, true, needs_deinit);
         // take with masks
         try self.emitReaderBatchMethod(type_name, "take", true, false, needs_deinit);
         // read with masks
@@ -2830,11 +2840,22 @@ const Generator = struct {
         try self.ind();
         try self.print("    pub fn get_key_value(self: @This(), key_holder: *{s}, handle: _zzdds.DDS.InstanceHandle_t) !void {{\n", .{type_name});
         try self.ind();
-        try self.write("        const _kv = _zzdds.getKeyValueRawReader(self._dr, handle) orelse return error.BadParameter;\n");
+        try self.write("        const _raw = _zzdds.getKeyValueRawReader(self._dr, handle) orelse return error.BadParameter;\n");
         try self.ind();
-        try self.write("        var _r = try zidl_rt.CdrReader.init(_kv);\n");
-        try self.ind();
-        try self.print("        try {s}.deserializeKeyInto(key_holder, &_r, self._alloc);\n", .{type_name});
+        try self.write("        var _r = try zidl_rt.CdrReader.init(_raw);\n");
+        if (needs_deinit) {
+            try self.ind();
+            try self.print("        var _kv: {s} = .{{}};\n", .{type_name});
+            try self.ind();
+            try self.write("        errdefer _kv.deinit(self._alloc);\n");
+            try self.ind();
+            try self.print("        try {s}.deserializeKeyInto(&_kv, &_r, self._alloc);\n", .{type_name});
+            try self.ind();
+            try self.write("        key_holder.* = _kv;\n");
+        } else {
+            try self.ind();
+            try self.print("        try {s}.deserializeKeyInto(key_holder, &_r, self._alloc);\n", .{type_name});
+        }
         try self.ind();
         try self.write("    }\n");
 
@@ -2862,6 +2883,7 @@ const Generator = struct {
         method_name: []const u8,
         with_instance: bool,
         non_destructive: bool,
+        needs_deinit: bool,
     ) !void {
         const raw_fn = if (with_instance)
             (if (non_destructive) "_zzdds.readNextInstanceRaw" else "_zzdds.takeNextInstanceRaw")
@@ -2886,8 +2908,19 @@ const Generator = struct {
         try self.print("            data_value.* = try {s}.deserialize(&_r, self._alloc);\n", .{type_name});
         try self.ind();
         try self.write("        } else {\n");
-        try self.ind();
-        try self.print("            try {s}.deserializeKeyInto(data_value, &_r, self._alloc);\n", .{type_name});
+        if (needs_deinit) {
+            try self.ind();
+            try self.print("            var _kv: {s} = .{{}};\n", .{type_name});
+            try self.ind();
+            try self.write("            errdefer _kv.deinit(self._alloc);\n");
+            try self.ind();
+            try self.print("            try {s}.deserializeKeyInto(&_kv, &_r, self._alloc);\n", .{type_name});
+            try self.ind();
+            try self.write("            data_value.* = _kv;\n");
+        } else {
+            try self.ind();
+            try self.print("            try {s}.deserializeKeyInto(data_value, &_r, self._alloc);\n", .{type_name});
+        }
         try self.ind();
         try self.write("        }\n");
         try self.ind();
