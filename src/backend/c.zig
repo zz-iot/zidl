@@ -2214,7 +2214,7 @@ const CdrGenerator = struct {
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, loan->data, loan->data_len);\n");
         try self.writeI("if (_rc) { zzdds_return_loaned_raw(self->reader, loan); return _rc; }\n");
-        try self.printI("_rc = {s}_deserialize(&_r, out);\n", .{c_name});
+        try self.printI("_rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
         try self.writeI("if (_rc) zzdds_return_loaned_raw(self->reader, loan);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
