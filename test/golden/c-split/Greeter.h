@@ -9,7 +9,7 @@
 typedef struct { void *ptr; const void *vtable; } Greeter;
 
 /* IDL interface: Greeter */
-char *Greeter_greet(Greeter self, char *name);
+char *Greeter_greet(Greeter self, const char *name);
 void Greeter_reset(Greeter self);
 int32_t Greeter_get_count(Greeter self);
 

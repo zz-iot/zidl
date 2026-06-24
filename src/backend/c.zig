@@ -961,10 +961,15 @@ const Generator = struct {
         const base = try self.typeRefToC(p.type_ref);
         defer self.alloc.free(base);
         return switch (p.mode) {
-            .in_ => if (isCPrimitive(p.type_ref))
-                self.alloc.dupe(u8, base) // scalars: pass by value
-            else
-                std.fmt.allocPrint(self.alloc, "const {s} *", .{base}), // structs: const pointer
+            .in_ => switch (p.type_ref) {
+                // A3: in string/wstring → const char * / const uint16_t *
+                .string => self.alloc.dupe(u8, "const char *"),
+                .wstring => self.alloc.dupe(u8, "const uint16_t *"),
+                else => if (isCPrimitive(p.type_ref))
+                    self.alloc.dupe(u8, base) // scalars: pass by value
+                else
+                    std.fmt.allocPrint(self.alloc, "const {s} *", .{base}), // structs: const pointer
+            },
             .out, .inout => std.fmt.allocPrint(self.alloc, "{s} *", .{base}),
         };
     }
@@ -4025,10 +4030,19 @@ test "c_backend: interface fat-pointer typedef emitted before free functions" {
     try testing.expect(has(s, "typedef struct { void *ptr; const void *vtable; } Greeter;"));
     // Free function declarations, not vtable fields
     try testing.expect(has(s, "/* IDL interface: Greeter */"));
-    try testing.expect(has(s, "char *Greeter_greet(Greeter self, char *name);"));
+    try testing.expect(has(s, "char *Greeter_greet(Greeter self, const char *name);"));
     // No named vtable struct
     try testing.expect(!has(s, "Greeter_Vtable"));
     try testing.expect(!has(s, "zig_new"));
+}
+
+test "c_backend: A3 — in wstring parameter uses const uint16_t *" {
+    var out = try testGenIfaceHeader(
+        \\interface Codec { void encode(in wstring input); };
+    , "codec");
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "void Codec_encode(Codec self, const uint16_t *input);"));
+    try testing.expect(!has(out.items, "Codec self, uint16_t *input"));
 }
 
 test "c_backend: interface readonly attribute emits getter only" {
