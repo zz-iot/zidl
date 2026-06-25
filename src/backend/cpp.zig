@@ -1879,7 +1879,9 @@ const CdrGenerator = struct {
         try self.print("int {s}DataWriter::unregister_instance_w_handle(const {s}& key, DDS_InstanceHandle_t handle) {{\n", .{ class_name, cpp_qname });
         try self.writeI("auto it = instance_handles_.find(handle);\n");
         try self.writeI("if (it == instance_handles_.end()) return DDS_RETCODE_BAD_PARAMETER;\n");
-        try self.printI("return {s}_write_kind_w_hash(writer_, xcdr_version_, ZZDDS_WRITE_UNREGISTER, key, true, it->second.data());\n", .{class_name});
+        try self.printI("int _rc = {s}_write_kind_w_hash(writer_, xcdr_version_, ZZDDS_WRITE_UNREGISTER, key, true, it->second.data());\n", .{class_name});
+        try self.writeI("instance_handles_.erase(it);\n");
+        try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
         try self.print("int {s}DataReader::take(Sample& out, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{class_name});
@@ -1953,7 +1955,13 @@ const CdrGenerator = struct {
         try self.printI("{s}_deserialize(&_r, &values[_i]) :\n", .{c_name});
         try self.printI("{s}_deserialize_key(&_r, &values[_i]);\n", .{c_name});
         self.indent_depth -= 1;
-        try self.writeI("if (_rc) { zzdds_return_raw_samples(reader, &_arr); return _rc; }\n");
+        try self.writeI("if (_rc) {\n");
+        self.indent_depth += 1;
+        try self.writeI("for (int _j = 0; _j < _i; _j++) values[_j] = {};\n");
+        try self.writeI("zzdds_return_raw_samples(reader, &_arr);\n");
+        try self.writeI("return _rc;\n");
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
         self.indent_depth -= 1;
         try self.writeI("}\n");
         try self.writeI("zzdds_return_raw_samples(reader, &_arr);\n");
@@ -6198,6 +6206,18 @@ test "cpp_backend cdr: zzdds wrapper implementations for keyed topic" {
     try testing.expect(has(s, "void TopicDataReader::Loan::reset() {"));
 }
 
+test "cpp_backend cdr: _reader_n_impl cleans up partial samples on deserialization failure" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; string name; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "for (int _j = 0; _j < _i; _j++) values[_j] = {};"));
+    try testing.expect(has(s, "zzdds_return_raw_samples(reader, &_arr);"));
+}
+
 test "cpp_backend: A1+A2 — namespaced struct uses IDL-scoped type name and namespace wrapper" {
     // A2: wrapper classes live inside namespace ovidds, not at global scope
     // A1: default type_name is "ovidds::Frame", not "ovidds_Frame"
@@ -6422,6 +6442,7 @@ test "cpp_backend cdr: B2 — write_w_handle/dispose_w_handle/unregister_instanc
     try testing.expect(has(s, "int TopicDataWriter::dispose_w_handle(const ::Topic& key, DDS_InstanceHandle_t handle) {"));
     try testing.expect(has(s, "int TopicDataWriter::unregister_instance_w_handle(const ::Topic& key, DDS_InstanceHandle_t handle) {"));
     try testing.expect(has(s, "if (it == instance_handles_.end()) return DDS_RETCODE_BAD_PARAMETER;"));
+    try testing.expect(has(s, "instance_handles_.erase(it);"));
 }
 
 // ── --cpp-generate-impl tests (B1+B3) ────────────────────────────────────────

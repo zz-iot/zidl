@@ -2236,7 +2236,17 @@ const CdrGenerator = struct {
         try self.printI("{s}_deserialize(&_r, &values[_i]) :\n", .{c_name});
         try self.printI("{s}_deserialize_key(&_r, &values[_i]);\n", .{c_name});
         self.indent_depth -= 1;
-        try self.writeI("if (_rc) { zzdds_return_raw_samples(self->reader, &_arr); return _rc; }\n");
+        if (structHasSequenceFields(s)) {
+            try self.writeI("if (_rc) {\n");
+            self.indent_depth += 1;
+            try self.printI("for (int _j = 0; _j < _i; _j++) {s}_free(&values[_j]);\n", .{c_name});
+            try self.writeI("zzdds_return_raw_samples(self->reader, &_arr);\n");
+            try self.writeI("return _rc;\n");
+            self.indent_depth -= 1;
+            try self.writeI("}\n");
+        } else {
+            try self.writeI("if (_rc) { zzdds_return_raw_samples(self->reader, &_arr); return _rc; }\n");
+        }
         self.indent_depth -= 1;
         try self.writeI("}\n");
         try self.writeI("zzdds_return_raw_samples(self->reader, &_arr);\n");
@@ -4393,6 +4403,30 @@ test "c_backend cdr: A1 — namespaced struct uses IDL-scoped type name in TypeS
     // fallback type_name must be IDL-scoped, not C-flat
     try testing.expect(has(s, "\"ovidds::Frame\""));
     try testing.expect(!has(s, "\"ovidds_Frame\""));
+}
+
+test "c_backend cdr: _n_impl cleans up partial samples when struct has sequence fields" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Msg { @key long id; sequence<octet> data; };",
+        "msg",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "for (int _j = 0; _j < _i; _j++) Msg_free(&values[_j]);"));
+    try testing.expect(has(s, "zzdds_return_raw_samples(self->reader, &_arr);"));
+}
+
+test "c_backend cdr: _n_impl has no cleanup loop when struct has no sequence fields" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Msg { @key long id; long value; };",
+        "msg",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(!has(s, "Msg_free(&values[_j])"));
+    try testing.expect(has(s, "if (_rc) { zzdds_return_raw_samples(self->reader, &_arr); return _rc; }"));
 }
 
 test "c_backend cdr: zzdds_c omitted when no qualifying topic struct" {
