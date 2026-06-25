@@ -3183,53 +3183,6 @@ const ConcreteImplGenerator = struct {
 
     // ── Listener bridge declaration (header) ──────────────────────────────────
 
-    fn emitListenerBridgeDecl(self: *ConcreteImplGenerator, ns: []const u8, iface: *const ir.Interface) !void {
-        const c_name = try cNameOf(self.alloc, iface.qualified_name);
-        defer self.alloc.free(c_name);
-
-        var ops = std.ArrayListUnmanaged(ir.Operation).empty;
-        defer ops.deinit(self.alloc);
-        var attrs = std.ArrayListUnmanaged(ir.Attribute).empty;
-        defer attrs.deinit(self.alloc);
-        try collectIfaceMembers(self.alloc, iface, &ops, &attrs);
-
-        try self.hdrPrint("// \u{2500}\u{2500} {s}Bridge \u{2500}\u{2500}\n\n", .{iface.name});
-        try self.hdrPrint(
-            "class {s}Bridge : public ::{s}::{s} {{\npublic:\n",
-            .{ iface.name, ns, iface.name },
-        );
-        try self.hdrWrite("    virtual ~");
-        try self.hdrPrint("{s}Bridge() = default;\n", .{iface.name});
-
-        // Default no-op overrides
-        for (ops.items) |op| {
-            const sig = try self.opSignature(&op);
-            defer self.alloc.free(sig);
-            try self.hdrPrint("    {s} override {{}}\n", .{sig});
-        }
-
-        // c_listener() declaration
-        try self.hdrPrint("    {s} c_listener() noexcept;\n", .{c_name});
-        try self.hdrWrite("private:\n");
-
-        // Static trampoline declarations
-        for (ops.items) |op| {
-            try self.hdrWrite("    static void s_");
-            try self.hdrWrite(op.name);
-            try self.hdrWrite("(");
-            for (op.params, 0..) |p, i| {
-                if (i > 0) try self.hdrWrite(", ");
-                const ct = try self.paramToCType(p);
-                defer self.alloc.free(ct);
-                try self.hdrWrite(ct);
-            }
-            if (op.params.len > 0) try self.hdrWrite(", ");
-            try self.hdrWrite("void* d);\n");
-        }
-
-        try self.hdrWrite("};\n\n");
-    }
-
     fn emitFactoryDecl(self: *ConcreteImplGenerator, ns: []const u8) !void {
         try self.hdrWrite("// \u{2500}\u{2500} Factory \u{2500}\u{2500}\n\n");
         try self.hdrPrint(
