@@ -101,7 +101,9 @@ pub const CppBackend = struct {
         }
 
         // ── <stem>_impl.cpp ──────────────────────────────────────────────────
-        if (opts.generate_interfaces) {
+        // Skipped when cpp_generate_impl is also set: generateConcreteImpl writes
+        // the same filename and subsumes the listener bridge + factory output.
+        if (opts.generate_interfaces and !opts.cpp_generate_impl) {
             var impl_content = std.ArrayList(u8).empty;
             defer impl_content.deinit(self.alloc);
             try generateImplSource(self.alloc, spec, opts, &impl_content);
@@ -3331,10 +3333,11 @@ const ConcreteImplGenerator = struct {
                 defer self.alloc.free(lc);
                 const bridge_name = try self.listenerBridgeName(p.type_ref);
                 defer self.alloc.free(bridge_name);
+                try self.srcPrint("    {s}* _lp_{s} = nullptr;\n", .{ lc, p.name });
                 try self.srcPrint("    {s} _l_{s}{{}};\n", .{ lc, p.name });
                 try self.srcPrint(
-                    "    if (auto* _b = dynamic_cast<{s}*>({s}.get())) _l_{s} = _b->c_listener();\n",
-                    .{ bridge_name, p.name, p.name },
+                    "    if (auto* _b = dynamic_cast<{s}*>({s}.get())) {{ _l_{s} = _b->c_listener(); _lp_{s} = &_l_{s}; }}\n",
+                    .{ bridge_name, p.name, p.name, p.name, p.name },
                 );
             }
         }
@@ -3456,17 +3459,15 @@ const ConcreteImplGenerator = struct {
                 },
                 .complex_struct_in, .seq_in, .complex_struct_out, .seq_out => try self.srcPrint("&_c_{s}", .{p.name}),
                 .entity_in => {
-                    const impl_name = try self.entityImplName(p.type_ref);
-                    defer self.alloc.free(impl_name);
                     const ct = try self.typeRefToCType(p.type_ref);
                     defer self.alloc.free(ct);
                     try self.srcPrint(
-                        "({s} ? static_cast<{s}*>({s}.get())->native_handle() : {s}{{nullptr, nullptr}})",
-                        .{ p.name, impl_name, p.name, ct },
+                        "({s} ? {s}->native_handle() : {s}{{nullptr, nullptr}})",
+                        .{ p.name, p.name, ct },
                     );
                 },
                 .listener_in => {
-                    try self.srcPrint("({s} ? &_l_{s} : nullptr)", .{ p.name, p.name });
+                    try self.srcPrint("_lp_{s}", .{p.name});
                 },
                 .todo => try self.srcPrint("/* TODO({s}) */", .{p.name}),
             }
@@ -4960,7 +4961,10 @@ fn generateTypeHeader(
     }
     if (opts.generate_zzdds_wrappers and !opts.no_typesupport) {
         switch (td) {
-            .struct_ => |s| if (isZzddsTopicStructCpp(s)) try gen.write("#include \"zzdds_c.h\"\n"),
+            .struct_ => |s| if (isZzddsTopicStructCpp(s)) {
+                try gen.write("#include \"zzdds_c.h\"\n");
+                try gen.write("#include <unordered_map>\n");
+            },
             else => {},
         }
     }
@@ -6715,4 +6719,38 @@ test "cpp_backend: D3 — typedef sequence<octet> out-param gets seq_out adaptat
     try testing.expect(has(src, ".assign("));
     try testing.expect(has(src, "DDS_OctetSeq_free(&_c_data)"));
     try testing.expect(!has(src, "TODO"));
+}
+
+test "cpp_backend split: zzdds wrapper header includes unordered_map" {
+    var out = try testGenTypeHeaderOpts("@appendable struct Topic { @key long id; };", "topic", 0, .{ .generate_zzdds_wrappers = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "#include \"zzdds_c.h\""));
+    try testing.expect(has(s, "#include <unordered_map>"));
+}
+
+test "cpp_backend: entity_in param uses virtual native_handle, not static_cast" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    interface Topic {};
+        \\    interface DomainParticipant { long create_topic(in Topic t); };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "t->native_handle()"));
+    try testing.expect(!has(src, "static_cast<TopicImpl*>"));
+}
+
+test "cpp_backend: listener_in uses _lp_ null pointer, not address-of zero struct" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    @callback interface DataWriterListener { void on_offered_deadline_missed(); };
+        \\    interface DataWriter { long set_listener(in DataWriterListener l); };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "_lp_l"));
+    try testing.expect(!has(src, "l ? &_l_l : nullptr"));
 }
