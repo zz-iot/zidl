@@ -313,7 +313,7 @@ const Generator = struct {
         // ABI declarations; duplicating them in dcps.hpp with C++ type names
         // (::DDS::Foo*) causes conflicting-declaration errors when both headers
         // are included in the same TU (as dcps_impl.hpp does).
-        if (!self.opts.no_typesupport and !self.opts.generate_interfaces) {
+        if (!self.opts.no_typesupport) {
             try self.emitCdrProtos(spec.items);
         }
 
