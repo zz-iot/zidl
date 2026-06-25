@@ -3410,8 +3410,6 @@ const ConcreteImplGenerator = struct {
 
         // Getter
         try self.srcPrint("{s} {s}Impl::{s}() const {{\n", .{ at, class_name, attr.name });
-        const rk = returnAdaptKind(.{ .named = .{ .interface = undefined } }); // dummy
-        _ = rk;
         switch (returnAdaptKind(attr.type_ref)) {
             .entity => {
                 const ret_c = try self.typeRefToCType(attr.type_ref);
