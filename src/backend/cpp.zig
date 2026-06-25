@@ -308,6 +308,10 @@ const Generator = struct {
 
         try self.emitItems(spec.items);
 
+        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport) {
+            try self.emitAllZzddsWrapperDecls(spec.items);
+        }
+
         // CDR protos are suppressed when the C header ({stem}.h) is included by
         // this file.  The C header is the authoritative source for C ABI function
         // declarations; if we re-declare them in .hpp with C++ type names
@@ -409,8 +413,24 @@ const Generator = struct {
             try self.print("{s}{s}int {s}_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);\n", .{ em, sp, c_name });
         }
         try self.write("\n");
-        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and isZzddsTopicStructCpp(s)) {
-            try self.emitStructZzddsWrapperDecls(s, cpp_qname);
+    }
+
+    fn emitAllZzddsWrapperDecls(self: *Generator, items: []const ir.ModuleItem) anyerror!void {
+        for (items) |item| {
+            switch (item) {
+                .module => |m| try self.emitAllZzddsWrapperDecls(m.items),
+                .type_decl => |td| switch (td) {
+                    .struct_ => |s| {
+                        if (isZzddsTopicStructCpp(s)) {
+                            const cpp_qname = try std.fmt.allocPrint(self.alloc, "::{s}", .{s.qualified_name});
+                            defer self.alloc.free(cpp_qname);
+                            try self.emitStructZzddsWrapperDecls(s, cpp_qname);
+                        }
+                    },
+                    else => {},
+                },
+                else => {},
+            }
         }
     }
 
@@ -1863,7 +1883,13 @@ const CdrGenerator = struct {
         try self.print("DDS_InstanceHandle_t {s}DataWriter::lookup_instance(const {s}& key) {{\n", .{ class_name, cpp_qname });
         try self.writeI("uint8_t _hash[16];\n");
         try self.printI("if ({s}_compute_key_hash(&key, _hash)) return DDS_HANDLE_NIL;\n", .{c_name});
-        try self.writeI("return zzdds_lookup_instance_writer(writer_, _hash);\n");
+        try self.writeI("DDS_InstanceHandle_t _ih = zzdds_lookup_instance_writer(writer_, _hash);\n");
+        try self.writeI("if (_ih != DDS_HANDLE_NIL) {\n");
+        try self.writeI("    std::array<uint8_t, 16> _arr;\n");
+        try self.writeI("    std::memcpy(_arr.data(), _hash, 16);\n");
+        try self.writeI("    instance_handles_[_ih] = _arr;\n");
+        try self.writeI("}\n");
+        try self.writeI("return _ih;\n");
         try self.write("}\n\n");
 
         try self.print("int {s}DataWriter::write_w_handle(const {s}& value, DDS_InstanceHandle_t handle) {{\n", .{ class_name, cpp_qname });
@@ -4948,6 +4974,17 @@ fn generateTypeHeader(
     }
 
     try gen.emitTypeDecl(td);
+
+    if (opts.generate_zzdds_wrappers and !opts.no_typesupport) {
+        switch (td) {
+            .struct_ => |s| if (isZzddsTopicStructCpp(s)) {
+                const cpp_qname = try std.fmt.allocPrint(alloc, "::{s}", .{s.qualified_name});
+                defer alloc.free(cpp_qname);
+                try gen.emitStructZzddsWrapperDecls(s, cpp_qname);
+            },
+            else => {},
+        }
+    }
 
     if (!opts.no_typesupport) {
         switch (td) {
