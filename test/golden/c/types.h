@@ -7,6 +7,10 @@
 #include <stdbool.h>
 #include "zidl_cdr.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef enum {
     Color_RED = 0,
     Color_GREEN = 1,
@@ -65,6 +69,8 @@ int Sample_deserialize_key(ZidlCdrReader *_r, Sample *_v);
 int Sample_compute_key_hash(const Sample *_v, uint8_t _hash[16]);
 int Sample_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);
 
+void Sample_free(Sample *v);
+
 typedef struct Frame_s {
     uint32_t seq_num;
     char *topic;
@@ -100,4 +106,8 @@ void AdvancedGreeter_reset(AdvancedGreeter self);
 void AdvancedGreeter_greetAdvanced(AdvancedGreeter self, const char *name);
 int32_t AdvancedGreeter_get_count(AdvancedGreeter self);
 
+
+#ifdef __cplusplus
+}
+#endif
 #endif /* TYPES_H */

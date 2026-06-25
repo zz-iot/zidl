@@ -360,6 +360,9 @@ const Generator = struct {
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and isZzddsTopicStruct(s)) {
             try self.emitStructTypedWrapper(s);
         }
+        if (self.opts.zig_generate_c_api and structNeedsSeqDeinit(s)) {
+            try self.emitStructCApiFree(s);
+        }
     }
 
     // ── Union ─────────────────────────────────────────────────────────────────
@@ -1157,6 +1160,15 @@ const Generator = struct {
             try self.write("    }\n");
             try self.ind();
             try self.print("}}; // {s}{s}\n\n", .{ pfx, t.name });
+            if (self.opts.zig_generate_c_api) {
+                const c_name = try self.cApiQualName(t.qualified_name, pfx);
+                defer self.alloc.free(c_name);
+                try self.ind();
+                try self.print(
+                    "pub export fn {s}_free(v: *{s}{s}) callconv(.c) void {{ v.deinit(std.heap.c_allocator); }}\n\n",
+                    .{ c_name, pfx, t.name },
+                );
+            }
             return;
         }
 
@@ -1407,6 +1419,21 @@ const Generator = struct {
     }
 
     // ── C-API exports (--zig-generate-c-api) ─────────────────────────────────
+
+    /// Emit `pub export fn DDS_X_free(v: *X) callconv(.c) void` for structs that
+    /// contain sequence fields allocated by the middleware (identified by _release).
+    /// The caller frees via the struct's generated `deinit` using std.heap.c_allocator,
+    /// which matches the allocator used by all C-ABI operations in zzdds.
+    fn emitStructCApiFree(self: *Generator, s: *const ir.Struct) !void {
+        const pfx = self.opts.type_prefix;
+        const c_name = try self.cApiQualName(s.qualified_name, pfx);
+        defer self.alloc.free(c_name);
+        try self.ind();
+        try self.print(
+            "pub export fn {s}_free(v: *{s}{s}) callconv(.c) void {{ v.deinit(std.heap.c_allocator); }}\n\n",
+            .{ c_name, pfx, s.name },
+        );
+    }
 
     /// Emit `pub export fn callconv(.c)` trivial forwarders for all operations and
     /// attributes of an entity interface.  Callback interfaces are handled by
@@ -6501,4 +6528,40 @@ test "zig_backend: @default scoped_name emits identifier" {
     , "cfg");
     defer h.deinit(testing.allocator);
     try testing.expect(has(h.items, "limit: i32 = MY_MAX,"));
+}
+
+test "zig_backend: struct with sequence field gets _free export under zig_generate_c_api" {
+    var h = try testGenOpts(
+        \\struct Policy { sequence<octet> value; };
+    , "t", .{ .zig_generate_c_api = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer h.deinit(testing.allocator);
+    // Export function uses C name (qualified) and calls deinit with c_allocator
+    try testing.expect(has(h.items, "Policy_free"));
+    try testing.expect(has(h.items, "callconv(.c)"));
+    try testing.expect(has(h.items, "v.deinit(std.heap.c_allocator)"));
+}
+
+test "zig_backend: struct without sequence fields has no _free export" {
+    var h = try testGenOpts(
+        \\struct Simple { long x; };
+    , "t", .{ .zig_generate_c_api = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer h.deinit(testing.allocator);
+    try testing.expect(!has(h.items, "_free"));
+}
+
+test "zig_backend: sequence typedef gets _free export when zig_generate_c_api" {
+    var h = try testGenOpts(
+        \\typedef sequence<string> StringSeq;
+    , "t", .{ .zig_generate_c_api = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "pub export fn StringSeq_free("));
+    try testing.expect(has(h.items, "v.deinit(std.heap.c_allocator)"));
+}
+
+test "zig_backend: sequence typedef has no _free export without zig_generate_c_api" {
+    var h = try testGenOpts(
+        \\typedef sequence<octet> OctetSeq;
+    , "t", .{ .no_typesupport = true, .no_typeobject_support = true });
+    defer h.deinit(testing.allocator);
+    try testing.expect(!has(h.items, "_free"));
 }

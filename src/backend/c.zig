@@ -231,7 +231,11 @@ const Generator = struct {
             try self.write("#include \"zzdds_c.h\"\n");
         }
         try self.write("\n");
-        if (self.opts.extern_c) {
+        // Always emit extern "C" when generating interfaces: the DDS C API is
+        // explicitly designed for C/C++ interop, and the guard is harmless for
+        // pure-C compilation units.  The --c-extern-c flag still forces it on
+        // for non-interface headers if the user wants it.
+        if (self.opts.extern_c or self.opts.generate_interfaces) {
             try self.write("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
         }
 
@@ -260,7 +264,7 @@ const Generator = struct {
         try self.emitItems(spec.items);
 
         // Closing guard.
-        if (self.opts.extern_c) {
+        if (self.opts.extern_c or self.opts.generate_interfaces) {
             try self.write("\n#ifdef __cplusplus\n}\n#endif\n");
         }
         if (!self.opts.pragma_once) {
@@ -573,6 +577,11 @@ const Generator = struct {
                 try self.emitStructZzddsWrapperProtos(c_name);
             }
         }
+        if (structHasSequenceFields(s)) {
+            const em = self.opts.export_macro;
+            const sp: []const u8 = if (em.len > 0) " " else "";
+            try self.print("{s}{s}void {s}_free({s} *v);\n\n", .{ em, sp, c_name, c_name });
+        }
         try self.emitVerbatimForPlacement(s.annotations.raw, "after-declaration");
     }
 
@@ -752,6 +761,18 @@ const Generator = struct {
                 try self.print("[{d}]", .{d});
             }
             try self.write(";\n\n");
+        }
+
+        // Unbounded sequence typedefs need a _free declaration so C++ bindings
+        // can release middleware-allocated buffers after copying them out.
+        const is_unbounded_seq = t.dimensions.len == 0 and switch (t.type_ref) {
+            .sequence => |seq| seq.bound == null,
+            else => false,
+        };
+        if (is_unbounded_seq) {
+            const em = self.opts.export_macro;
+            const sp: []const u8 = if (em.len > 0) " " else "";
+            try self.print("{s}{s}void {s}_free({s} *v);\n\n", .{ em, sp, c_name, c_name });
         }
     }
 
@@ -1266,6 +1287,27 @@ fn itemsHaveZzddsTopicStructC(items: []const ir.ModuleItem) bool {
         }
     }
     return false;
+}
+
+/// Returns true if the struct contains any unbounded sequence field (recursively
+/// through nested structs and typedefs), indicating it needs a _free function.
+fn structHasSequenceFields(s: *const ir.Struct) bool {
+    for (s.members) |m| {
+        if (typeRefHasSequence(m.type_ref)) return true;
+    }
+    return false;
+}
+
+fn typeRefHasSequence(tr: ir.TypeRef) bool {
+    return switch (tr) {
+        .sequence => |seq| seq.bound == null,
+        .named => |td| switch (td) {
+            .typedef => |t| t.dimensions.len == 0 and typeRefHasSequence(t.type_ref),
+            .struct_ => |s| structHasSequenceFields(s),
+            else => false,
+        },
+        else => false,
+    };
 }
 
 fn isDefaultUnionCase(cas: ir.UnionCase) bool {
@@ -4909,6 +4951,53 @@ test "c_backend cdr: @default string with non-ASCII uses octal escape" {
     var src = try testGenCdr(idl, "cfg");
     defer src.deinit(testing.allocator);
     try testing.expect(has(src.items, "strdup(\"\\001\")"));
+}
+
+test "c_backend: struct with sequence field gets _free declaration" {
+    const idl =
+        \\struct Policy { sequence<octet> value; };
+    ;
+    var h = try testGen(idl, "t");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "void Policy_free(Policy *v);"));
+}
+
+test "c_backend: struct without sequence fields has no _free declaration" {
+    const idl =
+        \\struct Simple { long x; string name; };
+    ;
+    var h = try testGen(idl, "t");
+    defer h.deinit(testing.allocator);
+    try testing.expect(!has(h.items, "_free"));
+}
+
+test "c_backend: nested struct with sequence field gets _free on outer struct" {
+    const idl =
+        \\struct Inner { sequence<long> vals; };
+        \\struct Outer { Inner nested; long id; };
+    ;
+    var h = try testGen(idl, "t");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "void Inner_free(Inner *v);"));
+    try testing.expect(has(h.items, "void Outer_free(Outer *v);"));
+}
+
+test "c_backend: sequence typedef gets _free declaration" {
+    const idl =
+        \\typedef sequence<string> StringSeq;
+    ;
+    var h = try testGen(idl, "t");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "void StringSeq_free(StringSeq *v);"));
+}
+
+test "c_backend: sequence typedef _free respects export macro" {
+    const idl =
+        \\typedef sequence<octet> OctetSeq;
+    ;
+    var h = try testGenFullOpts(idl, "t", .{ .export_macro = "MYLIB_EXPORT" });
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "MYLIB_EXPORT void OctetSeq_free(OctetSeq *v);"));
 }
 
 test "c_backend: @default prototype absent when no_typesupport" {
