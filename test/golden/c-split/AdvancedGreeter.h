@@ -10,9 +10,9 @@
 typedef struct { void *ptr; const void *vtable; } AdvancedGreeter;
 
 /* IDL interface: AdvancedGreeter */
-char *AdvancedGreeter_greet(AdvancedGreeter self, char *name);
+char *AdvancedGreeter_greet(AdvancedGreeter self, const char *name);
 void AdvancedGreeter_reset(AdvancedGreeter self);
-void AdvancedGreeter_greetAdvanced(AdvancedGreeter self, char *name);
+void AdvancedGreeter_greetAdvanced(AdvancedGreeter self, const char *name);
 int32_t AdvancedGreeter_get_count(AdvancedGreeter self);
 
 #endif /* ADVANCEDGREETER_H */

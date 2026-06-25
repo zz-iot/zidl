@@ -34,6 +34,10 @@ const ast = @import("../ast.zig");
 const ir = @import("../ir/root.zig");
 const interface = @import("interface.zig");
 
+// Stack buffer size for get_key_value; zzdds returns an error if the serialized
+// key exceeds this.  Exposed in generated C as ZZDDS_KEY_VALUE_BUF_SIZE.
+const key_value_buf_size: u32 = 4096;
+
 // ── Public backend struct ─────────────────────────────────────────────────────
 
 pub const CBackend = struct {
@@ -227,7 +231,11 @@ const Generator = struct {
             try self.write("#include \"zzdds_c.h\"\n");
         }
         try self.write("\n");
-        if (self.opts.extern_c) {
+        // Always emit extern "C" when generating interfaces: the DDS C API is
+        // explicitly designed for C/C++ interop, and the guard is harmless for
+        // pure-C compilation units.  The --c-extern-c flag still forces it on
+        // for non-interface headers if the user wants it.
+        if (self.opts.extern_c or self.opts.generate_interfaces) {
             try self.write("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
         }
 
@@ -256,7 +264,7 @@ const Generator = struct {
         try self.emitItems(spec.items);
 
         // Closing guard.
-        if (self.opts.extern_c) {
+        if (self.opts.extern_c or self.opts.generate_interfaces) {
             try self.write("\n#ifdef __cplusplus\n}\n#endif\n");
         }
         if (!self.opts.pragma_once) {
@@ -569,6 +577,11 @@ const Generator = struct {
                 try self.emitStructZzddsWrapperProtos(c_name);
             }
         }
+        if (structHasSequenceFields(s)) {
+            const em = self.opts.export_macro;
+            const sp: []const u8 = if (em.len > 0) " " else "";
+            try self.print("{s}{s}void {s}_free({s} *v);\n\n", .{ em, sp, c_name, c_name });
+        }
         try self.emitVerbatimForPlacement(s.annotations.raw, "after-declaration");
     }
 
@@ -607,8 +620,21 @@ const Generator = struct {
         try self.print("{s}{s}int {s}DataWriter_write({s}DataWriter *self, const {s} *value);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataWriter_dispose({s}DataWriter *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataWriter_unregister({s}DataWriter *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}DDS_InstanceHandle_t {s}DataWriter_register_instance({s}DataWriter *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataWriter_write_w_timestamp({s}DataWriter *self, const {s} *value, DDS_Time_t timestamp);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataWriter_dispose_w_timestamp({s}DataWriter *self, const {s} *key, DDS_Time_t timestamp);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataWriter_unregister_w_timestamp({s}DataWriter *self, const {s} *key, DDS_Time_t timestamp);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataWriter_get_key_value({s}DataWriter *self, DDS_InstanceHandle_t handle, {s} *key_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}DDS_InstanceHandle_t {s}DataWriter_lookup_instance({s}DataWriter *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}void {s}DataReader_init({s}DataReader *self, DDS_DataReader reader);\n", .{ em, sp, c_name, c_name });
         try self.print("{s}{s}int {s}DataReader_take({s}DataReader *self, {s} *out, zzdds_sample_info *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_read({s}DataReader *self, {s} *out, zzdds_sample_info *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_take_next_instance({s}DataReader *self, {s} *out, zzdds_sample_info *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_read_next_instance({s}DataReader *self, {s} *out, zzdds_sample_info *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_get_key_value({s}DataReader *self, DDS_InstanceHandle_t handle, {s} *key_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}DDS_InstanceHandle_t {s}DataReader_lookup_instance({s}DataReader *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_take_n({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_read_n({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataReader_take_loaned({s}DataReader *self, {s} *out, zzdds_sample_info *info, zzdds_loaned_sample *loan);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}void {s}DataReader_return_loan({s}DataReader *self, zzdds_loaned_sample *loan);\n\n", .{ em, sp, c_name, c_name });
     }
@@ -735,6 +761,18 @@ const Generator = struct {
                 try self.print("[{d}]", .{d});
             }
             try self.write(";\n\n");
+        }
+
+        // Unbounded sequence typedefs need a _free declaration so C++ bindings
+        // can release middleware-allocated buffers after copying them out.
+        const is_unbounded_seq = t.dimensions.len == 0 and switch (t.type_ref) {
+            .sequence => |seq| seq.bound == null,
+            else => false,
+        };
+        if (is_unbounded_seq) {
+            const em = self.opts.export_macro;
+            const sp: []const u8 = if (em.len > 0) " " else "";
+            try self.print("{s}{s}void {s}_free({s} *v);\n\n", .{ em, sp, c_name, c_name });
         }
     }
 
@@ -948,10 +986,15 @@ const Generator = struct {
         const base = try self.typeRefToC(p.type_ref);
         defer self.alloc.free(base);
         return switch (p.mode) {
-            .in_ => if (isCPrimitive(p.type_ref))
-                self.alloc.dupe(u8, base) // scalars: pass by value
-            else
-                std.fmt.allocPrint(self.alloc, "const {s} *", .{base}), // structs: const pointer
+            .in_ => switch (p.type_ref) {
+                // A3: in string/wstring → const char * / const uint16_t *
+                .string => self.alloc.dupe(u8, "const char *"),
+                .wstring => self.alloc.dupe(u8, "const uint16_t *"),
+                else => if (isCPrimitive(p.type_ref))
+                    self.alloc.dupe(u8, base) // scalars: pass by value
+                else
+                    std.fmt.allocPrint(self.alloc, "const {s} *", .{base}), // structs: const pointer
+            },
             .out, .inout => std.fmt.allocPrint(self.alloc, "{s} *", .{base}),
         };
     }
@@ -1246,6 +1289,27 @@ fn itemsHaveZzddsTopicStructC(items: []const ir.ModuleItem) bool {
     return false;
 }
 
+/// Returns true if the struct contains any unbounded sequence field (recursively
+/// through nested structs and typedefs), indicating it needs a _free function.
+fn structHasSequenceFields(s: *const ir.Struct) bool {
+    for (s.members) |m| {
+        if (typeRefHasSequence(m.type_ref)) return true;
+    }
+    return false;
+}
+
+fn typeRefHasSequence(tr: ir.TypeRef) bool {
+    return switch (tr) {
+        .sequence => |seq| seq.bound == null,
+        .named => |td| switch (td) {
+            .typedef => |t| t.dimensions.len == 0 and typeRefHasSequence(t.type_ref),
+            .struct_ => |s| structHasSequenceFields(s),
+            else => false,
+        },
+        else => false,
+    };
+}
+
 fn isDefaultUnionCase(cas: ir.UnionCase) bool {
     if (cas.labels.len == 0) return true;
     for (cas.labels) |lbl| {
@@ -1451,7 +1515,11 @@ const CdrGenerator = struct {
             try self.write("#include \"zzdds_c.h\"\n");
         }
         try self.write("#include <stdlib.h>\n");
-        try self.write("#include <string.h>\n\n");
+        try self.write("#include <string.h>\n");
+        if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructC(spec.items)) {
+            try self.print("#define ZZDDS_KEY_VALUE_BUF_SIZE {d}\n", .{key_value_buf_size});
+        }
+        try self.write("\n");
         try self.emitItems(spec.items);
     }
 
@@ -2006,13 +2074,14 @@ const CdrGenerator = struct {
             try self.write("}\n\n");
         }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and isZzddsTopicStructC(s)) {
-            try self.emitStructZzddsWrappers(c_name);
+            try self.emitStructZzddsWrappers(s, c_name);
         }
     }
 
-    fn emitStructZzddsWrappers(self: *CdrGenerator, c_name: []const u8) !void {
+    fn emitStructZzddsWrappers(self: *CdrGenerator, s: *const ir.Struct, c_name: []const u8) !void {
         try self.print("int {s}TypeSupport_register(DDS_DomainParticipant participant, const char *type_name) {{\n", .{c_name});
-        try self.printI("return zzdds_register_type_support_c(participant, type_name ? type_name : \"{s}\", {s}_compute_key_hash_from_cdr);\n", .{ c_name, c_name });
+        // A1: fallback uses IDL-scoped name (e.g. "ovidds::Frame"), not C-flat "ovidds_Frame"
+        try self.printI("return zzdds_register_type_support_c(participant, type_name ? type_name : \"{s}\", {s}_compute_key_hash_from_cdr);\n", .{ s.qualified_name, c_name });
         try self.write("}\n\n");
 
         try self.print("void {s}DataWriter_init({s}DataWriter *self, DDS_DataWriter writer, int xcdr_version) {{\n", .{ c_name, c_name });
@@ -2045,6 +2114,53 @@ const CdrGenerator = struct {
         try self.printI("return {s}DataWriter_write_kind(self, ZZDDS_WRITE_UNREGISTER, key, 1);\n", .{c_name});
         try self.write("}\n\n");
 
+        try self.print("DDS_InstanceHandle_t {s}DataWriter_register_instance({s}DataWriter *self, const {s} *key) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("uint8_t _hash[16];\n");
+        try self.printI("if ({s}_compute_key_hash(key, _hash)) return DDS_HANDLE_NIL;\n", .{c_name});
+        try self.writeI("return zzdds_register_instance_raw(self->writer, _hash);\n");
+        try self.write("}\n\n");
+
+        try self.print("static int {s}DataWriter_write_kind_w_timestamp({s}DataWriter *self, zzdds_write_kind kind, const {s} *value, int key_only, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("ZidlCdrWriter _w;\n");
+        try self.writeI("uint8_t _hash[16];\n");
+        try self.writeI("int _rc = zidl_cdr_writer_init(&_w, self->xcdr_version);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.writeI("_rc = zidl_cdr_write_encap(&_w);\n");
+        try self.writeI("if (!_rc) _rc = key_only ? ");
+        try self.print("{s}_serialize_key(&_w, value) : {s}_serialize(&_w, value);\n", .{ c_name, c_name });
+        try self.printI("if (!_rc) _rc = {s}_compute_key_hash(value, _hash);\n", .{c_name});
+        try self.writeI("if (!_rc) _rc = zzdds_write_raw_w_timestamp(self->writer, kind, _hash, _w.buf, _w.len, timestamp);\n");
+        try self.writeI("zidl_cdr_writer_deinit(&_w);\n");
+        try self.writeI("return _rc;\n");
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataWriter_write_w_timestamp({s}DataWriter *self, const {s} *value, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataWriter_write_kind_w_timestamp(self, ZZDDS_WRITE_ALIVE, value, 0, timestamp);\n", .{c_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataWriter_dispose_w_timestamp({s}DataWriter *self, const {s} *key, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataWriter_write_kind_w_timestamp(self, ZZDDS_WRITE_DISPOSE, key, 1, timestamp);\n", .{c_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataWriter_unregister_w_timestamp({s}DataWriter *self, const {s} *key, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataWriter_write_kind_w_timestamp(self, ZZDDS_WRITE_UNREGISTER, key, 1, timestamp);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataWriter_get_key_value({s}DataWriter *self, DDS_InstanceHandle_t handle, {s} *key_out) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("uint8_t _buf[ZZDDS_KEY_VALUE_BUF_SIZE];\n");
+        try self.writeI("size_t _len = 0;\n");
+        try self.writeI("int _rc = zzdds_get_key_value_writer(self->writer, handle, _buf, sizeof(_buf), &_len);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.writeI("ZidlCdrReader _r;\n");
+        try self.writeI("_rc = zidl_cdr_reader_init(&_r, _buf, _len);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.printI("return {s}_deserialize_key(&_r, key_out);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("DDS_InstanceHandle_t {s}DataWriter_lookup_instance({s}DataWriter *self, const {s} *key) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("uint8_t _hash[16];\n");
+        try self.printI("if ({s}_compute_key_hash(key, _hash)) return DDS_HANDLE_NIL;\n", .{c_name});
+        try self.writeI("return zzdds_lookup_instance_writer(self->writer, _hash);\n");
+        try self.write("}\n\n");
+
         try self.print("void {s}DataReader_init({s}DataReader *self, DDS_DataReader reader) {{\n", .{ c_name, c_name });
         try self.writeI("self->reader = reader;\n");
         try self.write("}\n\n");
@@ -2055,7 +2171,93 @@ const CdrGenerator = struct {
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
         try self.writeI("if (_rc) return _rc;\n");
-        try self.printI("return {s}_deserialize(&_r, out);\n", .{c_name});
+        try self.printI("return info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader_read({s}DataReader *self, {s} *out, zzdds_sample_info *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("int _n = zzdds_read_one_raw(self->reader, buf, buf_size, cdr_len_out, info);\n");
+        try self.writeI("if (_n != 1) return _n;\n");
+        try self.writeI("ZidlCdrReader _r;\n");
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.printI("return info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader_take_next_instance({s}DataReader *self, {s} *out, zzdds_sample_info *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("int _n = zzdds_take_one_raw_instance(self->reader, prev, buf, buf_size, cdr_len_out, info);\n");
+        try self.writeI("if (_n != 1) return _n;\n");
+        try self.writeI("ZidlCdrReader _r;\n");
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.printI("return info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader_read_next_instance({s}DataReader *self, {s} *out, zzdds_sample_info *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("int _n = zzdds_read_one_raw_instance(self->reader, prev, buf, buf_size, cdr_len_out, info);\n");
+        try self.writeI("if (_n != 1) return _n;\n");
+        try self.writeI("ZidlCdrReader _r;\n");
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.printI("return info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader_get_key_value({s}DataReader *self, DDS_InstanceHandle_t handle, {s} *key_out) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("uint8_t _buf[ZZDDS_KEY_VALUE_BUF_SIZE];\n");
+        try self.writeI("size_t _len = 0;\n");
+        try self.writeI("int _rc = zzdds_get_key_value_reader(self->reader, handle, _buf, sizeof(_buf), &_len);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.writeI("ZidlCdrReader _r;\n");
+        try self.writeI("_rc = zidl_cdr_reader_init(&_r, _buf, _len);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.printI("return {s}_deserialize_key(&_r, key_out);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("DDS_InstanceHandle_t {s}DataReader_lookup_instance({s}DataReader *self, const {s} *key) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("uint8_t _hash[16];\n");
+        try self.printI("if ({s}_compute_key_hash(key, _hash)) return DDS_HANDLE_NIL;\n", .{c_name});
+        try self.writeI("return zzdds_lookup_instance_reader(self->reader, _hash);\n");
+        try self.write("}\n\n");
+
+        try self.print("static int {s}DataReader_n_impl({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is, int destructive) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("zzdds_raw_sample_array _arr = {NULL, 0, 0};\n");
+        try self.writeI("int _n = destructive ?\n");
+        self.indent_depth += 1;
+        try self.writeI("zzdds_take_n_raw(self->reader, ss, vs, is, max, &_arr) :\n");
+        try self.writeI("zzdds_read_n_raw(self->reader, ss, vs, is, max, &_arr);\n");
+        self.indent_depth -= 1;
+        try self.writeI("if (_n <= 0) return _n;\n");
+        try self.writeI("for (int _i = 0; _i < _n; _i++) {\n");
+        self.indent_depth += 1;
+        try self.writeI("infos[_i] = _arr.samples[_i].info;\n");
+        try self.writeI("ZidlCdrReader _r;\n");
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _arr.samples[_i].data, _arr.samples[_i].data_len);\n");
+        try self.writeI("if (!_rc) _rc = infos[_i].valid_data ?\n");
+        self.indent_depth += 1;
+        try self.printI("{s}_deserialize(&_r, &values[_i]) :\n", .{c_name});
+        try self.printI("{s}_deserialize_key(&_r, &values[_i]);\n", .{c_name});
+        self.indent_depth -= 1;
+        if (structHasSequenceFields(s)) {
+            try self.writeI("if (_rc) {\n");
+            self.indent_depth += 1;
+            try self.printI("for (int _j = 0; _j < _i; _j++) {s}_free(&values[_j]);\n", .{c_name});
+            try self.writeI("zzdds_return_raw_samples(self->reader, &_arr);\n");
+            try self.writeI("return _rc;\n");
+            self.indent_depth -= 1;
+            try self.writeI("}\n");
+        } else {
+            try self.writeI("if (_rc) { zzdds_return_raw_samples(self->reader, &_arr); return _rc; }\n");
+        }
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.writeI("zzdds_return_raw_samples(self->reader, &_arr);\n");
+        try self.writeI("return _n;\n");
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader_take_n({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataReader_n_impl(self, values, infos, max, ss, vs, is, 1);\n", .{c_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataReader_read_n({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataReader_n_impl(self, values, infos, max, ss, vs, is, 0);\n", .{c_name});
         try self.write("}\n\n");
 
         try self.print("int {s}DataReader_take_loaned({s}DataReader *self, {s} *out, zzdds_sample_info *info, zzdds_loaned_sample *loan) {{\n", .{ c_name, c_name, c_name });
@@ -2064,7 +2266,7 @@ const CdrGenerator = struct {
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, loan->data, loan->data_len);\n");
         try self.writeI("if (_rc) { zzdds_return_loaned_raw(self->reader, loan); return _rc; }\n");
-        try self.printI("_rc = {s}_deserialize(&_r, out);\n", .{c_name});
+        try self.printI("_rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
         try self.writeI("if (_rc) zzdds_return_loaned_raw(self->reader, loan);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
@@ -3888,10 +4090,19 @@ test "c_backend: interface fat-pointer typedef emitted before free functions" {
     try testing.expect(has(s, "typedef struct { void *ptr; const void *vtable; } Greeter;"));
     // Free function declarations, not vtable fields
     try testing.expect(has(s, "/* IDL interface: Greeter */"));
-    try testing.expect(has(s, "char *Greeter_greet(Greeter self, char *name);"));
+    try testing.expect(has(s, "char *Greeter_greet(Greeter self, const char *name);"));
     // No named vtable struct
     try testing.expect(!has(s, "Greeter_Vtable"));
     try testing.expect(!has(s, "zig_new"));
+}
+
+test "c_backend: A3 — in wstring parameter uses const uint16_t *" {
+    var out = try testGenIfaceHeader(
+        \\interface Codec { void encode(in wstring input); };
+    , "codec");
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "void Codec_encode(Codec self, const uint16_t *input);"));
+    try testing.expect(!has(out.items, "Codec self, uint16_t *input"));
 }
 
 test "c_backend: interface readonly attribute emits getter only" {
@@ -4179,6 +4390,43 @@ test "c_backend cdr: zzdds wrapper implementations for keyed topic" {
     try testing.expect(has(s, "return TopicDataWriter_write_kind(self, ZZDDS_WRITE_ALIVE, value, 0);"));
     try testing.expect(has(s, "int TopicDataReader_take_loaned(TopicDataReader *self, Topic *out, zzdds_sample_info *info, zzdds_loaned_sample *loan) {"));
     try testing.expect(has(s, "zzdds_return_loaned_raw(self->reader, loan);"));
+}
+
+test "c_backend cdr: A1 — namespaced struct uses IDL-scoped type name in TypeSupport_register" {
+    var out = try testGenCdrOpts(
+        "module ovidds { @appendable struct Frame { @key long id; }; };",
+        "frame",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // fallback type_name must be IDL-scoped, not C-flat
+    try testing.expect(has(s, "\"ovidds::Frame\""));
+    try testing.expect(!has(s, "\"ovidds_Frame\""));
+}
+
+test "c_backend cdr: _n_impl cleans up partial samples when struct has sequence fields" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Msg { @key long id; sequence<octet> data; };",
+        "msg",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "for (int _j = 0; _j < _i; _j++) Msg_free(&values[_j]);"));
+    try testing.expect(has(s, "zzdds_return_raw_samples(self->reader, &_arr);"));
+}
+
+test "c_backend cdr: _n_impl has no cleanup loop when struct has no sequence fields" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Msg { @key long id; long value; };",
+        "msg",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(!has(s, "Msg_free(&values[_j])"));
+    try testing.expect(has(s, "if (_rc) { zzdds_return_raw_samples(self->reader, &_arr); return _rc; }"));
 }
 
 test "c_backend cdr: zzdds_c omitted when no qualifying topic struct" {
@@ -4737,6 +4985,53 @@ test "c_backend cdr: @default string with non-ASCII uses octal escape" {
     var src = try testGenCdr(idl, "cfg");
     defer src.deinit(testing.allocator);
     try testing.expect(has(src.items, "strdup(\"\\001\")"));
+}
+
+test "c_backend: struct with sequence field gets _free declaration" {
+    const idl =
+        \\struct Policy { sequence<octet> value; };
+    ;
+    var h = try testGen(idl, "t");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "void Policy_free(Policy *v);"));
+}
+
+test "c_backend: struct without sequence fields has no _free declaration" {
+    const idl =
+        \\struct Simple { long x; string name; };
+    ;
+    var h = try testGen(idl, "t");
+    defer h.deinit(testing.allocator);
+    try testing.expect(!has(h.items, "_free"));
+}
+
+test "c_backend: nested struct with sequence field gets _free on outer struct" {
+    const idl =
+        \\struct Inner { sequence<long> vals; };
+        \\struct Outer { Inner nested; long id; };
+    ;
+    var h = try testGen(idl, "t");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "void Inner_free(Inner *v);"));
+    try testing.expect(has(h.items, "void Outer_free(Outer *v);"));
+}
+
+test "c_backend: sequence typedef gets _free declaration" {
+    const idl =
+        \\typedef sequence<string> StringSeq;
+    ;
+    var h = try testGen(idl, "t");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "void StringSeq_free(StringSeq *v);"));
+}
+
+test "c_backend: sequence typedef _free respects export macro" {
+    const idl =
+        \\typedef sequence<octet> OctetSeq;
+    ;
+    var h = try testGenFullOpts(idl, "t", .{ .export_macro = "MYLIB_EXPORT" });
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "MYLIB_EXPORT void OctetSeq_free(OctetSeq *v);"));
 }
 
 test "c_backend: @default prototype absent when no_typesupport" {

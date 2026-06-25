@@ -51,6 +51,39 @@ this roadmap. New language backends have their own sections below.
   discriminant type of a `union` is a valid IDL discriminant type (integer, enum, char,
   boolean). Invalid discriminant types pass through silently.
 
+### C++ concrete impl backend (`--cpp-generate-impl`)
+
+The following methods in the generated `dcps_impl.cpp` still emit TODO stubs.
+They are grouped by the generator feature that would unblock them.
+
+**`get_listener()` return — 6 methods** (`DomainParticipantImpl`, `TopicImpl`,
+`PublisherImpl`, `DataWriterImpl`, `SubscriberImpl`, `DataReaderImpl`):
+The C ABI has no facility for retrieving the listener back out once set.
+Implementing these requires the Impl class to stash the `shared_ptr<FooListener>`
+at `set_listener` time and return it from `get_listener` — a runtime change in
+the Impl class, not a generator-only change.  The generator would need to emit a
+`std::shared_ptr<FooListener> listener_` member and populate it in the
+`set_listener` body.
+
+**`get_offered/requested_incompatible_qos_status` — 2 methods**
+(`DataWriterImpl`, `DataReaderImpl`):
+`OfferedIncompatibleQosStatus` / `RequestedIncompatibleQosStatus` contain
+`PolicyCountSeq` whose elements are `PolicyCount` structs (not scalars or
+strings).  `isAdaptableSeqElemIn` currently accepts only scalars, strings, and
+enums — not structs.  Extending it to handle sequences of simple structs
+(layout-compatible, no heap fields) would unblock these.
+
+**`WaitSet::wait` / `WaitSet::get_conditions` — 2 methods**:
+`ConditionSeq` contains `Condition` entity interface pointers.  Adapting a
+sequence of opaque entity handles to/from `shared_ptr<Condition>` requires the
+same per-element wrapping as `DataReaderSeq` — both are sequences of interface
+pointers rather than primitive handles.
+
+**`SubscriberImpl::get_datareaders` — 1 method**:
+`DataReaderSeq` contains `DataReader` entity handle fat-pointers.  Each element
+must be wrapped in a `DataReaderImpl`.  Requires a `seq_out` path that can
+construct entity Impl objects per-element rather than copying raw scalars.
+
 ### C backend
 
 - **`@optional` members**: Deferred. Requires adding a companion `has_NAME` boolean

@@ -167,7 +167,7 @@ pub fn generateSplitFiles(
             try gen.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
         if (opts.generate_zzdds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(m.items)) {
-            try gen.write("const _dds = @import(\"dds\");\n");
+            try gen.write("const _zzdds = @import(\"zzdds\");\n");
         }
         // Import each module imported by the IDL source file so that
         // cross-module type references (e.g. `DDS.SomeType`) resolve.
@@ -221,7 +221,7 @@ pub fn generateSplitFiles(
             try gen.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
         if (opts.generate_zzdds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(non_module.items)) {
-            try gen.write("const _dds = @import(\"dds\");\n");
+            try gen.write("const _zzdds = @import(\"zzdds\");\n");
         }
         try gen.write("\n");
         try gen.emitItems(non_module.items);
@@ -283,7 +283,7 @@ const Generator = struct {
             try self.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveTopicTypes(spec.items)) {
-            try self.write("const _dds = @import(\"dds\");\n");
+            try self.write("const _zzdds = @import(\"zzdds\");\n");
         }
         // Emit @import for each module imported via `import "file.idl";`.
         for (spec.imports) |name| {
@@ -359,6 +359,9 @@ const Generator = struct {
         try self.print("}}; // {s}{s}\n\n", .{ pfx, s.name });
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and isZzddsTopicStruct(s)) {
             try self.emitStructTypedWrapper(s);
+        }
+        if (self.opts.zig_generate_c_api and structNeedsSeqDeinit(s)) {
+            try self.emitStructCApiFree(s);
         }
     }
 
@@ -1157,6 +1160,15 @@ const Generator = struct {
             try self.write("    }\n");
             try self.ind();
             try self.print("}}; // {s}{s}\n\n", .{ pfx, t.name });
+            if (self.opts.zig_generate_c_api) {
+                const c_name = try self.cApiQualName(t.qualified_name, pfx);
+                defer self.alloc.free(c_name);
+                try self.ind();
+                try self.print(
+                    "pub export fn {s}_free(v: *{s}{s}) callconv(.c) void {{ v.deinit(std.heap.c_allocator); }}\n\n",
+                    .{ c_name, pfx, t.name },
+                );
+            }
             return;
         }
 
@@ -1408,6 +1420,21 @@ const Generator = struct {
 
     // ── C-API exports (--zig-generate-c-api) ─────────────────────────────────
 
+    /// Emit `pub export fn DDS_X_free(v: *X) callconv(.c) void` for structs that
+    /// contain sequence fields allocated by the middleware (identified by _release).
+    /// The caller frees via the struct's generated `deinit` using std.heap.c_allocator,
+    /// which matches the allocator used by all C-ABI operations in zzdds.
+    fn emitStructCApiFree(self: *Generator, s: *const ir.Struct) !void {
+        const pfx = self.opts.type_prefix;
+        const c_name = try self.cApiQualName(s.qualified_name, pfx);
+        defer self.alloc.free(c_name);
+        try self.ind();
+        try self.print(
+            "pub export fn {s}_free(v: *{s}{s}) callconv(.c) void {{ v.deinit(std.heap.c_allocator); }}\n\n",
+            .{ c_name, pfx, s.name },
+        );
+    }
+
     /// Emit `pub export fn callconv(.c)` trivial forwarders for all operations and
     /// attributes of an entity interface.  Callback interfaces are handled by
     /// `emitInterface` and produce no C-API export functions.
@@ -1602,7 +1629,13 @@ const Generator = struct {
         for (op.params) |p| {
             const pt = try self.cApiParamType(p);
             defer self.alloc.free(pt);
-            try self.print(", {s}: {s}", .{ p.name, pt });
+            // Struct in-params use ?*const T so C callers can pass null for defaults
+            // (DDS convention: null QoS means "use entity-type default QoS").
+            if (p.mode == .in_ and std.mem.startsWith(u8, pt, "*const ")) {
+                try self.print(", {s}: ?{s}", .{ p.name, pt });
+            } else {
+                try self.print(", {s}: {s}", .{ p.name, pt });
+            }
         }
         try self.print(") callconv(.c) {s} {{\n", .{c_ret});
 
@@ -1614,7 +1647,14 @@ const Generator = struct {
         }
         try self.print("self.vtable.{s}(self.ptr", .{op.name});
         for (op.params) |p| {
-            try self.print(", {s}", .{p.name});
+            const pt = try self.cApiParamType(p);
+            defer self.alloc.free(pt);
+            if (p.mode == .in_ and std.mem.startsWith(u8, pt, "*const ")) {
+                // Substitute the type default when caller passes null.
+                try self.print(", {s} orelse &.{{}}", .{p.name});
+            } else {
+                try self.print(", {s}", .{p.name});
+            }
         }
         try self.write(");\n");
 
@@ -2685,27 +2725,85 @@ const Generator = struct {
         const type_name = try std.fmt.allocPrint(self.alloc, "{s}{s}", .{ pfx, s.name });
         defer self.alloc.free(type_name);
         const appendable = s.annotations.extensibility == .appendable;
+        const needs_deinit = structNeedsSeqDeinit(s);
 
         // ── DataWriter ────────────────────────────────────────────────────────
         try self.ind();
         try self.print("pub const {s}DataWriter = struct {{\n", .{type_name});
         try self.ind();
-        try self.write("    _dw: _dds.DDS.DataWriter,\n");
+        try self.write("    _dw: _zzdds.DDS.DataWriter,\n");
         try self.ind();
         try self.write("    _alloc: std.mem.Allocator,\n");
         try self.ind();
         try self.write("    _xcdr2: bool,\n");
         try self.write("\n");
         try self.ind();
-        try self.write("    pub fn init(dw: _dds.DDS.DataWriter, alloc: std.mem.Allocator, xcdr2: bool) @This() {\n");
+        try self.write("    pub fn init(dw: _zzdds.DDS.DataWriter, alloc: std.mem.Allocator) @This() {\n");
         try self.ind();
-        try self.write("        return .{ ._dw = dw, ._alloc = alloc, ._xcdr2 = xcdr2 };\n");
+        try self.write("        return .{ ._dw = dw, ._alloc = alloc, ._xcdr2 = _zzdds.writerUsesXcdr2(dw) };\n");
+        try self.ind();
+        try self.write("    }\n");
+        try self.write("\n");
+        try self.ind();
+        try self.write("    pub fn dataWriter(self: @This()) _zzdds.DDS.DataWriter {\n");
+        try self.ind();
+        try self.write("        return self._dw;\n");
         try self.ind();
         try self.write("    }\n");
 
-        try self.emitTypedWriterMethod(type_name, "write", "value", "alive", false, appendable);
-        try self.emitTypedWriterMethod(type_name, "dispose", "key", "dispose", true, appendable);
-        try self.emitTypedWriterMethod(type_name, "unregister", "key", "unregister", true, appendable);
+        // write / write_w_timestamp
+        try self.emitTypedWriterMethod(type_name, "write", "instance_data", "alive", false, appendable, false);
+        try self.emitTypedWriterMethod(type_name, "write_w_timestamp", "instance_data", "alive", false, appendable, true);
+        // dispose / dispose_w_timestamp
+        try self.emitTypedWriterMethod(type_name, "dispose", "instance_data", "dispose", true, appendable, false);
+        try self.emitTypedWriterMethod(type_name, "dispose_w_timestamp", "instance_data", "dispose", true, appendable, true);
+        // unregister_instance / unregister_instance_w_timestamp
+        try self.emitTypedWriterMethod(type_name, "unregister_instance", "instance_data", "unregister", true, appendable, false);
+        try self.emitTypedWriterMethod(type_name, "unregister_instance_w_timestamp", "instance_data", "unregister", true, appendable, true);
+
+        // register_instance
+        try self.write("\n");
+        try self.ind();
+        // registerInstanceRaw / lookupInstanceWriter are pure hash→handle functions;
+        // the DataWriter handle is not needed (C ABI accepts it for spec completeness but ignores it).
+        try self.print("    pub fn register_instance(_: @This(), instance_data: {s}) _zzdds.DDS.InstanceHandle_t {{\n", .{type_name});
+        try self.ind();
+        try self.print("        return _zzdds.registerInstanceRaw({s}.computeKeyHash(instance_data));\n", .{type_name});
+        try self.ind();
+        try self.write("    }\n");
+
+        // get_key_value
+        try self.write("\n");
+        try self.ind();
+        try self.print("    pub fn get_key_value(self: @This(), key_holder: *{s}, handle: _zzdds.DDS.InstanceHandle_t) !void {{\n", .{type_name});
+        try self.ind();
+        try self.write("        const _raw = _zzdds.getKeyValueRawWriter(self._dw, handle) orelse return error.BadParameter;\n");
+        try self.ind();
+        try self.write("        var _r = try zidl_rt.CdrReader.init(_raw);\n");
+        if (needs_deinit) {
+            try self.ind();
+            try self.print("        var _kv: {s} = .{{}};\n", .{type_name});
+            try self.ind();
+            try self.write("        errdefer _kv.deinit(self._alloc);\n");
+            try self.ind();
+            try self.print("        try {s}.deserializeKeyInto(&_kv, &_r, self._alloc);\n", .{type_name});
+            try self.ind();
+            try self.write("        key_holder.* = _kv;\n");
+        } else {
+            try self.ind();
+            try self.print("        try {s}.deserializeKeyInto(key_holder, &_r, self._alloc);\n", .{type_name});
+        }
+        try self.ind();
+        try self.write("    }\n");
+
+        // lookup_instance
+        try self.write("\n");
+        try self.ind();
+        try self.print("    pub fn lookup_instance(_: @This(), instance_data: {s}) _zzdds.DDS.InstanceHandle_t {{\n", .{type_name});
+        try self.ind();
+        try self.print("        return _zzdds.lookupInstanceWriter({s}.computeKeyHash(instance_data));\n", .{type_name});
+        try self.ind();
+        try self.write("    }\n");
 
         try self.ind();
         try self.print("}}; // {s}DataWriter\n\n", .{type_name});
@@ -2714,28 +2812,39 @@ const Generator = struct {
         try self.ind();
         try self.print("pub const {s}DataReader = struct {{\n", .{type_name});
         try self.ind();
-        try self.write("    _dr: _dds.DDS.DataReader,\n");
+        try self.write("    _dr: _zzdds.DDS.DataReader,\n");
+        try self.ind();
+        try self.write("    _alloc: std.mem.Allocator,\n");
         try self.write("\n");
         try self.ind();
-        try self.write("    pub fn init(dr: _dds.DDS.DataReader) @This() {\n");
+        try self.write("    pub fn init(dr: _zzdds.DDS.DataReader, alloc: std.mem.Allocator) @This() {\n");
         try self.ind();
-        try self.write("        return .{ ._dr = dr };\n");
+        try self.write("        return .{ ._dr = dr, ._alloc = alloc };\n");
         try self.ind();
         try self.write("    }\n");
         try self.write("\n");
-        // Use `TakenSample` rather than `Sample` to avoid shadowing an IDL
-        // type that happens to be named `Sample` — in Zig, all declarations in
-        // a struct scope are mutually visible, so `pub const Sample` inside
-        // `SampleDataReader` would shadow file-scope `Sample` even in field
-        // type expressions like `value: Sample`.
         try self.ind();
-        try self.write("    pub const TakenSample = struct {\n");
+        try self.write("    pub fn withAllocator(self: @This(), alloc: std.mem.Allocator) @This() {\n");
+        try self.ind();
+        try self.write("        return .{ ._dr = self._dr, ._alloc = alloc };\n");
+        try self.ind();
+        try self.write("    }\n");
+        try self.write("\n");
+        try self.ind();
+        try self.write("    pub fn dataReader(self: @This()) _zzdds.DDS.DataReader {\n");
+        try self.ind();
+        try self.write("        return self._dr;\n");
+        try self.ind();
+        try self.write("    }\n");
+        try self.write("\n");
+        // Use `SampledValue` rather than `Sample` to avoid shadowing an IDL
+        // type that happens to be named `Sample`.
+        try self.ind();
+        try self.write("    pub const SampledValue = struct {\n");
         try self.ind();
         try self.print("        value: {s},\n", .{type_name});
         try self.ind();
-        try self.write("        instance_state: _dds.DDS.InstanceStateKind,\n");
-        try self.ind();
-        try self.write("        instance_handle: _dds.DDS.InstanceHandle_t,\n");
+        try self.write("        info: _zzdds.DDS.SampleInfo,\n");
         if (structNeedsSeqDeinit(s)) {
             try self.write("\n");
             try self.ind();
@@ -2748,25 +2857,194 @@ const Generator = struct {
         try self.ind();
         try self.write("    };\n");
         try self.write("\n");
-        // Returns anyerror!?TakenSample so that callers can distinguish
-        // "no data available" (null) from "data consumed but unparseable" (error).
-        // Using catch-return-null would silently drop a consumed DDS sample.
+
+        // take_next_sample
+        try self.emitReaderSingleMethod(type_name, "take_next_sample", false, false, needs_deinit);
+        // read_next_sample
+        try self.emitReaderSingleMethod(type_name, "read_next_sample", false, true, needs_deinit);
+        // take_next_instance
+        try self.emitReaderSingleMethod(type_name, "take_next_instance", true, false, needs_deinit);
+        // read_next_instance
+        try self.emitReaderSingleMethod(type_name, "read_next_instance", true, true, needs_deinit);
+        // take with masks
+        try self.emitReaderBatchMethod(type_name, "take", true, false, needs_deinit);
+        // read with masks
+        try self.emitReaderBatchMethod(type_name, "read", false, false, needs_deinit);
+        // take_instance
+        try self.emitReaderBatchMethod(type_name, "take_instance", true, true, needs_deinit);
+        // read_instance
+        try self.emitReaderBatchMethod(type_name, "read_instance", false, true, needs_deinit);
+
+        // get_key_value
+        try self.write("\n");
         try self.ind();
-        try self.write("    pub fn take(self: @This(), alloc: std.mem.Allocator) anyerror!?TakenSample {\n");
+        try self.print("    pub fn get_key_value(self: @This(), key_holder: *{s}, handle: _zzdds.DDS.InstanceHandle_t) !void {{\n", .{type_name});
         try self.ind();
-        try self.write("        const _raw = _dds.takeRaw(self._dr) orelse return null;\n");
+        try self.write("        const _raw = _zzdds.getKeyValueRawReader(self._dr, handle) orelse return error.BadParameter;\n");
+        try self.ind();
+        try self.write("        var _r = try zidl_rt.CdrReader.init(_raw);\n");
+        if (needs_deinit) {
+            try self.ind();
+            try self.print("        var _kv: {s} = .{{}};\n", .{type_name});
+            try self.ind();
+            try self.write("        errdefer _kv.deinit(self._alloc);\n");
+            try self.ind();
+            try self.print("        try {s}.deserializeKeyInto(&_kv, &_r, self._alloc);\n", .{type_name});
+            try self.ind();
+            try self.write("        key_holder.* = _kv;\n");
+        } else {
+            try self.ind();
+            try self.print("        try {s}.deserializeKeyInto(key_holder, &_r, self._alloc);\n", .{type_name});
+        }
+        try self.ind();
+        try self.write("    }\n");
+
+        // lookup_instance
+        try self.write("\n");
+        try self.ind();
+        try self.print("    pub fn lookup_instance(self: @This(), instance_data: {s}) ?_zzdds.DDS.InstanceHandle_t {{\n", .{type_name});
+        try self.ind();
+        try self.print("        const _ih = _zzdds.registerInstanceRaw({s}.computeKeyHash(instance_data));\n", .{type_name});
+        try self.ind();
+        try self.write("        return _zzdds.lookupInstanceReader(self._dr, _ih);\n");
+        try self.ind();
+        try self.write("    }\n");
+
+        try self.ind();
+        try self.print("}}; // {s}DataReader\n\n", .{type_name});
+    }
+
+    /// Emit a single-sample take/read method on the DataReader.
+    /// `with_instance` adds a `prev: DDS.InstanceHandle_t` parameter and calls
+    /// takeNextInstanceRaw / readNextInstanceRaw instead of takeRaw / readNextSampleRaw.
+    fn emitReaderSingleMethod(
+        self: *Generator,
+        type_name: []const u8,
+        method_name: []const u8,
+        with_instance: bool,
+        non_destructive: bool,
+        needs_deinit: bool,
+    ) !void {
+        const raw_fn = if (with_instance)
+            (if (non_destructive) "_zzdds.readNextInstanceRaw" else "_zzdds.takeNextInstanceRaw")
+        else
+            (if (non_destructive) "_zzdds.readNextSampleRaw" else "_zzdds.takeRaw");
+        const prev_param = if (with_instance) ", prev: _zzdds.DDS.InstanceHandle_t" else "";
+        const raw_arg = if (with_instance) "(self._dr, prev)" else "(self._dr)";
+        try self.write("\n");
+        try self.ind();
+        try self.print("    pub fn {s}(self: @This(), data_value: *{s}, sample_info: *_zzdds.DDS.SampleInfo{s}) !bool {{\n", .{ method_name, type_name, prev_param });
+        try self.ind();
+        try self.print("        const _raw = {s}{s} orelse return false;\n", .{ raw_fn, raw_arg });
         try self.ind();
         try self.write("        defer _raw.deinit();\n");
         try self.ind();
-        try self.write("        var _reader = try zidl_rt.CdrReader.init(_raw.data);\n");
+        try self.write("        sample_info.* = _raw.info;\n");
         try self.ind();
-        try self.print("        const _value = try {s}.deserialize(&_reader, alloc);\n", .{type_name});
+        try self.write("        var _r = try zidl_rt.CdrReader.init(_raw.data);\n");
         try self.ind();
-        try self.write("        return .{ .value = _value, .instance_state = _raw.instance_state, .instance_handle = _raw.instance_handle };\n");
+        try self.write("        if (_raw.info.valid_data) {\n");
+        try self.ind();
+        try self.print("            data_value.* = try {s}.deserialize(&_r, self._alloc);\n", .{type_name});
+        try self.ind();
+        try self.write("        } else {\n");
+        if (needs_deinit) {
+            try self.ind();
+            try self.print("            var _kv: {s} = .{{}};\n", .{type_name});
+            try self.ind();
+            try self.write("            errdefer _kv.deinit(self._alloc);\n");
+            try self.ind();
+            try self.print("            try {s}.deserializeKeyInto(&_kv, &_r, self._alloc);\n", .{type_name});
+            try self.ind();
+            try self.write("            data_value.* = _kv;\n");
+        } else {
+            try self.ind();
+            try self.print("            try {s}.deserializeKeyInto(data_value, &_r, self._alloc);\n", .{type_name});
+        }
+        try self.ind();
+        try self.write("        }\n");
+        try self.ind();
+        try self.write("        return true;\n");
         try self.ind();
         try self.write("    }\n");
+    }
+
+    /// Emit a multi-sample take/read method on the DataReader.
+    /// `with_instance` adds `handle: DDS.InstanceHandle_t` and passes it to the raw call.
+    fn emitReaderBatchMethod(
+        self: *Generator,
+        type_name: []const u8,
+        method_name: []const u8,
+        destructive: bool,
+        with_instance: bool,
+        needs_deinit: bool,
+    ) !void {
+        const raw_fn = if (destructive) "_zzdds.takeFilteredRaw" else "_zzdds.readFilteredRaw";
+        const ih_param = if (with_instance) ", handle: _zzdds.DDS.InstanceHandle_t" else "";
+        const ih_arg = if (with_instance) ", handle" else ", null";
+        try self.write("\n");
         try self.ind();
-        try self.print("}}; // {s}DataReader\n\n", .{type_name});
+        try self.print("    pub fn {s}(self: @This(), out: *std.ArrayListUnmanaged(SampledValue), max: i32, ss: _zzdds.DDS.SampleStateMask, vs: _zzdds.DDS.ViewStateMask, is: _zzdds.DDS.InstanceStateMask{s}) !bool {{\n", .{ method_name, ih_param });
+        try self.ind();
+        try self.write("        var _tmp: std.ArrayListUnmanaged(_zzdds.OwnedRawSample) = .empty;\n");
+        try self.ind();
+        try self.write("        defer {\n");
+        try self.ind();
+        try self.write("            for (_tmp.items) |_s| _s.deinit();\n");
+        try self.ind();
+        try self.write("            _tmp.deinit(self._alloc);\n");
+        try self.ind();
+        try self.write("        }\n");
+        try self.ind();
+        try self.print("        try {s}(self._dr, &_tmp, max, ss, vs, is{s});\n", .{ raw_fn, ih_arg });
+        try self.ind();
+        try self.write("        if (_tmp.items.len == 0) return false;\n");
+        try self.ind();
+        try self.write("        try out.ensureUnusedCapacity(self._alloc, _tmp.items.len);\n");
+        try self.ind();
+        try self.write("        const _base = out.items.len;\n");
+        try self.ind();
+        if (needs_deinit) {
+            try self.write("        errdefer {\n");
+            try self.ind();
+            try self.write("            for (out.items[_base..]) |_sv| _sv.value.deinit(self._alloc);\n");
+            try self.ind();
+            try self.write("            out.items.len = _base;\n");
+            try self.ind();
+            try self.write("        }\n");
+        } else {
+            try self.write("        errdefer out.items.len = _base;\n");
+        }
+        try self.ind();
+        try self.write("        for (_tmp.items) |_s| {\n");
+        try self.ind();
+        try self.write("            var _r = try zidl_rt.CdrReader.init(_s.data);\n");
+        try self.ind();
+        try self.write("            const _v = if (_s.info.valid_data)\n");
+        try self.ind();
+        try self.print("                try {s}.deserialize(&_r, self._alloc)\n", .{type_name});
+        try self.ind();
+        try self.write("            else blk: {\n");
+        try self.ind();
+        try self.print("                var _kv: {s} = .{{}};\n", .{type_name});
+        if (needs_deinit) {
+            try self.ind();
+            try self.write("                errdefer _kv.deinit(self._alloc);\n");
+        }
+        try self.ind();
+        try self.print("                try {s}.deserializeKeyInto(&_kv, &_r, self._alloc);\n", .{type_name});
+        try self.ind();
+        try self.write("                break :blk _kv;\n");
+        try self.ind();
+        try self.write("            };\n");
+        try self.ind();
+        try self.write("            out.appendAssumeCapacity(.{ .value = _v, .info = _s.info });\n");
+        try self.ind();
+        try self.write("        }\n");
+        try self.ind();
+        try self.write("        return true;\n");
+        try self.ind();
+        try self.write("    }\n");
     }
 
     fn emitTypedWriterMethod(
@@ -2777,10 +3055,14 @@ const Generator = struct {
         kind_str: []const u8,
         use_key: bool,
         appendable: bool,
+        with_timestamp: bool,
     ) !void {
+        const ts_param = if (with_timestamp) ", timestamp: _zzdds.DDS.Time_t" else "";
+        const write_fn = if (with_timestamp) "_zzdds.writeRawWithTimestamp" else "_zzdds.writeRaw";
+        const ts_arg = if (with_timestamp) ", timestamp" else "";
         try self.write("\n");
         try self.ind();
-        try self.print("    pub fn {s}(self: @This(), {s}: {s}) !void {{\n", .{ method_name, param_name, type_name });
+        try self.print("    pub fn {s}(self: @This(), {s}: {s}, _: _zzdds.DDS.InstanceHandle_t{s}) !void {{\n", .{ method_name, param_name, type_name, ts_param });
         try self.ind();
         try self.write("        var _buf = std.ArrayList(u8).empty;\n");
         try self.ind();
@@ -2818,7 +3100,7 @@ const Generator = struct {
         try self.ind();
         try self.print("        const _hash = {s}.computeKeyHash({s});\n", .{ type_name, param_name });
         try self.ind();
-        try self.print("        try _dds.writeRaw(self._dw, .{s}, _hash, _buf.items);\n", .{kind_str});
+        try self.print("        try {s}(self._dw, .{s}, _hash, _buf.items{s});\n", .{ write_fn, kind_str, ts_arg });
         try self.ind();
         try self.write("    }\n");
     }
@@ -5517,6 +5799,26 @@ test "zig_backend: --zig-generate-c-api entity wrappers use C_XxxListener and ad
     try testing.expect(!has(s, "std.heap.c_allocator.create(C"));
 }
 
+test "zig_backend: --zig-generate-c-api struct in-params use ?*const T (null = default)" {
+    var out = try testGenOpts(
+        \\struct TopicQos { long depth; };
+        \\interface Topic {
+        \\    long set_qos(in TopicQos qos);
+        \\    long create_with_qos(in TopicQos qos, in long mask);
+        \\};
+    , "tq", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Export signature: optional pointer so C callers can pass null for default QoS.
+    try testing.expect(has(s, "pub export fn Topic_set_qos(self: Topic, qos: ?*const TopicQos) callconv(.c) i32"));
+    try testing.expect(has(s, "pub export fn Topic_create_with_qos(self: Topic, qos: ?*const TopicQos, mask: i32) callconv(.c) i32"));
+    // Vtable call: substitute default when null.
+    try testing.expect(has(s, "return self.vtable.set_qos(self.ptr, qos orelse &.{});"));
+    try testing.expect(has(s, "return self.vtable.create_with_qos(self.ptr, qos orelse &.{}, mask);"));
+    // Vtable slot itself stays *const T (non-optional).
+    try testing.expect(has(s, "set_qos: *const fn (*anyopaque, qos: *const TopicQos) i32,"));
+}
+
 test "zig_backend: --zig-generate-c-api emits C_XxxSeq and out-seq write-back" {
     var out = try testGenOpts(
         \\typedef long long Handle;
@@ -5616,11 +5918,12 @@ test "zig_backend: --zig-generate-c-api struct in-param passed by pointer" {
     , "sq", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // Struct in-param → *const T in both vtable slot and C-ABI export signature
+    // Vtable slot: non-optional *const T (vtable always gets a valid pointer).
     try testing.expect(has(s, "set_qos: *const fn (*anyopaque, qos: *const Qos) i32,"));
-    try testing.expect(has(s, "qos: *const Qos"));
-    // Trivial forwarder — passes qos directly (pointer, no deref)
-    try testing.expect(has(s, "return self.vtable.set_qos(self.ptr, qos);"));
+    // C-ABI export: ?*const T so C callers can pass null for defaults.
+    try testing.expect(has(s, "pub export fn Writer_set_qos(self: Writer, qos: ?*const Qos) callconv(.c) i32"));
+    // Forwarder substitutes type default when null.
+    try testing.expect(has(s, "return self.vtable.set_qos(self.ptr, qos orelse &.{});"));
     try testing.expect(!has(s, "qos.*"));
 }
 
@@ -6057,7 +6360,7 @@ test "zig_backend: no typed DataWriter/DataReader by default for keyed struct" {
     const s = out.items;
     try testing.expect(!has(s, "DataWriter"));
     try testing.expect(!has(s, "DataReader"));
-    try testing.expect(!has(s, "const _dds ="));
+    try testing.expect(!has(s, "const _zzdds ="));
     try testing.expect(has(s, "pub fn serialize"));
 }
 
@@ -6067,38 +6370,37 @@ test "zig_backend: typed DataWriter/DataReader for keyed @appendable struct" {
     , "shape", .{ .generate_zzdds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // dds import emitted
-    try testing.expect(has(s, "const _dds = @import(\"dds\");"));
+    // zzdds import emitted
+    try testing.expect(has(s, "const _zzdds = @import(\"zzdds\");"));
     // DataWriter struct
     try testing.expect(has(s, "pub const ShapeTypeDataWriter = struct {"));
-    try testing.expect(has(s, "_dw: _dds.DDS.DataWriter,"));
+    try testing.expect(has(s, "_dw: _zzdds.DDS.DataWriter,"));
     try testing.expect(has(s, "_alloc: std.mem.Allocator,"));
     try testing.expect(has(s, "_xcdr2: bool,"));
-    try testing.expect(has(s, "pub fn init(dw: _dds.DDS.DataWriter, alloc: std.mem.Allocator, xcdr2: bool) @This() {"));
+    try testing.expect(has(s, "pub fn init(dw: _zzdds.DDS.DataWriter, alloc: std.mem.Allocator) @This() {"));
     // write() — @appendable uses writeEncapHeaderDelimited for xcdr2
-    try testing.expect(has(s, "pub fn write(self: @This(), value: ShapeType) !void {"));
+    try testing.expect(has(s, "pub fn write(self: @This(), instance_data: ShapeType, _: _zzdds.DDS.InstanceHandle_t) !void {"));
     try testing.expect(has(s, "try _w.writeEncapHeaderDelimited();"));
-    try testing.expect(has(s, "try ShapeType.serialize(&_w, value);"));
-    try testing.expect(has(s, "try _dds.writeRaw(self._dw, .alive, _hash, _buf.items);"));
+    try testing.expect(has(s, "try ShapeType.serialize(&_w, instance_data);"));
+    try testing.expect(has(s, "try _zzdds.writeRaw(self._dw, .alive, _hash, _buf.items);"));
     // dispose()
-    try testing.expect(has(s, "pub fn dispose(self: @This(), key: ShapeType) !void {"));
-    try testing.expect(has(s, "try ShapeType.serializeKey(&_w, key);"));
-    try testing.expect(has(s, "try _dds.writeRaw(self._dw, .dispose, _hash, _buf.items);"));
-    // unregister()
-    try testing.expect(has(s, "pub fn unregister(self: @This(), key: ShapeType) !void {"));
-    try testing.expect(has(s, "try _dds.writeRaw(self._dw, .unregister, _hash, _buf.items);"));
+    try testing.expect(has(s, "pub fn dispose(self: @This(), instance_data: ShapeType, _: _zzdds.DDS.InstanceHandle_t) !void {"));
+    try testing.expect(has(s, "try ShapeType.serializeKey(&_w, instance_data);"));
+    try testing.expect(has(s, "try _zzdds.writeRaw(self._dw, .dispose, _hash, _buf.items);"));
+    // unregister_instance()
+    try testing.expect(has(s, "pub fn unregister_instance(self: @This(), instance_data: ShapeType, _: _zzdds.DDS.InstanceHandle_t) !void {"));
+    try testing.expect(has(s, "try _zzdds.writeRaw(self._dw, .unregister, _hash, _buf.items);"));
     // DataReader struct
     try testing.expect(has(s, "pub const ShapeTypeDataReader = struct {"));
-    try testing.expect(has(s, "_dr: _dds.DDS.DataReader,"));
-    try testing.expect(has(s, "pub fn init(dr: _dds.DDS.DataReader) @This() {"));
-    try testing.expect(has(s, "pub const TakenSample = struct {"));
+    try testing.expect(has(s, "_dr: _zzdds.DDS.DataReader,"));
+    try testing.expect(has(s, "pub fn init(dr: _zzdds.DDS.DataReader, alloc: std.mem.Allocator) @This() {"));
+    try testing.expect(has(s, "pub const SampledValue = struct {"));
     try testing.expect(has(s, "value: ShapeType,"));
-    try testing.expect(has(s, "instance_state: _dds.DDS.InstanceStateKind,"));
-    try testing.expect(has(s, "instance_handle: _dds.DDS.InstanceHandle_t,"));
-    try testing.expect(has(s, "pub fn take(self: @This(), alloc: std.mem.Allocator) anyerror!?TakenSample {"));
-    try testing.expect(has(s, "_dds.takeRaw(self._dr)"));
-    try testing.expect(has(s, "ShapeType.deserialize(&_reader, alloc)"));
-    // no TakenSample.deinit — ShapeType has no unbounded sequences
+    try testing.expect(has(s, "info: _zzdds.DDS.SampleInfo,"));
+    try testing.expect(has(s, "pub fn take_next_sample(self: @This(), data_value: *ShapeType, sample_info: *_zzdds.DDS.SampleInfo) !bool {"));
+    try testing.expect(has(s, "_zzdds.takeRaw(self._dr)"));
+    try testing.expect(has(s, "ShapeType.deserialize(&_r, self._alloc)"));
+    // no SampledValue.deinit — ShapeType has no unbounded sequences
     try testing.expect(!has(s, "pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {"));
 }
 
@@ -6121,7 +6423,7 @@ test "zig_backend: no DataWriter/DataReader for struct without @key" {
     const s = out.items;
     try testing.expect(!has(s, "DataWriter"));
     try testing.expect(!has(s, "DataReader"));
-    try testing.expect(!has(s, "const _dds ="));
+    try testing.expect(!has(s, "const _zzdds ="));
 }
 
 test "zig_backend: no_typesupport suppresses DataWriter/DataReader" {
@@ -6134,7 +6436,7 @@ test "zig_backend: no_typesupport suppresses DataWriter/DataReader" {
     const s = out.items;
     try testing.expect(!has(s, "DataWriter"));
     try testing.expect(!has(s, "DataReader"));
-    try testing.expect(!has(s, "const _dds ="));
+    try testing.expect(!has(s, "const _zzdds ="));
 }
 
 test "zig_backend: no DataWriter/DataReader for @mutable keyed struct" {
@@ -6149,7 +6451,7 @@ test "zig_backend: no DataWriter/DataReader for @mutable keyed struct" {
     try testing.expect(!has(s, "DataReader"));
 }
 
-test "zig_backend: no DataWriter/DataReader or dds import for @nested keyed struct" {
+test "zig_backend: no DataWriter/DataReader or zzdds import for @nested keyed struct" {
     var out = try testGenOpts(
         "@nested struct NestedKey { @key long id; string data; };",
         "nk",
@@ -6159,7 +6461,7 @@ test "zig_backend: no DataWriter/DataReader or dds import for @nested keyed stru
     const s = out.items;
     try testing.expect(!has(s, "DataWriter"));
     try testing.expect(!has(s, "DataReader"));
-    try testing.expect(!has(s, "const _dds ="));
+    try testing.expect(!has(s, "const _zzdds ="));
 }
 
 test "zig_backend: Sample.deinit emitted when struct has unbounded sequence" {
@@ -6169,8 +6471,8 @@ test "zig_backend: Sample.deinit emitted when struct has unbounded sequence" {
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "pub const BagTopicDataReader = struct {"));
-    // BagTopic has unbounded sequence → deinit on TakenSample
-    try testing.expect(has(s, "pub const TakenSample = struct {"));
+    // BagTopic has unbounded sequence → deinit on SampledValue
+    try testing.expect(has(s, "pub const SampledValue = struct {"));
     try testing.expect(has(s, "pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {"));
     try testing.expect(has(s, "self.value.deinit(alloc);"));
 }
@@ -6181,27 +6483,25 @@ test "zig_backend: DataWriter/DataReader inside module" {
     , "dds", .{ .generate_zzdds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // _dds import at file level (prefixed to avoid clash with any IDL module named "dds")
-    try testing.expect(has(s, "const _dds = @import(\"dds\");"));
+    // _zzdds import at file level (prefixed to avoid clash with any IDL module named "dds")
+    try testing.expect(has(s, "const _zzdds = @import(\"zzdds\");"));
     // wrappers inside module struct
     try testing.expect(has(s, "pub const ShapeDataWriter = struct {"));
     try testing.expect(has(s, "pub const ShapeDataReader = struct {"));
 }
 
 test "zig_backend: module named 'dds' does not produce duplicate const dds" {
-    // IDL module named 'dds' — without the underscore prefix the self-reference
-    // alias 'pub const dds = struct { ... }' (single-file) or 'const dds = @This()'
-    // (split-file) would clash with 'const dds = @import("dds")'.  Using '_dds'
-    // makes the clash structurally impossible (IDL names cannot start with '_').
+    // IDL module named 'dds' — using '_zzdds' import makes any name clash with
+    // IDL module identifiers structurally impossible (IDL names cannot start with '_').
     var out = try testGenOpts(
         \\module dds { @appendable struct Topic { @key long id; }; };
     , "types", .{ .generate_zzdds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "const _dds = @import(\"dds\");"));
-    try testing.expect(!has(s, "const dds = @import(\"dds\");"));
+    try testing.expect(has(s, "const _zzdds = @import(\"zzdds\");"));
+    try testing.expect(!has(s, "const zzdds = @import(\"zzdds\");"));
     try testing.expect(has(s, "pub const TopicDataWriter = struct {"));
-    try testing.expect(has(s, "_dw: _dds.DDS.DataWriter,"));
+    try testing.expect(has(s, "_dw: _zzdds.DDS.DataWriter,"));
 }
 
 test "zig_backend: @default on non-optional field sets initializer" {
@@ -6262,4 +6562,40 @@ test "zig_backend: @default scoped_name emits identifier" {
     , "cfg");
     defer h.deinit(testing.allocator);
     try testing.expect(has(h.items, "limit: i32 = MY_MAX,"));
+}
+
+test "zig_backend: struct with sequence field gets _free export under zig_generate_c_api" {
+    var h = try testGenOpts(
+        \\struct Policy { sequence<octet> value; };
+    , "t", .{ .zig_generate_c_api = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer h.deinit(testing.allocator);
+    // Export function uses C name (qualified) and calls deinit with c_allocator
+    try testing.expect(has(h.items, "Policy_free"));
+    try testing.expect(has(h.items, "callconv(.c)"));
+    try testing.expect(has(h.items, "v.deinit(std.heap.c_allocator)"));
+}
+
+test "zig_backend: struct without sequence fields has no _free export" {
+    var h = try testGenOpts(
+        \\struct Simple { long x; };
+    , "t", .{ .zig_generate_c_api = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer h.deinit(testing.allocator);
+    try testing.expect(!has(h.items, "_free"));
+}
+
+test "zig_backend: sequence typedef gets _free export when zig_generate_c_api" {
+    var h = try testGenOpts(
+        \\typedef sequence<string> StringSeq;
+    , "t", .{ .zig_generate_c_api = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "pub export fn StringSeq_free("));
+    try testing.expect(has(h.items, "v.deinit(std.heap.c_allocator)"));
+}
+
+test "zig_backend: sequence typedef has no _free export without zig_generate_c_api" {
+    var h = try testGenOpts(
+        \\typedef sequence<octet> OctetSeq;
+    , "t", .{ .no_typesupport = true, .no_typeobject_support = true });
+    defer h.deinit(testing.allocator);
+    try testing.expect(!has(h.items, "_free"));
 }
