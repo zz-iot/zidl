@@ -1880,7 +1880,7 @@ const CdrGenerator = struct {
         try self.writeI("auto it = instance_handles_.find(handle);\n");
         try self.writeI("if (it == instance_handles_.end()) return DDS_RETCODE_BAD_PARAMETER;\n");
         try self.printI("int _rc = {s}_write_kind_w_hash(writer_, xcdr_version_, ZZDDS_WRITE_UNREGISTER, key, true, it->second.data());\n", .{class_name});
-        try self.writeI("instance_handles_.erase(it);\n");
+        try self.writeI("if (!_rc) instance_handles_.erase(it);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
@@ -6442,7 +6442,7 @@ test "cpp_backend cdr: B2 — write_w_handle/dispose_w_handle/unregister_instanc
     try testing.expect(has(s, "int TopicDataWriter::dispose_w_handle(const ::Topic& key, DDS_InstanceHandle_t handle) {"));
     try testing.expect(has(s, "int TopicDataWriter::unregister_instance_w_handle(const ::Topic& key, DDS_InstanceHandle_t handle) {"));
     try testing.expect(has(s, "if (it == instance_handles_.end()) return DDS_RETCODE_BAD_PARAMETER;"));
-    try testing.expect(has(s, "instance_handles_.erase(it);"));
+    try testing.expect(has(s, "if (!_rc) instance_handles_.erase(it);"));
 }
 
 // ── --cpp-generate-impl tests (B1+B3) ────────────────────────────────────────
