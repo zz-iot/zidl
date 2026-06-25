@@ -1629,7 +1629,13 @@ const Generator = struct {
         for (op.params) |p| {
             const pt = try self.cApiParamType(p);
             defer self.alloc.free(pt);
-            try self.print(", {s}: {s}", .{ p.name, pt });
+            // Struct in-params use ?*const T so C callers can pass null for defaults
+            // (DDS convention: null QoS means "use entity-type default QoS").
+            if (p.mode == .in_ and std.mem.startsWith(u8, pt, "*const ")) {
+                try self.print(", {s}: ?{s}", .{ p.name, pt });
+            } else {
+                try self.print(", {s}: {s}", .{ p.name, pt });
+            }
         }
         try self.print(") callconv(.c) {s} {{\n", .{c_ret});
 
@@ -1641,7 +1647,14 @@ const Generator = struct {
         }
         try self.print("self.vtable.{s}(self.ptr", .{op.name});
         for (op.params) |p| {
-            try self.print(", {s}", .{p.name});
+            const pt = try self.cApiParamType(p);
+            defer self.alloc.free(pt);
+            if (p.mode == .in_ and std.mem.startsWith(u8, pt, "*const ")) {
+                // Substitute the type default when caller passes null.
+                try self.print(", {s} orelse &.{{}}", .{p.name});
+            } else {
+                try self.print(", {s}", .{p.name});
+            }
         }
         try self.write(");\n");
 
@@ -5786,6 +5799,26 @@ test "zig_backend: --zig-generate-c-api entity wrappers use C_XxxListener and ad
     try testing.expect(!has(s, "std.heap.c_allocator.create(C"));
 }
 
+test "zig_backend: --zig-generate-c-api struct in-params use ?*const T (null = default)" {
+    var out = try testGenOpts(
+        \\struct TopicQos { long depth; };
+        \\interface Topic {
+        \\    long set_qos(in TopicQos qos);
+        \\    long create_with_qos(in TopicQos qos, in long mask);
+        \\};
+    , "tq", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Export signature: optional pointer so C callers can pass null for default QoS.
+    try testing.expect(has(s, "pub export fn Topic_set_qos(self: Topic, qos: ?*const TopicQos) callconv(.c) i32"));
+    try testing.expect(has(s, "pub export fn Topic_create_with_qos(self: Topic, qos: ?*const TopicQos, mask: i32) callconv(.c) i32"));
+    // Vtable call: substitute default when null.
+    try testing.expect(has(s, "return self.vtable.set_qos(self.ptr, qos orelse &.{});"));
+    try testing.expect(has(s, "return self.vtable.create_with_qos(self.ptr, qos orelse &.{}, mask);"));
+    // Vtable slot itself stays *const T (non-optional).
+    try testing.expect(has(s, "set_qos: *const fn (*anyopaque, qos: *const TopicQos) i32,"));
+}
+
 test "zig_backend: --zig-generate-c-api emits C_XxxSeq and out-seq write-back" {
     var out = try testGenOpts(
         \\typedef long long Handle;
@@ -5885,11 +5918,12 @@ test "zig_backend: --zig-generate-c-api struct in-param passed by pointer" {
     , "sq", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // Struct in-param → *const T in both vtable slot and C-ABI export signature
+    // Vtable slot: non-optional *const T (vtable always gets a valid pointer).
     try testing.expect(has(s, "set_qos: *const fn (*anyopaque, qos: *const Qos) i32,"));
-    try testing.expect(has(s, "qos: *const Qos"));
-    // Trivial forwarder — passes qos directly (pointer, no deref)
-    try testing.expect(has(s, "return self.vtable.set_qos(self.ptr, qos);"));
+    // C-ABI export: ?*const T so C callers can pass null for defaults.
+    try testing.expect(has(s, "pub export fn Writer_set_qos(self: Writer, qos: ?*const Qos) callconv(.c) i32"));
+    // Forwarder substitutes type default when null.
+    try testing.expect(has(s, "return self.vtable.set_qos(self.ptr, qos orelse &.{});"));
     try testing.expect(!has(s, "qos.*"));
 }
 

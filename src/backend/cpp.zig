@@ -308,12 +308,19 @@ const Generator = struct {
 
         try self.emitItems(spec.items);
 
-        // CDR protos are suppressed when --generate-interfaces is set: in that
-        // mode dcps.h is also generated and is the authoritative source for C
-        // ABI declarations; duplicating them in dcps.hpp with C++ type names
-        // (::DDS::Foo*) causes conflicting-declaration errors when both headers
-        // are included in the same TU (as dcps_impl.hpp does).
-        if (!self.opts.no_typesupport) {
+        // CDR protos are suppressed when the C header ({stem}.h) is included by
+        // this file.  The C header is the authoritative source for C ABI function
+        // declarations; if we re-declare them in .hpp with C++ type names
+        // (::DDS::Foo*) the compiler sees conflicting declarations (e.g.
+        // DDS_BuiltinTopicKey_t* ≠ ::DDS::BuiltinTopicKey_t*) in any TU that
+        // includes both headers.  The C header is included iff generate_interfaces
+        // AND at least one native-handle or callback interface is present.  For
+        // type-only IDLs (e.g. types.idl) neither condition holds, so the C header
+        // is not included and CDR protos belong here in the .hpp.
+        const has_c_header = self.opts.generate_interfaces and
+            (hasNativeHandleInterfaces(spec.items, &self.entity_base_ifaces) or
+                hasCallbackInterfaces(spec.items));
+        if (!self.opts.no_typesupport and !has_c_header) {
             try self.emitCdrProtos(spec.items);
         }
 
