@@ -14,6 +14,10 @@ public class Frame implements java.io.Serializable {
         this.topic = "";
     }
 
+    public static Frame defaultValue() {
+        return new Frame();
+    }
+
     public Frame(int seq_num, String topic) {
         this.seq_num = seq_num;
         this.topic = topic;

@@ -347,10 +347,19 @@ const Generator = struct {
         for (s.members) |m| {
             try self.emitField(m.name, m.type_ref, m.dimensions, m.annotations.is_optional, m.annotations.default_value);
         }
+        try self.ind();
+        try self.print("\n    pub fn default() @This() {{\n", .{});
+        try self.ind();
+        try self.print("        return .{{}};\n", .{});
+        try self.ind();
+        try self.print("    }}\n", .{});
         // Emit serialize fns when full typesupport is requested, or when
         // --zig-pl-cdr is set (PL_CDR fns are part of the struct, not TypeSupport).
         if (!self.opts.no_typesupport or self.opts.pl_cdr) {
             try self.emitStructSerializeFns(s);
+        } else if (structNeedsSeqDeinit(s)) {
+            try self.write("\n");
+            try self.emitStructDeinitFn(s);
         }
         if (!self.opts.no_typeobject_support) {
             try self.emitStructTypeObjectConsts(s);
@@ -1864,10 +1873,11 @@ const Generator = struct {
                 // Entity interfaces: extern struct fat pointer, pass by value.
                 // Callback interfaces: optional pointer to C callback struct.
                 .interface => |iface| if (isCallbackInterface(iface)) blk: {
-                    const p = self.opts.type_prefix;
+                    const zig = try self.typeRefToZig(tr);
+                    defer self.alloc.free(zig);
                     break :blk switch (mode) {
-                        .in_ => std.fmt.allocPrint(self.alloc, "?*const {s}{s}", .{ p, iface.name }),
-                        .out, .inout => std.fmt.allocPrint(self.alloc, "?*{s}{s}", .{ p, iface.name }),
+                        .in_ => std.fmt.allocPrint(self.alloc, "?*const {s}", .{zig}),
+                        .out, .inout => std.fmt.allocPrint(self.alloc, "?*{s}", .{zig}),
                     };
                 } else self.typeRefToZig(tr),
                 // Enum/bitmask/bitset are primitive-sized — pass by value.
@@ -2053,7 +2063,6 @@ const Generator = struct {
 
     /// Format an `AnnotationParamValue` as a Zig literal expression.
     fn formatDefaultValueZig(self: *Generator, dv: ir.AnnotationParamValue, type_ref: ir.TypeRef) ![]u8 {
-        _ = type_ref;
         return switch (dv) {
             .integer => |v| std.fmt.allocPrint(self.alloc, "{d}", .{v}),
             .float => |v| std.fmt.allocPrint(self.alloc, "{d}", .{v}),
@@ -2067,8 +2076,29 @@ const Generator = struct {
                 defer self.alloc.free(esc);
                 break :blk std.fmt.allocPrint(self.alloc, "\"{s}\"", .{esc});
             },
-            .scoped_name => |n| self.alloc.dupe(u8, n),
+            .scoped_name => |n| self.formatScopedNameDefaultZig(n, type_ref),
             else => self.alloc.dupe(u8, "undefined"),
+        };
+    }
+
+    fn formatScopedNameDefaultZig(self: *Generator, name: []const u8, type_ref: ir.TypeRef) ![]u8 {
+        return switch (type_ref) {
+            .named => |td| switch (td) {
+                .enum_ => {
+                    const tag = if (self.opts.zig_idiomatic_enums)
+                        try self.idiomaticEnumTag(name)
+                    else
+                        try self.alloc.dupe(u8, name);
+                    defer self.alloc.free(tag);
+                    return std.fmt.allocPrint(self.alloc, ".{s}", .{tag});
+                },
+                .typedef => |t| if (t.dimensions.len == 0)
+                    self.formatScopedNameDefaultZig(name, t.type_ref)
+                else
+                    self.alloc.dupe(u8, name),
+                else => self.alloc.dupe(u8, name),
+            },
+            else => self.alloc.dupe(u8, name),
         };
     }
 
@@ -5886,6 +5916,21 @@ test "zig_backend: @callback thunk unwraps ?*const T params (seq typedef and cal
     try testing.expect(has(s, "on_missed: ?*const fn (*Ctx, NumSeq) void = null,"));
 }
 
+test "zig_backend: imported callback interface param is qualified in vtable" {
+    var out = try testGenOpts(
+        \\module DDS { @callback interface DomainParticipantListener {}; };
+        \\module zzdds {
+        \\    interface Factory {
+        \\        void create(in DDS::DomainParticipantListener listener);
+        \\    };
+        \\};
+    , "ext", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "listener: ?*const DDS.DomainParticipantListener"));
+    try testing.expect(!has(s, "listener: ?*const DomainParticipantListener"));
+}
+
 test "zig_backend: --zig-generate-c-api with --type-prefix uses prefix in export name" {
     var out = try testGenOpts(
         \\interface Greeter { string greet(in string name); };
@@ -6562,6 +6607,15 @@ test "zig_backend: @default scoped_name emits identifier" {
     , "cfg");
     defer h.deinit(testing.allocator);
     try testing.expect(has(h.items, "limit: i32 = MY_MAX,"));
+}
+
+test "zig_backend: @default enum scoped_name emits enum tag" {
+    var h = try testGen(
+        \\enum Kind { FIRST, SECOND };
+        \\struct Cfg { @default(SECOND) Kind kind; };
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "kind: Kind = .SECOND,"));
 }
 
 test "zig_backend: struct with sequence field gets _free export under zig_generate_c_api" {

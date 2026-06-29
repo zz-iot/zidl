@@ -14,5 +14,7 @@ char *AdvancedGreeter_greet(AdvancedGreeter self, const char *name);
 void AdvancedGreeter_reset(AdvancedGreeter self);
 void AdvancedGreeter_greetAdvanced(AdvancedGreeter self, const char *name);
 int32_t AdvancedGreeter_get_count(AdvancedGreeter self);
+Greeter AdvancedGreeter_as_Greeter(AdvancedGreeter child);
+AdvancedGreeter Greeter_as_AdvancedGreeter(Greeter base);
 
 #endif /* ADVANCEDGREETER_H */

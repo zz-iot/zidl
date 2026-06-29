@@ -30,3 +30,7 @@ int Point_skip(ZidlCdrReader *_r) {
     return ZIDL_CDR_OK;
 }
 
+void Point_default(Point *_v) {
+    memset(_v, 0, sizeof(*_v));
+}
+

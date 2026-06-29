@@ -42,3 +42,7 @@ int Frame_skip(ZidlCdrReader *_r) {
     return ZIDL_CDR_OK;
 }
 
+void Frame_default(Frame *_v) {
+    memset(_v, 0, sizeof(*_v));
+}
+

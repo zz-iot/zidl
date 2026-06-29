@@ -13,6 +13,8 @@
 struct Point {
     int32_t x{};
     int32_t y{};
+
+    static Point default_value() { return Point{}; }
 }; // struct Point
 
 #define Point_has_key 0

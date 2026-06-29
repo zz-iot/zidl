@@ -82,6 +82,10 @@ public class Types {
             this.y = 0;
         }
 
+        public static Point defaultValue() {
+            return new Point();
+        }
+
         public Point(int x, int y) {
             this.x = x;
             this.y = y;
@@ -154,6 +158,10 @@ public class Types {
             this.arr = new int[3];
             this.clr = Color.values()[0];
             this.nested = new Point();
+        }
+
+        public static Sample defaultValue() {
+            return new Sample();
         }
 
         public Sample(int id, boolean b, byte u8_val, short s16_val, short u16_val, int s32_val, int u32_val, long s64_val, long u64_val, float f32_val, double f64_val, String str, String bstr, java.util.List<Integer> nums, int[] arr, Color clr, Point nested) {
@@ -355,6 +363,10 @@ public class Types {
             this.topic = "";
         }
 
+        public static Frame defaultValue() {
+            return new Frame();
+        }
+
         public Frame(int seq_num, String topic) {
             this.seq_num = seq_num;
             this.topic = topic;
@@ -401,6 +413,10 @@ public class Types {
         public Beacon() {
             this.id = 0;
             this.payload = "";
+        }
+
+        public static Beacon defaultValue() {
+            return new Beacon();
         }
 
         public Beacon(int id, String payload) {

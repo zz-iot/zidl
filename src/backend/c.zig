@@ -230,6 +230,11 @@ const Generator = struct {
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructC(spec.items)) {
             try self.write("#include \"zzdds_c.h\"\n");
         }
+        for (spec.imports) |import_name| {
+            const stem = try cIncludeStemForImport(self.alloc, import_name);
+            defer self.alloc.free(stem);
+            try self.print("#include \"{s}.h\"\n", .{stem});
+        }
         try self.write("\n");
         // Always emit extern "C" when generating interfaces: the DDS C API is
         // explicitly designed for C/C++ interop, and the guard is harmless for
@@ -507,8 +512,6 @@ const Generator = struct {
         for (s.members) |m| {
             if (m.annotations.is_optional) {
                 opt_count += 1;
-            } else if (m.annotations.default_value != null) {
-                return error.DefaultOnNonOptionalNotSupportedInCBackend;
             }
         }
         const has_optional = opt_count > 0;
@@ -568,10 +571,13 @@ const Generator = struct {
 
         if (!self.opts.no_typesupport) {
             try self.emitStructCdrProtos(c_name, s);
+            const em = self.opts.export_macro;
+            const sp: []const u8 = if (em.len > 0) " " else "";
+            try self.print("{s}{s}void {s}_default({s} *_v);\n", .{ em, sp, c_name, c_name });
             if (structHasDefault(s)) {
-                const em = self.opts.export_macro;
-                const sp: []const u8 = if (em.len > 0) " " else "";
                 try self.print("{s}{s}void {s}_apply_defaults({s} *_v);\n\n", .{ em, sp, c_name, c_name });
+            } else {
+                try self.write("\n");
             }
             if (self.opts.generate_zzdds_wrappers and isZzddsTopicStructC(s)) {
                 try self.emitStructZzddsWrapperProtos(c_name);
@@ -836,7 +842,41 @@ const Generator = struct {
         try self.print("/* IDL interface: {s} */\n", .{c_name});
         for (ops.items) |op| try self.emitFreeFunctionDecl(c_name, &op);
         for (attrs.items) |attr| try self.emitFreeAttrDecls(c_name, &attr);
+        try self.emitInterfaceCastDecls(iface);
         try self.write("\n");
+    }
+
+    /// Emit per-inheritance-edge C helper declarations.
+    ///
+    /// Entity interfaces are two-word handles, but the vtable type/layout differs
+    /// between parent and child, so these helpers are not raw bitcasts. Listener
+    /// interfaces are callback structs, so their adapters are field-copy helpers.
+    /// Runtime backends provide the bodies because only they know the concrete
+    /// parent/child view vtables.
+    fn emitInterfaceCastDecls(self: *Generator, iface: *const ir.Interface) !void {
+        const child_name = try self.prefixedCName(iface.qualified_name);
+        defer self.alloc.free(child_name);
+        for (iface.bases) |base| {
+            if (base != .interface) continue;
+            const base_iface = base.interface;
+            const base_name = try self.prefixedCName(base_iface.qualified_name);
+            defer self.alloc.free(base_name);
+            if (isListenerInterface(iface) or isListenerInterface(base_iface)) {
+                try self.print("void {s}_as_{s}(const {s} *child, {s} *out);\n", .{
+                    child_name, base_name, child_name, base_name,
+                });
+                try self.print("bool {s}_as_{s}(const {s} *base, {s} *out);\n", .{
+                    base_name, child_name, base_name, child_name,
+                });
+            } else {
+                try self.print("{s} {s}_as_{s}({s} child);\n", .{
+                    base_name, child_name, base_name, child_name,
+                });
+                try self.print("{s} {s}_as_{s}({s} base);\n", .{
+                    child_name, base_name, child_name, base_name,
+                });
+            }
+        }
     }
 
     /// Emit a free C function declaration for one interface operation.
@@ -940,6 +980,7 @@ const Generator = struct {
                 .type_decl => |td| switch (td) {
                     .interface => |iface| if (isListenerInterface(iface)) {
                         try self.emitListenerStruct(iface);
+                        try self.emitInterfaceCastDecls(iface);
                     },
                     else => {},
                 },
@@ -1289,6 +1330,11 @@ fn itemsHaveZzddsTopicStructC(items: []const ir.ModuleItem) bool {
     return false;
 }
 
+fn cIncludeStemForImport(alloc: std.mem.Allocator, import_name: []const u8) ![]u8 {
+    if (std.mem.eql(u8, import_name, "DDS")) return alloc.dupe(u8, "dcps");
+    return std.ascii.allocLowerString(alloc, import_name);
+}
+
 /// Returns true if the struct contains any unbounded sequence field (recursively
 /// through nested structs and typedefs), indicating it needs a _free function.
 fn structHasSequenceFields(s: *const ir.Struct) bool {
@@ -1537,6 +1583,7 @@ const CdrGenerator = struct {
         switch (td) {
             .struct_ => |s| {
                 try self.emitStructFns(s);
+                try self.emitDefault(s);
                 if (structHasDefault(s)) try self.emitApplyDefaults(s);
             },
             .exception => |e| try self.emitExceptionFns(e),
@@ -1552,8 +1599,6 @@ const CdrGenerator = struct {
         for (s.members) |m| {
             if (m.annotations.is_optional) {
                 opt_count += 1;
-            } else if (m.annotations.default_value != null) {
-                return error.DefaultOnNonOptionalNotSupportedInCBackend;
             }
         }
         if (opt_count > 64) return error.TooManyOptionalMembers;
@@ -3249,31 +3294,77 @@ const CdrGenerator = struct {
         return interface.prefixedCNameFromQualified(self.alloc, qname, self.opts.type_prefix);
     }
 
-    /// Emit `void <CName>_apply_defaults(<CName> *_v)` which sets each absent
-    /// @optional field that carries a @default annotation to its default value.
+    /// Emit `void <CName>_default(<CName> *_v)` which zero-initializes a whole
+    /// struct, recursively applies nested struct defaults, and sets explicit
+    /// @default values. Optional defaults set the corresponding presence bit.
+    fn emitDefault(self: *CdrGenerator, s: *const ir.Struct) !void {
+        const c_name = try self.prefixedCName(s.qualified_name);
+        defer self.alloc.free(c_name);
+
+        try self.print("void {s}_default({s} *_v) {{\n", .{ c_name, c_name });
+        try self.writeI("memset(_v, 0, sizeof(*_v));\n");
+        if (s.base) |base| {
+            switch (base) {
+                .struct_ => |bs| {
+                    const base_c = try self.prefixedCName(bs.qualified_name);
+                    defer self.alloc.free(base_c);
+                    try self.printI("{s}_default(&_v->_base);\n", .{base_c});
+                },
+                else => {},
+            }
+        }
+        for (s.members, 0..) |m, idx| {
+            if (m.annotations.default_value) |dv| {
+                try self.emitMemberDefaultAssign(s, m, idx, dv, true);
+            } else if (!m.annotations.is_optional and m.dimensions.len == 0) {
+                try self.emitNestedStructDefault(m.name, m.type_ref);
+            }
+        }
+        try self.write("}\n\n");
+    }
+
+    /// Emit `void <CName>_apply_defaults(<CName> *_v)` which overlays explicit
+    /// @default values on an existing object. Optional fields are only assigned
+    /// when absent; non-optional fields are assigned unconditionally.
     fn emitApplyDefaults(self: *CdrGenerator, s: *const ir.Struct) !void {
         const c_name = try self.prefixedCName(s.qualified_name);
         defer self.alloc.free(c_name);
 
         try self.print("void {s}_apply_defaults({s} *_v) {{\n", .{ c_name, c_name });
         for (s.members, 0..) |m, idx| {
-            if (!m.annotations.is_optional) continue;
             const dv = m.annotations.default_value orelse continue;
+            try self.emitMemberDefaultAssign(s, m, idx, dv, false);
+        }
+        try self.write("}\n\n");
+    }
+
+    fn emitMemberDefaultAssign(
+        self: *CdrGenerator,
+        s: *const ir.Struct,
+        m: ir.StructMember,
+        idx: usize,
+        dv: ir.AnnotationParamValue,
+        from_default_ctor: bool,
+    ) !void {
+        const is_string = switch (dv) {
+            .string => true,
+            else => false,
+        };
+        const dv_str = try self.defaultValueToC(dv, m.type_ref);
+        defer self.alloc.free(dv_str);
+
+        if (m.annotations.is_optional) {
             const bit_idx = optBitIdxForMember(s.*, idx);
-            const is_string = switch (dv) {
-                .string => true,
-                else => false,
-            };
-            const dv_str = try self.defaultValueToC(dv, m.type_ref);
-            defer self.alloc.free(dv_str);
-            try self.printI("if (!(_v->_present & (1ULL << {d}u))) {{\n", .{bit_idx});
-            self.indent_depth += 1;
+            if (!from_default_ctor) {
+                try self.printI("if (!(_v->_present & (1ULL << {d}u))) {{\n", .{bit_idx});
+                self.indent_depth += 1;
+            }
             if (is_string) {
                 // strdup can return NULL on OOM; only assign on success.
-                try self.printI("char *_s = {s};\n", .{dv_str});
-                try self.printI("if (_s) {{\n", .{});
+                try self.printI("char *_s_{s} = {s};\n", .{ m.name, dv_str });
+                try self.printI("if (_s_{s}) {{\n", .{m.name});
                 self.indent_depth += 1;
-                try self.printI("_v->{s} = _s;\n", .{m.name});
+                try self.printI("_v->{s} = _s_{s};\n", .{ m.name, m.name });
                 try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit_idx});
                 self.indent_depth -= 1;
                 try self.writeI("}\n");
@@ -3281,10 +3372,30 @@ const CdrGenerator = struct {
                 try self.printI("_v->{s} = {s};\n", .{ m.name, dv_str });
                 try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit_idx});
             }
-            self.indent_depth -= 1;
-            try self.writeI("}\n");
+            if (!from_default_ctor) {
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            }
+        } else {
+            try self.printI("_v->{s} = {s};\n", .{ m.name, dv_str });
         }
-        try self.write("}\n\n");
+    }
+
+    fn emitNestedStructDefault(self: *CdrGenerator, field_name: []const u8, tr: ir.TypeRef) !void {
+        switch (tr) {
+            .named => |td| switch (td) {
+                .struct_ => |nested| {
+                    const nested_c = try self.prefixedCName(nested.qualified_name);
+                    defer self.alloc.free(nested_c);
+                    try self.printI("{s}_default(&_v->{s});\n", .{ nested_c, field_name });
+                },
+                .typedef => |t| if (t.dimensions.len == 0) {
+                    try self.emitNestedStructDefault(field_name, t.type_ref);
+                },
+                else => {},
+            },
+            else => {},
+        }
     }
 
     /// Format an `AnnotationParamValue` as a C literal expression.
@@ -3308,8 +3419,26 @@ const CdrGenerator = struct {
                 defer self.alloc.free(esc);
                 break :blk std.fmt.allocPrint(self.alloc, "strdup(\"{s}\")", .{esc});
             },
-            .scoped_name => |n| self.alloc.dupe(u8, n),
+            .scoped_name => |n| self.scopedNameDefaultToC(n, type_ref),
             else => self.alloc.dupe(u8, "0"),
+        };
+    }
+
+    fn scopedNameDefaultToC(self: *CdrGenerator, name: []const u8, type_ref: ir.TypeRef) ![]u8 {
+        return switch (type_ref) {
+            .named => |td| switch (td) {
+                .enum_, .bitmask => {
+                    const c_name = try self.prefixedCName(ir.typeDeclQualifiedName(td));
+                    defer self.alloc.free(c_name);
+                    return std.fmt.allocPrint(self.alloc, "{s}_{s}", .{ c_name, name });
+                },
+                .typedef => |t| if (t.dimensions.len == 0)
+                    self.scopedNameDefaultToC(name, t.type_ref)
+                else
+                    self.alloc.dupe(u8, name),
+                else => self.alloc.dupe(u8, name),
+            },
+            else => self.alloc.dupe(u8, name),
         };
     }
 
@@ -4125,6 +4254,28 @@ test "c_backend: interface readwrite attribute emits both" {
     try testing.expect(has(s, "void Src_set_value(Src self, int32_t value);"));
 }
 
+test "c_backend: interface inheritance emits bidirectional entity cast declarations" {
+    var out = try testGenIfaceHeader(
+        \\module DDS { interface Entity { long enable(); }; };
+        \\module zzdds { interface Entity : DDS::Entity { long extension(); }; };
+    , "casts");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "DDS_Entity zzdds_Entity_as_DDS_Entity(zzdds_Entity child);"));
+    try testing.expect(has(s, "zzdds_Entity DDS_Entity_as_zzdds_Entity(DDS_Entity base);"));
+}
+
+test "c_backend: listener inheritance emits structural cast declarations" {
+    var out = try testGenIfaceHeader(
+        \\module DDS { @callback interface DataReaderListener { void on_data_available(in long value); }; };
+        \\module zzdds { @callback interface DataReaderListener : DDS::DataReaderListener { void on_serialized(in long value); }; };
+    , "listener_casts");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "void zzdds_DataReaderListener_as_DDS_DataReaderListener(const zzdds_DataReaderListener *child, DDS_DataReaderListener *out);"));
+    try testing.expect(has(s, "bool DDS_DataReaderListener_as_zzdds_DataReaderListener(const DDS_DataReaderListener *base, zzdds_DataReaderListener *out);"));
+}
+
 test "c_backend: listener interface emits callback struct not free functions" {
     var out = try testGenIfaceHeader(
         \\interface Entity { long enable(); };
@@ -4908,11 +5059,26 @@ test "c_backend cdr: struct without @optional has no _present clear in deseriali
     try testing.expect(!has(src.items, "_present = 0"));
 }
 
-test "c_backend cdr: @default on non-optional member returns error" {
-    const result_h = testGen("struct Cfg { @default(42) long x; };", "cfg");
-    try testing.expectError(error.DefaultOnNonOptionalNotSupportedInCBackend, result_h);
-    const result_cdr = testGenCdr("struct Cfg { @default(42) long x; };", "cfg");
-    try testing.expectError(error.DefaultOnNonOptionalNotSupportedInCBackend, result_cdr);
+test "c_backend cdr: @default on non-optional member emits full default helper" {
+    var h = try testGen("struct Cfg { @default(42) long x; };", "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "void Cfg_default(Cfg *_v);"));
+
+    var src = try testGenCdr("struct Cfg { @default(42) long x; };", "cfg");
+    defer src.deinit(testing.allocator);
+    try testing.expect(has(src.items, "void Cfg_default(Cfg *_v)"));
+    try testing.expect(has(src.items, "memset(_v, 0, sizeof(*_v));"));
+    try testing.expect(has(src.items, "_v->x = 42;"));
+}
+
+test "c_backend cdr: default helper initializes nested struct defaults" {
+    var src = try testGenCdr(
+        \\struct Inner { @default(7) long x; };
+        \\struct Outer { Inner inner; };
+    , "nest");
+    defer src.deinit(testing.allocator);
+    try testing.expect(has(src.items, "void Outer_default(Outer *_v)"));
+    try testing.expect(has(src.items, "Inner_default(&_v->inner);"));
 }
 
 test "c_backend cdr: @default emits apply_defaults prototype and implementation" {
@@ -4932,8 +5098,8 @@ test "c_backend cdr: @default emits apply_defaults prototype and implementation"
     const s = src.items;
     try testing.expect(has(s, "void UdpConfig_apply_defaults(UdpConfig *_v)"));
     try testing.expect(has(s, "_v->port_base = 7400;"));
-    try testing.expect(has(s, "char *_s = strdup(\"239.255.0.1\");"));
-    try testing.expect(has(s, "_v->multicast_group_v4 = _s;"));
+    try testing.expect(has(s, "char *_s_multicast_group_v4 = strdup(\"239.255.0.1\");"));
+    try testing.expect(has(s, "_v->multicast_group_v4 = _s_multicast_group_v4;"));
     try testing.expect(!has(s, "TODO"));
 }
 
@@ -4974,6 +5140,15 @@ test "c_backend cdr: @default scoped_name in apply_defaults" {
     var src = try testGenCdr(idl, "cfg");
     defer src.deinit(testing.allocator);
     try testing.expect(has(src.items, "_v->limit = MY_MAX;"));
+}
+
+test "c_backend cdr: @default enum scoped_name emits prefixed enumerator" {
+    var src = try testGenCdr(
+        \\enum Kind { FIRST, SECOND };
+        \\struct Cfg { @default(SECOND) Kind kind; };
+    , "cfg");
+    defer src.deinit(testing.allocator);
+    try testing.expect(has(src.items, "_v->kind = Kind_SECOND;"));
 }
 
 test "c_backend cdr: @default string with non-ASCII uses octal escape" {

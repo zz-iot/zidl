@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <memory>
 #include <array>
 #include <stdexcept>
 #include "zidl_cdr.h"
@@ -19,6 +20,8 @@ enum class Color : uint32_t {
 struct Point {
     int32_t x{};
     int32_t y{};
+
+    static Point default_value() { return Point{}; }
 }; // struct Point
 
 struct Sample {
@@ -39,16 +42,22 @@ struct Sample {
     int32_t arr[3];
     ::Color clr{};
     ::Point nested{};
+
+    static Sample default_value() { return Sample{}; }
 }; // struct Sample
 
 struct Frame {
     uint32_t seq_num{};
     std::string topic{};
+
+    static Frame default_value() { return Frame{}; }
 }; // struct Frame
 
 struct Beacon {
     uint32_t id{};
     std::string payload{};
+
+    static Beacon default_value() { return Beacon{}; }
 }; // struct Beacon
 
 class Greeter {

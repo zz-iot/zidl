@@ -17,4 +17,6 @@ int Frame_serialize(ZidlCdrWriter *_w, const Frame *_v);
 int Frame_deserialize(ZidlCdrReader *_r, Frame *_v);
 int Frame_skip(ZidlCdrReader *_r);
 
+void Frame_default(Frame *_v);
+
 #endif /* FRAME_H */

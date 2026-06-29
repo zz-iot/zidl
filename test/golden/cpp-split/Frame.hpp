@@ -13,6 +13,8 @@
 struct Frame {
     uint32_t seq_num{};
     std::string topic{};
+
+    static Frame default_value() { return Frame{}; }
 }; // struct Frame
 
 #define Frame_has_key 0

@@ -17,4 +17,6 @@ int Point_serialize(ZidlCdrWriter *_w, const Point *_v);
 int Point_deserialize(ZidlCdrReader *_r, Point *_v);
 int Point_skip(ZidlCdrReader *_r);
 
+void Point_default(Point *_v);
+
 #endif /* POINT_H */
