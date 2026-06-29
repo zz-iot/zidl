@@ -1400,6 +1400,17 @@ fn typeRefHasStructDefault(tr: ir.TypeRef) bool {
     };
 }
 
+fn typeRefIsNestedStruct(tr: ir.TypeRef) bool {
+    return switch (tr) {
+        .named => |td| switch (td) {
+            .struct_ => true,
+            .typedef => |t| typeRefIsNestedStruct(t.type_ref),
+            else => false,
+        },
+        else => false,
+    };
+}
+
 fn bitsetTotalBits(bs: *const ir.Bitset) u32 {
     var total: u32 = 0;
     for (bs.fields) |field| {
@@ -3330,6 +3341,7 @@ const CdrGenerator = struct {
                 .struct_ => |bs| {
                     const base_c = try self.prefixedCName(bs.qualified_name);
                     defer self.alloc.free(base_c);
+                    try self.writeI("// Base is already zeroed by the outer memset; this applies inherited defaults.\n");
                     try self.printI("{s}_default(&_v->_base);\n", .{base_c});
                 },
                 else => {},
@@ -3430,17 +3442,6 @@ const CdrGenerator = struct {
         } else {
             try self.printI("_v->{s} = {s};\n", .{ m.name, dv_str });
         }
-    }
-
-    fn typeRefIsNestedStruct(tr: ir.TypeRef) bool {
-        return switch (tr) {
-            .named => |td| switch (td) {
-                .struct_ => true,
-                .typedef => |t| typeRefIsNestedStruct(t.type_ref),
-                else => false,
-            },
-            else => false,
-        };
     }
 
     fn emitNestedStructDefault(

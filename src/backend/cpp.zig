@@ -624,6 +624,8 @@ const Generator = struct {
         for (s.members) |m| {
             try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, m.annotations.is_optional, m.annotations.default_value, "    ");
         }
+        // Aggregate value-initialization zero-fills members without explicit
+        // initializers, including raw array members.
         try self.print("\n    static {s} default_value() {{ return {s}{{}}; }}\n", .{ s.name, s.name });
         try self.print("}}; // struct {s}\n\n", .{s.name});
         try self.emitVerbatimForPlacement(s.annotations.raw, "after-declaration");

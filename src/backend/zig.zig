@@ -347,6 +347,7 @@ const Generator = struct {
         for (s.members) |m| {
             try self.emitField(m.name, m.type_ref, m.dimensions, m.annotations.is_optional, m.annotations.default_value);
         }
+        // default() is always emitted; it relies only on field defaults, not CDR support.
         try self.ind();
         try self.print("\n    pub fn default() @This() {{\n", .{});
         try self.ind();
