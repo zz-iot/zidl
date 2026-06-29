@@ -219,7 +219,6 @@ int Sample_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8
 
 void Sample_default(Sample *_v) {
     memset(_v, 0, sizeof(*_v));
-    Point_default(&_v->nested);
 }
 
 int Frame_serialize(ZidlCdrWriter *_w, const Frame *_v) {

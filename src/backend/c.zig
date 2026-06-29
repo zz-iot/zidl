@@ -1400,17 +1400,6 @@ fn typeRefHasStructDefault(tr: ir.TypeRef) bool {
     };
 }
 
-fn typeRefIsNestedStruct(tr: ir.TypeRef) bool {
-    return switch (tr) {
-        .named => |td| switch (td) {
-            .struct_ => true,
-            .typedef => |t| typeRefIsNestedStruct(t.type_ref),
-            else => false,
-        },
-        else => false,
-    };
-}
-
 fn bitsetTotalBits(bs: *const ir.Bitset) u32 {
     var total: u32 = 0;
     for (bs.fields) |field| {
@@ -3350,7 +3339,7 @@ const CdrGenerator = struct {
         for (s.members, 0..) |m, idx| {
             if (m.annotations.default_value) |dv| {
                 try self.emitMemberDefaultAssign(s, m, idx, dv, true);
-            } else if (!m.annotations.is_optional and typeRefIsNestedStruct(m.type_ref)) {
+            } else if (!m.annotations.is_optional and typeRefHasStructDefault(m.type_ref)) {
                 const field_expr = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
                 defer self.alloc.free(field_expr);
                 try self.emitNestedStructDefault(field_expr, m.type_ref, m.dimensions, 0);
