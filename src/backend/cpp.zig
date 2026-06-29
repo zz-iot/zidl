@@ -6961,6 +6961,24 @@ test "cpp_backend: B1+B3 — optional string struct member adapter is indented a
     ));
 }
 
+test "cpp_backend: B1+B3 — nested optional struct member adapter sets nested present bits" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    struct InnerQosPolicy { @optional string name; };
+        \\    struct OuterQosPolicy { @optional InnerQosPolicy inner; };
+        \\    interface Foo { long set_qos(in OuterQosPolicy qos); };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src,
+        \\    if (qos.inner.has_value()) {
+        \\        if ((*qos.inner).name.has_value()) {
+    ));
+    try testing.expect(has(src, "            _c_qos.inner._present |= (1ULL << 0u);"));
+    try testing.expect(has(src, "        _c_qos._present |= (1ULL << 0u);"));
+}
+
 test "cpp_backend: B — typedef sequence in-param gets seq_in adaptation" {
     var res = try testGenConcreteImpl(
         \\module DDS {

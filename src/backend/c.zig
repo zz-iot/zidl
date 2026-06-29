@@ -1376,6 +1376,12 @@ fn structHasOptional(s: *const ir.Struct) bool {
 }
 
 fn structHasDefault(s: *const ir.Struct) bool {
+    if (s.base) |base| {
+        switch (base) {
+            .struct_ => |bs| if (structHasDefault(bs)) return true,
+            else => {},
+        }
+    }
     for (s.members) |m| {
         if (m.annotations.default_value != null) return true;
         if (!m.annotations.is_optional and typeRefHasStructDefault(m.type_ref)) return true;
@@ -3349,6 +3355,16 @@ const CdrGenerator = struct {
         defer self.alloc.free(c_name);
 
         try self.print("void {s}_apply_defaults({s} *_v) {{\n", .{ c_name, c_name });
+        if (s.base) |base| {
+            switch (base) {
+                .struct_ => |bs| if (structHasDefault(bs)) {
+                    const base_c = try self.prefixedCName(bs.qualified_name);
+                    defer self.alloc.free(base_c);
+                    try self.printI("{s}_apply_defaults(&_v->_base);\n", .{base_c});
+                },
+                else => {},
+            }
+        }
         for (s.members, 0..) |m, idx| {
             if (m.annotations.default_value) |dv| {
                 try self.emitMemberDefaultAssign(s, m, idx, dv, false);
@@ -5233,6 +5249,22 @@ test "c_backend cdr: apply_defaults recurses into nested struct array defaults" 
     const s = src.items;
     try testing.expect(has(s, "{ uint32_t _di0; for (_di0 = 0; _di0 < 2u; _di0++) {"));
     try testing.expect(has(s, "Inner_apply_defaults(&_v->inner[_di0]);"));
+}
+
+test "c_backend cdr: apply_defaults propagates inherited base defaults" {
+    const idl =
+        \\struct Base { @optional @default(7) long x; };
+        \\struct Derived : Base { long y; };
+    ;
+    var h = try testGen(idl, "inherit_defaults");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "void Derived_apply_defaults(Derived *_v);"));
+
+    var src = try testGenCdr(idl, "inherit_defaults");
+    defer src.deinit(testing.allocator);
+    const s = src.items;
+    try testing.expect(has(s, "void Derived_apply_defaults(Derived *_v)"));
+    try testing.expect(has(s, "Base_apply_defaults(&_v->_base);"));
 }
 
 test "c_backend cdr: @default emits apply_defaults prototype and implementation" {
