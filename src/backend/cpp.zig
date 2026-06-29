@@ -289,7 +289,7 @@ const Generator = struct {
             try self.write("#include <unordered_map>\n");
         }
         for (spec.imports) |import_name| {
-            const stem = try cppIncludeStemForImport(self.alloc, import_name);
+            const stem = try interface.includeStemForImport(self.alloc, import_name);
             defer self.alloc.free(stem);
             try self.print("#include \"{s}.hpp\"\n", .{stem});
         }
@@ -1086,6 +1086,10 @@ const Generator = struct {
                     defer self.alloc.free(cpp_type);
                     return std.fmt.allocPrint(self.alloc, "{s}::{s}", .{ cpp_type, name });
                 },
+                // Bitmask bit constants are emitted as namespace-level
+                // `BitmaskName_BIT` values. IR qualified names already use
+                // `::`, so this forms an absolute C++ path like
+                // `::Module::BitmaskName_BIT`.
                 .bitmask => |bm| std.fmt.allocPrint(self.alloc, "::{s}_{s}", .{ bm.qualified_name, name }),
                 .typedef => |t| if (t.dimensions.len == 0)
                     self.formatScopedNameDefaultCpp(name, t.type_ref)
@@ -3104,7 +3108,7 @@ const ConcreteImplGenerator = struct {
             .{ self.opts.input_stem, self.opts.input_stem },
         );
         for (spec.imports) |import_name| {
-            const stem = try cppIncludeStemForImport(self.alloc, import_name);
+            const stem = try interface.includeStemForImport(self.alloc, import_name);
             defer self.alloc.free(stem);
             try self.hdrPrint("#include \"{s}_impl.hpp\"\n", .{stem});
         }
@@ -4839,11 +4843,6 @@ fn itemsHaveZzddsTopicStructCpp(items: []const ir.ModuleItem) bool {
         }
     }
     return false;
-}
-
-fn cppIncludeStemForImport(alloc: std.mem.Allocator, import_name: []const u8) ![]u8 {
-    if (std.mem.eql(u8, import_name, "DDS")) return alloc.dupe(u8, "dcps");
-    return std.ascii.allocLowerString(alloc, import_name);
 }
 
 /// C++ type string for a TypeRef — file-level helper for CdrGenerator.

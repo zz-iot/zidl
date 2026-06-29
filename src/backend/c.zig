@@ -231,7 +231,7 @@ const Generator = struct {
             try self.write("#include \"zzdds_c.h\"\n");
         }
         for (spec.imports) |import_name| {
-            const stem = try cIncludeStemForImport(self.alloc, import_name);
+            const stem = try interface.includeStemForImport(self.alloc, import_name);
             defer self.alloc.free(stem);
             try self.print("#include \"{s}.h\"\n", .{stem});
         }
@@ -858,11 +858,16 @@ const Generator = struct {
     fn emitInterfaceCastDecls(self: *Generator, iface: *const ir.Interface) !void {
         const child_name = try self.prefixedCName(iface.qualified_name);
         defer self.alloc.free(child_name);
+        var wrote_cast_note = false;
         for (iface.bases) |base| {
             if (base != .interface) continue;
             const base_iface = base.interface;
             const base_name = try self.prefixedCName(base_iface.qualified_name);
             defer self.alloc.free(base_name);
+            if (!wrote_cast_note) {
+                try self.write("/* Cast helpers are emitted for direct inheritance edges; compose helpers for transitive casts. */\n");
+                wrote_cast_note = true;
+            }
             if (isListenerInterface(iface) or isListenerInterface(base_iface)) {
                 try self.print("void {s}_as_{s}(const {s} *child, {s} *out);\n", .{
                     child_name, base_name, child_name, base_name,
@@ -1334,11 +1339,6 @@ fn itemsHaveZzddsTopicStructC(items: []const ir.ModuleItem) bool {
     return false;
 }
 
-fn cIncludeStemForImport(alloc: std.mem.Allocator, import_name: []const u8) ![]u8 {
-    if (std.mem.eql(u8, import_name, "DDS")) return alloc.dupe(u8, "dcps");
-    return std.ascii.allocLowerString(alloc, import_name);
-}
-
 /// Returns true if the struct contains any unbounded sequence field (recursively
 /// through nested structs and typedefs), indicating it needs a _free function.
 fn structHasSequenceFields(s: *const ir.Struct) bool {
@@ -1378,8 +1378,20 @@ fn structHasOptional(s: *const ir.Struct) bool {
 fn structHasDefault(s: *const ir.Struct) bool {
     for (s.members) |m| {
         if (m.annotations.default_value != null) return true;
+        if (!m.annotations.is_optional and typeRefHasStructDefault(m.type_ref)) return true;
     }
     return false;
+}
+
+fn typeRefHasStructDefault(tr: ir.TypeRef) bool {
+    return switch (tr) {
+        .named => |td| switch (td) {
+            .struct_ => |s| structHasDefault(s),
+            .typedef => |t| typeRefHasStructDefault(t.type_ref),
+            else => false,
+        },
+        else => false,
+    };
 }
 
 fn bitsetTotalBits(bs: *const ir.Bitset) u32 {
@@ -3338,8 +3350,13 @@ const CdrGenerator = struct {
 
         try self.print("void {s}_apply_defaults({s} *_v) {{\n", .{ c_name, c_name });
         for (s.members, 0..) |m, idx| {
-            const dv = m.annotations.default_value orelse continue;
-            try self.emitMemberDefaultAssign(s, m, idx, dv, false);
+            if (m.annotations.default_value) |dv| {
+                try self.emitMemberDefaultAssign(s, m, idx, dv, false);
+            } else if (!m.annotations.is_optional and typeRefHasStructDefault(m.type_ref)) {
+                const field_expr = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
+                defer self.alloc.free(field_expr);
+                try self.emitNestedStructApplyDefaults(field_expr, m.type_ref, m.dimensions, 0);
+            }
         }
         try self.write("}\n\n");
     }
@@ -3440,6 +3457,43 @@ const CdrGenerator = struct {
                     try self.printI("{s}_default(&{s});\n", .{ nested_c, field_expr });
                 },
                 .typedef => |t| try self.emitNestedStructDefault(field_expr, t.type_ref, t.dimensions, dim_idx),
+                else => {},
+            },
+            else => {},
+        }
+    }
+
+    fn emitNestedStructApplyDefaults(
+        self: *CdrGenerator,
+        field_expr: []const u8,
+        tr: ir.TypeRef,
+        dimensions: []const u64,
+        dim_idx: usize,
+    ) !void {
+        if (dimensions.len > 0) {
+            const idx_name = try std.fmt.allocPrint(self.alloc, "_di{d}", .{dim_idx});
+            defer self.alloc.free(idx_name);
+            try self.printI("{{ uint32_t {s}; for ({s} = 0; {s} < {d}u; {s}++) {{\n", .{
+                idx_name, idx_name, idx_name, dimensions[0], idx_name,
+            });
+            self.indent_depth += 1;
+            const elem_expr = try std.fmt.allocPrint(self.alloc, "{s}[{s}]", .{ field_expr, idx_name });
+            defer self.alloc.free(elem_expr);
+            try self.emitNestedStructApplyDefaults(elem_expr, tr, dimensions[1..], dim_idx + 1);
+            self.indent_depth -= 1;
+            try self.writeI("}\n");
+            try self.writeI("}\n");
+            return;
+        }
+        switch (tr) {
+            .named => |td| switch (td) {
+                .struct_ => |nested| {
+                    if (!structHasDefault(nested)) return;
+                    const nested_c = try self.prefixedCName(nested.qualified_name);
+                    defer self.alloc.free(nested_c);
+                    try self.printI("{s}_apply_defaults(&{s});\n", .{ nested_c, field_expr });
+                },
+                .typedef => |t| try self.emitNestedStructApplyDefaults(field_expr, t.type_ref, t.dimensions, dim_idx),
                 else => {},
             },
             else => {},
@@ -5152,6 +5206,33 @@ test "c_backend cdr: default helper initializes typedef array nested struct defa
     try testing.expect(has(s, "void Outer_default(Outer *_v)"));
     try testing.expect(has(s, "{ uint32_t _di0; for (_di0 = 0; _di0 < 2u; _di0++) {"));
     try testing.expect(has(s, "Inner_default(&_v->inner[_di0]);"));
+}
+
+test "c_backend cdr: apply_defaults recurses into nested struct defaults" {
+    const idl =
+        \\struct Inner { @default(7) long x; };
+        \\struct Outer { Inner inner; };
+    ;
+    var h = try testGen(idl, "nested_apply");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "void Outer_apply_defaults(Outer *_v);"));
+
+    var src = try testGenCdr(idl, "nested_apply");
+    defer src.deinit(testing.allocator);
+    const s = src.items;
+    try testing.expect(has(s, "void Outer_apply_defaults(Outer *_v)"));
+    try testing.expect(has(s, "Inner_apply_defaults(&_v->inner);"));
+}
+
+test "c_backend cdr: apply_defaults recurses into nested struct array defaults" {
+    var src = try testGenCdr(
+        \\struct Inner { @default(7) long x; };
+        \\struct Outer { Inner inner[2]; };
+    , "nested_array_apply");
+    defer src.deinit(testing.allocator);
+    const s = src.items;
+    try testing.expect(has(s, "{ uint32_t _di0; for (_di0 = 0; _di0 < 2u; _di0++) {"));
+    try testing.expect(has(s, "Inner_apply_defaults(&_v->inner[_di0]);"));
 }
 
 test "c_backend cdr: @default emits apply_defaults prototype and implementation" {
