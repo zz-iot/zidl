@@ -3476,7 +3476,11 @@ const ConcreteImplGenerator = struct {
                 try self.srcWrite("    return _r ? std::string(_r) : std::string{};\n");
             },
             .direct => {
-                try self.srcPrint("    return {s}_get_{s}({s});\n", .{ owner_c_name, attr.name, handle_expr });
+                if (typeRefIsEnumLike(attr.type_ref)) {
+                    try self.srcPrint("    return static_cast<{s}>({s}_get_{s}({s}));\n", .{ at, owner_c_name, attr.name, handle_expr });
+                } else {
+                    try self.srcPrint("    return {s}_get_{s}({s});\n", .{ owner_c_name, attr.name, handle_expr });
+                }
             },
             .todo => {
                 try self.srcWrite("    /* TODO */\n    return {};\n");
@@ -3487,7 +3491,15 @@ const ConcreteImplGenerator = struct {
         if (!attr.readonly) {
             try self.srcPrint("void {s}Impl::{s}({s} value) {{\n", .{ class_name, attr.name, at });
             switch (paramAdaptKindForTypeRef(attr.type_ref, .in_)) {
-                .direct => try self.srcPrint("    {s}_set_{s}({s}, value);\n", .{ owner_c_name, attr.name, handle_expr }),
+                .direct => {
+                    if (typeRefIsEnumLike(attr.type_ref)) {
+                        const ct = try self.typeRefToCType(attr.type_ref);
+                        defer self.alloc.free(ct);
+                        try self.srcPrint("    {s}_set_{s}({s}, static_cast<{s}>(value));\n", .{ owner_c_name, attr.name, handle_expr, ct });
+                    } else {
+                        try self.srcPrint("    {s}_set_{s}({s}, value);\n", .{ owner_c_name, attr.name, handle_expr });
+                    }
+                },
                 .str_in => try self.srcPrint("    {s}_set_{s}({s}, value.c_str());\n", .{ owner_c_name, attr.name, handle_expr }),
                 else => try self.srcPrint("    /* TODO */\n    (void)value;\n", .{}),
             }
@@ -6875,6 +6887,25 @@ test "cpp_backend: B1+B3 — entity return wraps in Impl" {
     const src = res.src.items;
     try testing.expect(has(src, "make_shared<::DDS::BarImpl>"));
     try testing.expect(has(src, "if (!_h.ptr)"));
+}
+
+test "cpp_backend: B1+B3 — enum-like attributes cast across C ABI" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    enum Color { RED, BLUE };
+        \\    bitmask Flags { READ, WRITE };
+        \\    interface Foo {
+        \\        attribute Color color;
+        \\        attribute Flags flags;
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "return static_cast<::DDS::Color>(DDS_Foo_get_color(ptr_));"));
+    try testing.expect(has(src, "DDS_Foo_set_color(ptr_, static_cast<DDS_Color>(value));"));
+    try testing.expect(has(src, "return static_cast<::DDS::Flags>(DDS_Foo_get_flags(ptr_));"));
+    try testing.expect(has(src, "DDS_Foo_set_flags(ptr_, static_cast<DDS_Flags>(value));"));
 }
 
 test "cpp_backend: B1+B3 — listener base is in dcps_impl.cpp; decl moved to dcps.hpp" {
