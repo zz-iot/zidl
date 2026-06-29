@@ -3382,13 +3382,15 @@ const CdrGenerator = struct {
                 self.indent_depth -= 1;
                 try self.writeI("}\n");
             }
-        } else if (is_string and !from_default_ctor) {
-            // Preserve the existing required string on OOM; only replace it
-            // after the default string allocation succeeds.
+        } else if (is_string) {
             try self.printI("char *_s_{s} = {s};\n", .{ m.name, dv_str });
             try self.printI("if (_s_{s}) {{\n", .{m.name});
             self.indent_depth += 1;
-            try self.printI("free(_v->{s});\n", .{m.name});
+            if (!from_default_ctor) {
+                // Preserve the existing required string on OOM; only replace it
+                // after the default string allocation succeeds.
+                try self.printI("free(_v->{s});\n", .{m.name});
+            }
             try self.printI("_v->{s} = _s_{s};\n", .{ m.name, m.name });
             self.indent_depth -= 1;
             try self.writeI("}\n");
@@ -5231,6 +5233,18 @@ test "c_backend cdr: non-optional string apply_defaults replaces only after strd
     try testing.expect(has(src.items, "if (_s_url) {"));
     try testing.expect(has(src.items, "free(_v->url);"));
     try testing.expect(has(src.items, "_v->url = _s_url;"));
+}
+
+test "c_backend cdr: non-optional string default ctor assigns only after strdup succeeds" {
+    var src = try testGenCdr(
+        \\struct Cfg { @default("default-url") string url; };
+    , "cfg");
+    defer src.deinit(testing.allocator);
+    try testing.expect(has(src.items, "void Cfg_default(Cfg *_v) {"));
+    try testing.expect(has(src.items, "char *_s_url = strdup(\"default-url\");"));
+    try testing.expect(has(src.items, "if (_s_url) {"));
+    try testing.expect(has(src.items, "_v->url = _s_url;"));
+    try testing.expect(!has(src.items, "_v->url = strdup(\"default-url\");"));
 }
 
 test "c_backend cdr: @default string with non-ASCII uses octal escape" {
