@@ -3566,7 +3566,7 @@ const ConcreteImplGenerator = struct {
             defer self.alloc.free(c_field);
             const cpp_field = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ cpp_src, mem.name });
             defer self.alloc.free(cpp_field);
-            try self.emitMemberAdaptIn(c_var, c_field, cpp_field, s, mem, idx, seq_ctr);
+            try self.emitMemberAdaptIn(c_var, c_field, cpp_field, s, mem, idx, seq_ctr, "    ");
         }
     }
 
@@ -3579,17 +3579,20 @@ const ConcreteImplGenerator = struct {
         mem: ir.StructMember,
         idx: usize,
         seq_ctr: *usize,
+        indent: []const u8,
     ) anyerror!void {
         if (!mem.annotations.is_optional) {
-            return self.emitFieldAdaptIn(c_dst, cpp_src, mem.type_ref, seq_ctr);
+            return self.emitFieldAdaptIn(c_dst, cpp_src, mem.type_ref, seq_ctr, indent);
         }
         const bit_idx = optionalBitIndexCpp(s, idx);
-        try self.srcPrint("    if ({s}.has_value()) {{\n", .{cpp_src});
+        try self.srcPrint("{s}if ({s}.has_value()) {{\n", .{ indent, cpp_src });
         const deref = try std.fmt.allocPrint(self.alloc, "(*{s})", .{cpp_src});
         defer self.alloc.free(deref);
-        try self.emitFieldAdaptIn(c_dst, deref, mem.type_ref, seq_ctr);
-        try self.srcPrint("        {s}._present |= (1ULL << {d}u);\n", .{ c_parent, bit_idx });
-        try self.srcWrite("    }\n");
+        const child_indent = try std.fmt.allocPrint(self.alloc, "{s}    ", .{indent});
+        defer self.alloc.free(child_indent);
+        try self.emitFieldAdaptIn(c_dst, deref, mem.type_ref, seq_ctr, child_indent);
+        try self.srcPrint("{s}{s}._present |= (1ULL << {d}u);\n", .{ child_indent, c_parent, bit_idx });
+        try self.srcPrint("{s}}}\n", .{indent});
     }
 
     fn emitFieldAdaptIn(
@@ -3598,27 +3601,31 @@ const ConcreteImplGenerator = struct {
         cpp_src: []const u8,
         tr: ir.TypeRef,
         seq_ctr: *usize,
+        indent: []const u8,
     ) anyerror!void {
         switch (tr) {
-            .base, .fixed_pt => try self.srcPrint("    {s} = {s};\n", .{ c_dst, cpp_src }),
-            .string => try self.srcPrint("    {s} = const_cast<char*>({s}.c_str());\n", .{ c_dst, cpp_src }),
-            .sequence => |seq| try self.emitSeqFieldAdaptIn(c_dst, cpp_src, seq.element.*, seq_ctr),
+            .base, .fixed_pt => try self.srcPrint("{s}{s} = {s};\n", .{ indent, c_dst, cpp_src }),
+            .string => {
+                try self.srcPrint("{s}// Borrowed string pointer; valid only for the duration of this C ABI call.\n", .{indent});
+                try self.srcPrint("{s}{s} = const_cast<char*>({s}.c_str());\n", .{ indent, c_dst, cpp_src });
+            },
+            .sequence => |seq| try self.emitSeqFieldAdaptIn(c_dst, cpp_src, seq.element.*, seq_ctr, indent),
             .named => |td| switch (td) {
                 .typedef => |t| if (t.dimensions.len == 0)
-                    try self.emitFieldAdaptIn(c_dst, cpp_src, t.type_ref, seq_ctr)
+                    try self.emitFieldAdaptIn(c_dst, cpp_src, t.type_ref, seq_ctr, indent)
                 else
-                    try self.srcPrint("    /* TODO: array typedef for {s} */\n", .{c_dst}),
+                    try self.srcPrint("{s}/* TODO: array typedef for {s} */\n", .{ indent, c_dst }),
                 .enum_, .bitmask, .bitset => {
                     const c_type = try cNameOf(self.alloc, ir.typeDeclQualifiedName(td));
                     defer self.alloc.free(c_type);
-                    try self.srcPrint("    {s} = static_cast<{s}>({s});\n", .{ c_dst, c_type, cpp_src });
+                    try self.srcPrint("{s}{s} = static_cast<{s}>({s});\n", .{ indent, c_dst, c_type, cpp_src });
                 },
                 .struct_ => |s| if (isSimpleStruct(s)) {
                     const c_type = try cNameOf(self.alloc, s.qualified_name);
                     defer self.alloc.free(c_type);
                     try self.srcPrint(
-                        "    {s} = *reinterpret_cast<const {s}*>(&{s});\n",
-                        .{ c_dst, c_type, cpp_src },
+                        "{s}{s} = *reinterpret_cast<const {s}*>(&{s});\n",
+                        .{ indent, c_dst, c_type, cpp_src },
                     );
                 } else {
                     for (s.members, 0..) |mem, idx| {
@@ -3626,12 +3633,12 @@ const ConcreteImplGenerator = struct {
                         defer self.alloc.free(c_f);
                         const cpp_f = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ cpp_src, mem.name });
                         defer self.alloc.free(cpp_f);
-                        try self.emitMemberAdaptIn(c_dst, c_f, cpp_f, s, mem, idx, seq_ctr);
+                        try self.emitMemberAdaptIn(c_dst, c_f, cpp_f, s, mem, idx, seq_ctr, indent);
                     }
                 },
-                else => try self.srcPrint("    /* TODO: adapt {s} */\n", .{c_dst}),
+                else => try self.srcPrint("{s}/* TODO: adapt {s} */\n", .{ indent, c_dst }),
             },
-            else => try self.srcPrint("    /* TODO: adapt {s} */\n", .{c_dst}),
+            else => try self.srcPrint("{s}/* TODO: adapt {s} */\n", .{ indent, c_dst }),
         }
     }
 
@@ -3641,6 +3648,7 @@ const ConcreteImplGenerator = struct {
         cpp_src: []const u8,
         elem_tr: ir.TypeRef,
         seq_ctr: *usize,
+        indent: []const u8,
     ) anyerror!void {
         const is_string = switch (elem_tr) {
             .string => true,
@@ -3650,21 +3658,23 @@ const ConcreteImplGenerator = struct {
             seq_ctr.* += 1;
             const tmp = try std.fmt.allocPrint(self.alloc, "_ptrs_{d}", .{seq_ctr.*});
             defer self.alloc.free(tmp);
-            try self.srcPrint("    std::vector<const char*> {s};\n", .{tmp});
-            try self.srcPrint("    {s}.reserve({s}.size());\n", .{ tmp, cpp_src });
-            try self.srcPrint("    for (const auto& _s : {s}) {s}.push_back(_s.c_str());\n", .{ cpp_src, tmp });
-            try self.srcPrint("    {s}._buffer = const_cast<char**>({s}.data());\n", .{ c_dst, tmp });
-            try self.srcPrint("    {s}._length = static_cast<int32_t>({s}.size());\n", .{ c_dst, tmp });
-            try self.srcPrint("    {s}._maximum = static_cast<int32_t>({s}.size());\n", .{ c_dst, tmp });
+            try self.srcPrint("{s}std::vector<const char*> {s};\n", .{ indent, tmp });
+            try self.srcPrint("{s}{s}.reserve({s}.size());\n", .{ indent, tmp, cpp_src });
+            try self.srcPrint("{s}for (const auto& _s : {s}) {s}.push_back(_s.c_str());\n", .{ indent, cpp_src, tmp });
+            try self.srcPrint("{s}// Borrowed string pointer array; valid only for the duration of this C ABI call.\n", .{indent});
+            try self.srcPrint("{s}{s}._buffer = const_cast<char**>({s}.data());\n", .{ indent, c_dst, tmp });
+            try self.srcPrint("{s}{s}._length = static_cast<int32_t>({s}.size());\n", .{ indent, c_dst, tmp });
+            try self.srcPrint("{s}{s}._maximum = static_cast<int32_t>({s}.size());\n", .{ indent, c_dst, tmp });
         } else {
             const cpp_elem_type = try cppTypeStr(self.alloc, elem_tr);
             defer self.alloc.free(cpp_elem_type);
+            try self.srcPrint("{s}// Borrowed sequence buffer; valid only for the duration of this C ABI call.\n", .{indent});
             try self.srcPrint(
-                "    {s}._buffer = const_cast<{s}*>({s}.data());\n",
-                .{ c_dst, cpp_elem_type, cpp_src },
+                "{s}{s}._buffer = const_cast<{s}*>({s}.data());\n",
+                .{ indent, c_dst, cpp_elem_type, cpp_src },
             );
-            try self.srcPrint("    {s}._length = static_cast<int32_t>({s}.size());\n", .{ c_dst, cpp_src });
-            try self.srcPrint("    {s}._maximum = static_cast<int32_t>({s}.size());\n", .{ c_dst, cpp_src });
+            try self.srcPrint("{s}{s}._length = static_cast<int32_t>({s}.size());\n", .{ indent, c_dst, cpp_src });
+            try self.srcPrint("{s}{s}._maximum = static_cast<int32_t>({s}.size());\n", .{ indent, c_dst, cpp_src });
         }
     }
 
@@ -3707,7 +3717,7 @@ const ConcreteImplGenerator = struct {
         const c_var = try std.fmt.allocPrint(self.alloc, "_c_{s}", .{p.name});
         defer self.alloc.free(c_var);
         try self.srcPrint("    {s} {s}{{}};\n", .{ c_type.?, c_var });
-        try self.emitSeqFieldAdaptIn(c_var, p.name, elem, seq_ctr);
+        try self.emitSeqFieldAdaptIn(c_var, p.name, elem, seq_ctr, "    ");
     }
 
     // ── Complex struct adaptation (C out-params → C++ structs) ───────────────
@@ -4370,15 +4380,9 @@ fn importedLeafBaseDeclaresNativeHandle(
     derived: *const ir.Interface,
     base: *const ir.Interface,
 ) bool {
-    // Imported interfaces are represented without enough inherited-member
-    // detail here to reliably reconstruct the abstract C++ header shape.
-    // The DDS factory is a true leaf in dcps.idl and its generated abstract
-    // class declares native_handle(); other imported extension bases such as
-    // DomainParticipant/Topic/DataReader/DataWriter inherit Entity and do not.
     return !isCallbackIface(base) and
-        base.bases.len == 0 and
         std.mem.indexOfScalar(u8, base.qualified_name, ':') != null and
-        std.mem.eql(u8, base.qualified_name, "DDS::DomainParticipantFactory") and
+        base.bases.len == 0 and
         !std.mem.eql(u8, rootModuleName(derived.qualified_name), rootModuleName(base.qualified_name));
 }
 
@@ -6720,6 +6724,27 @@ test "cpp_backend: extension Impl forwards inherited operations through generate
     try testing.expect(has(src, "zzdds_DomainParticipantFactory_create_participant_ex(ptr_)"));
 }
 
+test "cpp_backend: imported leaf base native_handle detection is generic" {
+    var res = try testGenConcreteImpl(
+        \\module Base {
+        \\    interface Leaf {
+        \\        long inherited_op();
+        \\    };
+        \\};
+        \\module Ext {
+        \\    interface Leaf : Base::Leaf {
+        \\        long extension_op();
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const hdr = res.hdr.items;
+    const src = res.src.items;
+    try testing.expect(has(hdr, "Base_Leaf native_handle() const noexcept override { return Ext_Leaf_as_Base_Leaf(ptr_); }"));
+    try testing.expect(has(src, "Base_Leaf_inherited_op(Ext_Leaf_as_Base_Leaf(ptr_))"));
+    try testing.expect(has(src, "Ext_Leaf_extension_op(ptr_)"));
+}
+
 test "cpp_backend: B1+B3 — entity return wraps in Impl" {
     var res = try testGenConcreteImpl(
         \\module DDS {
@@ -6802,6 +6827,27 @@ test "cpp_backend: B1+B3 — complex QoS struct gets field-by-field C adaptation
     try testing.expect(!has(src, "TODO: adapt parameters"));
 }
 
+test "cpp_backend: B1+B3 — optional string struct member adapter is indented and documents borrowed lifetime" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    struct NameQosPolicy { @optional string name; };
+        \\    interface Foo { long set_qos(in NameQosPolicy qos); };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src,
+        \\    if (qos.name.has_value()) {
+        \\        // Borrowed string pointer; valid only for the duration of this C ABI call.
+        \\        _c_qos.name = const_cast<char*>((*qos.name).c_str());
+    ));
+    try testing.expect(has(src, "        _c_qos._present |= (1ULL << 0u);"));
+    try testing.expect(!has(src,
+        \\    if (qos.name.has_value()) {
+        \\    _c_qos.name =
+    ));
+}
+
 test "cpp_backend: B — typedef sequence in-param gets seq_in adaptation" {
     var res = try testGenConcreteImpl(
         \\module DDS {
@@ -6815,6 +6861,7 @@ test "cpp_backend: B — typedef sequence in-param gets seq_in adaptation" {
     try testing.expect(has(src, "DDS_StringSeq _c_params{}"));
     try testing.expect(has(src, "_ptrs_1"));
     try testing.expect(has(src, "_c_params._buffer"));
+    try testing.expect(has(src, "// Borrowed string pointer array; valid only for the duration of this C ABI call."));
     try testing.expect(has(src, "&_c_params"));
     try testing.expect(!has(src, "TODO"));
 }

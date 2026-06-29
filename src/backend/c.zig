@@ -3316,8 +3316,10 @@ const CdrGenerator = struct {
         for (s.members, 0..) |m, idx| {
             if (m.annotations.default_value) |dv| {
                 try self.emitMemberDefaultAssign(s, m, idx, dv, true);
-            } else if (!m.annotations.is_optional and m.dimensions.len == 0) {
-                try self.emitNestedStructDefault(m.name, m.type_ref);
+            } else if (!m.annotations.is_optional and typeRefHasNestedStructDefault(m.type_ref)) {
+                const field_expr = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
+                defer self.alloc.free(field_expr);
+                try self.emitNestedStructDefault(field_expr, m.type_ref, m.dimensions, 0);
             }
         }
         try self.write("}\n\n");
@@ -3381,17 +3383,47 @@ const CdrGenerator = struct {
         }
     }
 
-    fn emitNestedStructDefault(self: *CdrGenerator, field_name: []const u8, tr: ir.TypeRef) !void {
+    fn typeRefHasNestedStructDefault(tr: ir.TypeRef) bool {
+        return switch (tr) {
+            .named => |td| switch (td) {
+                .struct_ => true,
+                .typedef => |t| typeRefHasNestedStructDefault(t.type_ref),
+                else => false,
+            },
+            else => false,
+        };
+    }
+
+    fn emitNestedStructDefault(
+        self: *CdrGenerator,
+        field_expr: []const u8,
+        tr: ir.TypeRef,
+        dimensions: []const u64,
+        dim_idx: usize,
+    ) !void {
+        if (dimensions.len > 0) {
+            const idx_name = try std.fmt.allocPrint(self.alloc, "_di{d}", .{dim_idx});
+            defer self.alloc.free(idx_name);
+            try self.printI("{{ uint32_t {s}; for ({s} = 0; {s} < {d}u; {s}++) {{\n", .{
+                idx_name, idx_name, idx_name, dimensions[0], idx_name,
+            });
+            self.indent_depth += 1;
+            const elem_expr = try std.fmt.allocPrint(self.alloc, "{s}[{s}]", .{ field_expr, idx_name });
+            defer self.alloc.free(elem_expr);
+            try self.emitNestedStructDefault(elem_expr, tr, dimensions[1..], dim_idx + 1);
+            self.indent_depth -= 1;
+            try self.writeI("}\n");
+            try self.writeI("}\n");
+            return;
+        }
         switch (tr) {
             .named => |td| switch (td) {
                 .struct_ => |nested| {
                     const nested_c = try self.prefixedCName(nested.qualified_name);
                     defer self.alloc.free(nested_c);
-                    try self.printI("{s}_default(&_v->{s});\n", .{ nested_c, field_name });
+                    try self.printI("{s}_default(&{s});\n", .{ nested_c, field_expr });
                 },
-                .typedef => |t| if (t.dimensions.len == 0) {
-                    try self.emitNestedStructDefault(field_name, t.type_ref);
-                },
+                .typedef => |t| try self.emitNestedStructDefault(field_expr, t.type_ref, t.dimensions, dim_idx),
                 else => {},
             },
             else => {},
@@ -5079,6 +5111,31 @@ test "c_backend cdr: default helper initializes nested struct defaults" {
     defer src.deinit(testing.allocator);
     try testing.expect(has(src.items, "void Outer_default(Outer *_v)"));
     try testing.expect(has(src.items, "Inner_default(&_v->inner);"));
+}
+
+test "c_backend cdr: default helper initializes nested struct array defaults" {
+    var src = try testGenCdr(
+        \\struct Inner { @default(7) long x; };
+        \\struct Outer { Inner inner[3]; };
+    , "nest_array");
+    defer src.deinit(testing.allocator);
+    const s = src.items;
+    try testing.expect(has(s, "void Outer_default(Outer *_v)"));
+    try testing.expect(has(s, "{ uint32_t _di0; for (_di0 = 0; _di0 < 3u; _di0++) {"));
+    try testing.expect(has(s, "Inner_default(&_v->inner[_di0]);"));
+}
+
+test "c_backend cdr: default helper initializes typedef array nested struct defaults" {
+    var src = try testGenCdr(
+        \\struct Inner { @default(7) long x; };
+        \\typedef Inner InnerArray[2];
+        \\struct Outer { InnerArray inner; };
+    , "typedef_array_default");
+    defer src.deinit(testing.allocator);
+    const s = src.items;
+    try testing.expect(has(s, "void Outer_default(Outer *_v)"));
+    try testing.expect(has(s, "{ uint32_t _di0; for (_di0 = 0; _di0 < 2u; _di0++) {"));
+    try testing.expect(has(s, "Inner_default(&_v->inner[_di0]);"));
 }
 
 test "c_backend cdr: @default emits apply_defaults prototype and implementation" {
