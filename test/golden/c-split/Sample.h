@@ -48,6 +48,7 @@ int Sample_deserialize_key(ZidlCdrReader *_r, Sample *_v);
 int Sample_compute_key_hash(const Sample *_v, uint8_t _hash[16]);
 int Sample_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);
 
+/* Initialize a full object using IDL defaults and zero values. */
 void Sample_default(Sample *_v);
 
 void Sample_free(Sample *v);

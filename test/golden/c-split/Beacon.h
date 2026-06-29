@@ -21,6 +21,7 @@ int Beacon_deserialize_key(ZidlCdrReader *_r, Beacon *_v);
 int Beacon_compute_key_hash(const Beacon *_v, uint8_t _hash[16]);
 int Beacon_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);
 
+/* Initialize a full object using IDL defaults and zero values. */
 void Beacon_default(Beacon *_v);
 
 #endif /* BEACON_H */

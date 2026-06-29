@@ -573,8 +573,10 @@ const Generator = struct {
             try self.emitStructCdrProtos(c_name, s);
             const em = self.opts.export_macro;
             const sp: []const u8 = if (em.len > 0) " " else "";
+            try self.write("/* Initialize a full object using IDL defaults and zero values. */\n");
             try self.print("{s}{s}void {s}_default({s} *_v);\n", .{ em, sp, c_name, c_name });
             if (structHasDefault(s)) {
+                try self.write("/* Overlay IDL defaults on an existing object. Non-optional @default fields overwrite current values; optional fields are set only when absent. */\n");
                 try self.print("{s}{s}void {s}_apply_defaults({s} *_v);\n\n", .{ em, sp, c_name, c_name });
             } else {
                 try self.write("\n");
@@ -869,9 +871,11 @@ const Generator = struct {
                     base_name, child_name, base_name, child_name,
                 });
             } else {
+                try self.print("/* Upcast {s} to {s}. */\n", .{ child_name, base_name });
                 try self.print("{s} {s}_as_{s}({s} child);\n", .{
                     base_name, child_name, base_name, child_name,
                 });
+                try self.print("/* Downcast {s} to {s}; returns a null handle when the base object is not an instance of {s}. */\n", .{ base_name, child_name, child_name });
                 try self.print("{s} {s}_as_{s}({s} base);\n", .{
                     child_name, base_name, child_name, base_name,
                 });
