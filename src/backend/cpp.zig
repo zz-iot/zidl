@@ -3260,9 +3260,6 @@ const ConcreteImplGenerator = struct {
     // ── Entity Impl method implementations (source) ───────────────────────────
 
     fn emitEntityImplMethods(self: *ConcreteImplGenerator, iface: *const ir.Interface) !void {
-        const c_name = try cNameOf(self.alloc, iface.qualified_name);
-        defer self.alloc.free(c_name);
-
         var ops = std.ArrayListUnmanaged(OwnedOperation).empty;
         defer ops.deinit(self.alloc);
         var attrs = std.ArrayListUnmanaged(OwnedAttribute).empty;
@@ -3272,10 +3269,10 @@ const ConcreteImplGenerator = struct {
         try self.srcPrint("// \u{2500}\u{2500} {s}Impl \u{2500}\u{2500}\n\n", .{iface.name});
 
         for (ops.items) |op| {
-            try self.emitEntityMethod(iface, op.owner, c_name, iface.name, op.op);
+            try self.emitEntityMethod(iface, op.owner, iface.name, op.op);
         }
         for (attrs.items) |attr| {
-            try self.emitEntityAttr(iface, attr.owner, c_name, iface.name, attr.attr);
+            try self.emitEntityAttr(iface, attr.owner, iface.name, attr.attr);
         }
     }
 
@@ -3283,11 +3280,9 @@ const ConcreteImplGenerator = struct {
         self: *ConcreteImplGenerator,
         iface: *const ir.Interface,
         owner: *const ir.Interface,
-        c_name: []const u8,
         class_name: []const u8,
         op: *const ir.Operation,
     ) !void {
-        _ = c_name;
         const owner_c_name = try cNameOf(self.alloc, owner.qualified_name);
         defer self.alloc.free(owner_c_name);
         const handle_expr = try self.handleExprForOwner(iface, owner, "ptr_");
@@ -3452,11 +3447,9 @@ const ConcreteImplGenerator = struct {
         self: *ConcreteImplGenerator,
         iface: *const ir.Interface,
         owner: *const ir.Interface,
-        c_name: []const u8,
         class_name: []const u8,
         attr: *const ir.Attribute,
     ) !void {
-        _ = c_name;
         const owner_c_name = try cNameOf(self.alloc, owner.qualified_name);
         defer self.alloc.free(owner_c_name);
         const handle_expr = try self.handleExprForOwner(iface, owner, "ptr_");
@@ -3555,9 +3548,17 @@ const ConcreteImplGenerator = struct {
                     } else {
                         const impl_name = try self.entityImplName(p.type_ref);
                         defer self.alloc.free(impl_name);
+                        const iface_name = switch (p.type_ref) {
+                            .named => |td| switch (td) {
+                                .interface => |iface| iface.qualified_name,
+                                else => ct,
+                            },
+                            else => ct,
+                        };
+                        try self.srcWrite("/* zidl: entity parameter adaptation uses dynamic_cast and requires RTTI. */");
                         try self.srcPrint(
                             "([](const auto& _p) -> {s} {{ if (!_p) return {s}{{nullptr, nullptr}}; if (auto* _impl = dynamic_cast<{s}*>(_p.get())) return zidl_concrete_handle(*_impl); throw std::invalid_argument(\"zidl: incompatible entity implementation for {s}\"); }})({s})",
-                            .{ ct, ct, impl_name, ct, p.name },
+                            .{ ct, ct, impl_name, iface_name, p.name },
                         );
                     }
                 },
@@ -4418,6 +4419,11 @@ fn importedLeafBaseDeclaresNativeHandle(
     derived: *const ir.Interface,
     base: *const ir.Interface,
 ) bool {
+    // The abstract header emits native_handle() for leaf entity interfaces in
+    // their own module.  When an extension interface in a different root module
+    // inherits such a leaf, nativeHandleBase must still see the imported base's
+    // virtual handle even though the base is not part of the current module's
+    // entity_base_ifaces scan.
     return !isCallbackIface(base) and
         std.mem.indexOfScalar(u8, base.qualified_name, ':') != null and
         base.bases.len == 0 and
@@ -7207,8 +7213,9 @@ test "cpp_backend: entity_in param for derived root interface uses concrete hand
     const src = res.src.items;
     try testing.expect(has(hdr, "friend zzdds_DomainParticipantFactory zidl_concrete_handle(const DomainParticipantFactoryImpl& self) noexcept { return self.ptr_; }"));
     try testing.expect(has(hdr, "DDS_DomainParticipantFactory native_handle() const noexcept override { return zzdds_DomainParticipantFactory_as_DDS_DomainParticipantFactory(ptr_); }"));
+    try testing.expect(has(src, "entity parameter adaptation uses dynamic_cast and requires RTTI"));
     try testing.expect(has(src, "dynamic_cast<::zzdds::DomainParticipantFactoryImpl*>(_p.get())) return zidl_concrete_handle(*_impl);"));
-    try testing.expect(has(src, "throw std::invalid_argument(\"zidl: incompatible entity implementation for zzdds_DomainParticipantFactory\")"));
+    try testing.expect(has(src, "throw std::invalid_argument(\"zidl: incompatible entity implementation for zzdds::DomainParticipantFactory\")"));
     try testing.expect(!has(src, "dynamic_cast<::zzdds::DomainParticipantFactoryImpl*>(_p.get())) return _impl->native_handle();"));
 }
 

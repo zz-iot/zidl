@@ -17,7 +17,7 @@ int Point_serialize(ZidlCdrWriter *_w, const Point *_v);
 int Point_deserialize(ZidlCdrReader *_r, Point *_v);
 int Point_skip(ZidlCdrReader *_r);
 
-/* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. */
+/* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. String defaults are applied only when strdup succeeds; NULL remains the zero-initialized fallback. */
 void Point_default(Point *_v);
 
 #endif /* POINT_H */

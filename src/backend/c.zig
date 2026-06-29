@@ -573,7 +573,7 @@ const Generator = struct {
             try self.emitStructCdrProtos(c_name, s);
             const em = self.opts.export_macro;
             const sp: []const u8 = if (em.len > 0) " " else "";
-            try self.write("/* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. */\n");
+            try self.write("/* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. String defaults are applied only when strdup succeeds; NULL remains the zero-initialized fallback. */\n");
             try self.print("{s}{s}void {s}_default({s} *_v);\n", .{ em, sp, c_name, c_name });
             if (structHasDefault(s)) {
                 try self.write("/* Overlay IDL defaults on an existing object. Non-optional @default fields overwrite current values; optional fields are set only when absent. */\n");
@@ -3327,7 +3327,7 @@ const CdrGenerator = struct {
         try self.writeI("memset(_v, 0, sizeof(*_v));\n");
         if (s.base) |base| {
             switch (base) {
-                .struct_ => |bs| {
+                .struct_ => |bs| if (structHasDefault(bs)) {
                     const base_c = try self.prefixedCName(bs.qualified_name);
                     defer self.alloc.free(base_c);
                     try self.writeI("// Base is already zeroed by the outer memset; this applies inherited defaults.\n");

@@ -40,7 +40,7 @@ int Point_serialize(ZidlCdrWriter *_w, const Point *_v);
 int Point_deserialize(ZidlCdrReader *_r, Point *_v);
 int Point_skip(ZidlCdrReader *_r);
 
-/* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. */
+/* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. String defaults are applied only when strdup succeeds; NULL remains the zero-initialized fallback. */
 void Point_default(Point *_v);
 
 typedef struct Sample_s {
@@ -72,7 +72,7 @@ int Sample_deserialize_key(ZidlCdrReader *_r, Sample *_v);
 int Sample_compute_key_hash(const Sample *_v, uint8_t _hash[16]);
 int Sample_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);
 
-/* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. */
+/* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. String defaults are applied only when strdup succeeds; NULL remains the zero-initialized fallback. */
 void Sample_default(Sample *_v);
 
 void Sample_free(Sample *v);
@@ -87,7 +87,7 @@ int Frame_serialize(ZidlCdrWriter *_w, const Frame *_v);
 int Frame_deserialize(ZidlCdrReader *_r, Frame *_v);
 int Frame_skip(ZidlCdrReader *_r);
 
-/* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. */
+/* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. String defaults are applied only when strdup succeeds; NULL remains the zero-initialized fallback. */
 void Frame_default(Frame *_v);
 
 typedef struct Beacon_s {
@@ -104,7 +104,7 @@ int Beacon_deserialize_key(ZidlCdrReader *_r, Beacon *_v);
 int Beacon_compute_key_hash(const Beacon *_v, uint8_t _hash[16]);
 int Beacon_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);
 
-/* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. */
+/* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. String defaults are applied only when strdup succeeds; NULL remains the zero-initialized fallback. */
 void Beacon_default(Beacon *_v);
 
 /* IDL interface: Greeter */
