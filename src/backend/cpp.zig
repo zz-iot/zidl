@@ -3152,6 +3152,10 @@ const ConcreteImplGenerator = struct {
         // Class bodies
         for (entities.items) |iface| try self.emitEntityImplDecl(m.name, iface);
 
+        try self.hdrWrite(
+            "// Bootstrap factory helpers such as create_participant_udp are not generated here;\n" ++
+                "// obtain a factory through the zzdds bootstrap API and use the generated DDS/zzdds factory interfaces.\n",
+        );
         try self.hdrPrint("}} // namespace {s}\n\n", .{m.name});
 
         // ── Source ────────────────────────────────────────────────────────────
@@ -7029,6 +7033,7 @@ test "cpp_backend: B1 — forward decls emitted without bootstrap factory helper
     // DomainParticipantListenerBase declaration moved to dcps.hpp
     try testing.expect(!has(hdr, "class DomainParticipantListenerBridge;"));
     try testing.expect(!has(hdr, "class DomainParticipantListenerBase;"));
+    try testing.expect(has(hdr, "Bootstrap factory helpers such as create_participant_udp are not generated here"));
     try testing.expect(!has(hdr, "create_participant_udp("));
     try testing.expect(!has(src, "zzdds_create_participant_udp("));
 }

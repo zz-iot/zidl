@@ -1384,7 +1384,7 @@ fn structHasDefault(s: *const ir.Struct) bool {
     }
     for (s.members) |m| {
         if (m.annotations.default_value != null) return true;
-        if (!m.annotations.is_optional and typeRefHasStructDefault(m.type_ref)) return true;
+        if (typeRefHasStructDefault(m.type_ref)) return true;
     }
     return false;
 }
@@ -3380,10 +3380,19 @@ const CdrGenerator = struct {
         for (s.members, 0..) |m, idx| {
             if (m.annotations.default_value) |dv| {
                 try self.emitMemberDefaultAssign(s, m, idx, dv, false);
-            } else if (!m.annotations.is_optional and typeRefHasStructDefault(m.type_ref)) {
+            } else if (typeRefHasStructDefault(m.type_ref)) {
                 const field_expr = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
                 defer self.alloc.free(field_expr);
+                if (m.annotations.is_optional) {
+                    const bit_idx = optBitIdxForMember(s.*, idx);
+                    try self.printI("if (_v->_present & (1ULL << {d}u)) {{\n", .{bit_idx});
+                    self.indent_depth += 1;
+                }
                 try self.emitNestedStructApplyDefaults(field_expr, m.type_ref, m.dimensions, 0);
+                if (m.annotations.is_optional) {
+                    self.indent_depth -= 1;
+                    try self.writeI("}\n");
+                }
             }
         }
         try self.write("}\n\n");
@@ -3480,7 +3489,7 @@ const CdrGenerator = struct {
         if (dimensions.len > 0) {
             const idx_name = try std.fmt.allocPrint(self.alloc, "_di{d}", .{dim_idx});
             defer self.alloc.free(idx_name);
-            try self.printI("{{ uint32_t {s}; for ({s} = 0; {s} < {d}u; {s}++) {{\n", .{
+            try self.printI("{{ uint64_t {s}; for ({s} = 0; {s} < {d}ull; {s}++) {{\n", .{
                 idx_name, idx_name, idx_name, dimensions[0], idx_name,
             });
             self.indent_depth += 1;
@@ -5202,7 +5211,7 @@ test "c_backend cdr: default helper initializes nested struct array defaults" {
     defer src.deinit(testing.allocator);
     const s = src.items;
     try testing.expect(has(s, "void Outer_default(Outer *_v)"));
-    try testing.expect(has(s, "{ uint32_t _di0; for (_di0 = 0; _di0 < 3u; _di0++) {"));
+    try testing.expect(has(s, "{ uint64_t _di0; for (_di0 = 0; _di0 < 3ull; _di0++) {"));
     try testing.expect(has(s, "Inner_default(&_v->inner[_di0]);"));
 }
 
@@ -5215,7 +5224,7 @@ test "c_backend cdr: default helper initializes typedef array nested struct defa
     defer src.deinit(testing.allocator);
     const s = src.items;
     try testing.expect(has(s, "void Outer_default(Outer *_v)"));
-    try testing.expect(has(s, "{ uint32_t _di0; for (_di0 = 0; _di0 < 2u; _di0++) {"));
+    try testing.expect(has(s, "{ uint64_t _di0; for (_di0 = 0; _di0 < 2ull; _di0++) {"));
     try testing.expect(has(s, "Inner_default(&_v->inner[_di0]);"));
 }
 
@@ -5235,6 +5244,19 @@ test "c_backend cdr: apply_defaults recurses into nested struct defaults" {
     try testing.expect(has(s, "Inner_apply_defaults(&_v->inner);"));
 }
 
+test "c_backend cdr: apply_defaults recurses into present optional nested struct defaults" {
+    const idl =
+        \\struct Inner { @optional @default(7) long x; };
+        \\struct Outer { @optional Inner inner; };
+    ;
+    var src = try testGenCdr(idl, "optional_nested_apply");
+    defer src.deinit(testing.allocator);
+    const s = src.items;
+    try testing.expect(has(s, "void Outer_apply_defaults(Outer *_v)"));
+    try testing.expect(has(s, "if (_v->_present & (1ULL << 0u)) {"));
+    try testing.expect(has(s, "Inner_apply_defaults(&_v->inner);"));
+}
+
 test "c_backend cdr: apply_defaults recurses into nested struct array defaults" {
     var src = try testGenCdr(
         \\struct Inner { @default(7) long x; };
@@ -5242,7 +5264,7 @@ test "c_backend cdr: apply_defaults recurses into nested struct array defaults" 
     , "nested_array_apply");
     defer src.deinit(testing.allocator);
     const s = src.items;
-    try testing.expect(has(s, "{ uint32_t _di0; for (_di0 = 0; _di0 < 2u; _di0++) {"));
+    try testing.expect(has(s, "{ uint64_t _di0; for (_di0 = 0; _di0 < 2ull; _di0++) {"));
     try testing.expect(has(s, "Inner_apply_defaults(&_v->inner[_di0]);"));
 }
 
