@@ -2580,6 +2580,11 @@ const Generator = struct {
                     defer self.alloc.free(java_type);
                     return std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ java_type, name });
                 },
+                .bitmask => |bm| {
+                    const java_type = try self.qualNameToJava(bm.qualified_name);
+                    defer self.alloc.free(java_type);
+                    return std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ java_type, name });
+                },
                 .typedef => |t| if (t.dimensions.len == 0)
                     self.formatScopedNameDefaultJava(name, t.type_ref)
                 else
@@ -4588,6 +4593,14 @@ test "java: @default enum scoped_name emits enum value" {
         \\enum Kind { FIRST, SECOND };
         \\struct Cfg { @default(SECOND) Kind kind; };
     , "cfg", "this.kind = Kind.SECOND;");
+}
+
+test "java: @default bitmask scoped_name emits bitmask constant" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\bitmask Flags { READ, WRITE };
+        \\struct Cfg { @default(WRITE) Flags flags; };
+    , "cfg", "this.flags = Flags.WRITE;");
 }
 
 test "java: CDR helpers include _cdrWriteFixed and _cdrReadFixed" {

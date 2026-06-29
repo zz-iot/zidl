@@ -1086,6 +1086,7 @@ const Generator = struct {
                     defer self.alloc.free(cpp_type);
                     return std.fmt.allocPrint(self.alloc, "{s}::{s}", .{ cpp_type, name });
                 },
+                .bitmask => |bm| std.fmt.allocPrint(self.alloc, "::{s}_{s}", .{ bm.qualified_name, name }),
                 .typedef => |t| if (t.dimensions.len == 0)
                     self.formatScopedNameDefaultCpp(name, t.type_ref)
                 else
@@ -6609,6 +6610,15 @@ test "cpp_backend: @default enum scoped_name emits enum class value" {
     , "cfg");
     defer h.deinit(testing.allocator);
     try testing.expect(has(h.items, "::Kind kind{::Kind::SECOND};"));
+}
+
+test "cpp_backend: @default bitmask scoped_name emits generated bit constant" {
+    var h = try testGen(
+        \\bitmask Flags { READ, WRITE };
+        \\struct Cfg { @default(WRITE) Flags flags; };
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "::Flags flags{::Flags_WRITE};"));
 }
 
 test "cpp_backend: B2 — write_w_handle/dispose_w_handle/unregister_instance_w_handle declared in header" {

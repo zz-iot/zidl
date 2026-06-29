@@ -2092,6 +2092,11 @@ const Generator = struct {
                     defer self.alloc.free(tag);
                     return std.fmt.allocPrint(self.alloc, ".{s}", .{tag});
                 },
+                .bitmask => |bm| {
+                    const bit_qname = try std.fmt.allocPrint(self.alloc, "{s}_{s}", .{ bm.qualified_name, name });
+                    defer self.alloc.free(bit_qname);
+                    return self.qualNameToZig(bit_qname);
+                },
                 .typedef => |t| if (t.dimensions.len == 0)
                     self.formatScopedNameDefaultZig(name, t.type_ref)
                 else
@@ -6616,6 +6621,15 @@ test "zig_backend: @default enum scoped_name emits enum tag" {
     , "cfg");
     defer h.deinit(testing.allocator);
     try testing.expect(has(h.items, "kind: Kind = .SECOND,"));
+}
+
+test "zig_backend: @default bitmask scoped_name emits bit constant" {
+    var h = try testGen(
+        \\bitmask Flags { READ, WRITE };
+        \\struct Cfg { @default(WRITE) Flags flags; };
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "flags: Flags = Flags_WRITE,"));
 }
 
 test "zig_backend: struct with sequence field gets _free export under zig_generate_c_api" {

@@ -1377,7 +1377,7 @@ fn structHasOptional(s: *const ir.Struct) bool {
 
 fn structHasDefault(s: *const ir.Struct) bool {
     for (s.members) |m| {
-        if (m.annotations.is_optional and m.annotations.default_value != null) return true;
+        if (m.annotations.default_value != null) return true;
     }
     return false;
 }
@@ -3382,6 +3382,16 @@ const CdrGenerator = struct {
                 self.indent_depth -= 1;
                 try self.writeI("}\n");
             }
+        } else if (is_string and !from_default_ctor) {
+            // Preserve the existing required string on OOM; only replace it
+            // after the default string allocation succeeds.
+            try self.printI("char *_s_{s} = {s};\n", .{ m.name, dv_str });
+            try self.printI("if (_s_{s}) {{\n", .{m.name});
+            self.indent_depth += 1;
+            try self.printI("free(_v->{s});\n", .{m.name});
+            try self.printI("_v->{s} = _s_{s};\n", .{ m.name, m.name });
+            self.indent_depth -= 1;
+            try self.writeI("}\n");
         } else {
             try self.printI("_v->{s} = {s};\n", .{ m.name, dv_str });
         }
@@ -5210,6 +5220,17 @@ test "c_backend cdr: @default enum scoped_name emits prefixed enumerator" {
     , "cfg");
     defer src.deinit(testing.allocator);
     try testing.expect(has(src.items, "_v->kind = Kind_SECOND;"));
+}
+
+test "c_backend cdr: non-optional string apply_defaults replaces only after strdup succeeds" {
+    var src = try testGenCdr(
+        \\struct Cfg { @default("default-url") string url; };
+    , "cfg");
+    defer src.deinit(testing.allocator);
+    try testing.expect(has(src.items, "char *_s_url = strdup(\"default-url\");"));
+    try testing.expect(has(src.items, "if (_s_url) {"));
+    try testing.expect(has(src.items, "free(_v->url);"));
+    try testing.expect(has(src.items, "_v->url = _s_url;"));
 }
 
 test "c_backend cdr: @default string with non-ASCII uses octal escape" {
