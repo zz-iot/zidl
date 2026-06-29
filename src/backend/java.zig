@@ -4603,6 +4603,16 @@ test "java: @default bitmask scoped_name emits bitmask constant" {
     , "cfg", "this.flags = Flags.WRITE;");
 }
 
+test "java: @default module bitmask scoped_name emits module bitmask constant" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\module DDS {
+        \\    bitmask Flags { READ, WRITE };
+        \\    struct Cfg { @default(WRITE) Flags mask; };
+        \\};
+    , "cfg", "this.mask = DDS.Flags.WRITE;");
+}
+
 test "java: CDR helpers include _cdrWriteFixed and _cdrReadFixed" {
     const alloc = testing.allocator;
     try testGen(alloc, "struct S { long x; };", "s", "private static void _cdrWriteFixed");

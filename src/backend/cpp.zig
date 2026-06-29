@@ -275,7 +275,8 @@ const Generator = struct {
         try self.write("#include <cstdint>\n");
         try self.write("#include <string>\n");
         try self.write("#include <vector>\n");
-        // Generated entity interface methods and adapters use std::shared_ptr.
+        // Entity interfaces and entity_in adapters use std::shared_ptr whenever
+        // interface generation is enabled.
         if (self.opts.generate_interfaces) try self.write("#include <memory>\n");
         if (needs.map) try self.write("#include <map>\n");
         if (needs.optional) try self.write("#include <optional>\n");
@@ -3212,7 +3213,6 @@ const ConcreteImplGenerator = struct {
             .{ iface.name, c_name },
         );
         try self.hdrPrint("    ~{s}Impl() override = default;\n", .{iface.name});
-        try self.hdrPrint("    {s} concrete_handle() const noexcept {{ return ptr_; }}\n", .{c_name});
         // Use 'override' only when the abstract interface declares native_handle().
         // Other concrete Impl classes still expose native_handle() for adapter code,
         // unless a base interface already declares a conflicting native_handle()
@@ -3251,7 +3251,10 @@ const ConcreteImplGenerator = struct {
                 try self.hdrPrint("    void {s}({s} value) override;\n", .{ attr.attr.name, at });
         }
 
-        try self.hdrPrint("\nprivate:\n    {s} ptr_;\n}};\n\n", .{c_name});
+        try self.hdrPrint(
+            "\nprivate:\n    friend {s} zidl_concrete_handle(const {s}Impl& self) noexcept {{ return self.ptr_; }}\n    {s} ptr_;\n}};\n\n",
+            .{ c_name, iface.name, c_name },
+        );
     }
 
     // ── Entity Impl method implementations (source) ───────────────────────────
@@ -3553,7 +3556,7 @@ const ConcreteImplGenerator = struct {
                         const impl_name = try self.entityImplName(p.type_ref);
                         defer self.alloc.free(impl_name);
                         try self.srcPrint(
-                            "([](const auto& _p) -> {s} {{ if (!_p) return {s}{{nullptr, nullptr}}; if (auto* _impl = dynamic_cast<{s}*>(_p.get())) return _impl->concrete_handle(); return {s}{{nullptr, nullptr}}; }})({s})",
+                            "([](const auto& _p) -> {s} {{ if (!_p) return {s}{{nullptr, nullptr}}; if (auto* _impl = dynamic_cast<{s}*>(_p.get())) return zidl_concrete_handle(*_impl); throw std::invalid_argument(\"zidl: incompatible entity implementation for {s}\"); }})({s})",
                             .{ ct, ct, impl_name, ct, p.name },
                         );
                     }
@@ -7202,9 +7205,10 @@ test "cpp_backend: entity_in param for derived root interface uses concrete hand
     defer res.deinit();
     const hdr = res.hdr.items;
     const src = res.src.items;
-    try testing.expect(has(hdr, "zzdds_DomainParticipantFactory concrete_handle() const noexcept { return ptr_; }"));
+    try testing.expect(has(hdr, "friend zzdds_DomainParticipantFactory zidl_concrete_handle(const DomainParticipantFactoryImpl& self) noexcept { return self.ptr_; }"));
     try testing.expect(has(hdr, "DDS_DomainParticipantFactory native_handle() const noexcept override { return zzdds_DomainParticipantFactory_as_DDS_DomainParticipantFactory(ptr_); }"));
-    try testing.expect(has(src, "dynamic_cast<::zzdds::DomainParticipantFactoryImpl*>(_p.get())) return _impl->concrete_handle();"));
+    try testing.expect(has(src, "dynamic_cast<::zzdds::DomainParticipantFactoryImpl*>(_p.get())) return zidl_concrete_handle(*_impl);"));
+    try testing.expect(has(src, "throw std::invalid_argument(\"zidl: incompatible entity implementation for zzdds_DomainParticipantFactory\")"));
     try testing.expect(!has(src, "dynamic_cast<::zzdds::DomainParticipantFactoryImpl*>(_p.get())) return _impl->native_handle();"));
 }
 

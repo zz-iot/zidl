@@ -3493,7 +3493,7 @@ const CdrGenerator = struct {
         switch (tr) {
             .named => |td| switch (td) {
                 .struct_ => |nested| {
-                    if (mode == .apply_defaults and !structHasDefault(nested)) return;
+                    if (!structHasDefault(nested)) return;
                     const nested_c = try self.prefixedCName(nested.qualified_name);
                     defer self.alloc.free(nested_c);
                     const fn_suffix = switch (mode) {
