@@ -3210,7 +3210,7 @@ const ConcreteImplGenerator = struct {
                 "    {s} native_handle() const noexcept override {{ return ptr_; }}\n\n",
                 .{c_name},
             );
-        } else if (self.nativeHandleBase(iface)) |base_iface| {
+        } else if (try self.nativeHandleBase(iface)) |base_iface| {
             const base_c = try cNameOf(self.alloc, base_iface.qualified_name);
             defer self.alloc.free(base_c);
             const handle_expr = try self.handleExprForOwner(iface, base_iface, "ptr_");
@@ -4001,16 +4001,27 @@ const ConcreteImplGenerator = struct {
             !self.entity_base_ifaces.contains(iface.qualified_name);
     }
 
-    fn nativeHandleBase(self: *ConcreteImplGenerator, iface: *const ir.Interface) ?*const ir.Interface {
+    fn nativeHandleBase(self: *ConcreteImplGenerator, iface: *const ir.Interface) !?*const ir.Interface {
+        var found: ?*const ir.Interface = null;
         for (iface.bases) |base| {
             if (base != .interface) continue;
             const base_iface = base.interface;
-            if (self.ifaceDeclaresNativeHandle(base_iface) or
+            const candidate = if (self.ifaceDeclaresNativeHandle(base_iface) or
                 importedLeafBaseDeclaresNativeHandle(iface, base_iface))
-                return base_iface;
-            if (self.nativeHandleBase(base_iface)) |decl_iface| return decl_iface;
+                base_iface
+            else
+                try self.nativeHandleBase(base_iface);
+            if (candidate) |decl_iface| {
+                if (found) |existing| {
+                    if (!std.mem.eql(u8, existing.qualified_name, decl_iface.qualified_name)) {
+                        return error.MultipleNativeHandleBases;
+                    }
+                } else {
+                    found = decl_iface;
+                }
+            }
         }
-        return null;
+        return found;
     }
 
     fn handleExprForOwner(
@@ -6791,6 +6802,61 @@ test "cpp_backend: handleExprForOwner errors when owner is not reachable" {
     };
 
     try testing.expectError(error.InterfaceCastPathNotFound, gen.handleExprForOwner(&child, &owner, "ptr_"));
+}
+
+test "cpp_backend: nativeHandleBase errors for multiple distinct native handle bases" {
+    var hdr = std.ArrayList(u8).empty;
+    defer hdr.deinit(testing.allocator);
+    var src = std.ArrayList(u8).empty;
+    defer src.deinit(testing.allocator);
+    var gen = ConcreteImplGenerator{
+        .alloc = testing.allocator,
+        .opts = .{ .input_stem = "multi_native_handle" },
+        .hdr = &hdr,
+        .src = &src,
+    };
+    defer gen.entity_base_ifaces.deinit(testing.allocator);
+
+    const loc = ast.Loc{ .offset = 0, .line = 1, .column = 1 };
+    var left = ir.Interface{
+        .name = "Left",
+        .qualified_name = "DDS::Left",
+        .span = ast.Span.at(loc),
+        .bases = &.{},
+        .operations = &.{},
+        .attributes = &.{},
+        .type_decls = &.{},
+        .consts = &.{},
+        .raw = &.{},
+    };
+    var right = ir.Interface{
+        .name = "Right",
+        .qualified_name = "DDS::Right",
+        .span = ast.Span.at(loc),
+        .bases = &.{},
+        .operations = &.{},
+        .attributes = &.{},
+        .type_decls = &.{},
+        .consts = &.{},
+        .raw = &.{},
+    };
+    const bases = [_]ir.TypeDecl{
+        .{ .interface = &left },
+        .{ .interface = &right },
+    };
+    var child = ir.Interface{
+        .name = "Child",
+        .qualified_name = "zzdds::Child",
+        .span = ast.Span.at(loc),
+        .bases = &bases,
+        .operations = &.{},
+        .attributes = &.{},
+        .type_decls = &.{},
+        .consts = &.{},
+        .raw = &.{},
+    };
+
+    try testing.expectError(error.MultipleNativeHandleBases, gen.nativeHandleBase(&child));
 }
 
 test "cpp_backend: B1+B3 — entity return wraps in Impl" {
