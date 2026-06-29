@@ -3450,37 +3450,27 @@ const CdrGenerator = struct {
         dimensions: []const u64,
         dim_idx: usize,
     ) !void {
-        if (dimensions.len > 0) {
-            const idx_name = try std.fmt.allocPrint(self.alloc, "_di{d}", .{dim_idx});
-            defer self.alloc.free(idx_name);
-            try self.printI("{{ uint32_t {s}; for ({s} = 0; {s} < {d}u; {s}++) {{\n", .{
-                idx_name, idx_name, idx_name, dimensions[0], idx_name,
-            });
-            self.indent_depth += 1;
-            const elem_expr = try std.fmt.allocPrint(self.alloc, "{s}[{s}]", .{ field_expr, idx_name });
-            defer self.alloc.free(elem_expr);
-            try self.emitNestedStructDefault(elem_expr, tr, dimensions[1..], dim_idx + 1);
-            self.indent_depth -= 1;
-            try self.writeI("}\n");
-            try self.writeI("}\n");
-            return;
-        }
-        switch (tr) {
-            .named => |td| switch (td) {
-                .struct_ => |nested| {
-                    const nested_c = try self.prefixedCName(nested.qualified_name);
-                    defer self.alloc.free(nested_c);
-                    try self.printI("{s}_default(&{s});\n", .{ nested_c, field_expr });
-                },
-                .typedef => |t| try self.emitNestedStructDefault(field_expr, t.type_ref, t.dimensions, dim_idx),
-                else => {},
-            },
-            else => {},
-        }
+        try self.emitNestedStructDefaults(.full_default, field_expr, tr, dimensions, dim_idx);
     }
 
     fn emitNestedStructApplyDefaults(
         self: *CdrGenerator,
+        field_expr: []const u8,
+        tr: ir.TypeRef,
+        dimensions: []const u64,
+        dim_idx: usize,
+    ) !void {
+        try self.emitNestedStructDefaults(.apply_defaults, field_expr, tr, dimensions, dim_idx);
+    }
+
+    const NestedDefaultMode = enum {
+        full_default,
+        apply_defaults,
+    };
+
+    fn emitNestedStructDefaults(
+        self: *CdrGenerator,
+        mode: NestedDefaultMode,
         field_expr: []const u8,
         tr: ir.TypeRef,
         dimensions: []const u64,
@@ -3495,7 +3485,7 @@ const CdrGenerator = struct {
             self.indent_depth += 1;
             const elem_expr = try std.fmt.allocPrint(self.alloc, "{s}[{s}]", .{ field_expr, idx_name });
             defer self.alloc.free(elem_expr);
-            try self.emitNestedStructApplyDefaults(elem_expr, tr, dimensions[1..], dim_idx + 1);
+            try self.emitNestedStructDefaults(mode, elem_expr, tr, dimensions[1..], dim_idx + 1);
             self.indent_depth -= 1;
             try self.writeI("}\n");
             try self.writeI("}\n");
@@ -3504,12 +3494,16 @@ const CdrGenerator = struct {
         switch (tr) {
             .named => |td| switch (td) {
                 .struct_ => |nested| {
-                    if (!structHasDefault(nested)) return;
+                    if (mode == .apply_defaults and !structHasDefault(nested)) return;
                     const nested_c = try self.prefixedCName(nested.qualified_name);
                     defer self.alloc.free(nested_c);
-                    try self.printI("{s}_apply_defaults(&{s});\n", .{ nested_c, field_expr });
+                    const fn_suffix = switch (mode) {
+                        .full_default => "default",
+                        .apply_defaults => "apply_defaults",
+                    };
+                    try self.printI("{s}_{s}(&{s});\n", .{ nested_c, fn_suffix, field_expr });
                 },
-                .typedef => |t| try self.emitNestedStructApplyDefaults(field_expr, t.type_ref, t.dimensions, dim_idx),
+                .typedef => |t| try self.emitNestedStructDefaults(mode, field_expr, t.type_ref, t.dimensions, dim_idx),
                 else => {},
             },
             else => {},
