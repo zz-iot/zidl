@@ -249,7 +249,6 @@ const Generator = struct {
     }
 
     fn scanIncludesInterface(iface: *const ir.Interface, needs: *IncludeNeeds) void {
-        if (isCallbackIface(iface)) needs.memory = true;
         for (iface.type_decls) |td| scanIncludesTypeDecl(td, needs);
         for (iface.operations) |op| {
             if (op.return_type) |rt| scanIncludesTypeRef(rt, needs);
@@ -4041,7 +4040,7 @@ const ConcreteImplGenerator = struct {
             defer self.alloc.free(next_expr);
             return self.handleExprForOwner(base_iface, to, next_expr);
         }
-        return self.alloc.dupe(u8, expr);
+        return error.InterfaceCastPathNotFound;
     }
 
     /// C type name for a struct param (for reinterpret_cast), e.g. DDS_PublisherQos
@@ -6743,6 +6742,45 @@ test "cpp_backend: imported leaf base native_handle detection is generic" {
     try testing.expect(has(hdr, "Base_Leaf native_handle() const noexcept override { return Ext_Leaf_as_Base_Leaf(ptr_); }"));
     try testing.expect(has(src, "Base_Leaf_inherited_op(Ext_Leaf_as_Base_Leaf(ptr_))"));
     try testing.expect(has(src, "Ext_Leaf_extension_op(ptr_)"));
+}
+
+test "cpp_backend: handleExprForOwner errors when owner is not reachable" {
+    var hdr = std.ArrayList(u8).empty;
+    defer hdr.deinit(testing.allocator);
+    var src = std.ArrayList(u8).empty;
+    defer src.deinit(testing.allocator);
+    var gen = ConcreteImplGenerator{
+        .alloc = testing.allocator,
+        .opts = .{ .input_stem = "bad_cast" },
+        .hdr = &hdr,
+        .src = &src,
+    };
+
+    const loc = ast.Loc{ .offset = 0, .line = 1, .column = 1 };
+    var owner = ir.Interface{
+        .name = "Owner",
+        .qualified_name = "DDS::Owner",
+        .span = ast.Span.at(loc),
+        .bases = &.{},
+        .operations = &.{},
+        .attributes = &.{},
+        .type_decls = &.{},
+        .consts = &.{},
+        .raw = &.{},
+    };
+    var child = ir.Interface{
+        .name = "Child",
+        .qualified_name = "zzdds::Child",
+        .span = ast.Span.at(loc),
+        .bases = &.{},
+        .operations = &.{},
+        .attributes = &.{},
+        .type_decls = &.{},
+        .consts = &.{},
+        .raw = &.{},
+    };
+
+    try testing.expectError(error.InterfaceCastPathNotFound, gen.handleExprForOwner(&child, &owner, "ptr_"));
 }
 
 test "cpp_backend: B1+B3 — entity return wraps in Impl" {

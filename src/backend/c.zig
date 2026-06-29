@@ -3316,7 +3316,7 @@ const CdrGenerator = struct {
         for (s.members, 0..) |m, idx| {
             if (m.annotations.default_value) |dv| {
                 try self.emitMemberDefaultAssign(s, m, idx, dv, true);
-            } else if (!m.annotations.is_optional and typeRefHasNestedStructDefault(m.type_ref)) {
+            } else if (!m.annotations.is_optional and typeRefIsNestedStruct(m.type_ref)) {
                 const field_expr = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
                 defer self.alloc.free(field_expr);
                 try self.emitNestedStructDefault(field_expr, m.type_ref, m.dimensions, 0);
@@ -3383,11 +3383,11 @@ const CdrGenerator = struct {
         }
     }
 
-    fn typeRefHasNestedStructDefault(tr: ir.TypeRef) bool {
+    fn typeRefIsNestedStruct(tr: ir.TypeRef) bool {
         return switch (tr) {
             .named => |td| switch (td) {
                 .struct_ => true,
-                .typedef => |t| typeRefHasNestedStructDefault(t.type_ref),
+                .typedef => |t| typeRefIsNestedStruct(t.type_ref),
                 else => false,
             },
             else => false,
