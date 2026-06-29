@@ -275,6 +275,7 @@ const Generator = struct {
         try self.write("#include <cstdint>\n");
         try self.write("#include <string>\n");
         try self.write("#include <vector>\n");
+        // Generated entity interface methods and adapters use std::shared_ptr.
         if (self.opts.generate_interfaces) try self.write("#include <memory>\n");
         if (needs.map) try self.write("#include <map>\n");
         if (needs.optional) try self.write("#include <optional>\n");
@@ -3211,6 +3212,7 @@ const ConcreteImplGenerator = struct {
             .{ iface.name, c_name },
         );
         try self.hdrPrint("    ~{s}Impl() override = default;\n", .{iface.name});
+        try self.hdrPrint("    {s} concrete_handle() const noexcept {{ return ptr_; }}\n", .{c_name});
         // Use 'override' only when the abstract interface declares native_handle().
         // Other concrete Impl classes still expose native_handle() for adapter code,
         // unless a base interface already declares a conflicting native_handle()
@@ -3551,7 +3553,7 @@ const ConcreteImplGenerator = struct {
                         const impl_name = try self.entityImplName(p.type_ref);
                         defer self.alloc.free(impl_name);
                         try self.srcPrint(
-                            "([](const auto& _p) -> {s} {{ if (!_p) return {s}{{nullptr, nullptr}}; if (auto* _impl = dynamic_cast<{s}*>(_p.get())) return _impl->native_handle(); return {s}{{nullptr, nullptr}}; }})({s})",
+                            "([](const auto& _p) -> {s} {{ if (!_p) return {s}{{nullptr, nullptr}}; if (auto* _impl = dynamic_cast<{s}*>(_p.get())) return _impl->concrete_handle(); return {s}{{nullptr, nullptr}}; }})({s})",
                             .{ ct, ct, impl_name, ct, p.name },
                         );
                     }
@@ -7183,6 +7185,27 @@ test "cpp_backend: entity_in param uses virtual native_handle, not static_cast" 
     const src = res.src.items;
     try testing.expect(has(src, "t->native_handle()"));
     try testing.expect(!has(src, "static_cast<TopicImpl*>"));
+}
+
+test "cpp_backend: entity_in param for derived root interface uses concrete handle" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    interface DomainParticipantFactory {};
+        \\};
+        \\module zzdds {
+        \\    interface DomainParticipantFactory : DDS::DomainParticipantFactory {};
+        \\    interface FactoryUser {
+        \\        long use_factory(in DomainParticipantFactory f);
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const hdr = res.hdr.items;
+    const src = res.src.items;
+    try testing.expect(has(hdr, "zzdds_DomainParticipantFactory concrete_handle() const noexcept { return ptr_; }"));
+    try testing.expect(has(hdr, "DDS_DomainParticipantFactory native_handle() const noexcept override { return zzdds_DomainParticipantFactory_as_DDS_DomainParticipantFactory(ptr_); }"));
+    try testing.expect(has(src, "dynamic_cast<::zzdds::DomainParticipantFactoryImpl*>(_p.get())) return _impl->concrete_handle();"));
+    try testing.expect(!has(src, "dynamic_cast<::zzdds::DomainParticipantFactoryImpl*>(_p.get())) return _impl->native_handle();"));
 }
 
 test "cpp_backend: listener_in uses _lp_ null pointer, not address-of zero struct" {

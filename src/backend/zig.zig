@@ -6633,6 +6633,17 @@ test "zig_backend: @default bitmask scoped_name emits bit constant" {
     try testing.expect(has(h.items, "flags: Flags = Flags_WRITE,"));
 }
 
+test "zig_backend: @default module bitmask scoped_name emits module bit constant" {
+    var h = try testGen(
+        \\module DDS {
+        \\    bitmask Flags { READ, WRITE };
+        \\    struct Cfg { @default(WRITE) Flags mask; };
+        \\};
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "mask: DDS.Flags = DDS.Flags_WRITE,"));
+}
+
 test "zig_backend: struct with sequence field gets _free export under zig_generate_c_api" {
     var h = try testGenOpts(
         \\struct Policy { sequence<octet> value; };
