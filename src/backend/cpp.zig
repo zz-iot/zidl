@@ -275,7 +275,9 @@ const Generator = struct {
         try self.write("#include <cstdint>\n");
         try self.write("#include <string>\n");
         try self.write("#include <vector>\n");
-        if (self.opts.generate_interfaces and needs.memory) try self.write("#include <memory>\n");
+        // Entity interfaces and entity_in adapters use std::shared_ptr whenever
+        // interface generation is enabled.
+        if (self.opts.generate_interfaces) try self.write("#include <memory>\n");
         if (needs.map) try self.write("#include <map>\n");
         if (needs.optional) try self.write("#include <optional>\n");
         if (needs.union_arrays) try self.write("#include <cstring>\n");
@@ -287,6 +289,11 @@ const Generator = struct {
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructCpp(spec.items)) {
             try self.write("#include \"zzdds_c.h\"\n");
             try self.write("#include <unordered_map>\n");
+        }
+        for (spec.imports) |import_name| {
+            const stem = try interface.includeStemForImport(self.alloc, import_name);
+            defer self.alloc.free(stem);
+            try self.print("#include \"{s}.hpp\"\n", .{stem});
         }
         // When emitting abstract DDS interfaces, pre-scan the spec to find which
         // interfaces appear as bases (so we can skip native_handle() on them —
@@ -619,6 +626,9 @@ const Generator = struct {
         for (s.members) |m| {
             try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, m.annotations.is_optional, m.annotations.default_value, "    ");
         }
+        // Aggregate value-initialization zero-fills members without explicit
+        // initializers, including raw array members.
+        try self.print("\n    static {s} default_value() {{ return {s}{{}}; }}\n", .{ s.name, s.name });
         try self.print("}}; // struct {s}\n\n", .{s.name});
         try self.emitVerbatimForPlacement(s.annotations.raw, "after-declaration");
     }
@@ -812,7 +822,7 @@ const Generator = struct {
         // (which would create a return-type conflict in derived Impl classes).
         if (self.opts.generate_interfaces and !isCallbackIface(iface)) {
             const in_module = std.mem.indexOfScalar(u8, iface.qualified_name, ':') != null;
-            if (in_module and !self.entity_base_ifaces.contains(iface.qualified_name)) {
+            if (in_module and iface.bases.len == 0 and !self.entity_base_ifaces.contains(iface.qualified_name)) {
                 const c_type = try self.prefixedCName(iface.qualified_name);
                 defer self.alloc.free(c_type);
                 try self.print("    virtual {s} native_handle() const noexcept = 0;\n", .{c_type});
@@ -1067,8 +1077,32 @@ const Generator = struct {
                 defer self.alloc.free(esc);
                 break :blk std.fmt.allocPrint(self.alloc, "\"{s}\"", .{esc});
             },
-            .scoped_name => |n| self.alloc.dupe(u8, n),
+            .scoped_name => |n| self.formatScopedNameDefaultCpp(n, type_ref),
             else => self.alloc.dupe(u8, "{}"),
+        };
+    }
+
+    fn formatScopedNameDefaultCpp(self: *Generator, name: []const u8, type_ref: ir.TypeRef) ![]u8 {
+        return switch (type_ref) {
+            .named => |td| switch (td) {
+                .enum_ => {
+                    const cpp_type = try self.typeRefToCpp(type_ref);
+                    defer self.alloc.free(cpp_type);
+                    return std.fmt.allocPrint(self.alloc, "{s}::{s}", .{ cpp_type, name });
+                },
+                // Bitmask bit constants are emitted as namespace-level
+                // `BitmaskName_BIT` values, not members of the bitmask alias
+                // returned by typeRefToCpp(). IR qualified names already use
+                // `::`, so this forms an absolute C++ path like
+                // `::Module::BitmaskName_BIT`.
+                .bitmask => |bm| std.fmt.allocPrint(self.alloc, "::{s}_{s}", .{ bm.qualified_name, name }),
+                .typedef => |t| if (t.dimensions.len == 0)
+                    self.formatScopedNameDefaultCpp(name, t.type_ref)
+                else
+                    self.alloc.dupe(u8, name),
+                else => self.alloc.dupe(u8, name),
+            },
+            else => self.alloc.dupe(u8, name),
         };
     }
 
@@ -3078,6 +3112,12 @@ const ConcreteImplGenerator = struct {
             "#include \"{s}.hpp\"\n#include \"{s}.h\"\n#include \"zzdds_c.h\"\n#include <memory>\n\n",
             .{ self.opts.input_stem, self.opts.input_stem },
         );
+        for (spec.imports) |import_name| {
+            const stem = try interface.includeStemForImport(self.alloc, import_name);
+            defer self.alloc.free(stem);
+            try self.hdrPrint("#include \"{s}_impl.hpp\"\n", .{stem});
+        }
+        if (spec.imports.len != 0) try self.hdrWrite("\n");
         try self.srcPrint(
             "// Generated by zidl from {s}.idl \u{2014} DO NOT EDIT\n#include \"{s}_impl.hpp\"\n\n",
             .{ self.opts.input_stem, self.opts.input_stem },
@@ -3115,19 +3155,16 @@ const ConcreteImplGenerator = struct {
         // Class bodies
         for (entities.items) |iface| try self.emitEntityImplDecl(m.name, iface);
 
-        // Factory (only if DomainParticipant exists in this module)
-        const has_dp = for (entities.items) |iface| {
-            if (std.mem.eql(u8, iface.name, "DomainParticipant")) break true;
-        } else false;
-        if (has_dp) try self.emitFactoryDecl(m.name);
-
+        try self.hdrWrite(
+            "// Bootstrap factory helpers such as create_participant_udp are not generated here;\n" ++
+                "// obtain a factory through the zzdds bootstrap API and use the generated DDS/zzdds factory interfaces.\n",
+        );
         try self.hdrPrint("}} // namespace {s}\n\n", .{m.name});
 
         // ── Source ────────────────────────────────────────────────────────────
         try self.srcPrint("namespace {s} {{\n\n", .{m.name});
         for (entities.items) |iface| try self.emitEntityImplMethods(iface);
         for (callbacks.items) |iface| try self.emitListenerBridgeMethods(m.name, iface);
-        if (has_dp) try self.emitFactoryImpl(m.name);
         try self.srcPrint("}} // namespace {s}\n\n", .{m.name});
     }
 
@@ -3161,11 +3198,11 @@ const ConcreteImplGenerator = struct {
         const c_name = try cNameOf(self.alloc, iface.qualified_name);
         defer self.alloc.free(c_name);
 
-        var ops = std.ArrayListUnmanaged(ir.Operation).empty;
+        var ops = std.ArrayListUnmanaged(OwnedOperation).empty;
         defer ops.deinit(self.alloc);
-        var attrs = std.ArrayListUnmanaged(ir.Attribute).empty;
+        var attrs = std.ArrayListUnmanaged(OwnedAttribute).empty;
         defer attrs.deinit(self.alloc);
-        try collectIfaceMembers(self.alloc, iface, &ops, &attrs);
+        try collectOwnedIfaceMembers(self.alloc, iface, &ops, &attrs);
 
         try self.hdrPrint("// \u{2500}\u{2500} {s}Impl \u{2500}\u{2500}\n\n", .{iface.name});
         try self.hdrPrint(
@@ -3177,14 +3214,23 @@ const ConcreteImplGenerator = struct {
             .{ iface.name, c_name },
         );
         try self.hdrPrint("    ~{s}Impl() override = default;\n", .{iface.name});
-        // Use 'override' only for leaf interfaces — those that have native_handle()
-        // declared as pure virtual in the abstract base.  Intermediate interfaces
-        // (Entity, Condition, …) were skipped in the abstract class to avoid
-        // return-type conflicts, so their Impl adds native_handle() without override.
-        if (!self.entity_base_ifaces.contains(iface.qualified_name)) {
+        // Use 'override' only when the abstract interface declares native_handle().
+        // Other concrete Impl classes still expose native_handle() for adapter code,
+        // unless a base interface already declares a conflicting native_handle()
+        // with a different C handle return type.
+        if (self.ifaceDeclaresNativeHandle(iface)) {
             try self.hdrPrint(
                 "    {s} native_handle() const noexcept override {{ return ptr_; }}\n\n",
                 .{c_name},
+            );
+        } else if (try self.nativeHandleBase(iface)) |base_iface| {
+            const base_c = try cNameOf(self.alloc, base_iface.qualified_name);
+            defer self.alloc.free(base_c);
+            const handle_expr = try self.handleExprForOwner(iface, base_iface, "ptr_");
+            defer self.alloc.free(handle_expr);
+            try self.hdrPrint(
+                "    {s} native_handle() const noexcept override {{ return {s}; }}\n\n",
+                .{ base_c, handle_expr },
             );
         } else {
             try self.hdrPrint(
@@ -3194,57 +3240,54 @@ const ConcreteImplGenerator = struct {
         }
 
         for (ops.items) |op| {
-            const sig = try self.opSignature(&op);
+            const sig = try self.opSignature(op.op);
             defer self.alloc.free(sig);
             try self.hdrPrint("    {s} override;\n", .{sig});
         }
         for (attrs.items) |attr| {
-            const at = try self.typeRefToCpp(attr.type_ref);
+            const at = try self.typeRefToCpp(attr.attr.type_ref);
             defer self.alloc.free(at);
-            try self.hdrPrint("    {s} {s}() const override;\n", .{ at, attr.name });
-            if (!attr.readonly)
-                try self.hdrPrint("    void {s}({s} value) override;\n", .{ attr.name, at });
+            try self.hdrPrint("    {s} {s}() const override;\n", .{ at, attr.attr.name });
+            if (!attr.attr.readonly)
+                try self.hdrPrint("    void {s}({s} value) override;\n", .{ attr.attr.name, at });
         }
 
-        try self.hdrPrint("\nprivate:\n    {s} ptr_;\n}};\n\n", .{c_name});
-    }
-
-    // ── Listener bridge declaration (header) ──────────────────────────────────
-
-    fn emitFactoryDecl(self: *ConcreteImplGenerator, ns: []const u8) !void {
-        try self.hdrWrite("// \u{2500}\u{2500} Factory \u{2500}\u{2500}\n\n");
         try self.hdrPrint(
-            "/// Create a DDS participant using the UDP transport (wraps zzdds_create_participant_udp).\n" ++
-                "std::shared_ptr<::{s}::DomainParticipant> create_participant_udp(\n" ++
-                "    ::{s}::DomainId_t domain_id,\n" ++
-                "    std::shared_ptr<::{s}::DomainParticipantListener> listener = nullptr);\n\n",
-            .{ ns, ns, ns },
+            "\nprivate:\n    friend {s} zidl_concrete_handle(const {s}Impl& self) noexcept {{ return self.ptr_; }}\n    {s} ptr_;\n}};\n\n",
+            .{ c_name, iface.name, c_name },
         );
     }
 
     // ── Entity Impl method implementations (source) ───────────────────────────
 
     fn emitEntityImplMethods(self: *ConcreteImplGenerator, iface: *const ir.Interface) !void {
-        const c_name = try cNameOf(self.alloc, iface.qualified_name);
-        defer self.alloc.free(c_name);
-
-        var ops = std.ArrayListUnmanaged(ir.Operation).empty;
+        var ops = std.ArrayListUnmanaged(OwnedOperation).empty;
         defer ops.deinit(self.alloc);
-        var attrs = std.ArrayListUnmanaged(ir.Attribute).empty;
+        var attrs = std.ArrayListUnmanaged(OwnedAttribute).empty;
         defer attrs.deinit(self.alloc);
-        try collectIfaceMembers(self.alloc, iface, &ops, &attrs);
+        try collectOwnedIfaceMembers(self.alloc, iface, &ops, &attrs);
 
         try self.srcPrint("// \u{2500}\u{2500} {s}Impl \u{2500}\u{2500}\n\n", .{iface.name});
 
         for (ops.items) |op| {
-            try self.emitEntityMethod(c_name, iface.name, &op);
+            try self.emitEntityMethod(iface, op.owner, iface.name, op.op);
         }
         for (attrs.items) |attr| {
-            try self.emitEntityAttr(c_name, iface.name, &attr);
+            try self.emitEntityAttr(iface, attr.owner, iface.name, attr.attr);
         }
     }
 
-    fn emitEntityMethod(self: *ConcreteImplGenerator, c_name: []const u8, class_name: []const u8, op: *const ir.Operation) !void {
+    fn emitEntityMethod(
+        self: *ConcreteImplGenerator,
+        iface: *const ir.Interface,
+        owner: *const ir.Interface,
+        class_name: []const u8,
+        op: *const ir.Operation,
+    ) !void {
+        const owner_c_name = try cNameOf(self.alloc, owner.qualified_name);
+        defer self.alloc.free(owner_c_name);
+        const handle_expr = try self.handleExprForOwner(iface, owner, "ptr_");
+        defer self.alloc.free(handle_expr);
         const ret_cpp = if (op.return_type) |rt| try self.typeRefToCpp(rt) else try self.alloc.dupe(u8, "void");
         defer self.alloc.free(ret_cpp);
 
@@ -3350,14 +3393,14 @@ const ConcreteImplGenerator = struct {
                 defer self.alloc.free(ret_c);
                 const impl_name = try self.entityImplName(op.return_type.?);
                 defer self.alloc.free(impl_name);
-                try self.srcPrint("    {s} _h = {s}_{s}(ptr_", .{ ret_c, c_name, op.name });
+                try self.srcPrint("    {s} _h = {s}_{s}({s}", .{ ret_c, owner_c_name, op.name, handle_expr });
                 try self.emitAdaptedParams(op.params);
                 try self.srcWrite(");\n");
                 try self.srcWrite("    if (!_h.ptr) return nullptr;\n");
                 try self.srcPrint("    return std::make_shared<{s}>(_h);\n", .{impl_name});
             },
             .str_ret => {
-                try self.srcPrint("    const char* _r = {s}_{s}(ptr_", .{ c_name, op.name });
+                try self.srcPrint("    const char* _r = {s}_{s}({s}", .{ owner_c_name, op.name, handle_expr });
                 try self.emitAdaptedParams(op.params);
                 try self.srcWrite(");\n");
                 try self.srcWrite("    return _r ? std::string(_r) : std::string{};\n");
@@ -3369,9 +3412,9 @@ const ConcreteImplGenerator = struct {
                 } else false;
                 if (needs_post) {
                     if (op.return_type != null) {
-                        try self.srcPrint("    const auto _rc = {s}_{s}(ptr_", .{ c_name, op.name });
+                        try self.srcPrint("    const auto _rc = {s}_{s}({s}", .{ owner_c_name, op.name, handle_expr });
                     } else {
-                        try self.srcPrint("    {s}_{s}(ptr_", .{ c_name, op.name });
+                        try self.srcPrint("    {s}_{s}({s}", .{ owner_c_name, op.name, handle_expr });
                     }
                     try self.emitAdaptedParams(op.params);
                     try self.srcWrite(");\n");
@@ -3385,9 +3428,9 @@ const ConcreteImplGenerator = struct {
                     if (op.return_type != null) try self.srcWrite("    return _rc;\n");
                 } else {
                     if (op.return_type != null) {
-                        try self.srcPrint("    return {s}_{s}(ptr_", .{ c_name, op.name });
+                        try self.srcPrint("    return {s}_{s}({s}", .{ owner_c_name, op.name, handle_expr });
                     } else {
-                        try self.srcPrint("    {s}_{s}(ptr_", .{ c_name, op.name });
+                        try self.srcPrint("    {s}_{s}({s}", .{ owner_c_name, op.name, handle_expr });
                     }
                     try self.emitAdaptedParams(op.params);
                     try self.srcWrite(");\n");
@@ -3401,7 +3444,17 @@ const ConcreteImplGenerator = struct {
         try self.srcWrite("}\n\n");
     }
 
-    fn emitEntityAttr(self: *ConcreteImplGenerator, c_name: []const u8, class_name: []const u8, attr: *const ir.Attribute) !void {
+    fn emitEntityAttr(
+        self: *ConcreteImplGenerator,
+        iface: *const ir.Interface,
+        owner: *const ir.Interface,
+        class_name: []const u8,
+        attr: *const ir.Attribute,
+    ) !void {
+        const owner_c_name = try cNameOf(self.alloc, owner.qualified_name);
+        defer self.alloc.free(owner_c_name);
+        const handle_expr = try self.handleExprForOwner(iface, owner, "ptr_");
+        defer self.alloc.free(handle_expr);
         const at = try self.typeRefToCpp(attr.type_ref);
         defer self.alloc.free(at);
 
@@ -3413,16 +3466,20 @@ const ConcreteImplGenerator = struct {
                 defer self.alloc.free(ret_c);
                 const impl_name = try self.entityImplName(attr.type_ref);
                 defer self.alloc.free(impl_name);
-                try self.srcPrint("    {s} _h = {s}_get_{s}(ptr_);\n", .{ ret_c, c_name, attr.name });
+                try self.srcPrint("    {s} _h = {s}_get_{s}({s});\n", .{ ret_c, owner_c_name, attr.name, handle_expr });
                 try self.srcWrite("    if (!_h.ptr) return nullptr;\n");
                 try self.srcPrint("    return std::make_shared<{s}>(_h);\n", .{impl_name});
             },
             .str_ret => {
-                try self.srcPrint("    const char* _r = {s}_get_{s}(ptr_);\n", .{ c_name, attr.name });
+                try self.srcPrint("    const char* _r = {s}_get_{s}({s});\n", .{ owner_c_name, attr.name, handle_expr });
                 try self.srcWrite("    return _r ? std::string(_r) : std::string{};\n");
             },
             .direct => {
-                try self.srcPrint("    return {s}_get_{s}(ptr_);\n", .{ c_name, attr.name });
+                if (typeRefIsEnumLike(attr.type_ref)) {
+                    try self.srcPrint("    return static_cast<{s}>({s}_get_{s}({s}));\n", .{ at, owner_c_name, attr.name, handle_expr });
+                } else {
+                    try self.srcPrint("    return {s}_get_{s}({s});\n", .{ owner_c_name, attr.name, handle_expr });
+                }
             },
             .todo => {
                 try self.srcWrite("    /* TODO */\n    return {};\n");
@@ -3433,8 +3490,16 @@ const ConcreteImplGenerator = struct {
         if (!attr.readonly) {
             try self.srcPrint("void {s}Impl::{s}({s} value) {{\n", .{ class_name, attr.name, at });
             switch (paramAdaptKindForTypeRef(attr.type_ref, .in_)) {
-                .direct => try self.srcPrint("    {s}_set_{s}(ptr_, value);\n", .{ c_name, attr.name }),
-                .str_in => try self.srcPrint("    {s}_set_{s}(ptr_, value.c_str());\n", .{ c_name, attr.name }),
+                .direct => {
+                    if (typeRefIsEnumLike(attr.type_ref)) {
+                        const ct = try self.typeRefToCType(attr.type_ref);
+                        defer self.alloc.free(ct);
+                        try self.srcPrint("    {s}_set_{s}({s}, static_cast<{s}>(value));\n", .{ owner_c_name, attr.name, handle_expr, ct });
+                    } else {
+                        try self.srcPrint("    {s}_set_{s}({s}, value);\n", .{ owner_c_name, attr.name, handle_expr });
+                    }
+                },
+                .str_in => try self.srcPrint("    {s}_set_{s}({s}, value.c_str());\n", .{ owner_c_name, attr.name, handle_expr }),
                 else => try self.srcPrint("    /* TODO */\n    (void)value;\n", .{}),
             }
             try self.srcWrite("}\n\n");
@@ -3445,7 +3510,15 @@ const ConcreteImplGenerator = struct {
         for (params) |p| {
             try self.srcWrite(", ");
             switch (paramAdaptKind(p)) {
-                .direct => try self.srcWrite(p.name),
+                .direct => {
+                    if (typeRefIsEnumLike(p.type_ref)) {
+                        const ct = try self.typeRefToCType(p.type_ref);
+                        defer self.alloc.free(ct);
+                        try self.srcPrint("static_cast<{s}>({s})", .{ ct, p.name });
+                    } else {
+                        try self.srcWrite(p.name);
+                    }
+                },
                 .str_in => try self.srcPrint("{s}.c_str()", .{p.name}),
                 .struct_in => {
                     const ct = try self.structCType(p.type_ref);
@@ -3461,10 +3534,34 @@ const ConcreteImplGenerator = struct {
                 .entity_in => {
                     const ct = try self.typeRefToCType(p.type_ref);
                     defer self.alloc.free(ct);
-                    try self.srcPrint(
-                        "({s} ? {s}->native_handle() : {s}{{nullptr, nullptr}})",
-                        .{ p.name, p.name, ct },
-                    );
+                    const use_virtual = switch (p.type_ref) {
+                        .named => |td| switch (td) {
+                            .interface => |iface| self.ifaceDeclaresNativeHandle(iface),
+                            else => false,
+                        },
+                        else => false,
+                    };
+                    if (use_virtual) {
+                        try self.srcPrint(
+                            "({s} ? {s}->native_handle() : {s}{{nullptr, nullptr}})",
+                            .{ p.name, p.name, ct },
+                        );
+                    } else {
+                        const impl_name = try self.entityImplName(p.type_ref);
+                        defer self.alloc.free(impl_name);
+                        const iface_name = switch (p.type_ref) {
+                            .named => |td| switch (td) {
+                                .interface => |iface| iface.qualified_name,
+                                else => ct,
+                            },
+                            else => ct,
+                        };
+                        try self.srcWrite("/* zidl: entity parameter adaptation uses dynamic_cast and requires RTTI. */");
+                        try self.srcPrint(
+                            "([](const auto& _p) -> {s} {{ if (!_p) return {s}{{nullptr, nullptr}}; if (auto* _impl = dynamic_cast<{s}*>(_p.get())) return zidl_concrete_handle(*_impl); throw std::invalid_argument(\"zidl: incompatible entity implementation for {s}\"); }})({s})",
+                            .{ ct, ct, impl_name, iface_name, p.name },
+                        );
+                    }
                 },
                 .listener_in => {
                     try self.srcPrint("_lp_{s}", .{p.name});
@@ -3493,13 +3590,38 @@ const ConcreteImplGenerator = struct {
         const c_type = try cNameOf(self.alloc, s.qualified_name);
         defer self.alloc.free(c_type);
         try self.srcPrint("    {s} {s}{{}};\n", .{ c_type, c_var });
-        for (s.members) |mem| {
+        for (s.members, 0..) |mem, idx| {
             const c_field = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ c_var, mem.name });
             defer self.alloc.free(c_field);
             const cpp_field = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ cpp_src, mem.name });
             defer self.alloc.free(cpp_field);
-            try self.emitFieldAdaptIn(c_field, cpp_field, mem.type_ref, seq_ctr);
+            try self.emitMemberAdaptIn(c_var, c_field, cpp_field, s, mem, idx, seq_ctr, "    ");
         }
+    }
+
+    fn emitMemberAdaptIn(
+        self: *ConcreteImplGenerator,
+        c_parent: []const u8,
+        c_dst: []const u8,
+        cpp_src: []const u8,
+        s: *const ir.Struct,
+        mem: ir.StructMember,
+        idx: usize,
+        seq_ctr: *usize,
+        indent: []const u8,
+    ) anyerror!void {
+        if (!mem.annotations.is_optional) {
+            return self.emitFieldAdaptIn(c_dst, cpp_src, mem.type_ref, seq_ctr, indent);
+        }
+        const bit_idx = optionalBitIndexCpp(s, idx);
+        try self.srcPrint("{s}if ({s}.has_value()) {{\n", .{ indent, cpp_src });
+        const deref = try std.fmt.allocPrint(self.alloc, "(*{s})", .{cpp_src});
+        defer self.alloc.free(deref);
+        const child_indent = try std.fmt.allocPrint(self.alloc, "{s}    ", .{indent});
+        defer self.alloc.free(child_indent);
+        try self.emitFieldAdaptIn(c_dst, deref, mem.type_ref, seq_ctr, child_indent);
+        try self.srcPrint("{s}{s}._present |= (1ULL << {d}u);\n", .{ child_indent, c_parent, bit_idx });
+        try self.srcPrint("{s}}}\n", .{indent});
     }
 
     fn emitFieldAdaptIn(
@@ -3508,40 +3630,44 @@ const ConcreteImplGenerator = struct {
         cpp_src: []const u8,
         tr: ir.TypeRef,
         seq_ctr: *usize,
+        indent: []const u8,
     ) anyerror!void {
         switch (tr) {
-            .base, .fixed_pt => try self.srcPrint("    {s} = {s};\n", .{ c_dst, cpp_src }),
-            .string => try self.srcPrint("    {s} = {s}.c_str();\n", .{ c_dst, cpp_src }),
-            .sequence => |seq| try self.emitSeqFieldAdaptIn(c_dst, cpp_src, seq.element.*, seq_ctr),
+            .base, .fixed_pt => try self.srcPrint("{s}{s} = {s};\n", .{ indent, c_dst, cpp_src }),
+            .string => {
+                try self.srcPrint("{s}// Borrowed string pointer; valid only for the duration of this C ABI call.\n", .{indent});
+                try self.srcPrint("{s}{s} = const_cast<char*>({s}.c_str());\n", .{ indent, c_dst, cpp_src });
+            },
+            .sequence => |seq| try self.emitSeqFieldAdaptIn(c_dst, cpp_src, seq.element.*, seq_ctr, indent),
             .named => |td| switch (td) {
                 .typedef => |t| if (t.dimensions.len == 0)
-                    try self.emitFieldAdaptIn(c_dst, cpp_src, t.type_ref, seq_ctr)
+                    try self.emitFieldAdaptIn(c_dst, cpp_src, t.type_ref, seq_ctr, indent)
                 else
-                    try self.srcPrint("    /* TODO: array typedef for {s} */\n", .{c_dst}),
+                    try self.srcPrint("{s}/* TODO: array typedef for {s} */\n", .{ indent, c_dst }),
                 .enum_, .bitmask, .bitset => {
                     const c_type = try cNameOf(self.alloc, ir.typeDeclQualifiedName(td));
                     defer self.alloc.free(c_type);
-                    try self.srcPrint("    {s} = static_cast<{s}>({s});\n", .{ c_dst, c_type, cpp_src });
+                    try self.srcPrint("{s}{s} = static_cast<{s}>({s});\n", .{ indent, c_dst, c_type, cpp_src });
                 },
                 .struct_ => |s| if (isSimpleStruct(s)) {
                     const c_type = try cNameOf(self.alloc, s.qualified_name);
                     defer self.alloc.free(c_type);
                     try self.srcPrint(
-                        "    {s} = *reinterpret_cast<const {s}*>(&{s});\n",
-                        .{ c_dst, c_type, cpp_src },
+                        "{s}{s} = *reinterpret_cast<const {s}*>(&{s});\n",
+                        .{ indent, c_dst, c_type, cpp_src },
                     );
                 } else {
-                    for (s.members) |mem| {
+                    for (s.members, 0..) |mem, idx| {
                         const c_f = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ c_dst, mem.name });
                         defer self.alloc.free(c_f);
                         const cpp_f = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ cpp_src, mem.name });
                         defer self.alloc.free(cpp_f);
-                        try self.emitFieldAdaptIn(c_f, cpp_f, mem.type_ref, seq_ctr);
+                        try self.emitMemberAdaptIn(c_dst, c_f, cpp_f, s, mem, idx, seq_ctr, indent);
                     }
                 },
-                else => try self.srcPrint("    /* TODO: adapt {s} */\n", .{c_dst}),
+                else => try self.srcPrint("{s}/* TODO: adapt {s} */\n", .{ indent, c_dst }),
             },
-            else => try self.srcPrint("    /* TODO: adapt {s} */\n", .{c_dst}),
+            else => try self.srcPrint("{s}/* TODO: adapt {s} */\n", .{ indent, c_dst }),
         }
     }
 
@@ -3551,6 +3677,7 @@ const ConcreteImplGenerator = struct {
         cpp_src: []const u8,
         elem_tr: ir.TypeRef,
         seq_ctr: *usize,
+        indent: []const u8,
     ) anyerror!void {
         const is_string = switch (elem_tr) {
             .string => true,
@@ -3560,21 +3687,23 @@ const ConcreteImplGenerator = struct {
             seq_ctr.* += 1;
             const tmp = try std.fmt.allocPrint(self.alloc, "_ptrs_{d}", .{seq_ctr.*});
             defer self.alloc.free(tmp);
-            try self.srcPrint("    std::vector<const char*> {s};\n", .{tmp});
-            try self.srcPrint("    {s}.reserve({s}.size());\n", .{ tmp, cpp_src });
-            try self.srcPrint("    for (const auto& _s : {s}) {s}.push_back(_s.c_str());\n", .{ cpp_src, tmp });
-            try self.srcPrint("    {s}._buffer = const_cast<char**>({s}.data());\n", .{ c_dst, tmp });
-            try self.srcPrint("    {s}._length = static_cast<int32_t>({s}.size());\n", .{ c_dst, tmp });
-            try self.srcPrint("    {s}._maximum = static_cast<int32_t>({s}.size());\n", .{ c_dst, tmp });
+            try self.srcPrint("{s}std::vector<const char*> {s};\n", .{ indent, tmp });
+            try self.srcPrint("{s}{s}.reserve({s}.size());\n", .{ indent, tmp, cpp_src });
+            try self.srcPrint("{s}for (const auto& _s : {s}) {s}.push_back(_s.c_str());\n", .{ indent, cpp_src, tmp });
+            try self.srcPrint("{s}// Borrowed string pointer array; valid only for the duration of this C ABI call.\n", .{indent});
+            try self.srcPrint("{s}{s}._buffer = const_cast<char**>({s}.data());\n", .{ indent, c_dst, tmp });
+            try self.srcPrint("{s}{s}._length = static_cast<int32_t>({s}.size());\n", .{ indent, c_dst, tmp });
+            try self.srcPrint("{s}{s}._maximum = static_cast<int32_t>({s}.size());\n", .{ indent, c_dst, tmp });
         } else {
             const cpp_elem_type = try cppTypeStr(self.alloc, elem_tr);
             defer self.alloc.free(cpp_elem_type);
+            try self.srcPrint("{s}// Borrowed sequence buffer; valid only for the duration of this C ABI call.\n", .{indent});
             try self.srcPrint(
-                "    {s}._buffer = const_cast<{s}*>({s}.data());\n",
-                .{ c_dst, cpp_elem_type, cpp_src },
+                "{s}{s}._buffer = const_cast<{s}*>({s}.data());\n",
+                .{ indent, c_dst, cpp_elem_type, cpp_src },
             );
-            try self.srcPrint("    {s}._length = static_cast<int32_t>({s}.size());\n", .{ c_dst, cpp_src });
-            try self.srcPrint("    {s}._maximum = static_cast<int32_t>({s}.size());\n", .{ c_dst, cpp_src });
+            try self.srcPrint("{s}{s}._length = static_cast<int32_t>({s}.size());\n", .{ indent, c_dst, cpp_src });
+            try self.srcPrint("{s}{s}._maximum = static_cast<int32_t>({s}.size());\n", .{ indent, c_dst, cpp_src });
         }
     }
 
@@ -3617,7 +3746,7 @@ const ConcreteImplGenerator = struct {
         const c_var = try std.fmt.allocPrint(self.alloc, "_c_{s}", .{p.name});
         defer self.alloc.free(c_var);
         try self.srcPrint("    {s} {s}{{}};\n", .{ c_type.?, c_var });
-        try self.emitSeqFieldAdaptIn(c_var, p.name, elem, seq_ctr);
+        try self.emitSeqFieldAdaptIn(c_var, p.name, elem, seq_ctr, "    ");
     }
 
     // ── Complex struct adaptation (C out-params → C++ structs) ───────────────
@@ -3826,31 +3955,6 @@ const ConcreteImplGenerator = struct {
         }
     }
 
-    fn emitFactoryImpl(self: *ConcreteImplGenerator, ns: []const u8) !void {
-        try self.srcWrite("// \u{2500}\u{2500} Factory \u{2500}\u{2500}\n\n");
-        try self.srcPrint(
-            "std::shared_ptr<::{s}::DomainParticipant> create_participant_udp(\n" ++
-                "    ::{s}::DomainId_t domain_id,\n" ++
-                "    std::shared_ptr<::{s}::DomainParticipantListener> listener) {{\n",
-            .{ ns, ns, ns },
-        );
-        try self.srcPrint(
-            "    DDS_DomainParticipantListener _l{{}};\n" ++
-                "    const DDS_DomainParticipantListener* _lp = nullptr;\n" ++
-                "    if (listener) {{\n" ++
-                "        if (auto* _b = dynamic_cast<DomainParticipantListenerBase*>(listener.get())) {{\n" ++
-                "            _l = _b->c_listener();\n" ++
-                "            _lp = &_l;\n" ++
-                "        }}\n" ++
-                "    }}\n" ++
-                "    DDS_DomainParticipant _h = zzdds_create_participant_udp(\n" ++
-                "        static_cast<uint32_t>(domain_id), _lp);\n" ++
-                "    if (!_h.ptr) return nullptr;\n" ++
-                "    return std::make_shared<DomainParticipantImpl>(_h);\n}}\n\n",
-            .{},
-        );
-    }
-
     // ── Type helpers ──────────────────────────────────────────────────────────
 
     fn typeRefToCpp(self: *ConcreteImplGenerator, tr: ir.TypeRef) ![]u8 {
@@ -3901,7 +4005,7 @@ const ConcreteImplGenerator = struct {
     fn listenerBridgeName(self: *ConcreteImplGenerator, tr: ir.TypeRef) ![]u8 {
         return switch (tr) {
             .named => |td| switch (td) {
-                .interface => |iface| std.fmt.allocPrint(self.alloc, "{s}Base", .{iface.name}),
+                .interface => |iface| std.fmt.allocPrint(self.alloc, "::{s}Base", .{iface.qualified_name}),
                 else => self.alloc.dupe(u8, "Base"),
             },
             else => self.alloc.dupe(u8, "Base"),
@@ -3912,11 +4016,72 @@ const ConcreteImplGenerator = struct {
     fn entityImplName(self: *ConcreteImplGenerator, tr: ir.TypeRef) ![]u8 {
         return switch (tr) {
             .named => |td| switch (td) {
-                .interface => |iface| std.fmt.allocPrint(self.alloc, "{s}Impl", .{iface.name}),
+                .interface => |iface| std.fmt.allocPrint(self.alloc, "::{s}Impl", .{iface.qualified_name}),
                 else => self.alloc.dupe(u8, "EntityImpl"),
             },
             else => self.alloc.dupe(u8, "EntityImpl"),
         };
+    }
+
+    fn ifaceDeclaresNativeHandle(self: *ConcreteImplGenerator, iface: *const ir.Interface) bool {
+        return !isCallbackIface(iface) and
+            std.mem.indexOfScalar(u8, iface.qualified_name, ':') != null and
+            iface.bases.len == 0 and
+            !self.entity_base_ifaces.contains(iface.qualified_name);
+    }
+
+    fn nativeHandleBase(self: *ConcreteImplGenerator, iface: *const ir.Interface) !?*const ir.Interface {
+        var found: ?*const ir.Interface = null;
+        for (iface.bases) |base| {
+            if (base != .interface) continue;
+            const base_iface = base.interface;
+            const candidate = if (self.ifaceDeclaresNativeHandle(base_iface) or
+                importedLeafBaseDeclaresNativeHandle(iface, base_iface))
+                base_iface
+            else
+                try self.nativeHandleBase(base_iface);
+            if (candidate) |decl_iface| {
+                if (found) |existing| {
+                    if (!std.mem.eql(u8, existing.qualified_name, decl_iface.qualified_name)) {
+                        return error.MultipleNativeHandleBases;
+                    }
+                } else {
+                    found = decl_iface;
+                }
+            }
+        }
+        return found;
+    }
+
+    fn handleExprForOwner(
+        self: *ConcreteImplGenerator,
+        from: *const ir.Interface,
+        to: *const ir.Interface,
+        expr: []const u8,
+    ) ![]u8 {
+        if (std.mem.eql(u8, from.qualified_name, to.qualified_name)) {
+            return self.alloc.dupe(u8, expr);
+        }
+        for (from.bases) |base| {
+            if (base != .interface) continue;
+            const base_iface = base.interface;
+            if (!interfaceContains(base_iface, to)) continue;
+            const from_c = try cNameOf(self.alloc, from.qualified_name);
+            defer self.alloc.free(from_c);
+            const base_c = try cNameOf(self.alloc, base_iface.qualified_name);
+            defer self.alloc.free(base_c);
+            const next_expr = try std.fmt.allocPrint(
+                self.alloc,
+                "{s}_as_{s}({s})",
+                .{ from_c, base_c, expr },
+            );
+            if (std.mem.eql(u8, base_iface.qualified_name, to.qualified_name)) {
+                return next_expr;
+            }
+            defer self.alloc.free(next_expr);
+            return self.handleExprForOwner(base_iface, to, next_expr);
+        }
+        return error.InterfaceCastPathNotFound;
     }
 
     /// C type name for a struct param (for reinterpret_cast), e.g. DDS_PublisherQos
@@ -4024,6 +4189,25 @@ fn returnAdaptKind(rt: ?ir.TypeRef) RetAdaptKind {
             else => .todo,
         },
     };
+}
+
+fn typeRefIsEnumLike(tr: ir.TypeRef) bool {
+    return switch (tr) {
+        .named => |td| switch (td) {
+            .typedef => |t| t.dimensions.len == 0 and typeRefIsEnumLike(t.type_ref),
+            .enum_, .bitmask, .bitset => true,
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn optionalBitIndexCpp(s: *const ir.Struct, member_idx: usize) usize {
+    var bit_idx: usize = 0;
+    for (s.members[0..member_idx]) |m| {
+        if (m.annotations.is_optional) bit_idx += 1;
+    }
+    return bit_idx;
 }
 
 fn isSimpleTypeRef(tr: ir.TypeRef) bool {
@@ -4195,6 +4379,61 @@ fn collectIfaceMembers(
     }
     try ops.appendSlice(alloc, iface.operations);
     try attrs.appendSlice(alloc, iface.attributes);
+}
+
+const OwnedOperation = struct {
+    owner: *const ir.Interface,
+    op: *const ir.Operation,
+};
+
+const OwnedAttribute = struct {
+    owner: *const ir.Interface,
+    attr: *const ir.Attribute,
+};
+
+fn collectOwnedIfaceMembers(
+    alloc: std.mem.Allocator,
+    iface: *const ir.Interface,
+    ops: *std.ArrayListUnmanaged(OwnedOperation),
+    attrs: *std.ArrayListUnmanaged(OwnedAttribute),
+) anyerror!void {
+    for (iface.bases) |base| {
+        if (base == .interface) try collectOwnedIfaceMembers(alloc, base.interface, ops, attrs);
+    }
+    for (iface.operations) |*op| {
+        try ops.append(alloc, .{ .owner = iface, .op = op });
+    }
+    for (iface.attributes) |*attr| {
+        try attrs.append(alloc, .{ .owner = iface, .attr = attr });
+    }
+}
+
+fn interfaceContains(iface: *const ir.Interface, target: *const ir.Interface) bool {
+    if (std.mem.eql(u8, iface.qualified_name, target.qualified_name)) return true;
+    for (iface.bases) |base| {
+        if (base == .interface and interfaceContains(base.interface, target)) return true;
+    }
+    return false;
+}
+
+fn importedLeafBaseDeclaresNativeHandle(
+    derived: *const ir.Interface,
+    base: *const ir.Interface,
+) bool {
+    // The abstract header emits native_handle() for leaf entity interfaces in
+    // their own module.  When an extension interface in a different root module
+    // inherits such a leaf, nativeHandleBase must still see the imported base's
+    // virtual handle even though the base is not part of the current module's
+    // entity_base_ifaces scan.
+    return !isCallbackIface(base) and
+        std.mem.indexOfScalar(u8, base.qualified_name, ':') != null and
+        base.bases.len == 0 and
+        !std.mem.eql(u8, rootModuleName(derived.qualified_name), rootModuleName(base.qualified_name));
+}
+
+fn rootModuleName(qname: []const u8) []const u8 {
+    if (std.mem.indexOf(u8, qname, "::")) |idx| return qname[0..idx];
+    return qname;
 }
 
 // ── Interface impl generation ─────────────────────────────────────────────────
@@ -5204,12 +5443,12 @@ test "cpp_backend: header guard and includes" {
     try testing.expect(has(s, "endif // MY_TYPES_HPP"));
 }
 
-test "cpp_backend: memory include only when interface signatures need shared_ptr" {
+test "cpp_backend: interface generation includes memory" {
     var primitive_iface = try testGenOpts(
         \\interface Greeter { string greet(in string name); };
     , "greeter", .{ .generate_interfaces = true });
     defer primitive_iface.deinit(testing.allocator);
-    try testing.expect(!has(primitive_iface.items, "#include <memory>"));
+    try testing.expect(has(primitive_iface.items, "#include <memory>"));
 
     var interface_ref = try testGenOpts(
         \\interface DataWriter {};
@@ -6404,6 +6643,24 @@ test "cpp_backend: @default scoped_name emits identifier" {
     try testing.expect(has(h.items, "int32_t limit{MY_MAX};"));
 }
 
+test "cpp_backend: @default enum scoped_name emits enum class value" {
+    var h = try testGen(
+        \\enum Kind { FIRST, SECOND };
+        \\struct Cfg { @default(SECOND) Kind kind; };
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "::Kind kind{::Kind::SECOND};"));
+}
+
+test "cpp_backend: @default bitmask scoped_name emits generated bit constant" {
+    var h = try testGen(
+        \\bitmask Flags { READ, WRITE };
+        \\struct Cfg { @default(WRITE) Flags flags; };
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "::Flags flags{::Flags_WRITE};"));
+}
+
 test "cpp_backend: B2 — write_w_handle/dispose_w_handle/unregister_instance_w_handle declared in header" {
     var out = try testGenOpts(
         "@appendable struct Topic { @key long id; };",
@@ -6485,11 +6742,150 @@ test "cpp_backend: B1+B3 — entity Impl class generated" {
     const hdr = res.hdr.items;
     const src = res.src.items;
     try testing.expect(has(hdr, "class FooImpl"));
-    try testing.expect(has(hdr, "DDS_Foo native_handle() const noexcept"));
+    try testing.expect(has(hdr, "DDS_Foo native_handle() const noexcept { return ptr_; }"));
     // FooListenerBase declaration moved to dcps.hpp (Generator); not in dcps_impl.hpp
     try testing.expect(!has(hdr, "class FooListenerBridge"));
     try testing.expect(has(src, "DDS_Foo_do_something(ptr_)"));
-    try testing.expect(has(src, "DDS_Entity_enable(ptr_)"));
+    try testing.expect(has(src, "DDS_Entity_enable(DDS_Foo_as_DDS_Entity(ptr_))"));
+}
+
+test "cpp_backend: extension Impl forwards inherited operations through generated C casts" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    interface DomainParticipant {};
+        \\    interface DomainParticipantFactory {
+        \\        DomainParticipant create_participant();
+        \\    };
+        \\};
+        \\module zzdds {
+        \\    interface DomainParticipantFactory : DDS::DomainParticipantFactory {
+        \\        DDS::DomainParticipant create_participant_ex();
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const hdr = res.hdr.items;
+    const src = res.src.items;
+    try testing.expect(has(hdr, "DDS_DomainParticipantFactory native_handle() const noexcept override { return zzdds_DomainParticipantFactory_as_DDS_DomainParticipantFactory(ptr_); }"));
+    try testing.expect(has(hdr, "std::shared_ptr<::DDS::DomainParticipant> create_participant() override;"));
+    try testing.expect(has(hdr, "std::shared_ptr<::DDS::DomainParticipant> create_participant_ex() override;"));
+    try testing.expect(has(src, "DDS_DomainParticipantFactory_create_participant(zzdds_DomainParticipantFactory_as_DDS_DomainParticipantFactory(ptr_))"));
+    try testing.expect(has(src, "zzdds_DomainParticipantFactory_create_participant_ex(ptr_)"));
+}
+
+test "cpp_backend: imported leaf base native_handle detection is generic" {
+    var res = try testGenConcreteImpl(
+        \\module Base {
+        \\    interface Leaf {
+        \\        long inherited_op();
+        \\    };
+        \\};
+        \\module Ext {
+        \\    interface Leaf : Base::Leaf {
+        \\        long extension_op();
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const hdr = res.hdr.items;
+    const src = res.src.items;
+    try testing.expect(has(hdr, "Base_Leaf native_handle() const noexcept override { return Ext_Leaf_as_Base_Leaf(ptr_); }"));
+    try testing.expect(has(src, "Base_Leaf_inherited_op(Ext_Leaf_as_Base_Leaf(ptr_))"));
+    try testing.expect(has(src, "Ext_Leaf_extension_op(ptr_)"));
+}
+
+test "cpp_backend: handleExprForOwner errors when owner is not reachable" {
+    var hdr = std.ArrayList(u8).empty;
+    defer hdr.deinit(testing.allocator);
+    var src = std.ArrayList(u8).empty;
+    defer src.deinit(testing.allocator);
+    var gen = ConcreteImplGenerator{
+        .alloc = testing.allocator,
+        .opts = .{ .input_stem = "bad_cast" },
+        .hdr = &hdr,
+        .src = &src,
+    };
+
+    const loc = ast.Loc{ .offset = 0, .line = 1, .column = 1 };
+    var owner = ir.Interface{
+        .name = "Owner",
+        .qualified_name = "DDS::Owner",
+        .span = ast.Span.at(loc),
+        .bases = &.{},
+        .operations = &.{},
+        .attributes = &.{},
+        .type_decls = &.{},
+        .consts = &.{},
+        .raw = &.{},
+    };
+    var child = ir.Interface{
+        .name = "Child",
+        .qualified_name = "zzdds::Child",
+        .span = ast.Span.at(loc),
+        .bases = &.{},
+        .operations = &.{},
+        .attributes = &.{},
+        .type_decls = &.{},
+        .consts = &.{},
+        .raw = &.{},
+    };
+
+    try testing.expectError(error.InterfaceCastPathNotFound, gen.handleExprForOwner(&child, &owner, "ptr_"));
+}
+
+test "cpp_backend: nativeHandleBase errors for multiple distinct native handle bases" {
+    var hdr = std.ArrayList(u8).empty;
+    defer hdr.deinit(testing.allocator);
+    var src = std.ArrayList(u8).empty;
+    defer src.deinit(testing.allocator);
+    var gen = ConcreteImplGenerator{
+        .alloc = testing.allocator,
+        .opts = .{ .input_stem = "multi_native_handle" },
+        .hdr = &hdr,
+        .src = &src,
+    };
+    defer gen.entity_base_ifaces.deinit(testing.allocator);
+
+    const loc = ast.Loc{ .offset = 0, .line = 1, .column = 1 };
+    var left = ir.Interface{
+        .name = "Left",
+        .qualified_name = "DDS::Left",
+        .span = ast.Span.at(loc),
+        .bases = &.{},
+        .operations = &.{},
+        .attributes = &.{},
+        .type_decls = &.{},
+        .consts = &.{},
+        .raw = &.{},
+    };
+    var right = ir.Interface{
+        .name = "Right",
+        .qualified_name = "DDS::Right",
+        .span = ast.Span.at(loc),
+        .bases = &.{},
+        .operations = &.{},
+        .attributes = &.{},
+        .type_decls = &.{},
+        .consts = &.{},
+        .raw = &.{},
+    };
+    const bases = [_]ir.TypeDecl{
+        .{ .interface = &left },
+        .{ .interface = &right },
+    };
+    var child = ir.Interface{
+        .name = "Child",
+        .qualified_name = "zzdds::Child",
+        .span = ast.Span.at(loc),
+        .bases = &bases,
+        .operations = &.{},
+        .attributes = &.{},
+        .type_decls = &.{},
+        .consts = &.{},
+        .raw = &.{},
+    };
+
+    try testing.expectError(error.MultipleNativeHandleBases, gen.nativeHandleBase(&child));
 }
 
 test "cpp_backend: B1+B3 — entity return wraps in Impl" {
@@ -6501,8 +6897,27 @@ test "cpp_backend: B1+B3 — entity return wraps in Impl" {
     );
     defer res.deinit();
     const src = res.src.items;
-    try testing.expect(has(src, "make_shared<BarImpl>"));
+    try testing.expect(has(src, "make_shared<::DDS::BarImpl>"));
     try testing.expect(has(src, "if (!_h.ptr)"));
+}
+
+test "cpp_backend: B1+B3 — enum-like attributes cast across C ABI" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    enum Color { RED, BLUE };
+        \\    bitmask Flags { READ, WRITE };
+        \\    interface Foo {
+        \\        attribute Color color;
+        \\        attribute Flags flags;
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "return static_cast<::DDS::Color>(DDS_Foo_get_color(ptr_));"));
+    try testing.expect(has(src, "DDS_Foo_set_color(ptr_, static_cast<DDS_Color>(value));"));
+    try testing.expect(has(src, "return static_cast<::DDS::Flags>(DDS_Foo_get_flags(ptr_));"));
+    try testing.expect(has(src, "DDS_Foo_set_flags(ptr_, static_cast<DDS_Flags>(value));"));
 }
 
 test "cpp_backend: B1+B3 — listener base is in dcps_impl.cpp; decl moved to dcps.hpp" {
@@ -6574,6 +6989,45 @@ test "cpp_backend: B1+B3 — complex QoS struct gets field-by-field C adaptation
     try testing.expect(!has(src, "TODO: adapt parameters"));
 }
 
+test "cpp_backend: B1+B3 — optional string struct member adapter is indented and documents borrowed lifetime" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    struct NameQosPolicy { @optional string name; };
+        \\    interface Foo { long set_qos(in NameQosPolicy qos); };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src,
+        \\    if (qos.name.has_value()) {
+        \\        // Borrowed string pointer; valid only for the duration of this C ABI call.
+        \\        _c_qos.name = const_cast<char*>((*qos.name).c_str());
+    ));
+    try testing.expect(has(src, "        _c_qos._present |= (1ULL << 0u);"));
+    try testing.expect(!has(src,
+        \\    if (qos.name.has_value()) {
+        \\    _c_qos.name =
+    ));
+}
+
+test "cpp_backend: B1+B3 — nested optional struct member adapter sets nested present bits" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    struct InnerQosPolicy { @optional string name; };
+        \\    struct OuterQosPolicy { @optional InnerQosPolicy inner; };
+        \\    interface Foo { long set_qos(in OuterQosPolicy qos); };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src,
+        \\    if (qos.inner.has_value()) {
+        \\        if ((*qos.inner).name.has_value()) {
+    ));
+    try testing.expect(has(src, "            _c_qos.inner._present |= (1ULL << 0u);"));
+    try testing.expect(has(src, "        _c_qos._present |= (1ULL << 0u);"));
+}
+
 test "cpp_backend: B — typedef sequence in-param gets seq_in adaptation" {
     var res = try testGenConcreteImpl(
         \\module DDS {
@@ -6587,6 +7041,7 @@ test "cpp_backend: B — typedef sequence in-param gets seq_in adaptation" {
     try testing.expect(has(src, "DDS_StringSeq _c_params{}"));
     try testing.expect(has(src, "_ptrs_1"));
     try testing.expect(has(src, "_c_params._buffer"));
+    try testing.expect(has(src, "// Borrowed string pointer array; valid only for the duration of this C ABI call."));
     try testing.expect(has(src, "&_c_params"));
     try testing.expect(!has(src, "TODO"));
 }
@@ -6607,7 +7062,7 @@ test "cpp_backend: B — typedef sequence<octet> in-param gets seq_in adaptation
     try testing.expect(has(src, "&_c_data"));
 }
 
-test "cpp_backend: B1+B3 — forward decls and factory emitted" {
+test "cpp_backend: B1 — forward decls emitted without bootstrap factory helper" {
     var res = try testGenConcreteImpl(
         \\module DDS {
         \\    @callback interface DomainParticipantListener {};
@@ -6621,9 +7076,9 @@ test "cpp_backend: B1+B3 — forward decls and factory emitted" {
     // DomainParticipantListenerBase declaration moved to dcps.hpp
     try testing.expect(!has(hdr, "class DomainParticipantListenerBridge;"));
     try testing.expect(!has(hdr, "class DomainParticipantListenerBase;"));
-    try testing.expect(has(hdr, "create_participant_udp("));
-    try testing.expect(has(src, "zzdds_create_participant_udp("));
-    try testing.expect(has(src, "make_shared<DomainParticipantImpl>"));
+    try testing.expect(has(hdr, "Bootstrap factory helpers such as create_participant_udp are not generated here"));
+    try testing.expect(!has(hdr, "create_participant_udp("));
+    try testing.expect(!has(src, "zzdds_create_participant_udp("));
 }
 
 test "cpp_backend: D3 — complex struct out-param gets field-by-field C→C++ copy and free" {
@@ -6740,6 +7195,29 @@ test "cpp_backend: entity_in param uses virtual native_handle, not static_cast" 
     const src = res.src.items;
     try testing.expect(has(src, "t->native_handle()"));
     try testing.expect(!has(src, "static_cast<TopicImpl*>"));
+}
+
+test "cpp_backend: entity_in param for derived root interface uses concrete handle" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    interface DomainParticipantFactory {};
+        \\};
+        \\module zzdds {
+        \\    interface DomainParticipantFactory : DDS::DomainParticipantFactory {};
+        \\    interface FactoryUser {
+        \\        long use_factory(in DomainParticipantFactory f);
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const hdr = res.hdr.items;
+    const src = res.src.items;
+    try testing.expect(has(hdr, "friend zzdds_DomainParticipantFactory zidl_concrete_handle(const DomainParticipantFactoryImpl& self) noexcept { return self.ptr_; }"));
+    try testing.expect(has(hdr, "DDS_DomainParticipantFactory native_handle() const noexcept override { return zzdds_DomainParticipantFactory_as_DDS_DomainParticipantFactory(ptr_); }"));
+    try testing.expect(has(src, "entity parameter adaptation uses dynamic_cast and requires RTTI"));
+    try testing.expect(has(src, "dynamic_cast<::zzdds::DomainParticipantFactoryImpl*>(_p.get())) return zidl_concrete_handle(*_impl);"));
+    try testing.expect(has(src, "throw std::invalid_argument(\"zidl: incompatible entity implementation for zzdds::DomainParticipantFactory\")"));
+    try testing.expect(!has(src, "dynamic_cast<::zzdds::DomainParticipantFactoryImpl*>(_p.get())) return _impl->native_handle();"));
 }
 
 test "cpp_backend: listener_in uses _lp_ null pointer, not address-of zero struct" {

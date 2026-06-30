@@ -30,6 +30,10 @@ int Point_skip(ZidlCdrReader *_r) {
     return ZIDL_CDR_OK;
 }
 
+void Point_default(Point *_v) {
+    memset(_v, 0, sizeof(*_v));
+}
+
 int Sample_serialize(ZidlCdrWriter *_w, const Sample *_v) {
     int _rc;
     _rc = zidl_cdr_write_u32(_w, _v->id);
@@ -213,6 +217,10 @@ int Sample_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8
     return Sample_compute_key_hash(_v, _hash);
 }
 
+void Sample_default(Sample *_v) {
+    memset(_v, 0, sizeof(*_v));
+}
+
 int Frame_serialize(ZidlCdrWriter *_w, const Frame *_v) {
     int _rc;
     size_t _dh;
@@ -248,6 +256,10 @@ int Frame_skip(ZidlCdrReader *_r) {
     { uint32_t _tmp; _rc = zidl_cdr_read_u32(_r, &_tmp); if (_rc) return _rc; }
     { const char *_sp; uint32_t _sl; _rc = zidl_cdr_read_string_zerocopy(_r, &_sp, &_sl); if (_rc) return _rc; }
     return ZIDL_CDR_OK;
+}
+
+void Frame_default(Frame *_v) {
+    memset(_v, 0, sizeof(*_v));
 }
 
 int Beacon_serialize(ZidlCdrWriter *_w, const Beacon *_v) {
@@ -343,5 +355,9 @@ int Beacon_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8
     if (_rc) return _rc;
     if (_key_end != (size_t)-1) { _rc = zidl_cdr_seek_to(_r, _key_end); if (_rc) return _rc; }
     return Beacon_compute_key_hash(_v, _hash);
+}
+
+void Beacon_default(Beacon *_v) {
+    memset(_v, 0, sizeof(*_v));
 }
 

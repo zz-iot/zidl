@@ -17,4 +17,7 @@ int Frame_serialize(ZidlCdrWriter *_w, const Frame *_v);
 int Frame_deserialize(ZidlCdrReader *_r, Frame *_v);
 int Frame_skip(ZidlCdrReader *_r);
 
+/* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. */
+void Frame_default(Frame *_v);
+
 #endif /* FRAME_H */

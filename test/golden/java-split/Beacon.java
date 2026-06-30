@@ -14,6 +14,10 @@ public class Beacon implements java.io.Serializable {
         this.payload = "";
     }
 
+    public static Beacon defaultValue() {
+        return new Beacon();
+    }
+
     public Beacon(int id, String payload) {
         this.id = id;
         this.payload = payload;

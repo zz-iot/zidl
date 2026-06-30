@@ -30,6 +30,10 @@ pub const Point = extern struct {
     x: i32 = 0,
     y: i32 = 0,
 
+    pub fn default() @This() {
+        return .{};
+    }
+
     pub const has_key = false;
 
     pub fn serialize(writer: anytype, value: @This()) !void {
@@ -77,6 +81,10 @@ pub const Sample = struct {
     arr: [3]i32 = std.mem.zeroes([3]i32),
     clr: Color = .RED,
     nested: Point = .{},
+
+    pub fn default() @This() {
+        return .{};
+    }
 
     pub const has_key = true;
 
@@ -236,6 +244,10 @@ pub const Frame = struct {
     seq_num: u32 = 0,
     topic: []const u8 = "",
 
+    pub fn default() @This() {
+        return .{};
+    }
+
     pub const has_key = false;
 
     pub fn serialize(writer: anytype, value: @This()) !void {
@@ -275,6 +287,10 @@ pub const Frame = struct {
 pub const Beacon = struct {
     id: u32 = 0,
     payload: []const u8 = "",
+
+    pub fn default() @This() {
+        return .{};
+    }
 
     pub const has_key = true;
 

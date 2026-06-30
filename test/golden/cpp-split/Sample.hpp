@@ -30,6 +30,8 @@ struct Sample {
     int32_t arr[3];
     ::Color clr{};
     ::Point nested{};
+
+    static Sample default_value() { return Sample{}; }
 }; // struct Sample
 
 #define Sample_has_key 1

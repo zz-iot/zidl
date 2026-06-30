@@ -136,6 +136,15 @@ pub const Options = struct {
     cpp_generate_impl: bool = false,
 };
 
+/// Map an imported IDL module name to the generated C/C++ include stem.
+/// Most modules use their lowercase name. DDS -> dcps is the only known
+/// historical filename mismatch; add an Options-provided override map here if
+/// another vendor module needs a non-default stem.
+pub fn includeStemForImport(alloc: std.mem.Allocator, import_name: []const u8) ![]u8 {
+    if (std.mem.eql(u8, import_name, "DDS")) return alloc.dupe(u8, "dcps");
+    return std.ascii.allocLowerString(alloc, import_name);
+}
+
 // ── XRCE profile validation ───────────────────────────────────────────────────
 
 /// Validate that `spec` conforms to the XRCE profile constraints:

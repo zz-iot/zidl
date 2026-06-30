@@ -44,6 +44,10 @@ public class Sample implements java.io.Serializable {
         this.nested = new Point();
     }
 
+    public static Sample defaultValue() {
+        return new Sample();
+    }
+
     public Sample(int id, boolean b, byte u8_val, short s16_val, short u16_val, int s32_val, int u32_val, long s64_val, long u64_val, float f32_val, double f64_val, String str, String bstr, java.util.List<Integer> nums, int[] arr, Color clr, Point nested) {
         this.id = id;
         this.b = b;

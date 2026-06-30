@@ -13,6 +13,8 @@
 struct Beacon {
     uint32_t id{};
     std::string payload{};
+
+    static Beacon default_value() { return Beacon{}; }
 }; // struct Beacon
 
 #define Beacon_has_key 1

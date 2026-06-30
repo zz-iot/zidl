@@ -40,6 +40,9 @@ int Point_serialize(ZidlCdrWriter *_w, const Point *_v);
 int Point_deserialize(ZidlCdrReader *_r, Point *_v);
 int Point_skip(ZidlCdrReader *_r);
 
+/* Initialize uninitialized storage using IDL defaults and zero values. */
+void Point_default(Point *_v);
+
 typedef struct Sample_s {
     uint32_t id;
     bool b;
@@ -69,6 +72,9 @@ int Sample_deserialize_key(ZidlCdrReader *_r, Sample *_v);
 int Sample_compute_key_hash(const Sample *_v, uint8_t _hash[16]);
 int Sample_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);
 
+/* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. */
+void Sample_default(Sample *_v);
+
 void Sample_free(Sample *v);
 
 typedef struct Frame_s {
@@ -80,6 +86,9 @@ typedef struct Frame_s {
 int Frame_serialize(ZidlCdrWriter *_w, const Frame *_v);
 int Frame_deserialize(ZidlCdrReader *_r, Frame *_v);
 int Frame_skip(ZidlCdrReader *_r);
+
+/* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. */
+void Frame_default(Frame *_v);
 
 typedef struct Beacon_s {
     uint32_t id;
@@ -95,6 +104,9 @@ int Beacon_deserialize_key(ZidlCdrReader *_r, Beacon *_v);
 int Beacon_compute_key_hash(const Beacon *_v, uint8_t _hash[16]);
 int Beacon_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);
 
+/* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. */
+void Beacon_default(Beacon *_v);
+
 /* IDL interface: Greeter */
 char *Greeter_greet(Greeter self, const char *name);
 void Greeter_reset(Greeter self);
@@ -105,6 +117,11 @@ char *AdvancedGreeter_greet(AdvancedGreeter self, const char *name);
 void AdvancedGreeter_reset(AdvancedGreeter self);
 void AdvancedGreeter_greetAdvanced(AdvancedGreeter self, const char *name);
 int32_t AdvancedGreeter_get_count(AdvancedGreeter self);
+/* Cast helpers are emitted for direct inheritance edges; compose helpers for transitive casts. */
+/* Upcast AdvancedGreeter to Greeter. */
+Greeter AdvancedGreeter_as_Greeter(AdvancedGreeter child);
+/* Downcast Greeter to AdvancedGreeter; returns a null handle when the base object is not an instance of AdvancedGreeter. */
+AdvancedGreeter Greeter_as_AdvancedGreeter(Greeter base);
 
 
 #ifdef __cplusplus
