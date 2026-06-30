@@ -1091,7 +1091,8 @@ const Generator = struct {
                     return std.fmt.allocPrint(self.alloc, "{s}::{s}", .{ cpp_type, name });
                 },
                 // Bitmask bit constants are emitted as namespace-level
-                // `BitmaskName_BIT` values. IR qualified names already use
+                // `BitmaskName_BIT` values, not members of the bitmask alias
+                // returned by typeRefToCpp(). IR qualified names already use
                 // `::`, so this forms an absolute C++ path like
                 // `::Module::BitmaskName_BIT`.
                 .bitmask => |bm| std.fmt.allocPrint(self.alloc, "::{s}_{s}", .{ bm.qualified_name, name }),

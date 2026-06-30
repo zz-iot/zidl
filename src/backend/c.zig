@@ -573,7 +573,10 @@ const Generator = struct {
             try self.emitStructCdrProtos(c_name, s);
             const em = self.opts.export_macro;
             const sp: []const u8 = if (em.len > 0) " " else "";
-            try self.write("/* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object.");
+            try self.write("/* Initialize uninitialized storage using IDL defaults and zero values.");
+            if (structHasOwnedFields(s)) {
+                try self.write(" Not a reset operation: release any owned fields before reinitializing an existing object.");
+            }
             if (structHasStringDefault(s)) {
                 try self.write(" String defaults are applied only when strdup succeeds; NULL remains the zero-initialized fallback.");
             }
@@ -876,7 +879,10 @@ const Generator = struct {
                 try self.write("/* Cast helpers are emitted for direct inheritance edges; compose helpers for transitive casts. */\n");
                 wrote_cast_note = true;
             }
-            if (isListenerInterface(iface) or isListenerInterface(base_iface)) {
+            const child_is_listener = isListenerInterface(iface);
+            const base_is_listener = isListenerInterface(base_iface);
+            if (child_is_listener != base_is_listener) return error.MixedEntityListenerInheritance;
+            if (child_is_listener) {
                 try self.print("void {s}_as_{s}(const {s} *child, {s} *out);\n", .{
                     child_name, base_name, child_name, base_name,
                 });
@@ -1402,6 +1408,33 @@ fn typeRefHasStructDefault(tr: ir.TypeRef) bool {
         .named => |td| switch (td) {
             .struct_ => |s| structHasDefault(s),
             .typedef => |t| typeRefHasStructDefault(t.type_ref),
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn structHasOwnedFields(s: *const ir.Struct) bool {
+    if (s.base) |base| {
+        switch (base) {
+            .struct_ => |bs| if (structHasOwnedFields(bs)) return true,
+            else => {},
+        }
+    }
+    for (s.members) |m| {
+        if (typeRefHasOwnedFields(m.type_ref)) return true;
+    }
+    return false;
+}
+
+fn typeRefHasOwnedFields(tr: ir.TypeRef) bool {
+    return switch (tr) {
+        .string => |bound| bound == null,
+        .wstring => |bound| bound == null,
+        .sequence => |seq| seq.bound == null,
+        .named => |td| switch (td) {
+            .struct_ => |s| structHasOwnedFields(s),
+            .typedef => |t| typeRefHasOwnedFields(t.type_ref),
             else => false,
         },
         else => false,
@@ -3545,6 +3578,7 @@ const CdrGenerator = struct {
         dimensions: []const u64,
         dim_idx: usize,
     ) !void {
+        if (!typeRefHasStructDefault(tr)) return;
         if (dimensions.len > 0) {
             const idx_name = try std.fmt.allocPrint(self.alloc, "_di{d}", .{dim_idx});
             defer self.alloc.free(idx_name);
@@ -4455,6 +4489,14 @@ test "c_backend: listener inheritance emits structural cast declarations" {
     const s = out.items;
     try testing.expect(has(s, "void zzdds_DataReaderListener_as_DDS_DataReaderListener(const zzdds_DataReaderListener *child, DDS_DataReaderListener *out);"));
     try testing.expect(has(s, "bool DDS_DataReaderListener_as_zzdds_DataReaderListener(const DDS_DataReaderListener *base, zzdds_DataReaderListener *out);"));
+}
+
+test "c_backend: mixed entity/listener inheritance is rejected" {
+    const result = testGenIfaceHeader(
+        \\@callback interface BaseListener { void on_event(in long value); };
+        \\interface Child : BaseListener { long enable(); };
+    , "mixed_listener_entity");
+    try testing.expectError(error.MixedEntityListenerInheritance, result);
 }
 
 test "c_backend: listener interface emits callback struct not free functions" {
@@ -5427,11 +5469,19 @@ test "c_backend cdr: non-optional string apply_defaults replaces only after strd
 test "c_backend: default comments mention string allocation only when relevant" {
     var plain = try testGen("struct Point { long x; long y; };", "point");
     defer plain.deinit(testing.allocator);
+    try testing.expect(!has(plain.items, "release any owned fields"));
     try testing.expect(!has(plain.items, "String defaults are applied only when strdup succeeds"));
     try testing.expect(!has(plain.items, "must be heap-allocated"));
 
+    var owned_string = try testGen("struct Frame { string topic; };", "frame");
+    defer owned_string.deinit(testing.allocator);
+    try testing.expect(has(owned_string.items, "release any owned fields"));
+    try testing.expect(!has(owned_string.items, "String defaults are applied only when strdup succeeds"));
+    try testing.expect(!has(owned_string.items, "must be heap-allocated"));
+
     var string_default = try testGen("struct Cfg { @default(\"default-url\") string url; };", "cfg");
     defer string_default.deinit(testing.allocator);
+    try testing.expect(has(string_default.items, "release any owned fields"));
     try testing.expect(has(string_default.items, "String defaults are applied only when strdup succeeds"));
     try testing.expect(has(string_default.items, "Non-NULL string fields overwritten by this function must be heap-allocated"));
 }

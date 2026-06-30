@@ -2094,6 +2094,10 @@ const Generator = struct {
                     return std.fmt.allocPrint(self.alloc, ".{s}", .{tag});
                 },
                 .bitmask => |bm| {
+                    // Bit constants are emitted as module-level declarations
+                    // named `BitmaskName_BIT`. Using the fully qualified IR
+                    // name works both from outside the module and inside the
+                    // module struct via Zig's lazy declaration resolution.
                     const bit_qname = try std.fmt.allocPrint(self.alloc, "{s}_{s}", .{ bm.qualified_name, name });
                     defer self.alloc.free(bit_qname);
                     return self.qualNameToZig(bit_qname);
