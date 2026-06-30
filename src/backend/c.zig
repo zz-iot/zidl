@@ -573,10 +573,18 @@ const Generator = struct {
             try self.emitStructCdrProtos(c_name, s);
             const em = self.opts.export_macro;
             const sp: []const u8 = if (em.len > 0) " " else "";
-            try self.write("/* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. String defaults are applied only when strdup succeeds; NULL remains the zero-initialized fallback. */\n");
+            try self.write("/* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object.");
+            if (structHasStringDefault(s)) {
+                try self.write(" String defaults are applied only when strdup succeeds; NULL remains the zero-initialized fallback.");
+            }
+            try self.write(" */\n");
             try self.print("{s}{s}void {s}_default({s} *_v);\n", .{ em, sp, c_name, c_name });
             if (structHasDefault(s)) {
-                try self.write("/* Overlay IDL defaults on an existing object. Non-optional @default fields overwrite current values; optional fields are set only when absent. */\n");
+                try self.write("/* Overlay IDL defaults on an existing object. Non-optional @default fields overwrite current values; optional fields are set only when absent.");
+                if (structHasNonOptionalStringDefault(s)) {
+                    try self.write(" Non-NULL string fields overwritten by this function must be heap-allocated, for example via strdup, or NULL.");
+                }
+                try self.write(" */\n");
                 try self.print("{s}{s}void {s}_apply_defaults({s} *_v);\n\n", .{ em, sp, c_name, c_name });
             } else {
                 try self.write("\n");
@@ -1394,6 +1402,68 @@ fn typeRefHasStructDefault(tr: ir.TypeRef) bool {
         .named => |td| switch (td) {
             .struct_ => |s| structHasDefault(s),
             .typedef => |t| typeRefHasStructDefault(t.type_ref),
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn structHasStringDefault(s: *const ir.Struct) bool {
+    if (s.base) |base| {
+        switch (base) {
+            .struct_ => |bs| if (structHasStringDefault(bs)) return true,
+            else => {},
+        }
+    }
+    for (s.members) |m| {
+        if (m.annotations.default_value) |dv| {
+            switch (dv) {
+                .string => return true,
+                else => {},
+            }
+        }
+        if (typeRefHasStringDefault(m.type_ref)) return true;
+    }
+    return false;
+}
+
+fn typeRefHasStringDefault(tr: ir.TypeRef) bool {
+    return switch (tr) {
+        .named => |td| switch (td) {
+            .struct_ => |s| structHasStringDefault(s),
+            .typedef => |t| typeRefHasStringDefault(t.type_ref),
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn structHasNonOptionalStringDefault(s: *const ir.Struct) bool {
+    if (s.base) |base| {
+        switch (base) {
+            .struct_ => |bs| if (structHasNonOptionalStringDefault(bs)) return true,
+            else => {},
+        }
+    }
+    for (s.members) |m| {
+        if (!m.annotations.is_optional) {
+            if (m.annotations.default_value) |dv| {
+                switch (dv) {
+                    .string => return true,
+                    else => {},
+                }
+            }
+        }
+        if (typeRefHasNonOptionalStringDefault(m.type_ref)) return true;
+    }
+    return false;
+}
+
+fn typeRefHasNonOptionalStringDefault(tr: ir.TypeRef) bool {
+    return switch (tr) {
+        .named => |td| switch (td) {
+            .struct_ => |s| structHasNonOptionalStringDefault(s),
+            .typedef => |t| typeRefHasNonOptionalStringDefault(t.type_ref),
             else => false,
         },
         else => false,
@@ -5352,6 +5422,18 @@ test "c_backend cdr: non-optional string apply_defaults replaces only after strd
     try testing.expect(has(src.items, "if (_s_url) {"));
     try testing.expect(has(src.items, "free(_v->url);"));
     try testing.expect(has(src.items, "_v->url = _s_url;"));
+}
+
+test "c_backend: default comments mention string allocation only when relevant" {
+    var plain = try testGen("struct Point { long x; long y; };", "point");
+    defer plain.deinit(testing.allocator);
+    try testing.expect(!has(plain.items, "String defaults are applied only when strdup succeeds"));
+    try testing.expect(!has(plain.items, "must be heap-allocated"));
+
+    var string_default = try testGen("struct Cfg { @default(\"default-url\") string url; };", "cfg");
+    defer string_default.deinit(testing.allocator);
+    try testing.expect(has(string_default.items, "String defaults are applied only when strdup succeeds"));
+    try testing.expect(has(string_default.items, "Non-NULL string fields overwritten by this function must be heap-allocated"));
 }
 
 test "c_backend cdr: non-optional string default ctor assigns only after strdup succeeds" {
