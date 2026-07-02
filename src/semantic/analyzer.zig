@@ -414,6 +414,18 @@ pub const Analyzer = struct {
         var diags = self.diagnostics; // borrow — errors appended to same list
         const cval = const_eval.evaluate(&c.value, parent, self.arena.allocator(), &diags) catch null;
 
+        // Type-check the evaluated value against the declared type.
+        if (cval) |v| {
+            if (!constValueFitsType(v, &c.const_type)) {
+                try self.addDiag(
+                    .const_type_mismatch,
+                    c.span,
+                    "const initializer value is not compatible with declared type (§7.4.3)",
+                    .{},
+                );
+            }
+        }
+
         _ = try self.defineSymbol(parent, .const_dcl, c.name, c.span, null);
 
         // Patch the const_value into the just-inserted symbol.
@@ -479,7 +491,7 @@ pub const Analyzer = struct {
             .def => |*def| {
                 const parent = self.currentScope();
                 const union_scope = try self.openScope(parent, .union_, .union_def, def.name, def.span);
-                try self.resolveSwitchTypeSpec(&def.switch_type);
+                try self.resolveSwitchTypeSpec(&def.switch_type, def.span);
                 try self.pushScope(union_scope);
                 defer self.popScope();
                 for (def.cases) |*case| {
@@ -499,10 +511,30 @@ pub const Analyzer = struct {
         }
     }
 
-    fn resolveSwitchTypeSpec(self: *Analyzer, st: *const ast.SwitchTypeSpec) !void {
+    fn resolveSwitchTypeSpec(self: *Analyzer, st: *const ast.SwitchTypeSpec, span: ast.Span) !void {
         switch (st.*) {
-            .base => {},
-            .scoped_name => |*sn| _ = try self.resolveScopedName(sn),
+            .base => |bt| {
+                if (!isValidDiscriminantBase(bt)) {
+                    try self.addDiag(
+                        .invalid_discriminant_type,
+                        span,
+                        "union discriminant must be an integer type, char, boolean, wchar, octet, or enum (§7.4.8); got '{s}'",
+                        .{@tagName(bt)},
+                    );
+                }
+            },
+            .scoped_name => |*sn| {
+                if (try self.resolveScopedName(sn)) |sym| {
+                    if (sym.tag != .enum_dcl) {
+                        try self.addDiag(
+                            .invalid_discriminant_type,
+                            sn.span,
+                            "union discriminant '{s}' must be an enum type (§7.4.8)",
+                            .{sn.parts[sn.parts.len - 1]},
+                        );
+                    }
+                }
+            },
         }
     }
 
@@ -1040,6 +1072,100 @@ pub const Analyzer = struct {
 // Helpers
 // ============================================================================
 
+/// Returns true when `val` is compatible with `ty` per IDL §7.4.3.
+/// Scoped-name types (enum references) are skipped — enumerator membership
+/// can't be verified without tracking which enum each enumerator belongs to.
+fn constValueFitsType(val: ConstValue, ty: *const ast.TypeSpec) bool {
+    return switch (ty.*) {
+        .base => |bt| constValueFitsBase(val, bt),
+        .template => |tmpl| switch (tmpl) {
+            .string => switch (val) {
+                .string => true,
+                else => false,
+            },
+            .wide_string => switch (val) {
+                .wide_string => true,
+                else => false,
+            },
+            .fixed_pt => switch (val) {
+                .fixed_pt, .integer, .float => true,
+                else => false,
+            },
+            else => true, // sequence/map not valid const types — skip
+        },
+        .scoped_name => true, // enum ref — can't verify membership here
+    };
+}
+
+fn constValueFitsBase(val: ConstValue, bt: ast.BaseTypeSpec) bool {
+    return switch (bt) {
+        .short,
+        .long,
+        .long_long,
+        .unsigned_short,
+        .unsigned_long,
+        .unsigned_long_long,
+        .octet,
+        .int8,
+        .int16,
+        .int32,
+        .int64,
+        .uint8,
+        .uint16,
+        .uint32,
+        .uint64,
+        => switch (val) {
+            .integer => true,
+            else => false,
+        },
+        .float, .double, .long_double => switch (val) {
+            .integer, .float => true,
+            else => false,
+        },
+        .char => switch (val) {
+            .character => true,
+            else => false,
+        },
+        .wchar => switch (val) {
+            .wide_character => true,
+            else => false,
+        },
+        .boolean => switch (val) {
+            .boolean => true,
+            else => false,
+        },
+        else => true, // any/object/value_base — not valid const types, but not checked here
+    };
+}
+
+/// Returns true when `bt` is a valid union discriminant base type (§7.4.8).
+/// Valid: all integer types, char, boolean, wchar (BB), octet (BB).
+/// Invalid: float, double, long_double, any, object, value_base.
+fn isValidDiscriminantBase(bt: ast.BaseTypeSpec) bool {
+    return switch (bt) {
+        .short,
+        .long,
+        .long_long,
+        .unsigned_short,
+        .unsigned_long,
+        .unsigned_long_long,
+        .int8,
+        .int16,
+        .int32,
+        .int64,
+        .uint8,
+        .uint16,
+        .uint32,
+        .uint64,
+        .char,
+        .wchar,
+        .boolean,
+        .octet,
+        => true,
+        else => false,
+    };
+}
+
 fn declaratorName(d: *const ast.Declarator) []const u8 {
     return switch (d.*) {
         .simple => |s| s.name,
@@ -1341,4 +1467,151 @@ test "analyzer: diamond inheritance not ambiguous" {
     );
     defer a.deinit();
     try testing.expectEqual(@as(usize, 0), a.diagnostics.items.len);
+}
+
+// ── const type-mismatch checks ────────────────────────────────────────────────
+
+test "analyzer: const integer value matches integer type" {
+    var a = try parseAndAnalyze("const long X = 42;", testing.allocator);
+    defer a.deinit();
+    try testing.expectEqual(@as(usize, 0), a.diagnostics.items.len);
+}
+
+test "analyzer: const integer literal matches float type" {
+    // Integer literals are promotable to float/double per IDL §7.4.3.
+    var a = try parseAndAnalyze("const float X = 3;", testing.allocator);
+    defer a.deinit();
+    try testing.expectEqual(@as(usize, 0), a.diagnostics.items.len);
+}
+
+test "analyzer: const float value matches float type" {
+    var a = try parseAndAnalyze("const double X = 3.14;", testing.allocator);
+    defer a.deinit();
+    try testing.expectEqual(@as(usize, 0), a.diagnostics.items.len);
+}
+
+test "analyzer: const string value matches string type" {
+    var a = try parseAndAnalyze("const string X = \"hello\";", testing.allocator);
+    defer a.deinit();
+    try testing.expectEqual(@as(usize, 0), a.diagnostics.items.len);
+}
+
+test "analyzer: const boolean value matches boolean type" {
+    var a = try parseAndAnalyze("const boolean X = TRUE;", testing.allocator);
+    defer a.deinit();
+    try testing.expectEqual(@as(usize, 0), a.diagnostics.items.len);
+}
+
+test "analyzer: const string value for integer type is mismatch" {
+    var a = try parseAndAnalyze("const long X = \"hello\";", testing.allocator);
+    defer a.deinit();
+    const found = for (a.diagnostics.items) |d| {
+        if (d.kind == .const_type_mismatch) break true;
+    } else false;
+    try testing.expect(found);
+}
+
+test "analyzer: const integer value for string type is mismatch" {
+    var a = try parseAndAnalyze("const string X = 42;", testing.allocator);
+    defer a.deinit();
+    const found = for (a.diagnostics.items) |d| {
+        if (d.kind == .const_type_mismatch) break true;
+    } else false;
+    try testing.expect(found);
+}
+
+test "analyzer: const integer value for boolean type is mismatch" {
+    var a = try parseAndAnalyze("const boolean X = 1;", testing.allocator);
+    defer a.deinit();
+    const found = for (a.diagnostics.items) |d| {
+        if (d.kind == .const_type_mismatch) break true;
+    } else false;
+    try testing.expect(found);
+}
+
+test "analyzer: const float value for integer type is mismatch" {
+    var a = try parseAndAnalyze("const long X = 3.14;", testing.allocator);
+    defer a.deinit();
+    const found = for (a.diagnostics.items) |d| {
+        if (d.kind == .const_type_mismatch) break true;
+    } else false;
+    try testing.expect(found);
+}
+
+// ── union discriminant type checks ───────────────────────────────────────────
+
+test "analyzer: union with integer discriminant is valid" {
+    var a = try parseAndAnalyze(
+        "union U switch(long) { case 1: long v; };",
+        testing.allocator,
+    );
+    defer a.deinit();
+    try testing.expectEqual(@as(usize, 0), a.diagnostics.items.len);
+}
+
+test "analyzer: union with boolean discriminant is valid" {
+    var a = try parseAndAnalyze(
+        "union U switch(boolean) { case TRUE: long v; };",
+        testing.allocator,
+    );
+    defer a.deinit();
+    try testing.expectEqual(@as(usize, 0), a.diagnostics.items.len);
+}
+
+test "analyzer: union with char discriminant is valid" {
+    var a = try parseAndAnalyze(
+        "union U switch(char) { case 'a': long v; };",
+        testing.allocator,
+    );
+    defer a.deinit();
+    try testing.expectEqual(@as(usize, 0), a.diagnostics.items.len);
+}
+
+test "analyzer: union with enum discriminant is valid" {
+    var a = try parseAndAnalyze(
+        \\enum Color { Red, Green };
+        \\union U switch(Color) { case Red: long v; };
+    ,
+        testing.allocator,
+    );
+    defer a.deinit();
+    try testing.expectEqual(@as(usize, 0), a.diagnostics.items.len);
+}
+
+test "analyzer: union with float discriminant is invalid" {
+    var a = try parseAndAnalyze(
+        "union U switch(float) { case 1: long v; };",
+        testing.allocator,
+    );
+    defer a.deinit();
+    const found = for (a.diagnostics.items) |d| {
+        if (d.kind == .invalid_discriminant_type) break true;
+    } else false;
+    try testing.expect(found);
+}
+
+test "analyzer: union with double discriminant is invalid" {
+    var a = try parseAndAnalyze(
+        "union U switch(double) { case 1: long v; };",
+        testing.allocator,
+    );
+    defer a.deinit();
+    const found = for (a.diagnostics.items) |d| {
+        if (d.kind == .invalid_discriminant_type) break true;
+    } else false;
+    try testing.expect(found);
+}
+
+test "analyzer: union with struct discriminant is invalid" {
+    var a = try parseAndAnalyze(
+        \\struct S { long x; };
+        \\union U switch(S) { case 1: long v; };
+    ,
+        testing.allocator,
+    );
+    defer a.deinit();
+    const found = for (a.diagnostics.items) |d| {
+        if (d.kind == .invalid_discriminant_type) break true;
+    } else false;
+    try testing.expect(found);
 }

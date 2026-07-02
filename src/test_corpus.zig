@@ -105,3 +105,21 @@ test "corpus: case-inconsistent identifier" {
         std.testing.allocator,
     );
 }
+
+test "corpus: const type mismatch" {
+    try runPipeline(
+        "const_type_mismatch.idl",
+        @embedFile("test_idl/errors/const_type_mismatch.idl"),
+        1,
+        std.testing.allocator,
+    );
+}
+
+test "corpus: invalid union discriminant type" {
+    try runPipeline(
+        "invalid_discriminant_type.idl",
+        @embedFile("test_idl/errors/invalid_discriminant_type.idl"),
+        1,
+        std.testing.allocator,
+    );
+}
