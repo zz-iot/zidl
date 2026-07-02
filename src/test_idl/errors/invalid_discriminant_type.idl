@@ -1,0 +1,7 @@
+// Error corpus: union discriminant is a float — triggers invalid_discriminant_type.
+//
+// Expected: exactly 1 semantic diagnostic (invalid_discriminant_type for 'U').
+
+union U switch(float) {
+    case 1: long v;
+};

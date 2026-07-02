@@ -1,0 +1,5 @@
+// Error corpus: const initializer type mismatch — triggers const_type_mismatch.
+//
+// Expected: exactly 1 semantic diagnostic (const_type_mismatch for 'Bad').
+
+const long Bad = "not an integer";
