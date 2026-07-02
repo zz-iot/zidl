@@ -1147,9 +1147,6 @@ fn constValueFitsBase(val: ConstValue, bt: ast.BaseTypeSpec) bool {
     };
 }
 
-/// Returns true when `bt` is a valid union discriminant base type (§7.4.8).
-/// Valid: all integer types, char, boolean, wchar (BB), octet (BB).
-/// Invalid: float, double, long_double, any, object, value_base.
 /// True when a resolved symbol is a valid union discriminant type (§7.4.8).
 /// Accepts enums directly, and typedef-aliased types whose underlying
 /// TypeSpec is a valid discriminant base.  Typedef-of-typedef (scoped_name
@@ -1177,6 +1174,9 @@ fn isValidDiscriminantTypeSpec(ts: *const ast.TypeSpec) bool {
     };
 }
 
+/// Returns true when `bt` is a valid union discriminant base type (§7.4.8).
+/// Valid: all integer types, char, boolean, wchar (BB), octet (BB).
+/// Invalid: float, double, long_double, any, object, value_base.
 fn isValidDiscriminantBase(bt: ast.BaseTypeSpec) bool {
     return switch (bt) {
         .short,
