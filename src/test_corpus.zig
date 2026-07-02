@@ -124,6 +124,15 @@ test "corpus: invalid union discriminant type" {
     );
 }
 
+test "corpus: boolean and char arithmetic consts are valid" {
+    try runPipeline(
+        "const_arithmetic.idl",
+        @embedFile("test_idl/valid/const_arithmetic.idl"),
+        0,
+        std.testing.allocator,
+    );
+}
+
 test "corpus: typedef-aliased discriminant is valid" {
     try runPipeline(
         "typedef_discriminant.idl",

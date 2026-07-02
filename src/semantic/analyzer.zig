@@ -1127,16 +1127,20 @@ fn constValueFitsBase(val: ConstValue, bt: ast.BaseTypeSpec) bool {
             .integer, .float => true,
             else => false,
         },
+        // const_eval coerces boolean/char operands to i64 for arithmetic
+        // (intVal), so arithmetic expressions like `TRUE & TRUE` or `'a' + 1`
+        // produce .integer.  Accept .integer as a compatible result per §7.4.3
+        // C-arithmetic semantics.
         .char => switch (val) {
-            .character => true,
+            .character, .integer => true,
             else => false,
         },
         .wchar => switch (val) {
-            .wide_character => true,
+            .wide_character, .integer => true,
             else => false,
         },
         .boolean => switch (val) {
-            .boolean => true,
+            .boolean, .integer => true,
             else => false,
         },
         else => true, // any/object/value_base — not valid const types, but not checked here
@@ -1552,13 +1556,31 @@ test "analyzer: const integer value for string type is mismatch" {
     try testing.expect(found);
 }
 
-test "analyzer: const integer value for boolean type is mismatch" {
-    var a = try parseAndAnalyze("const boolean X = 1;", testing.allocator);
+test "analyzer: const string value for boolean type is mismatch" {
+    var a = try parseAndAnalyze("const boolean X = \"yes\";", testing.allocator);
     defer a.deinit();
     const found = for (a.diagnostics.items) |d| {
         if (d.kind == .const_type_mismatch) break true;
     } else false;
     try testing.expect(found);
+}
+
+test "analyzer: boolean arithmetic expression fits boolean type" {
+    var a = try parseAndAnalyze("const boolean X = TRUE & TRUE;", testing.allocator);
+    defer a.deinit();
+    const found = for (a.diagnostics.items) |d| {
+        if (d.kind == .const_type_mismatch) break true;
+    } else false;
+    try testing.expect(!found);
+}
+
+test "analyzer: char arithmetic expression fits char type" {
+    var a = try parseAndAnalyze("const char X = 'a' + 1;", testing.allocator);
+    defer a.deinit();
+    const found = for (a.diagnostics.items) |d| {
+        if (d.kind == .const_type_mismatch) break true;
+    } else false;
+    try testing.expect(!found);
 }
 
 test "analyzer: const float value for integer type is mismatch" {

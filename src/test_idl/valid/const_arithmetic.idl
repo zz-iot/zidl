@@ -1,0 +1,6 @@
+// Valid: boolean and char arithmetic expressions — must not trigger
+// const_type_mismatch (regression guard; evaluator coerces these to .integer).
+
+const boolean AndResult = TRUE & TRUE;
+const boolean OrResult  = FALSE | TRUE;
+const char    NextChar  = 'a' + 1;
