@@ -457,6 +457,11 @@ pub const Analyzer = struct {
         for (d.declarators) |*decl| {
             const name = declaratorName(decl);
             _ = try self.defineSymbol(parent, .typedef_dcl, name, td.span, null);
+            // Patch typedef_type so resolveSwitchTypeSpec can validate discriminants.
+            const lower = try self.toLower(name);
+            if (parent.symbols.getPtr(lower)) |sym_ptr| {
+                sym_ptr.typedef_type = &d.type_spec;
+            }
         }
     }
 
@@ -525,11 +530,11 @@ pub const Analyzer = struct {
             },
             .scoped_name => |*sn| {
                 if (try self.resolveScopedName(sn)) |sym| {
-                    if (sym.tag != .enum_dcl) {
+                    if (!isValidDiscriminantSymbol(sym)) {
                         try self.addDiag(
                             .invalid_discriminant_type,
                             sn.span,
-                            "union discriminant '{s}' must be an enum type (§7.4.8)",
+                            "union discriminant '{s}' must be an integer, char, boolean, wchar, octet, or enum type (§7.4.8)",
                             .{sn.parts[sn.parts.len - 1]},
                         );
                     }
@@ -1141,6 +1146,33 @@ fn constValueFitsBase(val: ConstValue, bt: ast.BaseTypeSpec) bool {
 /// Returns true when `bt` is a valid union discriminant base type (§7.4.8).
 /// Valid: all integer types, char, boolean, wchar (BB), octet (BB).
 /// Invalid: float, double, long_double, any, object, value_base.
+/// True when a resolved symbol is a valid union discriminant type (§7.4.8).
+/// Accepts enums directly, and typedef-aliased types whose underlying
+/// TypeSpec is a valid discriminant base.  Typedef-of-typedef (scoped_name
+/// alias) is accepted conservatively — further resolution would require a
+/// full typedef-chain walk which is deferred to a later phase.
+fn isValidDiscriminantSymbol(sym: Symbol) bool {
+    return switch (sym.tag) {
+        .enum_dcl => true,
+        .typedef_dcl => blk: {
+            const ts = sym.typedef_type orelse break :blk true; // can't verify
+            break :blk isValidDiscriminantTypeSpec(ts);
+        },
+        else => false,
+    };
+}
+
+fn isValidDiscriminantTypeSpec(ts: *const ast.TypeSpec) bool {
+    return switch (ts.*) {
+        .base => |bt| isValidDiscriminantBase(bt),
+        // typedef of a scoped name (e.g. typedef MyEnum T) — accept conservatively;
+        // the referenced type will be validated when its own declaration is processed.
+        .scoped_name => true,
+        // template types (string, sequence, array, …) are never valid discriminants.
+        else => false,
+    };
+}
+
 fn isValidDiscriminantBase(bt: ast.BaseTypeSpec) bool {
     return switch (bt) {
         .short,
@@ -1606,6 +1638,34 @@ test "analyzer: union with struct discriminant is invalid" {
     var a = try parseAndAnalyze(
         \\struct S { long x; };
         \\union U switch(S) { case 1: long v; };
+    ,
+        testing.allocator,
+    );
+    defer a.deinit();
+    const found = for (a.diagnostics.items) |d| {
+        if (d.kind == .invalid_discriminant_type) break true;
+    } else false;
+    try testing.expect(found);
+}
+
+test "analyzer: typedef long discriminant is valid" {
+    var a = try parseAndAnalyze(
+        \\typedef long MyInt;
+        \\union U switch(MyInt) { case 1: long v; };
+    ,
+        testing.allocator,
+    );
+    defer a.deinit();
+    const found = for (a.diagnostics.items) |d| {
+        if (d.kind == .invalid_discriminant_type) break true;
+    } else false;
+    try testing.expect(!found);
+}
+
+test "analyzer: typedef float discriminant is invalid" {
+    var a = try parseAndAnalyze(
+        \\typedef float BadFloat;
+        \\union U switch(BadFloat) { case 1: long v; };
     ,
         testing.allocator,
     );

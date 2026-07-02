@@ -1,0 +1,9 @@
+// Valid: union discriminant via typedef-aliased integer — must not trigger
+// invalid_discriminant_type (regression guard for Greptile issue).
+
+typedef long MyInt;
+
+union U switch(MyInt) {
+    case 1: long a;
+    default: boolean b;
+};

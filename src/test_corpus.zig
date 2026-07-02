@@ -123,3 +123,12 @@ test "corpus: invalid union discriminant type" {
         std.testing.allocator,
     );
 }
+
+test "corpus: typedef-aliased discriminant is valid" {
+    try runPipeline(
+        "typedef_discriminant.idl",
+        @embedFile("test_idl/valid/typedef_discriminant.idl"),
+        0,
+        std.testing.allocator,
+    );
+}
