@@ -152,7 +152,7 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 | User-supplied allocator for strings/sequences | Not yet implemented — `zidl_cdr_read_string` and sequence reads use `malloc`; a `ZidlCdrAllocator` interface is planned |
 | `--zig-pl-cdr` (PL_CDR emit) | Flag parsed but C backend does not emit PL_CDR functions |
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
-| `--generate-interfaces`: full DDS object/resource adaptation | Basic C interface/vtable shapes are generated; richer DDS object binding semantics remain runtime-specific future work |
+| `--generate-interfaces`: full DDS object/resource adaptation | Opaque handle typedefs + free function declarations are generated; richer DDS object binding semantics remain runtime-specific future work |
 
 ---
 

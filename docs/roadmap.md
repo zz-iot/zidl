@@ -41,28 +41,19 @@ Existing-backend features that have `// TODO` or deferred markers in the code or
 documentation, are not intentionally omitted, and are not yet tracked elsewhere in
 this roadmap. New language backends have their own sections below.
 
-### C backend
-
-- **`@optional` members**: Deferred. Requires adding a companion `has_NAME` boolean
-  field to every struct that has an optional member — a non-trivial ABI change.
-  Until implemented, `@optional` members emit a `/* TODO: @optional name */` comment
-  in serialize/deserialize functions, and the struct field itself is omitted.
-- **`@optional` key fields**: Blocked on `@optional` support above. Key serialization
-  emits a `/* TODO */` comment for any `@key` member that is also `@optional`.
-
 ### C and C++ backends
 
 - **PL_CDR generation**: `--zig-pl-cdr` is parsed and wired through the CLI but neither
   the C nor C++ backend emits `serializePlCdr` / `deserializeFromPlCdr` functions.
   This is the RTPS ParameterList wire format used for DDS discovery types.
-- **C backend `--generate-interfaces` (opaque handles + free functions)**: currently
-  emits COM-style fat-pointer vtable structs.  Should emit opaque `typedef struct
-  Foo_s *Foo;` handles and free function declarations (`ReturnCode_t
-  Foo_method(Foo self, ...)`) matching the OMG C PSM binding and the idioms of
-  major C DDS implementations (Cyclone DDS, RTI Connext C API).  Listener
-  interfaces become plain C callback structs with a `void *listener_data` context
-  pointer.  The existing vtable structs in the generated header become an internal
-  artifact; they should not appear in the public C API header.
+- ~~**C backend `--generate-interfaces` (opaque handles + free functions)**~~:
+  **Implemented.** Entity interfaces emit opaque `typedef struct Foo_s *Foo;` handles
+  and free function declarations matching the OMG C PSM binding and the idioms of
+  major C DDS implementations (Cyclone DDS, RTI Connext C API). No struct layout is
+  exposed in the public header. Listener interfaces remain plain C callback structs
+  with a `void *listener_data` context pointer. The C++ backend's `ConcreteImplGenerator`
+  was updated to match (null checks and null-handle literals now use the opaque
+  pointer directly instead of a two-field struct literal).
 - ~~**Zig backend `--zig-generate-c-api`**~~: **Implemented.** Because the Zig vtable
   slots use C-ABI types from the start, the generated `pub export fn callconv(.c)`
   wrappers are trivial one-line forwarders with no type conversion.  No
@@ -116,6 +107,7 @@ this roadmap. New language backends have their own sections below.
 
 | Item | Notes |
 |---|---|
+| C backend `--generate-interfaces`: opaque handles | Entity interfaces emit `typedef struct Foo_s *Foo;` instead of a fat-pointer vtable struct; C++ `ConcreteImplGenerator` null-checks/null-handle literals updated to match. |
 | Const type-checking (semantic analyser) | `const_type_mismatch` diagnostic; validates initializer compatible with declared type (§7.4.3). PR #20. |
 | Union discriminant type validation | `invalid_discriminant_type` diagnostic; validates integer/char/boolean/wchar/octet/enum base (§7.4.8), including typedef-of-typedef. PR #20. |
 | C++ concrete impl backend: 11 TODO stub methods | `get_listener` ×6 (stash pattern), `get_offered/requested_incompatible_qos_status` ×2, `WaitSet::wait`/`get_conditions` ×2, `SubscriberImpl::get_datareaders` — unlocked by extending `isAdaptableSeqElemIn` for simple-struct and entity-interface sequence elements, plus a `listener_` stash member. |

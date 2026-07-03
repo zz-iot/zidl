@@ -247,7 +247,7 @@ const Generator = struct {
         // Pass 0: emit simple scalar typedefs and enum typedefs before sequences.
         try self.scanItemsForScalarTypedefs(spec.items);
 
-        // Pass 1 (interfaces, part a): emit entity fat-pointer typedefs before
+        // Pass 1 (interfaces, part a): emit entity opaque handle typedefs before
         // sequences, so that `DDS_DataReader *_buffer` compiles.
         if (self.opts.generate_interfaces) {
             try self.scanItemsForEntityTypedefs(spec.items);
@@ -861,11 +861,11 @@ const Generator = struct {
 
     /// Emit per-inheritance-edge C helper declarations.
     ///
-    /// Entity interfaces are two-word handles, but the vtable type/layout differs
-    /// between parent and child, so these helpers are not raw bitcasts. Listener
-    /// interfaces are callback structs, so their adapters are field-copy helpers.
-    /// Runtime backends provide the bodies because only they know the concrete
-    /// parent/child view vtables.
+    /// Entity interfaces are opaque handles, but the concrete object each handle
+    /// points to differs in shape between parent and child views, so these helpers
+    /// are not raw pointer casts. Listener interfaces are callback structs, so their
+    /// adapters are field-copy helpers. Runtime backends provide the bodies because
+    /// only they know the concrete parent/child view layouts.
     fn emitInterfaceCastDecls(self: *Generator, iface: *const ir.Interface) !void {
         const child_name = try self.prefixedCName(iface.qualified_name);
         defer self.alloc.free(child_name);
@@ -939,10 +939,12 @@ const Generator = struct {
                     .interface => |iface| if (!isListenerInterface(iface)) {
                         const c_name = try self.prefixedCName(iface.qualified_name);
                         defer self.alloc.free(c_name);
-                        // Fat-pointer struct: matches extern struct { ptr, vtable } in
-                        // the Zig backend so C and Zig agree on the 16-byte ABI layout.
-                        // The vtable field is void* to avoid exposing vtable types publicly.
-                        try self.print("typedef struct {{ void *ptr; const void *vtable; }} {s};\n", .{c_name});
+                        // Opaque handle: matches the OMG C PSM binding and the idioms of
+                        // major C DDS implementations (Cyclone DDS, RTI Connext C API).
+                        // `struct {c_name}_s` is intentionally never defined in the public
+                        // header; only the runtime backend that implements these free
+                        // functions knows (and owns) its layout.
+                        try self.print("typedef struct {s}_s *{s};\n", .{ c_name, c_name });
                         any = true;
                     },
                     else => {},
@@ -1074,7 +1076,7 @@ const Generator = struct {
             .named => |td| switch (td) {
                 .typedef => |t| isCPrimitive(t.type_ref),
                 .enum_, .bitmask, .bitset => true,
-                // Non-listener entity interfaces: fat-pointer structs passed by value.
+                // Non-listener entity interfaces: opaque handles passed by value.
                 .interface => |iface| !isListenerInterface(iface),
                 else => false, // struct, union, exception: pass by const pointer
             },
@@ -3911,7 +3913,7 @@ fn generateTypeHeader(
     // Sequence typedefs for this type.
     try gen.scanTypeDeclForSeqs(td);
 
-    // For non-listener entity interfaces: emit the fat-pointer typedef here so that
+    // For non-listener entity interfaces: emit the opaque handle typedef here so that
     // the free function declarations below compile when this header is included standalone.
     // (In the single-file path this typedef is emitted by scanItemsForEntityTypedefs.)
     if (opts.generate_interfaces) {
@@ -3919,7 +3921,7 @@ fn generateTypeHeader(
             .interface => |iface| if (!isListenerInterface(iface)) {
                 const c_name = try gen.prefixedCName(iface.qualified_name);
                 defer alloc.free(c_name);
-                try gen.print("typedef struct {{ void *ptr; const void *vtable; }} {s};\n\n", .{c_name});
+                try gen.print("typedef struct {s}_s *{s};\n\n", .{ c_name, c_name });
             },
             else => {},
         }
@@ -4424,20 +4426,21 @@ fn testGenIfaceHeader(source: []const u8, stem: []const u8) !std.ArrayList(u8) {
     return out;
 }
 
-test "c_backend: interface fat-pointer typedef emitted before free functions" {
+test "c_backend: interface opaque handle typedef emitted before free functions" {
     var out = try testGenIfaceHeader(
         \\interface Greeter { string greet(in string name); };
     , "iface");
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // Fat-pointer struct typedef (matches Zig extern struct layout for ABI correctness)
-    try testing.expect(has(s, "typedef struct { void *ptr; const void *vtable; } Greeter;"));
+    // Opaque handle typedef (OMG C PSM style; struct Greeter_s is never defined here)
+    try testing.expect(has(s, "typedef struct Greeter_s *Greeter;"));
     // Free function declarations, not vtable fields
     try testing.expect(has(s, "/* IDL interface: Greeter */"));
     try testing.expect(has(s, "char *Greeter_greet(Greeter self, const char *name);"));
-    // No named vtable struct
+    // No named vtable struct, no exposed struct layout
     try testing.expect(!has(s, "Greeter_Vtable"));
     try testing.expect(!has(s, "zig_new"));
+    try testing.expect(!has(s, "void *ptr"));
 }
 
 test "c_backend: A3 — in wstring parameter uses const uint16_t *" {
@@ -4506,8 +4509,8 @@ test "c_backend: listener interface emits callback struct not free functions" {
     , "ev");
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // Entity gets fat-pointer typedef + free functions
-    try testing.expect(has(s, "typedef struct { void *ptr; const void *vtable; } Entity;"));
+    // Entity gets opaque handle typedef + free functions
+    try testing.expect(has(s, "typedef struct Entity_s *Entity;"));
     try testing.expect(has(s, "int32_t Entity_enable(Entity self);"));
     // Listener gets a callback struct, not an opaque typedef + free functions
     try testing.expect(has(s, "void *listener_data;"));
@@ -4526,8 +4529,8 @@ test "c_backend: listener callback struct references entity types declared above
     , "dl");
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // Writer fat-pointer typedef comes before the listener struct (pre-scan pass 1)
-    const writer_pos = std.mem.indexOf(u8, s, "typedef struct { void *ptr; const void *vtable; } Writer;") orelse return error.NotFound;
+    // Writer opaque handle typedef comes before the listener struct (pre-scan pass 1)
+    const writer_pos = std.mem.indexOf(u8, s, "typedef struct Writer_s *Writer;") orelse return error.NotFound;
     const listener_pos = std.mem.indexOf(u8, s, "typedef struct DataListener {") orelse return error.NotFound;
     try testing.expect(writer_pos < listener_pos);
 }

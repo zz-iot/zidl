@@ -17,8 +17,8 @@ typedef enum {
     Color_BLUE = 2
 } Color;
 
-typedef struct { void *ptr; const void *vtable; } Greeter;
-typedef struct { void *ptr; const void *vtable; } AdvancedGreeter;
+typedef struct Greeter_s *Greeter;
+typedef struct AdvancedGreeter_s *AdvancedGreeter;
 
 #ifndef INT32_T_SEQ_DEFINED
 #define INT32_T_SEQ_DEFINED

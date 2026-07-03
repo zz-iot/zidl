@@ -3424,7 +3424,7 @@ const ConcreteImplGenerator = struct {
                 try self.srcPrint("    {s} _h = {s}_{s}({s}", .{ ret_c, owner_c_name, op.name, handle_expr });
                 try self.emitAdaptedParams(op.params);
                 try self.srcWrite(");\n");
-                try self.srcWrite("    if (!_h.ptr) return nullptr;\n");
+                try self.srcWrite("    if (!_h) return nullptr;\n");
                 try self.srcPrint("    return std::make_shared<{s}>(_h);\n", .{impl_name});
             },
             .str_ret => {
@@ -3502,7 +3502,7 @@ const ConcreteImplGenerator = struct {
                 const impl_name = try self.entityImplName(attr.type_ref);
                 defer self.alloc.free(impl_name);
                 try self.srcPrint("    {s} _h = {s}_get_{s}({s});\n", .{ ret_c, owner_c_name, attr.name, handle_expr });
-                try self.srcWrite("    if (!_h.ptr) return nullptr;\n");
+                try self.srcWrite("    if (!_h) return nullptr;\n");
                 try self.srcPrint("    return std::make_shared<{s}>(_h);\n", .{impl_name});
             },
             .str_ret => {
@@ -3578,8 +3578,8 @@ const ConcreteImplGenerator = struct {
                     };
                     if (use_virtual) {
                         try self.srcPrint(
-                            "({s} ? {s}->native_handle() : {s}{{nullptr, nullptr}})",
-                            .{ p.name, p.name, ct },
+                            "({s} ? {s}->native_handle() : nullptr)",
+                            .{ p.name, p.name },
                         );
                     } else {
                         const impl_name = try self.entityImplName(p.type_ref);
@@ -3593,8 +3593,8 @@ const ConcreteImplGenerator = struct {
                         };
                         try self.srcWrite("/* zidl: entity parameter adaptation uses dynamic_cast and requires RTTI. */");
                         try self.srcPrint(
-                            "([](const auto& _p) -> {s} {{ if (!_p) return {s}{{nullptr, nullptr}}; if (auto* _impl = dynamic_cast<{s}*>(_p.get())) return zidl_concrete_handle(*_impl); throw std::invalid_argument(\"zidl: incompatible entity implementation for {s}\"); }})({s})",
-                            .{ ct, ct, impl_name, iface_name, p.name },
+                            "([](const auto& _p) -> {s} {{ if (!_p) return nullptr; if (auto* _impl = dynamic_cast<{s}*>(_p.get())) return zidl_concrete_handle(*_impl); throw std::invalid_argument(\"zidl: incompatible entity implementation for {s}\"); }})({s})",
+                            .{ ct, impl_name, iface_name, p.name },
                         );
                     }
                 },
@@ -7042,7 +7042,7 @@ test "cpp_backend: B1+B3 — entity return wraps in Impl" {
     defer res.deinit();
     const src = res.src.items;
     try testing.expect(has(src, "make_shared<::DDS::BarImpl>"));
-    try testing.expect(has(src, "if (!_h.ptr)"));
+    try testing.expect(has(src, "if (!_h)"));
 }
 
 test "cpp_backend: simple-struct sequence field adapts out (no TODO)" {
