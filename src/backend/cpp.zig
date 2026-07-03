@@ -3399,8 +3399,10 @@ const ConcreteImplGenerator = struct {
         }
 
         // Stash the listener shared_ptr so a later get_listener() can return it —
-        // the C ABI has no call to read it back out.
-        if (listener_tr) |ltr| {
+        // the C ABI has no call to read it back out. Only stashed once the C call
+        // reports success, so a rejected set_listener doesn't diverge from the
+        // middleware's actual listener state.
+        const is_listener_setter = if (listener_tr) |ltr| blk: {
             const listener_qname = switch (ltr) {
                 .named => |td| switch (td) {
                     .interface => |listener_iface| listener_iface.qualified_name,
@@ -3408,10 +3410,8 @@ const ConcreteImplGenerator = struct {
                 },
                 else => "",
             };
-            if (isListenerSetterParam(op, listener_qname)) {
-                try self.srcPrint("    listener_ = {s};\n", .{op.params[0].name});
-            }
-        }
+            break :blk isListenerSetterParam(op, listener_qname);
+        } else false;
 
         // Build the C call
         const ret_kind = returnAdaptKind(op.return_type);
@@ -3434,7 +3434,7 @@ const ConcreteImplGenerator = struct {
                 try self.srcWrite("    return _r ? std::string(_r) : std::string{};\n");
             },
             .direct => {
-                const needs_post = for (op.params) |p| {
+                const needs_post = is_listener_setter or for (op.params) |p| {
                     const k = paramAdaptKind(p);
                     if (k == .complex_struct_out or k == .seq_out) break true;
                 } else false;
@@ -3451,6 +3451,13 @@ const ConcreteImplGenerator = struct {
                             .complex_struct_out => try self.emitComplexStructAdaptOut(p.name, p.type_ref),
                             .seq_out => try self.emitSeqParamAdaptOut(p),
                             else => {},
+                        }
+                    }
+                    if (is_listener_setter) {
+                        if (op.return_type != null) {
+                            try self.srcPrint("    if (_rc == 0) listener_ = {s};\n", .{op.params[0].name});
+                        } else {
+                            try self.srcPrint("    listener_ = {s};\n", .{op.params[0].name});
                         }
                     }
                     if (op.return_type != null) try self.srcWrite("    return _rc;\n");
@@ -7108,8 +7115,26 @@ test "cpp_backend: get_listener/set_listener stash pattern" {
     const src = res.src.items;
     try testing.expect(has(hdr, "std::shared_ptr<::DDS::FooListener> listener_;"));
     try testing.expect(has(src, "FooImpl::get_listener() {\n    return listener_;\n}"));
-    try testing.expect(has(src, "listener_ = a_listener;"));
+    try testing.expect(has(src, "const auto _rc = DDS_Foo_set_listener(ptr_"));
+    try testing.expect(has(src, "if (_rc == 0) listener_ = a_listener;"));
+    try testing.expect(has(src, "return _rc;"));
+    try testing.expect(!has(src, "TODO"));
+}
+
+test "cpp_backend: get_listener/set_listener stash — void set_listener return stashes unconditionally" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    @callback interface FooListener {};
+        \\    interface Foo {
+        \\        void set_listener(in FooListener a_listener);
+        \\        FooListener get_listener();
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
     try testing.expect(has(src, "DDS_Foo_set_listener(ptr_"));
+    try testing.expect(has(src, "    listener_ = a_listener;\n}"));
     try testing.expect(!has(src, "TODO"));
 }
 
