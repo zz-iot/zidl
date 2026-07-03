@@ -4330,6 +4330,10 @@ fn isSimpleTypeRef(tr: ir.TypeRef) bool {
 
 fn isSimpleStruct(s: *const ir.Struct) bool {
     for (s.members) |m| {
+        // @optional wraps the C++ field in std::optional<T>, which is not
+        // layout-compatible with the C struct's bare T — reinterpret_cast would
+        // read/write the wrong bytes.
+        if (m.annotations.is_optional) return false;
         if (!isSimpleTypeRef(m.type_ref)) return false;
     }
     return true;
@@ -7069,6 +7073,21 @@ test "cpp_backend: simple-struct sequence field adapts in (no TODO)" {
     const src = res.src.items;
     try testing.expect(has(src, "reinterpret_cast<DDS_Count*>(const_cast<::DDS::Count*>"));
     try testing.expect(!has(src, "TODO"));
+}
+
+test "cpp_backend: struct with @optional member is not treated as a simple/reinterpret_cast-able sequence element" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    struct Count { long id; @optional long n; };
+        \\    typedef sequence<Count> CountSeq;
+        \\    struct Status { CountSeq counts; };
+        \\    interface Foo { void get_status(inout Status s); };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(!has(src, "reinterpret_cast<const ::DDS::Count*>"));
+    try testing.expect(has(src, "TODO"));
 }
 
 test "cpp_backend: entity sequence field adapts out via per-element Impl wrapping (no TODO)" {
