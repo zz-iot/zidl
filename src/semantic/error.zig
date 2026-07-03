@@ -24,6 +24,10 @@ pub const DiagnosticKind = enum {
     const_eval_error,
     /// A constant expression contains a reference to a non-constant.
     not_a_const,
+    /// A `const` initializer value is incompatible with the declared type (§7.4.3).
+    const_type_mismatch,
+    /// A union discriminant type is not an integer, char, boolean, wchar, octet, or enum (§7.4.8).
+    invalid_discriminant_type,
 };
 
 /// A single diagnostic message attached to a source location.

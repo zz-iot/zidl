@@ -102,6 +102,11 @@ pub const Symbol = struct {
     scope: ?*Scope,
     /// Evaluated constant value.  Set only for `.const_dcl` symbols.
     const_value: ?ConstValue,
+    /// For `.typedef_dcl` symbols: the aliased type specifier (points into the
+    /// AST arena; valid for the lifetime of the Analyzer).  Null for all other
+    /// symbol tags, and null for typedefs defined inside template module
+    /// instantiation stubs.
+    typedef_type: ?*const ast.TypeSpec = null,
     /// True when this symbol was introduced via `Analyzer.preloadScope` from an
     /// imported file rather than declared in the current source file.  Used by
     /// the IR builder to avoid re-emitting imported types.
