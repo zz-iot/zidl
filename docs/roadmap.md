@@ -41,49 +41,6 @@ Existing-backend features that have `// TODO` or deferred markers in the code or
 documentation, are not intentionally omitted, and are not yet tracked elsewhere in
 this roadmap. New language backends have their own sections below.
 
-### Semantic analysis / frontend
-
-- **Const type-checking**: The semantic analyser does not validate that a `const`
-  declaration's initializer is compatible with its declared type
-  (e.g. `const long x = "hello"` is silently accepted). Should be caught and
-  reported as a diagnostic.
-- **Union discriminant type validation**: The IR builder does not check that the
-  discriminant type of a `union` is a valid IDL discriminant type (integer, enum, char,
-  boolean). Invalid discriminant types pass through silently.
-
-### C++ concrete impl backend (`--cpp-generate-impl`)
-
-The following methods in the generated `dcps_impl.cpp` still emit TODO stubs.
-They are grouped by the generator feature that would unblock them.
-
-**`get_listener()` return — 6 methods** (`DomainParticipantImpl`, `TopicImpl`,
-`PublisherImpl`, `DataWriterImpl`, `SubscriberImpl`, `DataReaderImpl`):
-The C ABI has no facility for retrieving the listener back out once set.
-Implementing these requires the Impl class to stash the `shared_ptr<FooListener>`
-at `set_listener` time and return it from `get_listener` — a runtime change in
-the Impl class, not a generator-only change.  The generator would need to emit a
-`std::shared_ptr<FooListener> listener_` member and populate it in the
-`set_listener` body.
-
-**`get_offered/requested_incompatible_qos_status` — 2 methods**
-(`DataWriterImpl`, `DataReaderImpl`):
-`OfferedIncompatibleQosStatus` / `RequestedIncompatibleQosStatus` contain
-`PolicyCountSeq` whose elements are `PolicyCount` structs (not scalars or
-strings).  `isAdaptableSeqElemIn` currently accepts only scalars, strings, and
-enums — not structs.  Extending it to handle sequences of simple structs
-(layout-compatible, no heap fields) would unblock these.
-
-**`WaitSet::wait` / `WaitSet::get_conditions` — 2 methods**:
-`ConditionSeq` contains `Condition` entity interface pointers.  Adapting a
-sequence of opaque entity handles to/from `shared_ptr<Condition>` requires the
-same per-element wrapping as `DataReaderSeq` — both are sequences of interface
-pointers rather than primitive handles.
-
-**`SubscriberImpl::get_datareaders` — 1 method**:
-`DataReaderSeq` contains `DataReader` entity handle fat-pointers.  Each element
-must be wrapped in a `DataReaderImpl`.  Requires a `seq_out` path that can
-construct entity Impl objects per-element rather than copying raw scalars.
-
 ### C backend
 
 - **`@optional` members**: Deferred. Requires adding a companion `has_NAME` boolean
@@ -159,6 +116,9 @@ construct entity Impl objects per-element rather than copying raw scalars.
 
 | Item | Notes |
 |---|---|
+| Const type-checking (semantic analyser) | `const_type_mismatch` diagnostic; validates initializer compatible with declared type (§7.4.3). PR #20. |
+| Union discriminant type validation | `invalid_discriminant_type` diagnostic; validates integer/char/boolean/wchar/octet/enum base (§7.4.8), including typedef-of-typedef. PR #20. |
+| C++ concrete impl backend: 11 TODO stub methods | `get_listener` ×6 (stash pattern), `get_offered/requested_incompatible_qos_status` ×2, `WaitSet::wait`/`get_conditions` ×2, `SubscriberImpl::get_datareaders` — unlocked by extending `isAdaptableSeqElemIn` for simple-struct and entity-interface sequence elements, plus a `listener_` stash member. |
 | `--zig-generate-c-api` trivial forwarders (Zig backend) | Vtable slots are C-ABI; exports are one-liners. No type conversion. |
 | `extern struct` for C-compatible IDL types | Structs whose fields are all C-compatible use `extern struct`; others use plain `struct`. |
 | `deinit(alloc)` on sequence-containing types | Recursively frees heap-owned sequence buffers (`_release == true`). |

@@ -3253,9 +3253,15 @@ const ConcreteImplGenerator = struct {
         }
 
         try self.hdrPrint(
-            "\nprivate:\n    friend {s} zidl_concrete_handle(const {s}Impl& self) noexcept {{ return self.ptr_; }}\n    {s} ptr_;\n}};\n\n",
-            .{ c_name, iface.name, c_name },
+            "\nprivate:\n    friend {s} zidl_concrete_handle(const {s}Impl& self) noexcept {{ return self.ptr_; }}\n",
+            .{ c_name, iface.name },
         );
+        if (listenerTypeOf(ops.items)) |listener_tr| {
+            const cpp_listener = try self.typeRefToCpp(listener_tr);
+            defer self.alloc.free(cpp_listener);
+            try self.hdrPrint("    {s} listener_;\n", .{cpp_listener});
+        }
+        try self.hdrPrint("    {s} ptr_;\n}};\n\n", .{c_name});
     }
 
     // ── Entity Impl method implementations (source) ───────────────────────────
@@ -3269,8 +3275,9 @@ const ConcreteImplGenerator = struct {
 
         try self.srcPrint("// \u{2500}\u{2500} {s}Impl \u{2500}\u{2500}\n\n", .{iface.name});
 
+        const listener_tr = listenerTypeOf(ops.items);
         for (ops.items) |op| {
-            try self.emitEntityMethod(iface, op.owner, iface.name, op.op);
+            try self.emitEntityMethod(iface, op.owner, iface.name, op.op, listener_tr);
         }
         for (attrs.items) |attr| {
             try self.emitEntityAttr(iface, attr.owner, iface.name, attr.attr);
@@ -3283,6 +3290,7 @@ const ConcreteImplGenerator = struct {
         owner: *const ir.Interface,
         class_name: []const u8,
         op: *const ir.Operation,
+        listener_tr: ?ir.TypeRef,
     ) !void {
         const owner_c_name = try cNameOf(self.alloc, owner.qualified_name);
         defer self.alloc.free(owner_c_name);
@@ -3302,6 +3310,11 @@ const ConcreteImplGenerator = struct {
             }
         }
         try self.srcWrite(") {\n");
+
+        if (listener_tr != null and op.params.len == 0 and std.mem.eql(u8, op.name, "get_listener")) {
+            try self.srcWrite("    return listener_;\n}\n\n");
+            return;
+        }
 
         if (!self.opIsAdaptable(op)) {
             try self.srcWrite("    /* TODO: adapt parameters/return (sequence or complex QoS) */\n");
@@ -3385,6 +3398,21 @@ const ConcreteImplGenerator = struct {
             }
         }
 
+        // Stash the listener shared_ptr so a later get_listener() can return it —
+        // the C ABI has no call to read it back out. Only stashed once the C call
+        // reports success, so a rejected set_listener doesn't diverge from the
+        // middleware's actual listener state.
+        const is_listener_setter = if (listener_tr) |ltr| blk: {
+            const listener_qname = switch (ltr) {
+                .named => |td| switch (td) {
+                    .interface => |listener_iface| listener_iface.qualified_name,
+                    else => "",
+                },
+                else => "",
+            };
+            break :blk isListenerSetterParam(op, listener_qname);
+        } else false;
+
         // Build the C call
         const ret_kind = returnAdaptKind(op.return_type);
         switch (ret_kind) {
@@ -3406,7 +3434,7 @@ const ConcreteImplGenerator = struct {
                 try self.srcWrite("    return _r ? std::string(_r) : std::string{};\n");
             },
             .direct => {
-                const needs_post = for (op.params) |p| {
+                const needs_post = is_listener_setter or for (op.params) |p| {
                     const k = paramAdaptKind(p);
                     if (k == .complex_struct_out or k == .seq_out) break true;
                 } else false;
@@ -3423,6 +3451,13 @@ const ConcreteImplGenerator = struct {
                             .complex_struct_out => try self.emitComplexStructAdaptOut(p.name, p.type_ref),
                             .seq_out => try self.emitSeqParamAdaptOut(p),
                             else => {},
+                        }
+                    }
+                    if (is_listener_setter) {
+                        if (op.return_type != null) {
+                            try self.srcPrint("    if (_rc == 0) listener_ = {s};\n", .{op.params[0].name});
+                        } else {
+                            try self.srcPrint("    listener_ = {s};\n", .{op.params[0].name});
                         }
                     }
                     if (op.return_type != null) try self.srcWrite("    return _rc;\n");
@@ -3679,32 +3714,74 @@ const ConcreteImplGenerator = struct {
         seq_ctr: *usize,
         indent: []const u8,
     ) anyerror!void {
-        const is_string = switch (elem_tr) {
-            .string => true,
-            else => false,
-        };
-        if (is_string) {
-            seq_ctr.* += 1;
-            const tmp = try std.fmt.allocPrint(self.alloc, "_ptrs_{d}", .{seq_ctr.*});
-            defer self.alloc.free(tmp);
-            try self.srcPrint("{s}std::vector<const char*> {s};\n", .{ indent, tmp });
-            try self.srcPrint("{s}{s}.reserve({s}.size());\n", .{ indent, tmp, cpp_src });
-            try self.srcPrint("{s}for (const auto& _s : {s}) {s}.push_back(_s.c_str());\n", .{ indent, cpp_src, tmp });
-            try self.srcPrint("{s}// Borrowed string pointer array; valid only for the duration of this C ABI call.\n", .{indent});
-            try self.srcPrint("{s}{s}._buffer = const_cast<char**>({s}.data());\n", .{ indent, c_dst, tmp });
-            try self.srcPrint("{s}{s}._length = static_cast<int32_t>({s}.size());\n", .{ indent, c_dst, tmp });
-            try self.srcPrint("{s}{s}._maximum = static_cast<int32_t>({s}.size());\n", .{ indent, c_dst, tmp });
-        } else {
-            const cpp_elem_type = try cppTypeStr(self.alloc, elem_tr);
-            defer self.alloc.free(cpp_elem_type);
-            try self.srcPrint("{s}// Borrowed sequence buffer; valid only for the duration of this C ABI call.\n", .{indent});
-            try self.srcPrint(
-                "{s}{s}._buffer = const_cast<{s}*>({s}.data());\n",
-                .{ indent, c_dst, cpp_elem_type, cpp_src },
-            );
-            try self.srcPrint("{s}{s}._length = static_cast<int32_t>({s}.size());\n", .{ indent, c_dst, cpp_src });
-            try self.srcPrint("{s}{s}._maximum = static_cast<int32_t>({s}.size());\n", .{ indent, c_dst, cpp_src });
+        switch (elem_tr) {
+            .string => {
+                seq_ctr.* += 1;
+                const tmp = try std.fmt.allocPrint(self.alloc, "_ptrs_{d}", .{seq_ctr.*});
+                defer self.alloc.free(tmp);
+                try self.srcPrint("{s}std::vector<const char*> {s};\n", .{ indent, tmp });
+                try self.srcPrint("{s}{s}.reserve({s}.size());\n", .{ indent, tmp, cpp_src });
+                try self.srcPrint("{s}for (const auto& _s : {s}) {s}.push_back(_s.c_str());\n", .{ indent, cpp_src, tmp });
+                try self.srcPrint("{s}// Borrowed string pointer array; valid only for the duration of this C ABI call.\n", .{indent});
+                try self.srcPrint("{s}{s}._buffer = const_cast<char**>({s}.data());\n", .{ indent, c_dst, tmp });
+                try self.srcPrint("{s}{s}._length = static_cast<int32_t>({s}.size());\n", .{ indent, c_dst, tmp });
+                try self.srcPrint("{s}{s}._maximum = static_cast<int32_t>({s}.size());\n", .{ indent, c_dst, tmp });
+                return;
+            },
+            .named => |td| switch (td) {
+                .struct_ => |s| if (isSimpleStruct(s)) {
+                    const cpp_type = try std.fmt.allocPrint(self.alloc, "::{s}", .{s.qualified_name});
+                    defer self.alloc.free(cpp_type);
+                    const c_type = try cNameOf(self.alloc, s.qualified_name);
+                    defer self.alloc.free(c_type);
+                    try self.srcPrint("{s}// Borrowed sequence buffer; valid only for the duration of this C ABI call.\n", .{indent});
+                    try self.srcPrint(
+                        "{s}{s}._buffer = reinterpret_cast<{s}*>(const_cast<{s}*>({s}.data()));\n",
+                        .{ indent, c_dst, c_type, cpp_type, cpp_src },
+                    );
+                    try self.srcPrint("{s}{s}._length = static_cast<int32_t>({s}.size());\n", .{ indent, c_dst, cpp_src });
+                    try self.srcPrint("{s}{s}._maximum = static_cast<int32_t>({s}.size());\n", .{ indent, c_dst, cpp_src });
+                    return;
+                },
+                .interface => |iface| if (!isCallbackIface(iface)) {
+                    seq_ctr.* += 1;
+                    const tmp = try std.fmt.allocPrint(self.alloc, "_handles_{d}", .{seq_ctr.*});
+                    defer self.alloc.free(tmp);
+                    const c_type = try cNameOf(self.alloc, iface.qualified_name);
+                    defer self.alloc.free(c_type);
+                    const impl_name = try self.entityImplName(elem_tr);
+                    defer self.alloc.free(impl_name);
+                    try self.srcPrint("{s}std::vector<{s}> {s};\n", .{ indent, c_type, tmp });
+                    try self.srcPrint("{s}{s}.reserve({s}.size());\n", .{ indent, tmp, cpp_src });
+                    try self.srcPrint("{s}for (const auto& _e : {s}) {{\n", .{ indent, cpp_src });
+                    try self.srcPrint(
+                        "{s}    if (auto* _impl = dynamic_cast<{s}*>(_e.get())) {s}.push_back(zidl_concrete_handle(*_impl));\n",
+                        .{ indent, impl_name, tmp },
+                    );
+                    try self.srcPrint(
+                        "{s}    else throw std::invalid_argument(\"zidl: incompatible entity implementation for {s}\");\n",
+                        .{ indent, iface.qualified_name },
+                    );
+                    try self.srcPrint("{s}}}\n", .{indent});
+                    try self.srcPrint("{s}// Borrowed sequence buffer; valid only for the duration of this C ABI call.\n", .{indent});
+                    try self.srcPrint("{s}{s}._buffer = {s}.data();\n", .{ indent, c_dst, tmp });
+                    try self.srcPrint("{s}{s}._length = static_cast<int32_t>({s}.size());\n", .{ indent, c_dst, tmp });
+                    try self.srcPrint("{s}{s}._maximum = static_cast<int32_t>({s}.size());\n", .{ indent, c_dst, tmp });
+                    return;
+                },
+                else => {},
+            },
+            else => {},
         }
+        const cpp_elem_type = try cppTypeStr(self.alloc, elem_tr);
+        defer self.alloc.free(cpp_elem_type);
+        try self.srcPrint("{s}// Borrowed sequence buffer; valid only for the duration of this C ABI call.\n", .{indent});
+        try self.srcPrint(
+            "{s}{s}._buffer = const_cast<{s}*>({s}.data());\n",
+            .{ indent, c_dst, cpp_elem_type, cpp_src },
+        );
+        try self.srcPrint("{s}{s}._length = static_cast<int32_t>({s}.size());\n", .{ indent, c_dst, cpp_src });
+        try self.srcPrint("{s}{s}._maximum = static_cast<int32_t>({s}.size());\n", .{ indent, c_dst, cpp_src });
     }
 
     /// Emit a C sequence local variable and fill it from a C++ vector param.
@@ -3834,25 +3911,53 @@ const ConcreteImplGenerator = struct {
         c_src: []const u8,
         elem_tr: ir.TypeRef,
     ) anyerror!void {
-        const is_string = switch (elem_tr) {
-            .string => true,
-            else => false,
-        };
-        if (is_string) {
-            try self.srcPrint("    {s}.clear();\n", .{cpp_dst});
-            try self.srcPrint("    for (int32_t _i = 0; _i < {s}._length; ++_i)\n", .{c_src});
-            try self.srcPrint(
-                "        {s}.emplace_back({s}._buffer[_i] ? {s}._buffer[_i] : \"\");\n",
-                .{ cpp_dst, c_src, c_src },
-            );
-        } else {
-            try self.srcPrint("    if ({s}._buffer)\n", .{c_src});
-            try self.srcPrint(
-                "        {s}.assign({s}._buffer, {s}._buffer + {s}._length);\n",
-                .{ cpp_dst, c_src, c_src, c_src },
-            );
-            try self.srcPrint("    else\n        {s}.clear();\n", .{cpp_dst});
+        switch (elem_tr) {
+            .string => {
+                try self.srcPrint("    {s}.clear();\n", .{cpp_dst});
+                try self.srcPrint("    for (int32_t _i = 0; _i < {s}._length; ++_i)\n", .{c_src});
+                try self.srcPrint(
+                    "        {s}.emplace_back({s}._buffer[_i] ? {s}._buffer[_i] : \"\");\n",
+                    .{ cpp_dst, c_src, c_src },
+                );
+                return;
+            },
+            .named => |td| switch (td) {
+                .struct_ => |s| if (isSimpleStruct(s)) {
+                    const cpp_type = try std.fmt.allocPrint(self.alloc, "::{s}", .{s.qualified_name});
+                    defer self.alloc.free(cpp_type);
+                    try self.srcPrint("    if ({s}._buffer)\n", .{c_src});
+                    try self.srcPrint(
+                        "        {s}.assign(reinterpret_cast<const {s}*>({s}._buffer), reinterpret_cast<const {s}*>({s}._buffer) + {s}._length);\n",
+                        .{ cpp_dst, cpp_type, c_src, cpp_type, c_src, c_src },
+                    );
+                    try self.srcPrint("    else\n        {s}.clear();\n", .{cpp_dst});
+                    return;
+                },
+                .interface => |iface| if (!isCallbackIface(iface)) {
+                    const impl_name = try self.entityImplName(elem_tr);
+                    defer self.alloc.free(impl_name);
+                    try self.srcPrint("    {s}.clear();\n", .{cpp_dst});
+                    try self.srcPrint("    if ({s}._buffer) {{\n", .{c_src});
+                    try self.srcPrint("        {s}.reserve({s}._length);\n", .{ cpp_dst, c_src });
+                    try self.srcPrint("        for (int32_t _i = 0; _i < {s}._length; ++_i)\n", .{c_src});
+                    try self.srcPrint(
+                        "            {s}.push_back(std::make_shared<{s}>({s}._buffer[_i]));\n",
+                        .{ cpp_dst, impl_name, c_src },
+                    );
+                    try self.srcWrite("    }\n");
+                    return;
+                },
+                else => {},
+            },
+            else => {},
         }
+        // Fallback: base/enum-like elements (existing behaviour, unchanged).
+        try self.srcPrint("    if ({s}._buffer)\n", .{c_src});
+        try self.srcPrint(
+            "        {s}.assign({s}._buffer, {s}._buffer + {s}._length);\n",
+            .{ cpp_dst, c_src, c_src, c_src },
+        );
+        try self.srcPrint("    else\n        {s}.clear();\n", .{cpp_dst});
     }
 
     /// Copy a C sequence out-param into the C++ reference, then free the C buffer.
@@ -4225,6 +4330,10 @@ fn isSimpleTypeRef(tr: ir.TypeRef) bool {
 
 fn isSimpleStruct(s: *const ir.Struct) bool {
     for (s.members) |m| {
+        // @optional wraps the C++ field in std::optional<T>, which is not
+        // layout-compatible with the C struct's bare T — reinterpret_cast would
+        // read/write the wrong bytes.
+        if (m.annotations.is_optional) return false;
         if (!isSimpleTypeRef(m.type_ref)) return false;
     }
     return true;
@@ -4237,6 +4346,8 @@ fn isAdaptableSeqElemIn(tr: ir.TypeRef) bool {
         .named => |td| switch (td) {
             .typedef => |t| t.dimensions.len == 0 and isAdaptableSeqElemIn(t.type_ref),
             .enum_, .bitmask, .bitset => true,
+            .struct_ => |s| isSimpleStruct(s),
+            .interface => |iface| !isCallbackIface(iface),
             else => false,
         },
         else => false,
@@ -4362,6 +4473,39 @@ fn isCallbackIface(iface: *const ir.Interface) bool {
         if (std.mem.eql(u8, ann.name, "callback")) return true;
     }
     return std.mem.endsWith(u8, iface.name, "Listener");
+}
+
+/// If `ops` contains a zero-param `get_listener` operation returning a `@callback`
+/// interface, return that return type so the caller can emit a stash member for it.
+fn listenerTypeOf(ops: []const OwnedOperation) ?ir.TypeRef {
+    for (ops) |o| {
+        if (o.op.params.len != 0) continue;
+        if (!std.mem.eql(u8, o.op.name, "get_listener")) continue;
+        const rt = o.op.return_type orelse continue;
+        switch (rt) {
+            .named => |td| switch (td) {
+                .interface => |iface| if (isCallbackIface(iface)) return rt,
+                else => {},
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// True when `op` is the `set_listener` half of a `listenerTypeOf` pair: a first
+/// `in` parameter whose type is the same callback interface as `listener_qname`.
+fn isListenerSetterParam(op: *const ir.Operation, listener_qname: []const u8) bool {
+    if (!std.mem.eql(u8, op.name, "set_listener") or op.params.len == 0) return false;
+    const p0 = op.params[0];
+    if (p0.mode != .in_) return false;
+    return switch (p0.type_ref) {
+        .named => |td| switch (td) {
+            .interface => |iface| std.mem.eql(u8, iface.qualified_name, listener_qname),
+            else => false,
+        },
+        else => false,
+    };
 }
 
 fn cNameOf(alloc: std.mem.Allocator, qname: []const u8) ![]u8 {
@@ -6899,6 +7043,118 @@ test "cpp_backend: B1+B3 — entity return wraps in Impl" {
     const src = res.src.items;
     try testing.expect(has(src, "make_shared<::DDS::BarImpl>"));
     try testing.expect(has(src, "if (!_h.ptr)"));
+}
+
+test "cpp_backend: simple-struct sequence field adapts out (no TODO)" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    struct Count { long id; long n; };
+        \\    typedef sequence<Count> CountSeq;
+        \\    struct Status { CountSeq counts; };
+        \\    interface Foo { void get_status(inout Status s); };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "reinterpret_cast<const ::DDS::Count*>"));
+    try testing.expect(!has(src, "TODO"));
+}
+
+test "cpp_backend: simple-struct sequence field adapts in (no TODO)" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    struct Count { long id; long n; };
+        \\    typedef sequence<Count> CountSeq;
+        \\    struct Status { CountSeq counts; };
+        \\    interface Foo { void set_status(in Status s); };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "reinterpret_cast<DDS_Count*>(const_cast<::DDS::Count*>"));
+    try testing.expect(!has(src, "TODO"));
+}
+
+test "cpp_backend: struct with @optional member is not treated as a simple/reinterpret_cast-able sequence element" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    struct Count { long id; @optional long n; };
+        \\    typedef sequence<Count> CountSeq;
+        \\    struct Status { CountSeq counts; };
+        \\    interface Foo { void get_status(inout Status s); };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(!has(src, "reinterpret_cast<const ::DDS::Count*>"));
+    try testing.expect(has(src, "TODO"));
+}
+
+test "cpp_backend: entity sequence field adapts out via per-element Impl wrapping (no TODO)" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    interface Reader {};
+        \\    typedef sequence<Reader> ReaderSeq;
+        \\    interface Sub { long get_readers(inout ReaderSeq readers); };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "make_shared<::DDS::ReaderImpl>"));
+    try testing.expect(!has(src, "TODO"));
+}
+
+test "cpp_backend: entity sequence field adapts in via dynamic_cast loop (no TODO)" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    interface Reader {};
+        \\    typedef sequence<Reader> ReaderSeq;
+        \\    interface Sub { long set_readers(in ReaderSeq readers); };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "dynamic_cast<::DDS::ReaderImpl*>"));
+    try testing.expect(has(src, "zidl_concrete_handle(*_impl)"));
+    try testing.expect(!has(src, "TODO"));
+}
+
+test "cpp_backend: get_listener/set_listener stash pattern" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    @callback interface FooListener {};
+        \\    interface Foo {
+        \\        long set_listener(in FooListener a_listener, in long mask);
+        \\        FooListener get_listener();
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const hdr = res.hdr.items;
+    const src = res.src.items;
+    try testing.expect(has(hdr, "std::shared_ptr<::DDS::FooListener> listener_;"));
+    try testing.expect(has(src, "FooImpl::get_listener() {\n    return listener_;\n}"));
+    try testing.expect(has(src, "const auto _rc = DDS_Foo_set_listener(ptr_"));
+    try testing.expect(has(src, "if (_rc == 0) listener_ = a_listener;"));
+    try testing.expect(has(src, "return _rc;"));
+    try testing.expect(!has(src, "TODO"));
+}
+
+test "cpp_backend: get_listener/set_listener stash — void set_listener return stashes unconditionally" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    @callback interface FooListener {};
+        \\    interface Foo {
+        \\        void set_listener(in FooListener a_listener);
+        \\        FooListener get_listener();
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "DDS_Foo_set_listener(ptr_"));
+    try testing.expect(has(src, "    listener_ = a_listener;\n}"));
+    try testing.expect(!has(src, "TODO"));
 }
 
 test "cpp_backend: B1+B3 — enum-like attributes cast across C ABI" {
