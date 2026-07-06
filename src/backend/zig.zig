@@ -1334,6 +1334,26 @@ const Generator = struct {
         // which is what lets it preserve handle identity and avoid leaking a
         // box on every accessor call, without zidl needing to know or care.
         try self.write("        get_c_abi_handle: *const fn (*anyopaque) *anyopaque,\n");
+
+        // Synthetic `as_{Base}` slots, one per direct declared base interface
+        // — lets a caller upcast to any IDL-declared base (Entity,
+        // TopicDescription, Condition, ...) without needing to know which
+        // concrete implementation it holds.  Returns the *native* fat-pointer
+        // type (like `deinit`'s pattern, not boxed) — boxing happens only in
+        // the generated C-ABI export wrapper, same as any other entity-
+        // returning operation.  Deliberately a vtable slot rather than a raw
+        // pointer reinterpretation: zidl flattens inherited ops bases-first,
+        // so only a type's *first* base would ever land at a byte-exact
+        // offset-0 prefix — reinterpreting a second-or-later base's Vtable
+        // pointer this way would silently misread the wrong fields.
+        for (iface.bases) |base| {
+            if (base != .interface) continue;
+            const base_zig_type = try self.typeRefToZig(.{ .named = base });
+            defer self.alloc.free(base_zig_type);
+            try self.ind();
+            try self.print("        as_{s}: *const fn (*anyopaque) {s},\n", .{ base.interface.name, base_zig_type });
+        }
+
         try self.ind();
         try self.write("    };\n\n");
 
@@ -1484,6 +1504,41 @@ const Generator = struct {
         for (attrs) |attr| {
             try self.emitCApiAttr(qual_c_name, pfx, iface.name, &attr);
         }
+
+        // One upcast forwarder per direct declared base interface, mirroring
+        // the native `as_{Base}` vtable slot emitted in `emitInterface`.
+        for (iface.bases) |base| {
+            if (base != .interface) continue;
+            try self.emitCApiAsBase(qual_c_name, pfx, iface.name, base);
+        }
+    }
+
+    /// Emit the C-ABI export wrapper for one `as_{Base}` upcast. Kept separate
+    /// from `emitCApiOp` because the two names involved — the native vtable
+    /// slot (simple base name, e.g. `as_Entity`) and the exported C symbol
+    /// (fully qualified, e.g. `DDS_Topic_as_DDS_Entity`) — are deliberately
+    /// different, unlike every other operation where both names match.
+    fn emitCApiAsBase(
+        self: *Generator,
+        c_name: []const u8,
+        pfx: []const u8,
+        iface_name: []const u8,
+        base: ir.TypeDecl,
+    ) anyerror!void {
+        const base_iface = base.interface;
+        const base_qual_c_name = try self.cApiQualName(base_iface.qualified_name, pfx);
+        defer self.alloc.free(base_qual_c_name);
+
+        try self.ind();
+        try self.print("pub export fn {s}_as_{s}(self: *anyopaque) callconv(.c) *anyopaque {{\n", .{ c_name, base_qual_c_name });
+        try self.ind();
+        try self.print("    const _self: {s}{s} = zidl_rt.unboxAs({s}{s}, self);\n", .{ pfx, iface_name, pfx, iface_name });
+        try self.ind();
+        try self.print("    const _r = _self.vtable.as_{s}(_self.ptr);\n", .{base_iface.name});
+        try self.ind();
+        try self.write("    return _r.vtable.get_c_abi_handle(_r.ptr);\n");
+        try self.ind();
+        try self.write("}\n\n");
     }
 
     /// True when `tr` names a non-callback (entity) interface — these cross
@@ -6913,4 +6968,58 @@ test "zig_backend: sequence typedef has no _free export without zig_generate_c_a
     , "t", .{ .no_typesupport = true, .no_typeobject_support = true });
     defer h.deinit(testing.allocator);
     try testing.expect(!has(h.items, "_free"));
+}
+
+test "zig_backend: as_Base vtable slot emitted for every direct base, unconditionally" {
+    // Entity is the first declared base, TopicDescription the second —
+    // deliberately mirroring dcps.idl's `Topic : Entity, TopicDescription`.
+    // The second base's fields land at a non-zero offset within Topic's own
+    // flattened Vtable, which is exactly why a raw pointer-reinterpretation
+    // upcast (instead of this dedicated vtable slot) would silently misread
+    // the wrong fields for it.
+    var out = try testGenOpts(
+        \\interface Entity {};
+        \\interface TopicDescription {};
+        \\interface Topic : Entity, TopicDescription {};
+    , "t", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Present even without --zig-generate-c-api, matching deinit/get_c_abi_handle.
+    try testing.expect(has(s, "as_Entity: *const fn (*anyopaque) Entity,"));
+    try testing.expect(has(s, "as_TopicDescription: *const fn (*anyopaque) TopicDescription,"));
+    // No export wrappers without --zig-generate-c-api.
+    try testing.expect(!has(s, "pub export fn Topic_as_Entity"));
+    try testing.expect(!has(s, "pub export fn Topic_as_TopicDescription"));
+}
+
+test "zig_backend: --zig-generate-c-api generates an as_Base export per direct base" {
+    var out = try testGenOpts(
+        \\interface Entity {};
+        \\interface TopicDescription {};
+        \\interface Topic : Entity, TopicDescription {};
+    , "t", .{
+        .generate_interfaces = true,
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+        .zig_generate_c_api = true,
+    });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "pub export fn Topic_as_Entity(self: *anyopaque) callconv(.c) *anyopaque {"));
+    try testing.expect(has(s, "const _self: Topic = zidl_rt.unboxAs(Topic, self);"));
+    try testing.expect(has(s, "const _r = _self.vtable.as_Entity(_self.ptr);"));
+    // Two separate export functions share the unbox line pattern; check both
+    // bodies dispatch through their own `as_*` slot and box via the result's
+    // own vtable, never a hardcoded one.
+    try testing.expect(has(s, "pub export fn Topic_as_TopicDescription(self: *anyopaque) callconv(.c) *anyopaque {"));
+    try testing.expect(has(s, "const _r = _self.vtable.as_TopicDescription(_self.ptr);"));
+    try testing.expect(has(s, "return _r.vtable.get_c_abi_handle(_r.ptr);"));
+}
+
+test "zig_backend: interface with no bases gets no as_Base slot" {
+    var out = try testGenOpts(
+        \\interface Standalone {};
+    , "t", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    try testing.expect(!has(out.items, "as_"));
 }

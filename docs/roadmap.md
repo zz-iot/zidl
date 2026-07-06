@@ -120,12 +120,85 @@ produced is entirely the concrete implementation's choice, not zidl's:
   roadmap's Tier 1 entry for what's left to do there, and Tier 2/3 for the
   separate data-plane and per-entity-kind allocator work.
 
-**zzdds-side follow-up required before consuming a zidl release with this
-change**: every hand-written concrete impl needs a `get_c_abi_handle`
-implementation following the cache-and-reuse pattern above (including for
-widened views it returns, e.g. `StatusConditionImpl` caching its own
-`entity_view_handle` for `get_entity()`). This is load-bearing for
-correctness, not an optional allocator nicety — see the zzdds roadmap.
+**zzdds-side follow-up**: every hand-written concrete impl needs a
+`get_c_abi_handle` implementation following the cache-and-reuse pattern above
+(including for widened views it returns, e.g. `StatusConditionImpl` caching
+its own `entity_view_handle` for `get_entity()`). Done, against a local-path
+zidl checkout (not yet a tagged release) — see the zzdds roadmap.
+
+### C++ backend: entity wrapper identity (Planned)
+
+A related but independent gap, found while auditing whether this design should
+change anything for the C++ backend (it doesn't need to — C++'s own
+`class Foo` / `class FooImpl : public Foo` abstract-class hierarchy already
+gets real polymorphism natively from the compiler-embedded vtable, which is
+exactly what the Zig side had to hand-roll as a fat pointer; there's no
+analogous "narrow a fat reference into an opaque C handle" problem on the C++
+side for boxing to solve). But looking at `ConcreteImplGenerator`
+(`src/backend/cpp.zig`) surfaced a structurally similar, pre-existing gap: it
+constructs a fresh `std::make_shared<FooImpl>(_h)` on every operation that
+returns an entity, so calling e.g. `participant->get_topic("X")` twice today
+returns two different `FooImpl` objects wrapping the same underlying `_h` —
+not identity-equal, though not a leak either (`shared_ptr` RAII cleans up
+correctly regardless of how many wrapper instances exist).
+
+This wasn't practically fixable before the heap-boxing work above: nothing
+guaranteed the raw C handle `_h` was itself stable/reusable across calls, so
+there'd have been no correct value to key a wrapper cache against. Now that
+`get_c_abi_handle` makes the underlying handle identity-stable, the C++ side
+could reuse the same principle (cache-and-reuse against a stable key, instead
+of allocating a fresh wrapper per access) via its own idiom — e.g. a
+`static std::unordered_map<DDS_Foo, std::weak_ptr<FooImpl>>` (plus a mutex) per
+entity type in generated code: reuse the existing wrapper if the `weak_ptr` is
+still alive, construct-and-insert otherwise.
+
+Unlike the Zig-side `get_c_abi_handle` item, this doesn't need any hand-written
+zzdds participation — zzdds doesn't author its own C++ bindings; they're
+entirely generated via `--cpp-generate-impl`. The cache has nowhere to live
+before the *first* `FooImpl` for a given handle exists (unlike the Zig side,
+where a cache field can attach to the already-existing concrete impl object),
+so it has to be a self-contained registry, fully expressible inside
+`ConcreteImplGenerator`'s own generated code — this is purely a zidl backend
+change, not a zzdds implementation task.
+
+### Zig backend: `as_{Base}` upcast vtable slot (Implemented)
+
+zzdds hand-wrote ~12 free functions upcasting an entity handle to an
+IDL-declared base interface across the C-ABI (`DDS_Topic_as_DDS_Entity`,
+`DDS_GuardCondition_as_DDS_Condition`, ...), each with its own
+vtable-identity check. Every one of these relationships is already declared
+as IDL interface inheritance, so this is now generated: `emitInterface`
+(`src/backend/zig.zig`) adds one synthetic `as_{Base}: *const fn(*anyopaque)
+{Base}` slot per direct declared base, alongside `deinit`/`get_c_abi_handle`
+(unconditional, same precedent); under `--zig-generate-c-api`,
+`emitCApiExports` additionally emits a `{Iface}_as_{Base}` export wrapper per
+base, unboxing self, calling the native slot, boxing the result via the
+target's own `get_c_abi_handle`.
+
+Two designs that don't work, ruled out during investigation:
+- **Raw pointer reinterpretation** (`@ptrCast` the derived vtable as the
+  base's `Vtable` type) only works for whichever base is declared *first* —
+  `collectInterfaceMembers` flattens inherited ops bases-first, so a second
+  (or later) base's fields start at a non-zero offset; reinterpreting would
+  silently misread the wrong fields. Confirmed via a dedicated golden/unit
+  test fixture with a non-first base.
+- **A permanent external mapping** (as `--c-api-impl` would have been) bakes
+  in "there is exactly one implementation," the same problem that dropped
+  that design originally.
+
+The vtable slot is the mechanism that generalizes correctly: the concrete
+implementation supplies `as_{Base}`, and dispatch through the vtable is
+correct by construction — no runtime "is this really the vtable I expect"
+check is needed or possible to bypass, unlike the hand-written functions it
+replaces.
+
+**zzdds migration note**: `zzdds.idl`'s own vendor-extension interfaces
+declare real IDL bases too (`interface Topic : DDS::Topic`), which was easy
+to miss — the upcast direction of the `ZZDDS.* ↔ DDS.*` conversions
+(`zzdds_Topic_as_DDS_Topic` etc.) is *also* now generated, not just the
+DDS-internal ones. Only the downcast direction (`DDS_Topic_as_zzdds_Topic`,
+requiring a runtime vtable-identity check IDL can't express) remains
+hand-written.
 
 ### All backends (annotation support)
 
