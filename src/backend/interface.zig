@@ -340,11 +340,12 @@ pub fn isCallbackInterface(iface: *const ir.Interface) bool {
 /// Collect the qualified names of every (non-callback) interface that appears
 /// as a `base` of some other (non-callback) interface, anywhere in `items`.
 ///
-/// Used to distinguish "leaf" entity interfaces (exactly one real backing
-/// implementation — safe to devirtualize at a C ABI boundary) from "base"
-/// interfaces like `Entity`/`TopicDescription` (implemented once per leaf that
-/// inherits from them, so a single caller-visible handle genuinely needs to
-/// resolve to different concrete vtables at runtime).
+/// Used by the C++ backend's `ifaceDeclaresNativeHandle` to decide whether an
+/// interface gets its own `native_handle()` override or must instead delegate
+/// to a base's: an interface with no bases of its own that is *also* used as
+/// a base by more than one derived interface would otherwise get an
+/// ambiguous, conflicting `native_handle()` declared once per derived class
+/// under C++ multiple inheritance.
 pub fn collectEntityBaseNames(
     alloc: std.mem.Allocator,
     items: []const ir.ModuleItem,
