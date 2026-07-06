@@ -326,6 +326,53 @@ pub fn prefixedCNameFromQualified(
     return std.fmt.allocPrint(alloc, "{s}{s}", .{ prefix, flat });
 }
 
+/// True for `@callback`-annotated interfaces (listener interfaces), which get a
+/// plain C callback struct instead of an entity opaque handle / vtable.
+/// Falls back to the "Listener" name-suffix heuristic for IDL that predates the
+/// `@callback` annotation — deprecated, kept for backwards compatibility.
+pub fn isCallbackInterface(iface: *const ir.Interface) bool {
+    for (iface.raw) |ann| {
+        if (std.mem.eql(u8, ann.name, "callback")) return true;
+    }
+    return std.mem.endsWith(u8, iface.name, "Listener");
+}
+
+/// Collect the qualified names of every (non-callback) interface that appears
+/// as a `base` of some other (non-callback) interface, anywhere in `items`.
+///
+/// Used to distinguish "leaf" entity interfaces (exactly one real backing
+/// implementation — safe to devirtualize at a C ABI boundary) from "base"
+/// interfaces like `Entity`/`TopicDescription` (implemented once per leaf that
+/// inherits from them, so a single caller-visible handle genuinely needs to
+/// resolve to different concrete vtables at runtime).
+pub fn collectEntityBaseNames(
+    alloc: std.mem.Allocator,
+    items: []const ir.ModuleItem,
+    result: *std.StringHashMapUnmanaged(void),
+) anyerror!void {
+    for (items) |item| {
+        switch (item) {
+            .module => |m| try collectEntityBaseNames(alloc, m.items, result),
+            .type_decl => |td| switch (td) {
+                .interface => |iface| {
+                    if (!isCallbackInterface(iface)) {
+                        for (iface.bases) |base| {
+                            switch (base) {
+                                .interface => |b| if (!isCallbackInterface(b)) {
+                                    try result.put(alloc, b.qualified_name, {});
+                                },
+                                else => {},
+                            }
+                        }
+                    }
+                },
+                else => {},
+            },
+            else => {},
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;

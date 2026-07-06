@@ -3,10 +3,15 @@
 
 const std = @import("std");
 const types = @import("types");
+const zidl_rt = @import("zidl_rt");
 
 pub const GreeterStub = struct {
     count: i32 = 0,
     last_name: []const u8 = "",
+    // Cached C-ABI handle: created lazily on first request, reused thereafter
+    // (so repeated calls return the same handle — identity-stable), freed in
+    // `deinit`. See zig.zig's `get_c_abi_handle` Vtable slot doc comment.
+    c_abi_handle: ?*anyopaque = null,
 
     pub fn asGreeter(self: *GreeterStub) types.Greeter {
         return .{ .ptr = self, .vtable = &vtable };
@@ -17,6 +22,7 @@ pub const GreeterStub = struct {
         .reset = reset,
         .get_count = get_count,
         .deinit = deinit,
+        .get_c_abi_handle = get_c_abi_handle,
     };
 
     // Vtable slots now use [*:0]const u8 (C-ABI) for strings.
@@ -37,5 +43,16 @@ pub const GreeterStub = struct {
         return self.count;
     }
 
-    fn deinit(_: *anyopaque) void {}
+    fn deinit(ptr: *anyopaque) void {
+        const self: *GreeterStub = @ptrCast(@alignCast(ptr));
+        if (self.c_abi_handle) |h| zidl_rt.freeEntityBox(std.testing.allocator, h);
+    }
+
+    fn get_c_abi_handle(ptr: *anyopaque) *anyopaque {
+        const self: *GreeterStub = @ptrCast(@alignCast(ptr));
+        if (self.c_abi_handle == null) {
+            self.c_abi_handle = zidl_rt.boxEntity(std.testing.allocator, ptr, &vtable) catch @panic("oom");
+        }
+        return self.c_abi_handle.?;
+    }
 };

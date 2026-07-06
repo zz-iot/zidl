@@ -4520,6 +4520,22 @@ test "c_backend: listener interface emits callback struct not free functions" {
     try testing.expect(!has(s, "EntityListener_enable"));
 }
 
+test "c_backend: every non-listener interface gets an opaque handle, base or leaf alike" {
+    var out = try testGenIfaceHeader(
+        \\interface Base { long enable(); };
+        \\interface Leaf : Base { long write_val(); };
+    , "hyb");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Base is used by Leaf as a `base`, but the C-ABI handle shape doesn't
+    // distinguish leaf/base interfaces — every entity interface is boxed
+    // uniformly on the Zig side (see --zig-generate-c-api), so the C header
+    // stays a single opaque pointer regardless of inheritance.
+    try testing.expect(has(s, "typedef struct Base_s *Base;"));
+    try testing.expect(!has(s, "typedef struct { void *ptr; const void *vtable; } Base;"));
+    try testing.expect(has(s, "typedef struct Leaf_s *Leaf;"));
+}
+
 test "c_backend: listener callback struct references entity types declared above" {
     // Listener struct uses Entity opaque handle in callback param — the pre-scan
     // ensures entity typedefs appear before listener structs regardless of IDL order.

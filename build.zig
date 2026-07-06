@@ -64,7 +64,7 @@ pub fn build(b: *std.Build) void {
     // ── Zig integration tests ─────────────────────────────────────────────────
     // These use the committed golden types.zig and run CDR round-trip + vtable tests.
     const zidl_rt_mod = b.addModule("zidl_rt", .{
-        .root_source_file = b.path("packages/zidl-rt/src/cdr.zig"),
+        .root_source_file = b.path("packages/zidl-rt/src/root.zig"),
         .target = target,
     });
 
@@ -81,6 +81,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .imports = &.{
             .{ .name = "types", .module = golden_zig_mod },
+            .{ .name = "zidl_rt", .module = zidl_rt_mod },
         },
     });
 

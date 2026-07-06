@@ -170,31 +170,72 @@ object signatures still need explicit ABI adaptation.
 
 ## `--zig-generate-c-api`: C-ABI Export Layer (Zig backend, implemented)
 
-A companion flag to `--generate-interfaces` for the Zig backend.  Because the
-Zig vtable slots already use C-ABI types throughout (see per-language shapes
-above), the C export functions are **trivial one-line forwarders** — no type
-conversion code is emitted:
+A companion flag to `--generate-interfaces` for the Zig backend. The Zig-native
+representation of an entity interface is always the fat-pointer vtable struct
+shown above (`{ptr, vtable}`) — this never changes, and Zig-to-Zig callers
+(including nil-object sentinels used for failed `create_*` calls) always work
+with it directly.
+
+The C backend's opaque single-pointer handle (`typedef struct FooDataWriter_s
+*FooDataWriter;`) is one word, not two, so crossing between the two
+representations needs real work at the `callconv(.c)` boundary — a bare
+pointer isn't enough to recover `{ptr, vtable}` generically. The export layer
+bridges this with a small heap-allocated box (`zidl_rt.EntityBox`) holding the
+real pair; boxing/unboxing happens **only** in the generated export functions,
+never in Zig-native code:
 
 ```zig
 pub export fn DDS_Publisher_create_datawriter(
-    self: DDS.Publisher,
-    a_topic: DDS.Topic,
+    self: *anyopaque,
+    a_topic: *anyopaque,
     qos: ?*const DDS.DataWriterQos,
     a_listener: ?*const DDS.DataWriterListener,
     mask: DDS.StatusMask,
-) callconv(.c) DDS.DataWriter {
-    return self.vtable.create_datawriter(self.ptr, a_topic, qos, a_listener, mask);
+) callconv(.c) *anyopaque {
+    const _self: DDS.Publisher = zidl_rt.unboxAs(DDS.Publisher, self);
+    const _r = _self.vtable.create_datawriter(
+        _self.ptr, zidl_rt.unboxAs(DDS.Topic, a_topic), qos, a_listener, mask,
+    );
+    return _r.vtable.get_c_abi_handle(_r.ptr);
 }
 ```
 
-For **listener interfaces** (`@callback` annotated): user code passes a
-`?*const XxxListener` pointer directly; no adapter struct is generated.  The
-listener is stored by the vtable implementation as a plain value copy.
+Every entity interface is handled uniformly this way — there's no distinction
+in the generated code between an interface with exactly one real
+implementation and one implemented several times (e.g. `Entity`,
+`TopicDescription`, each presented differently depending on which concrete
+leaf type is being widened).
 
-**Design note:** The absence of conversion overhead is a direct consequence of
-the binding model: the Zig vtable is the primary binding and its slot types are
-C-ABI from the start.  An idiomatic Zig wrapper layer (slice strings, ergonomic
-QoS builders) would sit on top of this and is a planned future addition.
+Note what the export function does *not* do: it never allocates the box
+itself and never assumes which vtable a returned value carries. Every entity
+interface's vtable gains one synthetic slot, `get_c_abi_handle: *const
+fn(*anyopaque) *anyopaque`, alongside the existing `deinit` — its
+implementation (provided by the concrete impl, e.g. in zzdds) decides how the
+handle is produced. The recommended pattern is to cache and reuse a handle
+across repeated calls (freed in that same object's `deinit`), rather than
+allocate a fresh one every time: this is what keeps a handle returned from an
+accessor operation (e.g. `get_participant()`) identity-stable across repeated
+calls, and what avoids leaking a box on every such call. Because the vtable
+used to build the returned handle is always whatever the native call actually
+returned — never a value assumed or hardcoded by generated code — a failed
+`create_*` call's nil-object result is boxed and unboxed correctly too, the
+same as any other value.
+
+For **listener interfaces** (`@callback` annotated): user code passes a
+`?*const XxxListener` pointer directly; no adapter struct is generated. Entity
+interfaces referenced *inside* a listener callback's parameters (e.g. `in
+DataWriter dw`) are boxed/unboxed the same way as any other entity crossing
+this boundary.
+
+**Design note:** unlike operations on data payloads (which stay C-ABI shaped
+in the vtable itself — see per-language shapes above, and note the vtable
+slots for entity-typed parameters/returns are **not** touched by this
+boxing — they keep the real fat-pointer type, since they're also used by
+purely-native Zig callers), the *export* signature specifically narrows entity
+values down to a single opaque pointer, matching the C backend's handle
+one-for-one. An idiomatic Zig wrapper layer (slice strings, ergonomic QoS
+builders) sitting on top of the native vtable is still a planned future
+addition, independent of this boundary.
 
 ---
 

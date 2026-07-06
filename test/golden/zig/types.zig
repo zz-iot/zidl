@@ -365,6 +365,7 @@ pub const Greeter = extern struct {
         reset: *const fn (*anyopaque) void,
         get_count: *const fn (*anyopaque) i32,
         deinit: *const fn (*anyopaque) void,
+        get_c_abi_handle: *const fn (*anyopaque) *anyopaque,
     };
 
     pub fn greet(self: @This(), name: [:0]const u8) []const u8 {
@@ -394,6 +395,7 @@ pub const AdvancedGreeter = extern struct {
         greetAdvanced: *const fn (*anyopaque, name: [*:0]const u8) void,
         get_count: *const fn (*anyopaque) i32,
         deinit: *const fn (*anyopaque) void,
+        get_c_abi_handle: *const fn (*anyopaque) *anyopaque,
     };
 
     pub fn greet(self: @This(), name: [:0]const u8) []const u8 {
