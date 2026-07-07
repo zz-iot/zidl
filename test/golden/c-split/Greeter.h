@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-typedef struct { void *ptr; const void *vtable; } Greeter;
+typedef struct Greeter_s *Greeter;
 
 /* IDL interface: Greeter */
 char *Greeter_greet(Greeter self, const char *name);

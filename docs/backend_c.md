@@ -248,4 +248,4 @@ which emit inline field initializers for non-optional defaults.
 | `@default` on non-optional members | Returns `error.DefaultOnNonOptionalNotSupportedInCBackend` at codegen time |
 | `--zig-pl-cdr` (PL_CDR emit) | Flag parsed but C backend does not emit PL_CDR functions |
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
-| `--generate-interfaces`: full DDS object/resource adaptation | Basic C interface/vtable shapes are generated; richer DDS object binding semantics remain runtime-specific future work |
+| `--generate-interfaces`: full DDS object/resource adaptation | Opaque handle typedefs + free function declarations are generated (see [`ecosystem.md`](ecosystem.md) §`--generate-interfaces`); richer DDS object binding semantics remain runtime-specific future work |

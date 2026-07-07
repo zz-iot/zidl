@@ -39,6 +39,13 @@
 
 const std = @import("std");
 const cdr = @import("cdr.zig");
+const entity_box = @import("entity_box.zig");
+
+pub const EntityBox = entity_box.EntityBox;
+pub const boxEntity = entity_box.boxEntity;
+pub const unboxEntity = entity_box.unboxEntity;
+pub const unboxAs = entity_box.unboxAs;
+pub const freeEntityBox = entity_box.freeEntityBox;
 
 pub const XcdrVersion = cdr.XcdrVersion;
 pub const ByteOrder = cdr.ByteOrder;

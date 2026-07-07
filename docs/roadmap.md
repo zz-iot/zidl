@@ -41,33 +41,164 @@ Existing-backend features that have `// TODO` or deferred markers in the code or
 documentation, are not intentionally omitted, and are not yet tracked elsewhere in
 this roadmap. New language backends have their own sections below.
 
-### C backend
-
-- **`@optional` members**: Deferred. Requires adding a companion `has_NAME` boolean
-  field to every struct that has an optional member — a non-trivial ABI change.
-  Until implemented, `@optional` members emit a `/* TODO: @optional name */` comment
-  in serialize/deserialize functions, and the struct field itself is omitted.
-- **`@optional` key fields**: Blocked on `@optional` support above. Key serialization
-  emits a `/* TODO */` comment for any `@key` member that is also `@optional`.
-
 ### C and C++ backends
 
+- **`ZidlCdrAllocator` (user-supplied allocator for strings/sequences)**: `zidl_cdr_read_string`
+  and sequence reads use `malloc` internally today; see `docs/backend_c.md` §"`zidl-cdr`
+  Dependency". This is "Tier 2" of the allocator-control work described under "Entity
+  handle ABI: heap-boxing + allocator control" above — a separate, data-plane
+  configuration surface from entity-handle boxing (Tier 1), but following the same
+  discipline: route through a swappable interface, never hardcode `malloc` in
+  generated per-type code.
 - **PL_CDR generation**: `--zig-pl-cdr` is parsed and wired through the CLI but neither
   the C nor C++ backend emits `serializePlCdr` / `deserializeFromPlCdr` functions.
   This is the RTPS ParameterList wire format used for DDS discovery types.
-- **C backend `--generate-interfaces` (opaque handles + free functions)**: currently
-  emits COM-style fat-pointer vtable structs.  Should emit opaque `typedef struct
-  Foo_s *Foo;` handles and free function declarations (`ReturnCode_t
-  Foo_method(Foo self, ...)`) matching the OMG C PSM binding and the idioms of
-  major C DDS implementations (Cyclone DDS, RTI Connext C API).  Listener
-  interfaces become plain C callback structs with a `void *listener_data` context
-  pointer.  The existing vtable structs in the generated header become an internal
-  artifact; they should not appear in the public C API header.
-- ~~**Zig backend `--zig-generate-c-api`**~~: **Implemented.** Because the Zig vtable
-  slots use C-ABI types from the start, the generated `pub export fn callconv(.c)`
-  wrappers are trivial one-line forwarders with no type conversion.  No
-  `CXxxListenerAdapter` is generated; listener structs are passed and stored by
-  value directly.  See `docs/ecosystem.md` §"`--zig-generate-c-api`" for details.
+- ~~**C backend `--generate-interfaces` (opaque handles + free functions)**~~:
+  **Implemented.** Entity interfaces emit opaque `typedef struct Foo_s *Foo;` handles
+  and free function declarations matching the OMG C PSM binding and the idioms of
+  major C DDS implementations (Cyclone DDS, RTI Connext C API). No struct layout is
+  exposed in the public header. Listener interfaces remain plain C callback structs
+  with a `void *listener_data` context pointer. The C++ backend's `ConcreteImplGenerator`
+  was updated to match (null checks and null-handle literals now use the opaque
+  pointer directly instead of a two-field struct literal).
+- ~~**Zig backend `--zig-generate-c-api`**~~: **Implemented**, via uniform entity
+  handle boxing (see "Entity handle ABI: heap-boxing" below for the design and
+  the discarded intermediate designs that led to it). Every non-listener entity
+  interface — regardless of how many real implementations it has — crosses the
+  C-ABI boundary as a single opaque pointer to a `zidl_rt.EntityBox`, matching
+  the C backend's handle one-for-one. See `docs/ecosystem.md` §"`--zig-generate-c-api`"
+  for the generated-code shape.
+
+## Entity handle ABI: heap-boxing (Implemented, zidl side)
+
+Every non-listener entity interface gets a single opaque C-ABI pointer, always,
+matching the OMG PSM idiom with no exceptions — no leaf/base distinction
+anywhere in generated code. The pointer targets a small heap-allocated box
+(`zidl_rt.EntityBox`) holding the native Zig `{ptr, vtable}` pair; boxing/
+unboxing happens only at the `--zig-generate-c-api` export boundary, never in
+Zig-native code, so pure-Zig consumers of zidl-generated interfaces pay nothing
+extra and keep the fat-pointer type as-is (see the "idiomatic Zig" discussion
+in the PR history that led here).
+
+This design went through two discarded intermediate steps worth recording so
+they aren't re-attempted:
+1. A **hybrid leaf/base split** (devirtualize "leaf" interfaces to a bare
+   pointer dispatched through an externally-supplied vtable symbol, keep
+   "base" interfaces — `Entity`, `TopicDescription` — as the old fat-pointer
+   struct) was implemented, then discarded. It required a new `--c-api-impl`
+   mapping (a permanent per-interface maintenance burden), left base
+   interfaces non-opaque in the C header, baked "this interface has exactly
+   one implementation, forever" into the wire format, and — critically — had
+   a real correctness bug: devirtualized dispatch assumed a statically-known
+   vtable, discarding whatever vtable a native call actually returned, so a
+   failed `create_*` call's nil-object result would misdispatch on any
+   subsequent call.
+2. A **naive "always box fresh" design** (every export call allocates a new
+   box, unconditionally) was also discarded: it breaks handle identity for
+   accessor operations (`get_participant()` called twice would return two
+   different, non-`==`-comparable boxes) and leaks unconditionally for
+   widened-view accessors (`get_entity()`, `lookup_topicdescription()`), since
+   the live C++ `ConcreteImplGenerator`'s Impl-class destructor is `= default`
+   and nothing else in the generated code frees a box.
+
+The design that replaced both: every entity interface's vtable gains one
+synthetic slot, `get_c_abi_handle: *const fn(*anyopaque) *anyopaque`, alongside
+the existing `deinit`. Generated code is completely uniform —
+`return _r.vtable.get_c_abi_handle(_r.ptr);` for every entity return, no
+allocation and no allocator lookup in generated code at all. How the handle is
+produced is entirely the concrete implementation's choice, not zidl's:
+
+- **Recommended pattern (zzdds side, not yet done — see below)**: cache and
+  reuse a handle across repeated calls to the same object (lazily created on
+  first request, stored on the concrete impl, freed in that object's own
+  `deinit()`). This fixes both discarded designs' problems at once — identity
+  is preserved, and nothing leaks — with no new C-ABI release step (preserving
+  familiarity with Cyclone/Connext-style APIs) and no new IDL annotation.
+- Allocation, when needed, uses whatever allocator the concrete impl already
+  has (e.g. `self.alloc`) — ordinary access, not a new generic vtable-mediated
+  mechanism. This is "Tier 1" of the allocator-control work; see the zzdds
+  roadmap's Tier 1 entry for what's left to do there, and Tier 2/3 for the
+  separate data-plane and per-entity-kind allocator work.
+
+**zzdds-side follow-up**: every hand-written concrete impl needs a
+`get_c_abi_handle` implementation following the cache-and-reuse pattern above
+(including for widened views it returns, e.g. `StatusConditionImpl` caching
+its own `entity_view_handle` for `get_entity()`). Done, against a local-path
+zidl checkout (not yet a tagged release) — see the zzdds roadmap.
+
+### C++ backend: entity wrapper identity (Planned)
+
+A related but independent gap, found while auditing whether this design should
+change anything for the C++ backend (it doesn't need to — C++'s own
+`class Foo` / `class FooImpl : public Foo` abstract-class hierarchy already
+gets real polymorphism natively from the compiler-embedded vtable, which is
+exactly what the Zig side had to hand-roll as a fat pointer; there's no
+analogous "narrow a fat reference into an opaque C handle" problem on the C++
+side for boxing to solve). But looking at `ConcreteImplGenerator`
+(`src/backend/cpp.zig`) surfaced a structurally similar, pre-existing gap: it
+constructs a fresh `std::make_shared<FooImpl>(_h)` on every operation that
+returns an entity, so calling e.g. `participant->get_topic("X")` twice today
+returns two different `FooImpl` objects wrapping the same underlying `_h` —
+not identity-equal, though not a leak either (`shared_ptr` RAII cleans up
+correctly regardless of how many wrapper instances exist).
+
+This wasn't practically fixable before the heap-boxing work above: nothing
+guaranteed the raw C handle `_h` was itself stable/reusable across calls, so
+there'd have been no correct value to key a wrapper cache against. Now that
+`get_c_abi_handle` makes the underlying handle identity-stable, the C++ side
+could reuse the same principle (cache-and-reuse against a stable key, instead
+of allocating a fresh wrapper per access) via its own idiom — e.g. a
+`static std::unordered_map<DDS_Foo, std::weak_ptr<FooImpl>>` (plus a mutex) per
+entity type in generated code: reuse the existing wrapper if the `weak_ptr` is
+still alive, construct-and-insert otherwise.
+
+Unlike the Zig-side `get_c_abi_handle` item, this doesn't need any hand-written
+zzdds participation — zzdds doesn't author its own C++ bindings; they're
+entirely generated via `--cpp-generate-impl`. The cache has nowhere to live
+before the *first* `FooImpl` for a given handle exists (unlike the Zig side,
+where a cache field can attach to the already-existing concrete impl object),
+so it has to be a self-contained registry, fully expressible inside
+`ConcreteImplGenerator`'s own generated code — this is purely a zidl backend
+change, not a zzdds implementation task.
+
+### Zig backend: `as_{Base}` upcast vtable slot (Implemented)
+
+zzdds hand-wrote ~12 free functions upcasting an entity handle to an
+IDL-declared base interface across the C-ABI (`DDS_Topic_as_DDS_Entity`,
+`DDS_GuardCondition_as_DDS_Condition`, ...), each with its own
+vtable-identity check. Every one of these relationships is already declared
+as IDL interface inheritance, so this is now generated: `emitInterface`
+(`src/backend/zig.zig`) adds one synthetic `as_{Base}: *const fn(*anyopaque)
+{Base}` slot per direct declared base, alongside `deinit`/`get_c_abi_handle`
+(unconditional, same precedent); under `--zig-generate-c-api`,
+`emitCApiExports` additionally emits a `{Iface}_as_{Base}` export wrapper per
+base, unboxing self, calling the native slot, boxing the result via the
+target's own `get_c_abi_handle`.
+
+Two designs that don't work, ruled out during investigation:
+- **Raw pointer reinterpretation** (`@ptrCast` the derived vtable as the
+  base's `Vtable` type) only works for whichever base is declared *first* —
+  `collectInterfaceMembers` flattens inherited ops bases-first, so a second
+  (or later) base's fields start at a non-zero offset; reinterpreting would
+  silently misread the wrong fields. Confirmed via a dedicated golden/unit
+  test fixture with a non-first base.
+- **A permanent external mapping** (as `--c-api-impl` would have been) bakes
+  in "there is exactly one implementation," the same problem that dropped
+  that design originally.
+
+The vtable slot is the mechanism that generalizes correctly: the concrete
+implementation supplies `as_{Base}`, and dispatch through the vtable is
+correct by construction — no runtime "is this really the vtable I expect"
+check is needed or possible to bypass, unlike the hand-written functions it
+replaces.
+
+**zzdds migration note**: `zzdds.idl`'s own vendor-extension interfaces
+declare real IDL bases too (`interface Topic : DDS::Topic`), which was easy
+to miss — the upcast direction of the `ZZDDS.* ↔ DDS.*` conversions
+(`zzdds_Topic_as_DDS_Topic` etc.) is *also* now generated, not just the
+DDS-internal ones. Only the downcast direction (`DDS_Topic_as_zzdds_Topic`,
+requiring a runtime vtable-identity check IDL can't express) remains
+hand-written.
 
 ### All backends (annotation support)
 
@@ -116,6 +247,7 @@ this roadmap. New language backends have their own sections below.
 
 | Item | Notes |
 |---|---|
+| C backend `--generate-interfaces`: opaque handles | Entity interfaces emit `typedef struct Foo_s *Foo;` instead of a fat-pointer vtable struct; C++ `ConcreteImplGenerator` null-checks/null-handle literals updated to match. |
 | Const type-checking (semantic analyser) | `const_type_mismatch` diagnostic; validates initializer compatible with declared type (§7.4.3). PR #20. |
 | Union discriminant type validation | `invalid_discriminant_type` diagnostic; validates integer/char/boolean/wchar/octet/enum base (§7.4.8), including typedef-of-typedef. PR #20. |
 | C++ concrete impl backend: 11 TODO stub methods | `get_listener` ×6 (stash pattern), `get_offered/requested_incompatible_qos_status` ×2, `WaitSet::wait`/`get_conditions` ×2, `SubscriberImpl::get_datareaders` — unlocked by extending `isAdaptableSeqElemIn` for simple-struct and entity-interface sequence elements, plus a `listener_` stash member. |

@@ -326,6 +326,54 @@ pub fn prefixedCNameFromQualified(
     return std.fmt.allocPrint(alloc, "{s}{s}", .{ prefix, flat });
 }
 
+/// True for `@callback`-annotated interfaces (listener interfaces), which get a
+/// plain C callback struct instead of an entity opaque handle / vtable.
+/// Falls back to the "Listener" name-suffix heuristic for IDL that predates the
+/// `@callback` annotation — deprecated, kept for backwards compatibility.
+pub fn isCallbackInterface(iface: *const ir.Interface) bool {
+    for (iface.raw) |ann| {
+        if (std.mem.eql(u8, ann.name, "callback")) return true;
+    }
+    return std.mem.endsWith(u8, iface.name, "Listener");
+}
+
+/// Collect the qualified names of every (non-callback) interface that appears
+/// as a `base` of some other (non-callback) interface, anywhere in `items`.
+///
+/// Used by the C++ backend's `ifaceDeclaresNativeHandle` to decide whether an
+/// interface gets its own `native_handle()` override or must instead delegate
+/// to a base's: an interface with no bases of its own that is *also* used as
+/// a base by more than one derived interface would otherwise get an
+/// ambiguous, conflicting `native_handle()` declared once per derived class
+/// under C++ multiple inheritance.
+pub fn collectEntityBaseNames(
+    alloc: std.mem.Allocator,
+    items: []const ir.ModuleItem,
+    result: *std.StringHashMapUnmanaged(void),
+) anyerror!void {
+    for (items) |item| {
+        switch (item) {
+            .module => |m| try collectEntityBaseNames(alloc, m.items, result),
+            .type_decl => |td| switch (td) {
+                .interface => |iface| {
+                    if (!isCallbackInterface(iface)) {
+                        for (iface.bases) |base| {
+                            switch (base) {
+                                .interface => |b| if (!isCallbackInterface(b)) {
+                                    try result.put(alloc, b.qualified_name, {});
+                                },
+                                else => {},
+                            }
+                        }
+                    }
+                },
+                else => {},
+            },
+            else => {},
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;

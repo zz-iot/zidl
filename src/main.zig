@@ -550,6 +550,7 @@ fn processFile(
         try Io.Dir.cwd().createDirPath(_io, opts.output_dir);
     }
     const stem = std.fs.path.stem(path);
+
     const gen_opts = zidl.backend.Options{
         .output_dir = opts.output_dir,
         .input_stem = stem,

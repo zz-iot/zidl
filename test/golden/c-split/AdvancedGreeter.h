@@ -7,7 +7,7 @@
 #include <stdbool.h>
 #include "Greeter.h"
 
-typedef struct { void *ptr; const void *vtable; } AdvancedGreeter;
+typedef struct AdvancedGreeter_s *AdvancedGreeter;
 
 /* IDL interface: AdvancedGreeter */
 char *AdvancedGreeter_greet(AdvancedGreeter self, const char *name);

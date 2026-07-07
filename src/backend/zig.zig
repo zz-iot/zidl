@@ -163,7 +163,7 @@ pub fn generateSplitFiles(
             .{opts.input_stem},
         );
         try gen.write("const std = @import(\"std\");\n");
-        if (!opts.no_typesupport or opts.pl_cdr) {
+        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_c_api) {
             try gen.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
         if (opts.generate_zzdds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(m.items)) {
@@ -217,7 +217,7 @@ pub fn generateSplitFiles(
     if (non_module.items.len > 0) {
         if (module_names.items.len > 0) try gen.write("\n");
         try gen.write("const std = @import(\"std\");\n");
-        if (!opts.no_typesupport or opts.pl_cdr) {
+        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_c_api) {
             try gen.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
         if (opts.generate_zzdds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(non_module.items)) {
@@ -279,7 +279,7 @@ const Generator = struct {
             try self.print("// Zig output target: {s}\n\n", .{self.opts.zig_version.label()});
         }
         try self.write("const std = @import(\"std\");\n");
-        if (!self.opts.no_typesupport or self.opts.pl_cdr) {
+        if (!self.opts.no_typesupport or self.opts.pl_cdr or self.opts.zig_generate_c_api) {
             try self.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveTopicTypes(spec.items)) {
@@ -1270,9 +1270,15 @@ const Generator = struct {
         try self.collectInterfaceMembers(iface, &ops, &attrs);
 
         // ── Outer struct ──────────────────────────────────────────────────
-        // extern struct makes the two-pointer {ptr, vtable} layout C-ABI
-        // compatible, which --zig-generate-c-api relies on to pass entity values
-        // through callconv(.c) functions without an extra heap indirection.
+        // extern struct makes the two-pointer {ptr, vtable} layout the
+        // idiomatic Zig-native shape for runtime polymorphism (matching
+        // std.mem.Allocator) — this is how Zig-to-Zig callers (including
+        // nil-object sentinels and test doubles) get real dispatch, and it
+        // never changes. --zig-generate-c-api never passes this fat struct
+        // across callconv(.c) directly: every entity crossing that boundary
+        // is boxed into a single opaque pointer (see `zidl_rt.boxEntity` /
+        // `unboxAs`), matching the C backend's single-pointer opaque handle
+        // uniformly for every non-listener interface, leaf or base alike.
         try self.ind();
         try self.print("pub const {s}{s} = extern struct {{\n", .{ pfx, iface.name });
 
@@ -1318,6 +1324,36 @@ const Generator = struct {
 
         try self.ind();
         try self.write("        deinit: *const fn (*anyopaque) void,\n");
+        try self.ind();
+        // Synthetic, like `deinit` above — not sourced from IDL-declared ops.
+        // Returns an already-prepared opaque C-ABI handle for this value (see
+        // `zidl_rt.EntityBox`) — the generic --zig-generate-c-api export layer
+        // never allocates or looks up an allocator itself; it just calls this.
+        // How the handle is produced (a fresh box vs. one cached and reused
+        // across calls) is entirely the concrete implementation's own choice,
+        // which is what lets it preserve handle identity and avoid leaking a
+        // box on every accessor call, without zidl needing to know or care.
+        try self.write("        get_c_abi_handle: *const fn (*anyopaque) *anyopaque,\n");
+
+        // Synthetic `as_{Base}` slots, one per direct declared base interface
+        // — lets a caller upcast to any IDL-declared base (Entity,
+        // TopicDescription, Condition, ...) without needing to know which
+        // concrete implementation it holds.  Returns the *native* fat-pointer
+        // type (like `deinit`'s pattern, not boxed) — boxing happens only in
+        // the generated C-ABI export wrapper, same as any other entity-
+        // returning operation.  Deliberately a vtable slot rather than a raw
+        // pointer reinterpretation: zidl flattens inherited ops bases-first,
+        // so only a type's *first* base would ever land at a byte-exact
+        // offset-0 prefix — reinterpreting a second-or-later base's Vtable
+        // pointer this way would silently misread the wrong fields.
+        for (iface.bases) |base| {
+            if (base != .interface) continue;
+            const base_zig_type = try self.typeRefToZig(.{ .named = base });
+            defer self.alloc.free(base_zig_type);
+            try self.ind();
+            try self.print("        as_{s}: *const fn (*anyopaque) {s},\n", .{ base.interface.name, base_zig_type });
+        }
+
         try self.ind();
         try self.write("    };\n\n");
 
@@ -1468,6 +1504,55 @@ const Generator = struct {
         for (attrs) |attr| {
             try self.emitCApiAttr(qual_c_name, pfx, iface.name, &attr);
         }
+
+        // One upcast forwarder per direct declared base interface, mirroring
+        // the native `as_{Base}` vtable slot emitted in `emitInterface`.
+        for (iface.bases) |base| {
+            if (base != .interface) continue;
+            try self.emitCApiAsBase(qual_c_name, pfx, iface.name, base);
+        }
+    }
+
+    /// Emit the C-ABI export wrapper for one `as_{Base}` upcast. Kept separate
+    /// from `emitCApiOp` because the two names involved — the native vtable
+    /// slot (simple base name, e.g. `as_Entity`) and the exported C symbol
+    /// (fully qualified, e.g. `DDS_Topic_as_DDS_Entity`) — are deliberately
+    /// different, unlike every other operation where both names match.
+    fn emitCApiAsBase(
+        self: *Generator,
+        c_name: []const u8,
+        pfx: []const u8,
+        iface_name: []const u8,
+        base: ir.TypeDecl,
+    ) anyerror!void {
+        const base_iface = base.interface;
+        const base_qual_c_name = try self.cApiQualName(base_iface.qualified_name, pfx);
+        defer self.alloc.free(base_qual_c_name);
+
+        try self.ind();
+        try self.print("pub export fn {s}_as_{s}(self: *anyopaque) callconv(.c) *anyopaque {{\n", .{ c_name, base_qual_c_name });
+        try self.ind();
+        try self.print("    const _self: {s}{s} = zidl_rt.unboxAs({s}{s}, self);\n", .{ pfx, iface_name, pfx, iface_name });
+        try self.ind();
+        try self.print("    const _r = _self.vtable.as_{s}(_self.ptr);\n", .{base_iface.name});
+        try self.ind();
+        try self.write("    return _r.vtable.get_c_abi_handle(_r.ptr);\n");
+        try self.ind();
+        try self.write("}\n\n");
+    }
+
+    /// True when `tr` names a non-callback (entity) interface — these cross
+    /// the `--zig-generate-c-api` boundary as a single boxed opaque pointer
+    /// (see `zidl_rt.boxEntity`/`unboxAs`), uniformly, regardless of whether
+    /// the interface has one real implementation or several.
+    fn typeRefIsEntityInterface(tr: ir.TypeRef) bool {
+        return switch (tr) {
+            .named => |td| switch (td) {
+                .interface => |iface| !isCallbackInterface(iface),
+                else => false,
+            },
+            else => false,
+        };
     }
 
     /// Zero-initialized noop constant for a callback struct.
@@ -1548,7 +1633,7 @@ const Generator = struct {
             try self.write("            fn _w(");
             for (op.params, 0..) |p, i| {
                 if (i > 0) try self.write(", ");
-                const ct = try self.cApiTypeRef(p.type_ref, p.mode);
+                const ct = try self.cApiExportTypeRef(p.type_ref, p.mode);
                 defer self.alloc.free(ct);
                 try self.print("_{s}: {s}", .{ p.name, ct });
             }
@@ -1558,15 +1643,22 @@ const Generator = struct {
             try self.ind();
             try self.write("                _h(@ptrCast(@alignCast(_ld))");
             for (op.params) |p| {
-                const ct = try self.cApiTypeRef(p.type_ref, p.mode);
+                const ct = try self.cApiExportTypeRef(p.type_ref, p.mode);
                 defer self.alloc.free(ct);
                 const is_unbounded_str = switch (p.type_ref) {
                     .string => |b| b == null,
                     .wstring => |b| b == null,
                     else => false,
                 };
-                // Unbounded strings arrive as [*:0]const u8; Handlers expects []const u8.
-                if (is_unbounded_str) {
+                // Entity params arrive as a single boxed *anyopaque; Handlers
+                // (the idiomatic Zig signature) expects the native fat-pointer
+                // handle, so unbox it.
+                if (typeRefIsEntityInterface(p.type_ref)) {
+                    const pzig = try self.typeRefToZig(p.type_ref);
+                    defer self.alloc.free(pzig);
+                    try self.print(", zidl_rt.unboxAs({s}, _{s})", .{ pzig, p.name });
+                    // Unbounded strings arrive as [*:0]const u8; Handlers expects []const u8.
+                } else if (is_unbounded_str) {
                     try self.print(", std.mem.span(_{s})", .{p.name});
                     // Nullable pointer params (callback struct or sequence typedef): unwrap or zero.
                 } else if (std.mem.startsWith(u8, ct, "?*const ")) {
@@ -1607,7 +1699,7 @@ const Generator = struct {
             try self.print("    {s}: ?*const fn (", .{op.name});
             for (op.params, 0..) |p, i| {
                 if (i > 0) try self.write(", ");
-                const pt = try self.cApiTypeRef(p.type_ref, p.mode);
+                const pt = try self.cApiExportTypeRef(p.type_ref, p.mode);
                 defer self.alloc.free(pt);
                 try self.write(pt);
             }
@@ -1618,11 +1710,14 @@ const Generator = struct {
         try self.print("}}; // {s}{s}\n\n", .{ pfx, iface_name });
     }
 
-    /// Adapter struct: wraps `C_{iface_name}` in a Zig `{iface_name}` vtable.
-    /// Allocated with `std.heap.c_allocator` by entity create wrappers; freed
-    /// in the `deinit` vtable slot when the entity is deleted.
-    /// Emit one trivial `pub export fn callconv(.c)` forwarder for an interface operation.
-    /// Vtable slots now use C-ABI types directly, so no conversion is needed.
+    /// Emit one trivial `pub export fn callconv(.c)` forwarder for an
+    /// interface operation. Every entity value crossing this boundary —
+    /// `self`, entity-typed params, entity-typed returns — is a single boxed
+    /// opaque pointer, uniformly, leaf or base interface alike (see
+    /// `zidl_rt.EntityBox`). Params unbox via `zidl_rt.unboxAs` before
+    /// dispatching to the reconstructed native vtable call; entity returns
+    /// are obtained via `_r.vtable.get_c_abi_handle(_r.ptr)` — no allocation
+    /// in generated code.
     fn emitCApiOp(
         self: *Generator,
         c_name: []const u8,
@@ -1630,14 +1725,14 @@ const Generator = struct {
         iface_name: []const u8,
         op: *const ir.Operation,
     ) anyerror!void {
-        const c_ret = try self.cApiOptRetType(op.return_type);
+        const c_ret = try self.cApiExportOptRetType(op.return_type);
         defer self.alloc.free(c_ret);
         const is_void_ret = std.mem.eql(u8, c_ret, "void");
 
         try self.ind();
-        try self.print("pub export fn {s}_{s}(self: {s}{s}", .{ c_name, op.name, pfx, iface_name });
+        try self.print("pub export fn {s}_{s}(self: *anyopaque", .{ c_name, op.name });
         for (op.params) |p| {
-            const pt = try self.cApiParamType(p);
+            const pt = try self.cApiExportParamType(p);
             defer self.alloc.free(pt);
             // Struct in-params use ?*const T so C callers can pass null for defaults
             // (DDS convention: null QoS means "use entity-type default QoS").
@@ -1650,16 +1745,27 @@ const Generator = struct {
         try self.print(") callconv(.c) {s} {{\n", .{c_ret});
 
         try self.ind();
-        if (!is_void_ret) {
+        try self.print("    const _self: {s}{s} = zidl_rt.unboxAs({s}{s}, self);\n", .{ pfx, iface_name, pfx, iface_name });
+
+        const ret_is_entity = if (op.return_type) |rt| typeRefIsEntityInterface(rt) else false;
+
+        try self.ind();
+        if (ret_is_entity) {
+            try self.write("    const _r = ");
+        } else if (!is_void_ret) {
             try self.write("    return ");
         } else {
             try self.write("    ");
         }
-        try self.print("self.vtable.{s}(self.ptr", .{op.name});
+        try self.print("_self.vtable.{s}(_self.ptr", .{op.name});
         for (op.params) |p| {
-            const pt = try self.cApiParamType(p);
+            const pt = try self.cApiExportParamType(p);
             defer self.alloc.free(pt);
-            if (p.mode == .in_ and std.mem.startsWith(u8, pt, "*const ")) {
+            if (typeRefIsEntityInterface(p.type_ref)) {
+                const pzig = try self.typeRefToZig(p.type_ref);
+                defer self.alloc.free(pzig);
+                try self.print(", zidl_rt.unboxAs({s}, {s})", .{ pzig, p.name });
+            } else if (p.mode == .in_ and std.mem.startsWith(u8, pt, "*const ")) {
                 // Substitute the type default when caller passes null.
                 try self.print(", {s} orelse &.{{}}", .{p.name});
             } else {
@@ -1668,11 +1774,17 @@ const Generator = struct {
         }
         try self.write(");\n");
 
+        if (ret_is_entity) {
+            try self.ind();
+            try self.write("    return _r.vtable.get_c_abi_handle(_r.ptr);\n");
+        }
+
         try self.ind();
         try self.write("}\n\n");
     }
 
-    /// Emit trivial getter and optional setter `pub export fn` for an attribute.
+    /// Emit trivial getter and optional setter `pub export fn` for an
+    /// attribute. See `emitCApiOp` for the entity boxing/unboxing convention.
     fn emitCApiAttr(
         self: *Generator,
         c_name: []const u8,
@@ -1680,23 +1792,40 @@ const Generator = struct {
         iface_name: []const u8,
         attr: *const ir.Attribute,
     ) anyerror!void {
-        const c_at = try self.cApiRetType(attr.type_ref);
+        const c_at = try self.cApiExportRetType(attr.type_ref);
         defer self.alloc.free(c_at);
+        const at_is_entity = typeRefIsEntityInterface(attr.type_ref);
 
         try self.ind();
-        try self.print("pub export fn {s}_get_{s}(self: {s}{s}) callconv(.c) {s} {{\n", .{ c_name, attr.name, pfx, iface_name, c_at });
+        try self.print("pub export fn {s}_get_{s}(self: *anyopaque) callconv(.c) {s} {{\n", .{ c_name, attr.name, c_at });
         try self.ind();
-        try self.print("    return self.vtable.get_{s}(self.ptr);\n", .{attr.name});
+        try self.print("    const _self: {s}{s} = zidl_rt.unboxAs({s}{s}, self);\n", .{ pfx, iface_name, pfx, iface_name });
+        try self.ind();
+        if (at_is_entity) {
+            try self.print("    const _r = _self.vtable.get_{s}(_self.ptr);\n", .{attr.name});
+            try self.ind();
+            try self.write("    return _r.vtable.get_c_abi_handle(_r.ptr);\n");
+        } else {
+            try self.print("    return _self.vtable.get_{s}(_self.ptr);\n", .{attr.name});
+        }
         try self.ind();
         try self.write("}\n\n");
 
         if (!attr.readonly) {
-            const c_param = try self.cApiTypeRef(attr.type_ref, .in_);
+            const c_param = try self.cApiExportTypeRef(attr.type_ref, .in_);
             defer self.alloc.free(c_param);
             try self.ind();
-            try self.print("pub export fn {s}_set_{s}(self: {s}{s}, value: {s}) callconv(.c) void {{\n", .{ c_name, attr.name, pfx, iface_name, c_param });
+            try self.print("pub export fn {s}_set_{s}(self: *anyopaque, value: {s}) callconv(.c) void {{\n", .{ c_name, attr.name, c_param });
             try self.ind();
-            try self.print("    self.vtable.set_{s}(self.ptr, value);\n", .{attr.name});
+            try self.print("    const _self: {s}{s} = zidl_rt.unboxAs({s}{s}, self);\n", .{ pfx, iface_name, pfx, iface_name });
+            try self.ind();
+            if (at_is_entity) {
+                const at_zig = try self.typeRefToZig(attr.type_ref);
+                defer self.alloc.free(at_zig);
+                try self.print("    _self.vtable.set_{s}(_self.ptr, zidl_rt.unboxAs({s}, value));\n", .{ attr.name, at_zig });
+            } else {
+                try self.print("    _self.vtable.set_{s}(_self.ptr, value);\n", .{attr.name});
+            }
             try self.ind();
             try self.write("}\n\n");
         }
@@ -1709,11 +1838,7 @@ const Generator = struct {
     /// Falls back to the "Listener" name suffix heuristic for IDL files that have not
     /// yet been annotated — this fallback is deprecated and will be removed.
     fn isCallbackInterface(iface: *const ir.Interface) bool {
-        for (iface.raw) |ann| {
-            if (std.mem.eql(u8, ann.name, "callback")) return true;
-        }
-        // Deprecated fallback: name-based heuristic for backwards compatibility.
-        return std.mem.endsWith(u8, iface.name, "Listener");
+        return interface.isCallbackInterface(iface);
     }
 
     /// If `tr` is a named typedef whose underlying type is a sequence, return that typedef.
@@ -1756,6 +1881,37 @@ const Generator = struct {
     /// named struct/union → pointer, everything else same as vtable type.
     fn cApiParamType(self: *Generator, p: ir.Parameter) ![]u8 {
         return self.cApiTypeRef(p.type_ref, p.mode);
+    }
+
+    // ── C-ABI-boundary-facing type overrides ──────────────────────────────────
+    //
+    // `cApiTypeRef`/`cApiRetType`/`cApiParamType` above return the *native*
+    // type for entity interfaces (the real `{ptr, vtable}` fat pointer) — they
+    // also serve the native vtable slot and idiomatic forwarding-method
+    // declarations, which must keep dealing in real values internally.
+    //
+    // Anything that actually crosses `callconv(.c)` — a `pub export fn`'s own
+    // signature, or a `@callback` thunk's signature — narrows entity
+    // interfaces down to a single boxed `*anyopaque` instead (see
+    // `zidl_rt.EntityBox`, `typeRefIsEntityInterface`). These wrappers apply
+    // that narrowing on top of the native functions above.
+
+    fn cApiExportTypeRef(self: *Generator, tr: ir.TypeRef, mode: ir.ParamMode) ![]u8 {
+        if (typeRefIsEntityInterface(tr)) return self.alloc.dupe(u8, "*anyopaque");
+        return self.cApiTypeRef(tr, mode);
+    }
+
+    fn cApiExportParamType(self: *Generator, p: ir.Parameter) ![]u8 {
+        return self.cApiExportTypeRef(p.type_ref, p.mode);
+    }
+
+    fn cApiExportRetType(self: *Generator, ret: ir.TypeRef) ![]u8 {
+        if (typeRefIsEntityInterface(ret)) return self.alloc.dupe(u8, "*anyopaque");
+        return self.cApiRetType(ret);
+    }
+
+    fn cApiExportOptRetType(self: *Generator, ret: ?ir.TypeRef) ![]u8 {
+        return if (ret) |tr| self.cApiExportRetType(tr) else self.alloc.dupe(u8, "void");
     }
 
     // ── Idiomatic Zig forwarding-method helpers ───────────────────────────────
@@ -1871,8 +2027,14 @@ const Generator = struct {
                 .out, .inout => "[*:0]u16",
             }),
             .named => |td| switch (td) {
-                // Entity interfaces: extern struct fat pointer, pass by value.
                 // Callback interfaces: optional pointer to C callback struct.
+                // Entity interfaces: the *native* fat-pointer type, unchanged
+                // — this function also serves the native vtable slot and
+                // idiomatic forwarding-method declarations, which always deal
+                // in real `{ptr, vtable}` values internally. Only the
+                // C-ABI-facing *export* signatures (the `pub export fn`
+                // itself, and `@callback` thunks) narrow entities down to a
+                // single boxed `*anyopaque` — see `cApiExportTypeRef`.
                 .interface => |iface| if (isCallbackInterface(iface)) blk: {
                     const zig = try self.typeRefToZig(tr);
                     defer self.alloc.free(zig);
@@ -1932,7 +2094,9 @@ const Generator = struct {
         };
     }
 
-    /// C-ABI return type: `[]const u8` → `[*:0]const u8`, others unchanged.
+    /// C-ABI return type: `[]const u8` → `[*:0]const u8`; entity interfaces
+    /// stay the *native* fat-pointer type (see `cApiTypeRef`'s doc comment —
+    /// this also serves the native vtable slot); others unchanged.
     fn cApiRetType(self: *Generator, ret: ir.TypeRef) ![]u8 {
         return switch (ret) {
             .string => self.alloc.dupe(u8, "[*:0]const u8"),
@@ -5634,6 +5798,7 @@ test "zig_backend: interface basic vtable struct" {
     try testing.expect(has(s, "vtable: *const Vtable,"));
     try testing.expect(has(s, "pub const Vtable = struct {"));
     try testing.expect(has(s, "deinit: *const fn (*anyopaque) void,"));
+    try testing.expect(has(s, "get_c_abi_handle: *const fn (*anyopaque) *anyopaque,"));
 }
 
 test "zig_backend: interface operation vtable entry and forwarder" {
@@ -5749,16 +5914,78 @@ test "zig_backend: interface in module" {
 test "zig_backend: --zig-generate-c-api emits callconv(.c) wrappers for entity interfaces" {
     var out = try testGenOpts(
         \\interface Writer { long write_val(in long x, in string label); void reset(); };
-    , "w", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
+    , "w", .{
+        .generate_interfaces = true,
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+        .zig_generate_c_api = true,
+    });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // Trivial forwarder: string param is [*:0]const u8, passed directly to vtable
-    try testing.expect(has(s, "pub export fn Writer_write_val(self: Writer, x: i32, label: [*:0]const u8) callconv(.c) i32"));
-    try testing.expect(has(s, "return self.vtable.write_val(self.ptr, x, label);"));
+    // Every entity crosses the C-ABI as a single boxed opaque pointer,
+    // unboxed at the top of the export function before dispatch.
+    try testing.expect(has(s, "pub export fn Writer_write_val(self: *anyopaque, x: i32, label: [*:0]const u8) callconv(.c) i32"));
+    try testing.expect(has(s, "const _self: Writer = zidl_rt.unboxAs(Writer, self);"));
+    try testing.expect(has(s, "return _self.vtable.write_val(_self.ptr, x, label);"));
     // No span conversion — vtable already uses C types
     try testing.expect(!has(s, "std.mem.span(label)"));
     // Void op
-    try testing.expect(has(s, "pub export fn Writer_reset(self: Writer) callconv(.c) void"));
+    try testing.expect(has(s, "pub export fn Writer_reset(self: *anyopaque) callconv(.c) void"));
+}
+
+test "zig_backend: --zig-generate-c-api entity-returning op boxes the result via get_c_abi_handle" {
+    var out = try testGenOpts(
+        \\interface Writer {};
+        \\interface Factory { Writer create_writer(in long qos); };
+    , "f", .{
+        .generate_interfaces = true,
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+        .zig_generate_c_api = true,
+    });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Params (including a plain scalar) unbox self only — nothing to unbox
+    // here since `qos` isn't an entity — but the result of the native call
+    // must be boxed via the returned value's own vtable before returning,
+    // never a hardcoded/assumed vtable, and no allocation call in generated
+    // code at all (that's the concrete impl's own responsibility).
+    try testing.expect(has(s, "pub export fn Factory_create_writer(self: *anyopaque, qos: i32) callconv(.c) *anyopaque {"));
+    try testing.expect(has(s, "const _self: Factory = zidl_rt.unboxAs(Factory, self);"));
+    try testing.expect(has(s, "const _r = _self.vtable.create_writer(_self.ptr, qos);"));
+    try testing.expect(has(s, "return _r.vtable.get_c_abi_handle(_r.ptr);"));
+    try testing.expect(!has(s, "zidl_rt.boxEntity"));
+    // The *native* vtable slot (used for internal Zig-to-Zig dispatch, e.g. a
+    // concrete FactoryImpl's own implementation) must keep the real
+    // fat-pointer Writer return type — only the export function's own
+    // signature narrows to *anyopaque. Getting this wrong (making the vtable
+    // slot itself *anyopaque) would break every native caller of this vtable.
+    try testing.expect(has(s, "create_writer: *const fn (*anyopaque, qos: i32) Writer,"));
+    try testing.expect(!has(s, "create_writer: *const fn (*anyopaque, qos: i32) *anyopaque,"));
+    // Same for the idiomatic Zig forwarding method.
+    try testing.expect(has(s, "pub fn create_writer(self: @This(), qos: i32) Writer {"));
+}
+
+test "zig_backend: --zig-generate-c-api entity-typed param unboxes before dispatch" {
+    var out = try testGenOpts(
+        \\interface Topic {};
+        \\interface Publisher { long create_writer(in Topic a_topic); };
+    , "p", .{
+        .generate_interfaces = true,
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+        .zig_generate_c_api = true,
+    });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Topic-typed param arrives as a boxed *anyopaque; must be unboxed to the
+    // native fat-pointer form before the vtable call, uniformly — regardless
+    // of whether the parameter's interface has one implementation or several.
+    try testing.expect(has(s, "pub export fn Publisher_create_writer(self: *anyopaque, a_topic: *anyopaque) callconv(.c) i32 {"));
+    try testing.expect(has(s, "return _self.vtable.create_writer(_self.ptr, zidl_rt.unboxAs(Topic, a_topic));"));
+    // Native vtable slot keeps the real Topic fat-pointer param type.
+    try testing.expect(has(s, "create_writer: *const fn (*anyopaque, a_topic: Topic) i32,"));
+    try testing.expect(!has(s, "create_writer: *const fn (*anyopaque, a_topic: *anyopaque) i32,"));
 }
 
 test "zig_backend: --zig-generate-c-api emits C_XxxListener and adapter for listener interfaces" {
@@ -5766,12 +5993,19 @@ test "zig_backend: --zig-generate-c-api emits C_XxxListener and adapter for list
         \\struct Status { long count; };
         \\interface Source { long enable(); };
         \\interface SourceListener { void on_change(in Source src, in Status st); };
-    , "sl", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
+    , "sl", .{
+        .generate_interfaces = true,
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+        .zig_generate_c_api = true,
+    });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // @callback interfaces now produce C callback struct (no C_ prefix, no fat-pointer, no adapter)
+    // @callback interfaces now produce C callback struct (no C_ prefix, no adapter).
+    // Source is a leaf entity interface, so its field devirtualizes to
+    // *anyopaque — matching the C header's single-pointer Source handle.
     try testing.expect(has(s, "pub const SourceListener = extern struct {"));
-    try testing.expect(has(s, "on_change: ?*const fn (Source, *const Status, ?*anyopaque) callconv(.c) void"));
+    try testing.expect(has(s, "on_change: ?*const fn (*anyopaque, *const Status, ?*anyopaque) callconv(.c) void"));
     try testing.expect(has(s, "pub const noop_SourceListener: SourceListener = .{};"));
     // No fat-pointer SourceListener, no adapter
     try testing.expect(!has(s, "pub const CSourceListenerAdapter"));
@@ -5786,24 +6020,33 @@ test "zig_backend: @callback interface emits Zig listener helpers" {
         \\    void on_offered(in DataWriter dw, in OfferedStatus status);
         \\    void on_alive(in DataWriter dw);
         \\};
-    , "wl", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true });
+    , "wl", .{
+        .generate_interfaces = true,
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+    });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // C callback struct emitted as before
     try testing.expect(has(s, "pub const WriterListener = extern struct {"));
     try testing.expect(has(s, "pub const noop_WriterListener: WriterListener = .{};"));
-    // Handlers type: plain Zig signatures, no callconv(.c), status by value
+    // Handlers type (idiomatic Zig surface): plain Zig signatures, no callconv(.c),
+    // status by value, DataWriter still the native fat-pointer handle.
     try testing.expect(has(s, "pub fn WriterListenerHandlers(comptime Ctx: type) type {"));
     try testing.expect(has(s, "on_offered: ?*const fn (*Ctx, DataWriter, OfferedStatus) void = null,"));
     try testing.expect(has(s, "on_alive: ?*const fn (*Ctx, DataWriter) void = null,"));
     // Builder function: lowercase-first name
     try testing.expect(has(s, "pub fn writerListener(ctx: anytype, comptime cbs: WriterListenerHandlers(@TypeOf(ctx.*))) WriterListener {"));
-    // Thunks: callconv(.c) wrappers inside anonymous structs
-    try testing.expect(has(s, "fn _w(_dw: DataWriter, _status: *const OfferedStatus, _ld: ?*anyopaque) callconv(.c) void {"));
-    try testing.expect(has(s, "_h(@ptrCast(@alignCast(_ld)), _dw, _status.*);"));
+    // Thunks (C-ABI surface): DataWriter is a leaf interface, so the thunk
+    // parameter devirtualizes to *anyopaque — matching the C header's
+    // single-pointer DataWriter handle in the callback struct field — and the
+    // body reconstructs the fat-pointer handle before calling the idiomatic
+    // Zig handler.
+    try testing.expect(has(s, "fn _w(_dw: *anyopaque, _status: *const OfferedStatus, _ld: ?*anyopaque) callconv(.c) void {"));
+    try testing.expect(has(s, "_h(@ptrCast(@alignCast(_ld)), zidl_rt.unboxAs(DataWriter, _dw), _status.*);"));
     // on_alive has no status — no dereference
-    try testing.expect(has(s, "fn _w(_dw: DataWriter, _ld: ?*anyopaque) callconv(.c) void {"));
-    try testing.expect(has(s, "_h(@ptrCast(@alignCast(_ld)), _dw);"));
+    try testing.expect(has(s, "fn _w(_dw: *anyopaque, _ld: ?*anyopaque) callconv(.c) void {"));
+    try testing.expect(has(s, "_h(@ptrCast(@alignCast(_ld)), zidl_rt.unboxAs(DataWriter, _dw));"));
 }
 
 test "zig_backend: @callback thunk wraps string params with std.mem.span" {
@@ -5829,13 +6072,18 @@ test "zig_backend: --zig-generate-c-api entity wrappers use C_XxxListener and ad
         \\    long create_writer(in long qos, in WriterListener a_listener);
         \\    long set_listener(in WriterListener a_listener, in long mask);
         \\};
-    , "pw", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
+    , "pw", .{
+        .generate_interfaces = true,
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+        .zig_generate_c_api = true,
+    });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Vtable and export both use ?*const WriterListener (the callback struct)
     try testing.expect(has(s, "a_listener: ?*const WriterListener"));
-    // Trivial forwarder — no adapter allocation
-    try testing.expect(has(s, "return self.vtable.create_writer(self.ptr, qos, a_listener);"));
+    // Trivial forwarder after unboxing self — no adapter allocation
+    try testing.expect(has(s, "return _self.vtable.create_writer(_self.ptr, qos, a_listener);"));
     try testing.expect(!has(s, "std.heap.c_allocator.create(C"));
 }
 
@@ -5846,15 +6094,20 @@ test "zig_backend: --zig-generate-c-api struct in-params use ?*const T (null = d
         \\    long set_qos(in TopicQos qos);
         \\    long create_with_qos(in TopicQos qos, in long mask);
         \\};
-    , "tq", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
+    , "tq", .{
+        .generate_interfaces = true,
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+        .zig_generate_c_api = true,
+    });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Export signature: optional pointer so C callers can pass null for default QoS.
-    try testing.expect(has(s, "pub export fn Topic_set_qos(self: Topic, qos: ?*const TopicQos) callconv(.c) i32"));
-    try testing.expect(has(s, "pub export fn Topic_create_with_qos(self: Topic, qos: ?*const TopicQos, mask: i32) callconv(.c) i32"));
+    try testing.expect(has(s, "pub export fn Topic_set_qos(self: *anyopaque, qos: ?*const TopicQos) callconv(.c) i32"));
+    try testing.expect(has(s, "pub export fn Topic_create_with_qos(self: *anyopaque, qos: ?*const TopicQos, mask: i32) callconv(.c) i32"));
     // Vtable call: substitute default when null.
-    try testing.expect(has(s, "return self.vtable.set_qos(self.ptr, qos orelse &.{});"));
-    try testing.expect(has(s, "return self.vtable.create_with_qos(self.ptr, qos orelse &.{}, mask);"));
+    try testing.expect(has(s, "return _self.vtable.set_qos(_self.ptr, qos orelse &.{});"));
+    try testing.expect(has(s, "return _self.vtable.create_with_qos(_self.ptr, qos orelse &.{}, mask);"));
     // Vtable slot itself stays *const T (non-optional).
     try testing.expect(has(s, "set_qos: *const fn (*anyopaque, qos: *const TopicQos) i32,"));
 }
@@ -5864,7 +6117,12 @@ test "zig_backend: --zig-generate-c-api emits C_XxxSeq and out-seq write-back" {
         \\typedef long long Handle;
         \\typedef sequence<Handle> HandleSeq;
         \\interface Obj { long get_handles(out HandleSeq handles); };
-    , "sq", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
+    , "sq", .{
+        .generate_interfaces = true,
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+        .zig_generate_c_api = true,
+    });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Sequence typedef is now the extern struct itself (no C_ prefix companion)
@@ -5872,8 +6130,8 @@ test "zig_backend: --zig-generate-c-api emits C_XxxSeq and out-seq write-back" {
     try testing.expect(has(s, "_buffer: ?[*]Handle = null,"));
     // out param is ?*HandleSeq (no C_ prefix)
     try testing.expect(has(s, "handles: ?*HandleSeq"));
-    // Trivial forwarder — no write-back logic
-    try testing.expect(has(s, "return self.vtable.get_handles(self.ptr, handles);"));
+    // Trivial forwarder after unboxing self — no write-back logic
+    try testing.expect(has(s, "return _self.vtable.get_handles(_self.ptr, handles);"));
     try testing.expect(!has(s, "pub const C_HandleSeq"));
 }
 
@@ -5881,7 +6139,12 @@ test "zig_backend: --zig-generate-c-api in-StringSeq allocates span conversion" 
     var out = try testGenOpts(
         \\typedef sequence<string> StringSeq;
         \\interface F { long filter(in StringSeq params); };
-    , "sf", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
+    , "sf", .{
+        .generate_interfaces = true,
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+        .zig_generate_c_api = true,
+    });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // StringSeq typedef is the extern struct; [*:0]const u8 buffer (C strings)
@@ -5889,9 +6152,9 @@ test "zig_backend: --zig-generate-c-api in-StringSeq allocates span conversion" 
     try testing.expect(has(s, "_buffer: ?[*][*:0]const u8 = null,"));
     // param type is nullable pointer to StringSeq (no C_ prefix)
     try testing.expect(has(s, "params: ?*const StringSeq"));
-    // Trivial forwarder — no span conversion inside the export fn body.
+    // Trivial forwarder after unboxing self — no span conversion inside the export fn body.
     // (std.mem.span is legitimately used in StringSeq.deinit, but not in the forwarder.)
-    try testing.expect(has(s, "return self.vtable.filter(self.ptr, params);"));
+    try testing.expect(has(s, "return _self.vtable.filter(_self.ptr, params);"));
     try testing.expect(!has(s, "fn DDS_F_filter") or !has(s, "std.mem.span(params)"));
 }
 
@@ -5899,7 +6162,12 @@ test "zig_backend: --zig-generate-c-api emits noop vtable for listener interface
     var out = try testGenOpts(
         \\interface Writer { long write_val(in long x); };
         \\interface WriterListener { void on_change(in Writer w); };
-    , "wl", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
+    , "wl", .{
+        .generate_interfaces = true,
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+        .zig_generate_c_api = true,
+    });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Listener gets a noop constant, not a free function
@@ -5944,7 +6212,15 @@ test "zig_backend: imported callback interface param is qualified in vtable" {
 test "zig_backend: --zig-generate-c-api with --type-prefix uses prefix in export name" {
     var out = try testGenOpts(
         \\interface Greeter { string greet(in string name); };
-    , "g", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true, .type_prefix = "DDS_" });
+    , "g", .{
+        .generate_interfaces = true,
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+        .zig_generate_c_api = true,
+        .type_prefix = "DDS_",
+        // --c-api-impl keys are always the unprefixed qualified name — the
+        // prefix only affects generated symbol *names*, not classification.
+    });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Exported symbol must carry the prefix so it matches the C header's declaration
@@ -5955,13 +6231,18 @@ test "zig_backend: --zig-generate-c-api with --type-prefix uses prefix in export
 test "zig_backend: --zig-generate-c-api string return uses ptrCast" {
     var out = try testGenOpts(
         \\interface Named { string get_name(); };
-    , "n", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
+    , "n", .{
+        .generate_interfaces = true,
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+        .zig_generate_c_api = true,
+    });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Vtable returns [*:0]const u8; trivial forwarder passes it through
     try testing.expect(has(s, "get_name: *const fn (*anyopaque) [*:0]const u8,"));
     try testing.expect(has(s, "callconv(.c) [*:0]const u8"));
-    try testing.expect(has(s, "return self.vtable.get_name(self.ptr);"));
+    try testing.expect(has(s, "return _self.vtable.get_name(_self.ptr);"));
     // No ptrCast needed — vtable already returns the right type
     try testing.expect(!has(s, "@ptrCast(_r.ptr)"));
 }
@@ -5970,15 +6251,20 @@ test "zig_backend: --zig-generate-c-api struct in-param passed by pointer" {
     var out = try testGenOpts(
         \\struct Qos { long depth; };
         \\interface Writer { long set_qos(in Qos qos); };
-    , "sq", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true, .zig_generate_c_api = true });
+    , "sq", .{
+        .generate_interfaces = true,
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+        .zig_generate_c_api = true,
+    });
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Vtable slot: non-optional *const T (vtable always gets a valid pointer).
     try testing.expect(has(s, "set_qos: *const fn (*anyopaque, qos: *const Qos) i32,"));
-    // C-ABI export: ?*const T so C callers can pass null for defaults.
-    try testing.expect(has(s, "pub export fn Writer_set_qos(self: Writer, qos: ?*const Qos) callconv(.c) i32"));
+    // C-ABI export: boxed self, ?*const T so C callers can pass null for defaults.
+    try testing.expect(has(s, "pub export fn Writer_set_qos(self: *anyopaque, qos: ?*const Qos) callconv(.c) i32"));
     // Forwarder substitutes type default when null.
-    try testing.expect(has(s, "return self.vtable.set_qos(self.ptr, qos orelse &.{});"));
+    try testing.expect(has(s, "return _self.vtable.set_qos(_self.ptr, qos orelse &.{});"));
     try testing.expect(!has(s, "qos.*"));
 }
 
@@ -6682,4 +6968,58 @@ test "zig_backend: sequence typedef has no _free export without zig_generate_c_a
     , "t", .{ .no_typesupport = true, .no_typeobject_support = true });
     defer h.deinit(testing.allocator);
     try testing.expect(!has(h.items, "_free"));
+}
+
+test "zig_backend: as_Base vtable slot emitted for every direct base, unconditionally" {
+    // Entity is the first declared base, TopicDescription the second —
+    // deliberately mirroring dcps.idl's `Topic : Entity, TopicDescription`.
+    // The second base's fields land at a non-zero offset within Topic's own
+    // flattened Vtable, which is exactly why a raw pointer-reinterpretation
+    // upcast (instead of this dedicated vtable slot) would silently misread
+    // the wrong fields for it.
+    var out = try testGenOpts(
+        \\interface Entity {};
+        \\interface TopicDescription {};
+        \\interface Topic : Entity, TopicDescription {};
+    , "t", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Present even without --zig-generate-c-api, matching deinit/get_c_abi_handle.
+    try testing.expect(has(s, "as_Entity: *const fn (*anyopaque) Entity,"));
+    try testing.expect(has(s, "as_TopicDescription: *const fn (*anyopaque) TopicDescription,"));
+    // No export wrappers without --zig-generate-c-api.
+    try testing.expect(!has(s, "pub export fn Topic_as_Entity"));
+    try testing.expect(!has(s, "pub export fn Topic_as_TopicDescription"));
+}
+
+test "zig_backend: --zig-generate-c-api generates an as_Base export per direct base" {
+    var out = try testGenOpts(
+        \\interface Entity {};
+        \\interface TopicDescription {};
+        \\interface Topic : Entity, TopicDescription {};
+    , "t", .{
+        .generate_interfaces = true,
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+        .zig_generate_c_api = true,
+    });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "pub export fn Topic_as_Entity(self: *anyopaque) callconv(.c) *anyopaque {"));
+    try testing.expect(has(s, "const _self: Topic = zidl_rt.unboxAs(Topic, self);"));
+    try testing.expect(has(s, "const _r = _self.vtable.as_Entity(_self.ptr);"));
+    // Two separate export functions share the unbox line pattern; check both
+    // bodies dispatch through their own `as_*` slot and box via the result's
+    // own vtable, never a hardcoded one.
+    try testing.expect(has(s, "pub export fn Topic_as_TopicDescription(self: *anyopaque) callconv(.c) *anyopaque {"));
+    try testing.expect(has(s, "const _r = _self.vtable.as_TopicDescription(_self.ptr);"));
+    try testing.expect(has(s, "return _r.vtable.get_c_abi_handle(_r.ptr);"));
+}
+
+test "zig_backend: interface with no bases gets no as_Base slot" {
+    var out = try testGenOpts(
+        \\interface Standalone {};
+    , "t", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    try testing.expect(!has(out.items, "as_"));
 }
