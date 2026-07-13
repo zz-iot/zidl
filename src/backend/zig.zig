@@ -3200,7 +3200,7 @@ const Generator = struct {
         try self.ind();
         try self.write("        }\n");
         try self.ind();
-        try self.print("        try {s}(self._dr, &_tmp, max, ss, vs, is{s});\n", .{ raw_fn, ih_arg });
+        try self.print("        try {s}(self._dr, &_tmp, max, ss, vs, is{s}, self._alloc);\n", .{ raw_fn, ih_arg });
         try self.ind();
         try self.write("        if (_tmp.items.len == 0) return false;\n");
         try self.ind();
@@ -3211,7 +3211,7 @@ const Generator = struct {
         if (needs_deinit) {
             try self.write("        errdefer {\n");
             try self.ind();
-            try self.write("            for (out.items[_base..]) |_sv| _sv.value.deinit(self._alloc);\n");
+            try self.write("            for (out.items[_base..]) |*_sv| _sv.value.deinit(self._alloc);\n");
             try self.ind();
             try self.write("            out.items.len = _base;\n");
             try self.ind();
