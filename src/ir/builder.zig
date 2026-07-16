@@ -43,6 +43,41 @@ pub fn build(
     global_scope: *const Scope,
     imports: []const []const u8,
 ) anyerror!ir.Spec {
+    return buildImpl(backing_alloc, ast_spec, global_scope, imports, &.{});
+}
+
+/// An imported file's own AST + scope, needed to fill in the *real* member
+/// lists (operations, attributes, ...) of types it declares.  Without this,
+/// an imported symbol only gets the empty Pass-1 skeleton registered by
+/// `registerTypes` — fine for plain type references, but wrong for anything
+/// that needs to walk into a cross-module base's members (e.g. flattening a
+/// `@callback interface Derived : SomeImportedListener`).
+pub const ImportedUnit = struct {
+    ast_spec: *const ast.Specification,
+    scope: *const Scope,
+};
+
+/// Like `build`, but additionally fills in the real IR content (not just
+/// empty skeletons) for symbols declared in `imported_units`.  Use this when
+/// the caller needs to look through an imported type's members — e.g. a
+/// `@callback interface` inheriting cross-module.
+pub fn buildWithImportedUnits(
+    backing_alloc: std.mem.Allocator,
+    ast_spec: *const ast.Specification,
+    global_scope: *const Scope,
+    imports: []const []const u8,
+    imported_units: []const ImportedUnit,
+) anyerror!ir.Spec {
+    return buildImpl(backing_alloc, ast_spec, global_scope, imports, imported_units);
+}
+
+fn buildImpl(
+    backing_alloc: std.mem.Allocator,
+    ast_spec: *const ast.Specification,
+    global_scope: *const Scope,
+    imports: []const []const u8,
+    imported_units: []const ImportedUnit,
+) anyerror!ir.Spec {
     var spec_arena = std.heap.ArenaAllocator.init(backing_alloc);
     errdefer spec_arena.deinit();
     const alloc = spec_arena.allocator();
@@ -57,7 +92,32 @@ pub fn build(
     // Pass 1 — register skeleton IR nodes from the scope tree.
     try b.registerTypes(global_scope, "", false);
 
-    // Pass 2 — fill skeletons from the AST in source order.
+    // Pass 2 — fill imported units' own skeletons from their own AST first
+    // (their content never becomes part of the output item tree — the
+    // per-call discard list below is thrown away — but this mutates the same
+    // skeleton nodes Pass 1 registered in `type_map`, so any later cross-
+    // module base reference sees the real members instead of an empty stub).
+    for (imported_units) |iu| {
+        var discard: std.ArrayListUnmanaged(ir.ModuleItem) = .empty;
+        try b.buildDefinitions(iu.ast_spec.definitions, &discard, "", iu.scope);
+
+        // Deliberately undo the fill for non-`@callback` (entity) interfaces:
+        // only `@callback` interface flattening (`collectInterfaceMembers` in
+        // the backends) needs a cross-module base's real `.operations` — entity
+        // interfaces use per-backend mechanisms that were never designed
+        // around cross-module bases having real content (native Zig vtable
+        // flattening requires every concrete impl's hand-written vtable
+        // literal to grow to match; the C++ backend's native-handle-owner
+        // resolution assumes at most one candidate per base chain). Filling
+        // those in as a side effect of this fix would silently change what
+        // those backends require without anyone asking for it. Interfaces
+        // declared directly in the main file are unaffected — this only
+        // touches nodes built from `iu`'s own AST, before the main file's own
+        // Pass 2 runs.
+        b.resetNonCallbackInterfaces(iu.scope, "");
+    }
+
+    // Pass 2 — fill the main file's own skeletons from its AST in source order.
     var top_items: std.ArrayListUnmanaged(ir.ModuleItem) = .empty;
     try b.buildDefinitions(ast_spec.definitions, &top_items, "", global_scope);
 
@@ -103,9 +163,14 @@ const Builder = struct {
 
     /// Register skeleton IR nodes from `scope` into `type_map` and
     /// `module_entries`.  `is_imported_ctx` is true when we are recursing inside
-    /// a scope that was preloaded from an imported file.  Imported modules are
-    /// NOT added to `module_entries` (they won't be code-generated), but their
-    /// child types ARE registered in `type_map` so that cross-references resolve.
+    /// a scope that was preloaded from an imported file.  Imported modules DO
+    /// get a `module_entries` slot (needed so `buildDefinitions`'s `handleModule`
+    /// can find it when `buildWithImportedUnits` fills that module's real
+    /// members from its own AST), but their marker is never appended to the
+    /// *main* file's output item tree unless the main file's own AST actually
+    /// re-opens that module — so they still aren't code-generated as top-level
+    /// output. Their child types ARE always registered in `type_map` so that
+    /// cross-references resolve.
     fn registerTypes(self: *Builder, scope: *const Scope, qpath: []const u8, is_imported_ctx: bool) anyerror!void {
         var it = scope.symbols.iterator();
         while (it.next()) |entry| {
@@ -114,7 +179,7 @@ const Builder = struct {
             switch (sym.tag) {
                 .module => {
                     const qname = try qualifyName(self.alloc, qpath, sym.name);
-                    if (!is_imported) {
+                    {
                         const lkey = try toLower(self.alloc, qname);
                         if (!self.module_entries.contains(lkey)) {
                             const mod = try self.alloc.create(ir.Module);
@@ -194,6 +259,52 @@ const Builder = struct {
                 },
                 // Skipped: forward decls, enumerator, const_dcl, operations,
                 //          attributes, CCM, valuetype, component, home, …
+                else => {},
+            }
+        }
+    }
+
+    /// True for `@callback`-annotated interfaces, or (fallback, for IDL predating
+    /// the annotation) interfaces whose name ends in `Listener`. Mirrors
+    /// `backend/interface.zig`'s `isCallbackInterface` exactly — duplicated here
+    /// (rather than imported) because the IR layer doesn't otherwise depend on
+    /// the backend layer, and this check is small enough that keeping the two in
+    /// sync by inspection is low-risk.
+    fn isCallbackIface(iface: *const ir.Interface) bool {
+        for (iface.raw) |ann| {
+            if (std.mem.eql(u8, ann.name, "callback")) return true;
+        }
+        return std.mem.endsWith(u8, iface.name, "Listener");
+    }
+
+    /// Undo `buildDefinitions`'s fill for every non-`@callback` interface
+    /// reachable from `scope` (called only on an imported unit's own scope,
+    /// after that unit's fill pass — see `buildImpl`). Only `@callback`
+    /// interface flattening needs a cross-module base's real operations;
+    /// entity interfaces should see the same empty-skeleton bases they always
+    /// have, so this leaves everything else (structs, typedefs, `@callback`
+    /// interfaces, ...) exactly as the fill pass left it.
+    fn resetNonCallbackInterfaces(self: *Builder, scope: *const Scope, qpath: []const u8) void {
+        var it = scope.symbols.iterator();
+        while (it.next()) |entry| {
+            const sym = entry.value_ptr.*;
+            switch (sym.tag) {
+                .module => {
+                    const qname = qualifyName(self.alloc, qpath, sym.name) catch continue;
+                    if (sym.scope) |child| self.resetNonCallbackInterfaces(child, qname);
+                },
+                .interface_def => {
+                    const qname = qualifyName(self.alloc, qpath, sym.name) catch continue;
+                    if (self.lookupByQname(qname)) |td| {
+                        const iface = td.interface;
+                        if (!isCallbackIface(iface)) {
+                            iface.bases = &.{};
+                            iface.operations = &.{};
+                            iface.attributes = &.{};
+                        }
+                    } else |_| {}
+                    if (sym.scope) |iface_scope| self.resetNonCallbackInterfaces(iface_scope, qname);
+                },
                 else => {},
             }
         }
@@ -1307,6 +1418,41 @@ fn testBuild(source: []const u8) !ir.Spec {
     return build(testing.allocator, &spec, az.global_scope, &.{});
 }
 
+/// Like `testBuild`, but `derived_source` gets `base_source` preloaded as an
+/// imported scope first — mirrors main.zig's real `import "file.idl";`
+/// pipeline (two independent Analyzers, the importer's scope preloaded with
+/// the imported one's symbols) rather than two modules in one source string.
+/// Uses `buildWithImportedUnits` so cross-module base members are filled in,
+/// not left as empty Pass-1 skeletons.
+fn testBuildWithImport(base_source: []const u8, derived_source: []const u8) !ir.Spec {
+    var base_ast_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer base_ast_arena.deinit();
+    var base_p = parser_mod.Parser.init(base_source, base_ast_arena.allocator());
+    const base_spec = try base_p.parseSpecification();
+
+    var base_az = try semantic_mod.Analyzer.init(testing.allocator);
+    defer base_az.deinit();
+    try base_az.analyze(&base_spec);
+
+    var derived_ast_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer derived_ast_arena.deinit();
+    var derived_p = parser_mod.Parser.init(derived_source, derived_ast_arena.allocator());
+    const derived_spec = try derived_p.parseSpecification();
+
+    var derived_az = try semantic_mod.Analyzer.init(testing.allocator);
+    defer derived_az.deinit();
+    try derived_az.preloadScope(base_az.global_scope);
+    try derived_az.analyze(&derived_spec);
+
+    return buildWithImportedUnits(
+        testing.allocator,
+        &derived_spec,
+        derived_az.global_scope,
+        &.{},
+        &.{.{ .ast_spec = &base_spec, .scope = base_az.global_scope }},
+    );
+}
+
 test "builder: simple struct" {
     var ir_spec = try testBuild(
         \\struct Point { long x; long y; };
@@ -1473,6 +1619,33 @@ test "builder: interface with operation" {
     try testing.expectEqual(@as(usize, 1), op.params.len);
     try testing.expectEqualStrings("name", op.params[0].name);
     try testing.expectEqual(ir.ParamMode.in_, op.params[0].mode);
+}
+
+test "builder: cross-module @callback interface inheritance fills base members" {
+    // Regression test: an imported file's own AST/scope is only used to
+    // register empty Pass-1 skeletons by default (`build`/plain `import
+    // module_names` list) — `collectInterfaceMembers`-style flattening (used
+    // for @callback interfaces) needs the base's *real* operations, which
+    // only `buildWithImportedUnits` fills in. Without the fill pass, `base`
+    // below resolves but its `.operations` stays empty, silently dropping
+    // `on_a` from the flattened derived interface.
+    var ir_spec = try testBuildWithImport(
+        \\module Base { @callback interface Listener { void on_a(in long x); }; };
+    ,
+        \\module Derived { @callback interface Ex : Base::Listener { void on_b(in long y); }; };
+    );
+    defer ir_spec.deinit();
+
+    const mod = ir_spec.items[0].module;
+    const iface = mod.items[0].type_decl.interface;
+    try testing.expectEqualStrings("Ex", iface.name);
+    try testing.expectEqual(@as(usize, 1), iface.bases.len);
+    const base_iface = iface.bases[0].interface;
+    try testing.expectEqualStrings("Listener", base_iface.name);
+    try testing.expectEqual(@as(usize, 1), base_iface.operations.len);
+    try testing.expectEqualStrings("on_a", base_iface.operations[0].name);
+    try testing.expectEqual(@as(usize, 1), iface.operations.len);
+    try testing.expectEqualStrings("on_b", iface.operations[0].name);
 }
 
 test "builder: union with default case" {

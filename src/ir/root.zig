@@ -53,6 +53,8 @@ pub const typeDeclSpan = types.typeDeclSpan;
 /// Build an IR Spec from a parsed specification and the global scope produced
 /// by `semantic.Analyzer`.  See `builder.build` for full documentation.
 pub const build = builder.build;
+pub const buildWithImportedUnits = builder.buildWithImportedUnits;
+pub const ImportedUnit = builder.ImportedUnit;
 
 test {
     std.testing.refAllDecls(@This());

@@ -415,6 +415,11 @@ fn processFile(
     const ialloc = import_arena.allocator();
 
     var imported_analyzers: std.ArrayListUnmanaged(*zidl.semantic.Analyzer) = .empty;
+    // Parallel to imported_analyzers: each import's own parsed AST, kept alive
+    // (not freed immediately after analysis, unlike before) so ir.build() can
+    // fill in imported types' real members, not just empty skeletons — see
+    // zidl.ir.ImportedUnit / buildWithImportedUnits.
+    var imported_ast_specs: std.ArrayListUnmanaged(*const zidl.ast.Specification) = .empty;
     var import_module_names: std.ArrayListUnmanaged([]const u8) = .empty;
     var seen_import_modules = std.StringHashMapUnmanaged(void).empty;
 
@@ -490,7 +495,15 @@ fn processFile(
             }
             try stderr.flush();
         }
-        sub_ast_arena.deinit(); // AST no longer needed; scope data stays in ialloc
+        // Note: sub_ast_arena is intentionally NOT deinit'd here (unlike before) —
+        // ir.buildWithImportedUnits() needs the imported file's own AST alive to
+        // fill in its types' real members (operations, etc.), not just empty
+        // Pass-1 skeletons. It's backed by ialloc (import_arena), which the
+        // caller keeps alive until after ir.build() returns, so this only
+        // delays freeing rather than leaking past this function's lifetime.
+        const sub_ast_copy = try ialloc.create(zidl.ast.Specification);
+        sub_ast_copy.* = sub_ast;
+        try imported_ast_specs.append(ialloc, sub_ast_copy);
         try imported_analyzers.append(ialloc, sub_az);
 
         // Collect unique top-level module names from the imported scope.
@@ -531,7 +544,17 @@ fn processFile(
     // ── Phase 4: Build IR ────────────────────────────────────────────────────
     // import_arena (and sub-analyzers) remain alive here — scope pointers
     // inside preloaded symbols borrow from them until ir.build() returns.
-    var ir_spec = try zidl.ir.build(alloc, &ast_spec, analyzer.global_scope, import_module_names.items);
+    var imported_units: std.ArrayListUnmanaged(zidl.ir.ImportedUnit) = .empty;
+    for (imported_ast_specs.items, imported_analyzers.items) |iu_ast, iu_az| {
+        try imported_units.append(ialloc, .{ .ast_spec = iu_ast, .scope = iu_az.global_scope });
+    }
+    var ir_spec = try zidl.ir.buildWithImportedUnits(
+        alloc,
+        &ast_spec,
+        analyzer.global_scope,
+        import_module_names.items,
+        imported_units.items,
+    );
     defer ir_spec.deinit();
 
     for (ir_spec.warnings) |w| {
