@@ -93,13 +93,20 @@ fn buildImpl(
     try b.registerTypes(global_scope, "", false);
 
     // Pass 2 — fill imported units' own skeletons from their own AST first
-    // (their content never becomes part of the output item tree — the
-    // per-call discard list below is thrown away — but this mutates the same
-    // skeleton nodes Pass 1 registered in `type_map`, so any later cross-
-    // module base reference sees the real members instead of an empty stub).
+    // (their content never becomes part of the output item tree — but this
+    // mutates the same skeleton nodes Pass 1 registered in `type_map`, so any
+    // later cross-module base reference sees the real members instead of an
+    // empty stub). Uses `fillFromImportedAst`, NOT `buildDefinitions` — the
+    // latter's `.module` handling goes through `handleModule`, which
+    // permanently sets the *shared* `module_entries[...].in_parent = true` as
+    // a side effect. If the main file ever re-opens the same module
+    // namespace as an import (e.g. both declare `module DDS { ... }`), that
+    // would cause the main file's own Pass 2 to skip re-adding the module
+    // marker to the real output tree, silently dropping its content.
+    // `fillFromImportedAst` fills type skeletons in place without touching
+    // `module_entries` bookkeeping at all.
     for (imported_units) |iu| {
-        var discard: std.ArrayListUnmanaged(ir.ModuleItem) = .empty;
-        try b.buildDefinitions(iu.ast_spec.definitions, &discard, "", iu.scope);
+        try b.fillFromImportedAst(iu.ast_spec.definitions, "", iu.scope);
 
         // Deliberately undo the fill for non-`@callback` (entity) interfaces:
         // only `@callback` interface flattening (`collectInterfaceMembers` in
@@ -298,9 +305,16 @@ const Builder = struct {
                     if (self.lookupByQname(qname)) |td| {
                         const iface = td.interface;
                         if (!isCallbackIface(iface)) {
+                            // Reset to exactly the Pass-1 skeleton shape
+                            // (registerTypes' initial literal) — every field
+                            // the fill pass could have populated, not just
+                            // the ones `collectInterfaceMembers` reads.
                             iface.bases = &.{};
                             iface.operations = &.{};
                             iface.attributes = &.{};
+                            iface.type_decls = &.{};
+                            iface.consts = &.{};
+                            iface.raw = &.{};
                         }
                     } else |_| {}
                     if (sym.scope) |iface_scope| self.resetNonCallbackInterfaces(iface_scope, qname);
@@ -373,6 +387,57 @@ const Builder = struct {
                 );
                 try self.warnings.append(self.alloc, msg);
             },
+        }
+    }
+
+    // ── Imported-unit fill pass ───────────────────────────────────────────────
+
+    /// Like `buildDefinitions`, but used only to fill an imported unit's own
+    /// type skeletons in place (see `buildWithImportedUnits`). Deliberately
+    /// does NOT go through `handleModule`/`buildDefinition`: those append to
+    /// an `out_items` list and mutate the *shared* `module_entries[...].in_parent`
+    /// flag, which must reflect only the real output tree being assembled
+    /// from the main file's own AST. If an imported file and the main file
+    /// both declare the same module (e.g. `module DDS { ... }` reopened in
+    /// both), running that bookkeeping here would mark the module as
+    /// "already in parent" before the main file's Pass 2 ever runs — causing
+    /// the main file's own re-opening to be silently skipped, dropping its
+    /// content from the output. This function only recurses to reach nested
+    /// type declarations and fill them via the existing per-type builders,
+    /// which mutate the shared `type_map` skeleton directly regardless of
+    /// what (if anything) collects their return value.
+    fn fillFromImportedAst(
+        self: *Builder,
+        definitions: []const ast.Definition,
+        module_qpath: []const u8,
+        scope: *const Scope,
+    ) anyerror!void {
+        for (definitions) |*def| {
+            switch (def.kind) {
+                .module => |*m| {
+                    const qname = try qualifyName(self.alloc, module_qpath, m.name);
+                    var nbuf: [256]u8 = undefined;
+                    if (m.name.len > nbuf.len) return error.NameTooLong;
+                    const lname = lowerInto(nbuf[0..m.name.len], m.name);
+                    const sym = scope.lookupLocal(lname) orelse return error.MissingModuleScope;
+                    const child_scope = sym.scope orelse return error.NotAScope;
+                    try self.fillFromImportedAst(m.definitions, qname, child_scope);
+                },
+                .const_dcl => |*c| _ = try self.buildConst(c, def.annotations, module_qpath, scope),
+                .type_dcl => |*t| {
+                    var td_list: std.ArrayListUnmanaged(ir.TypeDecl) = .empty;
+                    try self.buildTypeDcl(t, def.annotations, module_qpath, scope, &td_list);
+                },
+                .except_dcl => |*e| _ = try self.buildExcept(e, def.annotations, module_qpath, scope),
+                .interface_dcl => |*i| switch (i.*) {
+                    .def => |*idef| _ = try self.buildInterface(idef, def.annotations, module_qpath, scope),
+                    .forward => {},
+                },
+                // import_dcl / unsupported constructs: nothing to fill; the
+                // main pass over the primary file already warns about the
+                // latter if it also encounters them directly.
+                else => {},
+            }
         }
     }
 
@@ -1646,6 +1711,30 @@ test "builder: cross-module @callback interface inheritance fills base members" 
     try testing.expectEqualStrings("on_a", base_iface.operations[0].name);
     try testing.expectEqual(@as(usize, 1), iface.operations.len);
     try testing.expectEqualStrings("on_b", iface.operations[0].name);
+}
+
+test "builder: main file re-opening an imported module's namespace keeps its own content" {
+    // Regression test: the imported-unit fill pass must not mark the shared
+    // `module_entries[...].in_parent` as true (which `handleModule` does as
+    // a side effect of the normal build path) — otherwise, when the main
+    // file re-opens the SAME module namespace as an import (both declare
+    // `module Base { ... }` here), the main file's own Pass 2 would find
+    // `in_parent` already true and skip re-adding the module marker to the
+    // output tree, silently dropping everything the main file itself put in
+    // that module.
+    var ir_spec = try testBuildWithImport(
+        \\module Base { @callback interface Listener { void on_a(in long x); }; };
+    ,
+        \\module Base { const long MAIN_ONLY = 42; };
+    );
+    defer ir_spec.deinit();
+
+    try testing.expectEqual(@as(usize, 1), ir_spec.items.len);
+    const mod = ir_spec.items[0].module;
+    try testing.expectEqualStrings("Base", mod.name);
+    try testing.expectEqual(@as(usize, 1), mod.items.len);
+    const c = mod.items[0].const_;
+    try testing.expectEqualStrings("MAIN_ONLY", c.name);
 }
 
 test "builder: union with default case" {
