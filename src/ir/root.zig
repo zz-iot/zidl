@@ -39,6 +39,7 @@ pub const Typedef = types.Typedef;
 pub const Native = types.Native;
 pub const Exception = types.Exception;
 pub const Interface = types.Interface;
+pub const isCallbackInterface = types.isCallbackInterface;
 pub const Operation = types.Operation;
 pub const Parameter = types.Parameter;
 pub const ParamMode = types.ParamMode;
@@ -53,6 +54,8 @@ pub const typeDeclSpan = types.typeDeclSpan;
 /// Build an IR Spec from a parsed specification and the global scope produced
 /// by `semantic.Analyzer`.  See `builder.build` for full documentation.
 pub const build = builder.build;
+pub const buildWithImportedUnits = builder.buildWithImportedUnits;
+pub const ImportedUnit = builder.ImportedUnit;
 
 test {
     std.testing.refAllDecls(@This());

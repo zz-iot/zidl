@@ -330,11 +330,13 @@ pub fn prefixedCNameFromQualified(
 /// plain C callback struct instead of an entity opaque handle / vtable.
 /// Falls back to the "Listener" name-suffix heuristic for IDL that predates the
 /// `@callback` annotation — deprecated, kept for backwards compatibility.
+///
+/// Thin re-export of the canonical `ir.isCallbackInterface`: kept as a
+/// function here (rather than deleting it and updating every call site to say
+/// `ir.isCallbackInterface`) since this backend module is where callers
+/// naturally look for it.
 pub fn isCallbackInterface(iface: *const ir.Interface) bool {
-    for (iface.raw) |ann| {
-        if (std.mem.eql(u8, ann.name, "callback")) return true;
-    }
-    return std.mem.endsWith(u8, iface.name, "Listener");
+    return ir.isCallbackInterface(iface);
 }
 
 /// Collect the qualified names of every (non-callback) interface that appears

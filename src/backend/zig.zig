@@ -163,7 +163,7 @@ pub fn generateSplitFiles(
             .{opts.input_stem},
         );
         try gen.write("const std = @import(\"std\");\n");
-        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_c_api) {
+        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(m.items)) {
             try gen.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
         if (opts.generate_zzdds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(m.items)) {
@@ -217,7 +217,7 @@ pub fn generateSplitFiles(
     if (non_module.items.len > 0) {
         if (module_names.items.len > 0) try gen.write("\n");
         try gen.write("const std = @import(\"std\");\n");
-        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_c_api) {
+        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(non_module.items)) {
             try gen.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
         if (opts.generate_zzdds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(non_module.items)) {
@@ -279,7 +279,7 @@ const Generator = struct {
             try self.print("// Zig output target: {s}\n\n", .{self.opts.zig_version.label()});
         }
         try self.write("const std = @import(\"std\");\n");
-        if (!self.opts.no_typesupport or self.opts.pl_cdr or self.opts.zig_generate_c_api) {
+        if (!self.opts.no_typesupport or self.opts.pl_cdr or self.opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(spec.items)) {
             try self.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveTopicTypes(spec.items)) {
@@ -2051,10 +2051,17 @@ const Generator = struct {
                 // Other named types (struct, union, exception): pass by pointer.
                 else => blk: {
                     if (seqTypedef(tr)) |std_td| {
-                        const p = self.opts.type_prefix;
+                        // Use the fully qualified name (via qualNameToZig), not the
+                        // bare `.name` field: this type may be a cross-module
+                        // reference (e.g. an operation inherited from an imported
+                        // base interface via collectInterfaceMembers), where the
+                        // bare name is not a valid identifier in the emitting
+                        // file. qualNameToZig already applies type_prefix correctly.
+                        const zig = try self.qualNameToZig(std_td.qualified_name);
+                        defer self.alloc.free(zig);
                         break :blk switch (mode) {
-                            .in_ => std.fmt.allocPrint(self.alloc, "?*const {s}{s}", .{ p, std_td.name }),
-                            .out, .inout => std.fmt.allocPrint(self.alloc, "?*{s}{s}", .{ p, std_td.name }),
+                            .in_ => std.fmt.allocPrint(self.alloc, "?*const {s}", .{zig}),
+                            .out, .inout => std.fmt.allocPrint(self.alloc, "?*{s}", .{zig}),
                         };
                     }
                     if (isCApiPrimitive(tr)) {
@@ -4773,6 +4780,40 @@ fn itemsHaveTopicTypes(items: []const ir.ModuleItem) bool {
                 else => {},
             },
             .module => |m| if (itemsHaveTopicTypes(m.items)) return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+/// True if `iface` (a `@callback interface`) has at least one operation, own
+/// or inherited. Mirrors `collectInterfaceMembers`'s recursion without needing
+/// an allocator — this is only ever used for a non-emptiness check.
+fn callbackInterfaceHasOperations(iface: *const ir.Interface) bool {
+    if (iface.operations.len > 0) return true;
+    for (iface.bases) |base| {
+        if (base == .interface and callbackInterfaceHasOperations(base.interface)) return true;
+    }
+    return false;
+}
+
+/// True if `items` contains a `@callback interface` with at least one
+/// (possibly inherited) operation. `emitInterface` only emits
+/// `emitZigListenerHelpers` — the idiomatic Zig helper pair, whose thunks call
+/// `zidl_rt.unboxAs`/`zidl_rt.boxEntity` for any entity-interface-typed
+/// parameter — in that same case, so this is the matching condition for
+/// whether the generated file needs a `zidl_rt` import. Without this, a file
+/// whose only callback interface happens to be the first one generated for
+/// that module (no prior typesupport/pl_cdr/c-api need to trigger the import
+/// some other way) silently emits code referencing an unimported `zidl_rt`.
+fn itemsHaveCallbackInterfaceOperations(items: []const ir.ModuleItem) bool {
+    for (items) |item| {
+        switch (item) {
+            .type_decl => |td| switch (td) {
+                .interface => |iface| if (interface.isCallbackInterface(iface) and callbackInterfaceHasOperations(iface)) return true,
+                else => {},
+            },
+            .module => |m| if (itemsHaveCallbackInterfaceOperations(m.items)) return true,
             else => {},
         }
     }

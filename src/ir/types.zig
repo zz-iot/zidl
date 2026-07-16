@@ -302,6 +302,21 @@ pub const Interface = struct {
     raw: []const RawAnnotation,
 };
 
+/// True for `@callback`-annotated interfaces (listener interfaces), which get a
+/// plain C callback struct instead of an entity opaque handle / vtable. Falls
+/// back to the "Listener" name-suffix heuristic for IDL that predates the
+/// `@callback` annotation — deprecated, kept for backwards compatibility.
+///
+/// Single canonical copy: both the IR builder (deciding whether to preserve an
+/// imported interface's fill pass) and the backends (deciding whether to emit
+/// a callback struct vs. an entity handle) need this same predicate.
+pub fn isCallbackInterface(iface: *const Interface) bool {
+    for (iface.raw) |ann| {
+        if (std.mem.eql(u8, ann.name, "callback")) return true;
+    }
+    return std.mem.endsWith(u8, iface.name, "Listener");
+}
+
 pub const Operation = struct {
     name: []const u8,
     span: ast.Span,
