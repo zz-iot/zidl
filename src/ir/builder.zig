@@ -271,19 +271,6 @@ const Builder = struct {
         }
     }
 
-    /// True for `@callback`-annotated interfaces, or (fallback, for IDL predating
-    /// the annotation) interfaces whose name ends in `Listener`. Mirrors
-    /// `backend/interface.zig`'s `isCallbackInterface` exactly — duplicated here
-    /// (rather than imported) because the IR layer doesn't otherwise depend on
-    /// the backend layer, and this check is small enough that keeping the two in
-    /// sync by inspection is low-risk.
-    fn isCallbackIface(iface: *const ir.Interface) bool {
-        for (iface.raw) |ann| {
-            if (std.mem.eql(u8, ann.name, "callback")) return true;
-        }
-        return std.mem.endsWith(u8, iface.name, "Listener");
-    }
-
     /// Undo `buildDefinitions`'s fill for every non-`@callback` interface
     /// reachable from `scope` (called only on an imported unit's own scope,
     /// after that unit's fill pass — see `buildImpl`). Only `@callback`
@@ -304,7 +291,7 @@ const Builder = struct {
                     const qname = qualifyName(self.alloc, qpath, sym.name) catch continue;
                     if (self.lookupByQname(qname)) |td| {
                         const iface = td.interface;
-                        if (!isCallbackIface(iface)) {
+                        if (!ir.isCallbackInterface(iface)) {
                             // Reset to exactly the Pass-1 skeleton shape
                             // (registerTypes' initial literal) — every field
                             // the fill pass could have populated, not just
