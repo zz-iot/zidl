@@ -63,11 +63,13 @@ discovery directly, without going through the Zig core.
 
 - **`ZidlCdrAllocator` (user-supplied allocator for strings/sequences)**: `zidl_cdr_read_string`
   and sequence reads use `malloc` internally today; see `docs/backend_c.md` §"`zidl-cdr`
-  Dependency". This is "Tier 2" of the allocator-control work described under "Entity
-  handle ABI: heap-boxing + allocator control" above — a separate, data-plane
-  configuration surface from entity-handle boxing (Tier 1), but following the same
-  discipline: route through a swappable interface, never hardcode `malloc` in
-  generated per-type code.
+  Dependency". Full sequencing now in zzdds's `docs/design/allocator-strategy.md` — this is
+  "Phase 2" there, required before an unbounded `string`/`sequence` field in a user-defined
+  topic type can avoid `malloc` in C (or C++ via the generated CDR path). It depends on
+  "Phase 0" landing first: a shared `ZidlAllocator` vtable struct, to be defined in
+  `zidl-cdr`'s public runtime header and reused (not duplicated) by zzdds's own C-ABI
+  bootstrap-allocator injection — don't invent a second, incompatible allocator-vtable
+  shape here independently of that one.
 - ~~**C backend `--generate-interfaces` (opaque handles + free functions)**~~:
   **Implemented.** Entity interfaces emit opaque `typedef struct Foo_s *Foo;` handles
   and free function declarations matching the OMG C PSM binding and the idioms of
