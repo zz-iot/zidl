@@ -41,18 +41,35 @@ Existing-backend features that have `// TODO` or deferred markers in the code or
 documentation, are not intentionally omitted, and are not yet tracked elsewhere in
 this roadmap. New language backends have their own sections below.
 
+**PL_CDR (RTPS ParameterList) codegen in non-Zig backends — not planned, verified out of
+scope for all of them (C, C++, Java, and future Python/C#/Rust/Haskell alike).**
+`--zig-pl-cdr` is a Zig-backend-only flag; every other backend parses and silently ignores
+it, and that's correct, not a gap. Confirmed against zzdds (zidl's only real-world
+consumer): `idl/rtps_discovery.idl`, the sole IDL file with PL_CDR-eligible `@mutable`
+discovery types, is generated exclusively via `-b zig --zig-pl-cdr`
+(`zzdds/docs/dev-notes.md`) — no non-Zig generation target exists for it. RTPS wire-level
+SPDP/SEDP encode/decode happens entirely inside zzdds's Zig core
+(`src/discovery/spdp.zig`/`sedp.zig`) and never crosses the C-ABI. The only place discovery
+data reaches a binding is via `ParticipantBuiltinTopicData` and its siblings in
+`idl/dcps.idl`, which are plain `@final` structs generated through the ordinary
+(non-PL_CDR) path — by the time any binding sees discovery data it's already been decoded
+by Zig and repackaged as an ordinary DDS-typed struct. Since RTPS discovery always runs in
+the Zig core regardless of which language binding created the participant, no binding
+backend needs its own PL_CDR codec — this applies uniformly, not just to C/C++. Re-raise
+only if a consumer other than zzdds needs a non-Zig program to implement RTPS wire
+discovery directly, without going through the Zig core.
+
 ### C and C++ backends
 
 - **`ZidlCdrAllocator` (user-supplied allocator for strings/sequences)**: `zidl_cdr_read_string`
   and sequence reads use `malloc` internally today; see `docs/backend_c.md` §"`zidl-cdr`
-  Dependency". This is "Tier 2" of the allocator-control work described under "Entity
-  handle ABI: heap-boxing + allocator control" above — a separate, data-plane
-  configuration surface from entity-handle boxing (Tier 1), but following the same
-  discipline: route through a swappable interface, never hardcode `malloc` in
-  generated per-type code.
-- **PL_CDR generation**: `--zig-pl-cdr` is parsed and wired through the CLI but neither
-  the C nor C++ backend emits `serializePlCdr` / `deserializeFromPlCdr` functions.
-  This is the RTPS ParameterList wire format used for DDS discovery types.
+  Dependency". Full sequencing now in zzdds's `docs/design/allocator-strategy.md` — this is
+  "Phase 2" there, required before an unbounded `string`/`sequence` field in a user-defined
+  topic type can avoid `malloc` in C (or C++ via the generated CDR path). It depends on
+  "Phase 0" landing first: a shared `ZidlAllocator` vtable struct, to be defined in
+  `zidl-cdr`'s public runtime header and reused (not duplicated) by zzdds's own C-ABI
+  bootstrap-allocator injection — don't invent a second, incompatible allocator-vtable
+  shape here independently of that one.
 - ~~**C backend `--generate-interfaces` (opaque handles + free functions)**~~:
   **Implemented.** Entity interfaces emit opaque `typedef struct Foo_s *Foo;` handles
   and free function declarations matching the OMG C PSM binding and the idioms of
@@ -123,10 +140,11 @@ produced is entirely the concrete implementation's choice, not zidl's:
 **zzdds-side follow-up**: every hand-written concrete impl needs a
 `get_c_abi_handle` implementation following the cache-and-reuse pattern above
 (including for widened views it returns, e.g. `StatusConditionImpl` caching
-its own `entity_view_handle` for `get_entity()`). Done, against a local-path
-zidl checkout (not yet a tagged release) — see the zzdds roadmap.
+its own `entity_view_handle` for `get_entity()`). Done — this vtable slot has
+shipped in tagged zidl releases since `v0.2.7-zig.0.16.0`; see the zzdds
+roadmap for the implementation details.
 
-### C++ backend: entity wrapper identity (Planned)
+### C++ backend: entity wrapper identity (Implemented)
 
 A related but independent gap, found while auditing whether this design should
 change anything for the C++ backend (it doesn't need to — C++'s own
@@ -136,30 +154,60 @@ exactly what the Zig side had to hand-roll as a fat pointer; there's no
 analogous "narrow a fat reference into an opaque C handle" problem on the C++
 side for boxing to solve). But looking at `ConcreteImplGenerator`
 (`src/backend/cpp.zig`) surfaced a structurally similar, pre-existing gap: it
-constructs a fresh `std::make_shared<FooImpl>(_h)` on every operation that
-returns an entity, so calling e.g. `participant->get_topic("X")` twice today
-returns two different `FooImpl` objects wrapping the same underlying `_h` —
-not identity-equal, though not a leak either (`shared_ptr` RAII cleans up
-correctly regardless of how many wrapper instances exist).
+constructed a fresh `std::make_shared<FooImpl>(_h)` on every operation that
+returns an entity, so calling e.g. `participant->get_topic("X")` twice used to
+return two different `FooImpl` objects wrapping the same underlying `_h` —
+not identity-equal, though not a leak either (`shared_ptr` RAII cleaned up
+correctly regardless of how many wrapper instances existed).
 
 This wasn't practically fixable before the heap-boxing work above: nothing
 guaranteed the raw C handle `_h` was itself stable/reusable across calls, so
 there'd have been no correct value to key a wrapper cache against. Now that
 `get_c_abi_handle` makes the underlying handle identity-stable, the C++ side
-could reuse the same principle (cache-and-reuse against a stable key, instead
-of allocating a fresh wrapper per access) via its own idiom — e.g. a
-`static std::unordered_map<DDS_Foo, std::weak_ptr<FooImpl>>` (plus a mutex) per
-entity type in generated code: reuse the existing wrapper if the `weak_ptr` is
-still alive, construct-and-insert otherwise.
+reuses the same principle. Every entity `FooImpl` class gets a `public static
+std::shared_ptr<FooImpl> _getOrCreate(DDS_Foo h)` factory (declared in the
+header next to the constructor, defined once in the generated `.cpp`), backed
+by a function-local `static std::unordered_map<DDS_Foo, std::weak_ptr<FooImpl>>`
+plus a `static std::mutex` — C++11 "magic statics" give this exactly one
+instance per class, lazily initialized, thread-safe, with no separate member
+fields or manual initialization needed. Lookup: if a live (non-expired)
+`weak_ptr` is cached for the handle, return `.lock()`'s result; otherwise
+construct-and-cache a new `FooImpl` and return it. `_getOrCreate(nullptr)`
+returns `nullptr` (subsuming the old separate `if (!_h) return nullptr;`
+guard at each call site). All four generated call sites that used to construct
+a wrapper directly — the entity-returning operation path, the entity
+attribute getter, the sequence-of-entities out-adaptation loop, and the
+listener-trampoline argument wrapper — now route through `_getOrCreate`
+instead of `std::make_shared` directly, so identity holds everywhere a wrapper
+can originate, including entities arriving via a listener callback.
 
-Unlike the Zig-side `get_c_abi_handle` item, this doesn't need any hand-written
-zzdds participation — zzdds doesn't author its own C++ bindings; they're
-entirely generated via `--cpp-generate-impl`. The cache has nowhere to live
-before the *first* `FooImpl` for a given handle exists (unlike the Zig side,
-where a cache field can attach to the already-existing concrete impl object),
-so it has to be a self-contained registry, fully expressible inside
-`ConcreteImplGenerator`'s own generated code — this is purely a zidl backend
-change, not a zzdds implementation task.
+One accepted tradeoff: expired (`weak_ptr` no longer lockable) entries are
+only overwritten lazily, on the next `_getOrCreate` call for that same handle
+value — there's no active sweep, so a long-running process that creates and
+destroys many distinct entities whose C handle addresses are never reused
+will accumulate dead map slots (small, pointer-sized; not a use-after-free or
+object leak, since the cache only ever holds a `weak_ptr`). Not addressed
+here; revisit if it matters in practice.
+
+Unlike the Zig-side `get_c_abi_handle` item, this needed no hand-written zzdds
+participation — zzdds doesn't author its own C++ bindings; they're entirely
+generated via `--cpp-generate-impl`. Verified two ways: (1) the codegen unit
+tests in `src/backend/cpp.zig` assert the header declaration, the cache/mutex
+body, and all four call sites; (2) real-world check against zzdds — pointed
+`zzdds/build.zig.zon` at this local zidl checkout, ran
+`zig build install -Dcpp-binding=true`, and compiled the resulting
+`dcps_impl.cpp` (95 `_getOrCreate` occurrences across ~35 entity classes) with
+`g++ -std=c++17 -Wall -Wextra -pthread` — zero errors, zero warnings
+attributable to the new code (12 pre-existing, unrelated sign-compare
+warnings only). A standalone reproduction of the exact generated pattern
+(separately compiled and run) confirmed the runtime invariants: two calls for
+the same live handle return the identical `shared_ptr`; a different handle
+gets a distinct wrapper; dropping every `shared_ptr` for a handle lets the
+cached `weak_ptr` expire so the next call constructs fresh rather than
+returning a dangling reference; and a reused handle address correctly
+overwrites the stale slot. Not yet in a tagged zidl release — needs a
+release before zzdds's C++ users see it (zzdds currently pins
+`v0.2.9-zig.0.16.0`, unaffected until the pin is bumped).
 
 ### Zig backend: `as_{Base}` upcast vtable slot (Implemented)
 

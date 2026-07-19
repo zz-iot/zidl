@@ -177,6 +177,5 @@ references.
 |---|---|
 | Custom allocators for `std::string` / `std::vector` / `std::map` | Not yet implemented — all STL containers use default allocators; `std::pmr` or allocator template parameter support is planned |
 | `@verbatim` annotations | Parsed and stored in IR but not yet injected into generated output — see [`@verbatim` Injection](#verbatim-injection-not-yet-implemented) above |
-| `--zig-pl-cdr` (PL_CDR emit) | Flag parsed but C++ backend does not emit PL_CDR functions |
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
 | `--generate-interfaces`: complex-type adaptation | Primitive and string operation signatures are adapted; richer signatures emit `/* TODO: adapt C++ types */` stubs |
