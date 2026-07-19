@@ -239,11 +239,9 @@ integration tests run as part of `zig build test`.
 | C backend: `@optional` `_set_` macro shape-aware setter | No `memcpy`-based setter for fixed arrays / bounded strings — future work |
 | C backend: user-supplied allocator | `ZidlCdrAllocator` interface planned; strings/sequences currently use `malloc` |
 | C++ backend: custom STL allocators | `std::string`, `std::vector`, `std::map` use default allocators; `std::pmr` support planned |
-| C/C++ backends: PL_CDR codegen | `--zig-pl-cdr` flag is parsed and wired but C/C++ backends do not yet emit PL_CDR functions |
 | Zig 0.15.1 / MicroZig output | Partially implemented: `--zig-version 0.15.1` is wired and bounded strings/sequences use fixed-capacity `zidl_rt.BoundedArray`; full freestanding/no-heap runtime path remains planned |
 | `--generate-interfaces` C++: complex-type adaptation | Primitive and string operation signatures are adapted; richer signatures emit `/* TODO */` stubs |
 | Const type-checking | Not implemented (e.g. `const long x = "hello"` is not caught) |
 | Union discriminant type validation | Not implemented |
 | TypeObject for typedef/alias | Deferred |
-| PL_CDR serialization (RTPS ParameterList) | Zig only via `--zig-pl-cdr`; C/C++ backends do not emit PL_CDR functions |
 | value_dcl / component_dcl / home_dcl / template modules | Parsed, silently dropped + warning diagnostic |
