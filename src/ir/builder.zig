@@ -273,11 +273,33 @@ const Builder = struct {
 
     /// Undo `buildDefinitions`'s fill for every non-`@callback` interface
     /// reachable from `scope` (called only on an imported unit's own scope,
-    /// after that unit's fill pass — see `buildImpl`). Only `@callback`
-    /// interface flattening needs a cross-module base's real operations;
-    /// entity interfaces should see the same empty-skeleton bases they always
-    /// have, so this leaves everything else (structs, typedefs, `@callback`
-    /// interfaces, ...) exactly as the fill pass left it.
+    /// after that unit's fill pass — see `buildImpl`), *except* `.bases`.
+    /// Only `@callback` interface flattening needs a cross-module base's
+    /// real operations — filling those in for entity interfaces would grow
+    /// hand-written Zig vtable literals and flattened member lists that
+    /// nothing asked for, so `.operations`/`.attributes`/`.type_decls`/
+    /// `.consts`/`.raw` are reset back to the empty Pass-1 skeleton here, same
+    /// as before.
+    ///
+    /// `.bases` is deliberately spared: it's pure structural inheritance
+    /// info, not member content, and per-backend logic that walks a chain of
+    /// *direct* bases to answer structural questions — most notably the C++
+    /// backend's `nativeHandleBase`, which decides whether a base interface
+    /// is a genuine base-less "leaf" entity (as opposed to one that itself
+    /// has a further base, just not one visible without this fill) — needs
+    /// the *real* answer, not an empty stub. Before this fix, every
+    /// cross-module entity base looked base-less regardless of its real IDL
+    /// declaration, e.g. `DDS::DomainParticipant : Entity` (`dcps.idl`)
+    /// appeared to `zzdds.idl`'s generation pass as if it had no base at
+    /// all, which made the C++ backend incorrectly treat it as a leaf and
+    /// emit `override` on a `native_handle()` its real base chain never
+    /// declares — a real compile failure in any zzdds.idl-derived C++
+    /// binding, confirmed independent of any other change. Since
+    /// `.operations` still resets to empty for every interface in the chain
+    /// (this function recurses into `sym.scope` regardless), nothing new
+    /// becomes flattenable via the now-visible `.bases` — a base with real
+    /// `.bases` but always-empty `.operations` contributes no new members to
+    /// walk, only the extra structural hop `nativeHandleBase` needs.
     fn resetNonCallbackInterfaces(self: *Builder, scope: *const Scope, qpath: []const u8) void {
         var it = scope.symbols.iterator();
         while (it.next()) |entry| {
@@ -292,11 +314,10 @@ const Builder = struct {
                     if (self.lookupByQname(qname)) |td| {
                         const iface = td.interface;
                         if (!ir.isCallbackInterface(iface)) {
-                            // Reset to exactly the Pass-1 skeleton shape
-                            // (registerTypes' initial literal) — every field
-                            // the fill pass could have populated, not just
-                            // the ones `collectInterfaceMembers` reads.
-                            iface.bases = &.{};
+                            // Reset to the Pass-1 skeleton shape for every
+                            // field `collectInterfaceMembers`-style flattening
+                            // reads — except `.bases` (kept real; see doc
+                            // comment above).
                             iface.operations = &.{};
                             iface.attributes = &.{};
                             iface.type_decls = &.{};
