@@ -41,6 +41,7 @@
 
 #include <cassert>
 #include <cstddef>
+#include <cstdlib>
 #include <memory_resource>
 #include <new>
 
@@ -137,10 +138,22 @@ inline ZidlAllocatorResource* allocateStaticPoolResource(const ZidlAllocator* al
     constexpr std::size_t kPoolSize = (ZIDL_ALLOCATOR_PMR_STATIC_POOL_SIZE);
     alignas(ZidlAllocatorResource) static unsigned char pool[kPoolSize][sizeof(ZidlAllocatorResource)];
     static std::size_t next = 0;
+    // assert() alone is not enough here: it's compiled out under -DNDEBUG,
+    // which is the normal production/release build mode for the embedded
+    // targets this macro exists for -- exactly the configuration where
+    // silently indexing pool[next] past its bound (corrupting whatever
+    // static/global storage happens to follow it) would be worst. The
+    // assert below still gives a descriptive failure in debug builds; the
+    // explicit check+abort right after it is unconditional and never
+    // compiled away, so release builds fail loudly instead of corrupting
+    // memory.
     assert(next < kPoolSize &&
         "zidl_allocator_pmr.hpp: ZIDL_ALLOCATOR_PMR_STATIC_POOL_SIZE exceeded -- "
         "increase the pool size, or reduce how many times setCppAllocator "
         "is called with a non-null allocator over the process's lifetime");
+    if (next >= kPoolSize) {
+        std::abort();
+    }
     void* slot = pool[next++];
     return ::new (slot) ZidlAllocatorResource(allocator);
 }

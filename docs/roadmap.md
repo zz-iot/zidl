@@ -162,10 +162,27 @@ discovery directly, without going through the Zig core.
   `_getOrCreate`-style `allocate_shared` call through it (confirmed the same way); exceeding the
   pool bound asserts rather than silently wrapping around onto a live slot. The first two are
   now permanent, CI-checked integration tests
-  (`test/integration/cpp/test_allocator_pmr_static_pool.cpp`); the bound-exceeded assert was
-  verified manually (a `assert()`-driven abort doesn't fit the existing "compile, run, expect
-  exit 0" integration-test harness without adding subprocess-based death-test infrastructure,
-  judged disproportionate for a defensive bound on a rare, non-hot-path admin operation).
+  (`test/integration/cpp/test_allocator_pmr_static_pool.cpp`); the bound-exceeded check was
+  verified manually (an abort doesn't fit the existing "compile, run, expect exit 0"
+  integration-test harness without adding subprocess-based death-test infrastructure, judged
+  disproportionate for a defensive bound on a rare, non-hot-path admin operation).
+
+  **Correctness fix (Greptile, PR #28)**: the bound check was originally `assert()`-only —
+  which compiles to nothing under `-DNDEBUG`, the normal production/release build
+  configuration for the embedded targets this macro exists for. That meant in exactly the
+  deployment mode that matters, exceeding the pool bound wouldn't abort — `pool[next++]`
+  would silently index past the static array and placement-new construct a
+  `ZidlAllocatorResource` into whatever static/global storage happened to follow it in the
+  binary's layout. Confirmed this concretely (not just by inspection): computed the returned
+  pointer for a deliberate over-bound call and showed it landed exactly
+  `sizeof(ZidlAllocatorResource)` bytes past the last valid slot — a real out-of-bounds
+  pointer, not a hypothetical. (AddressSanitizer did not flag this specific case, due to a
+  known ASan blind spot around function-local statics inside `inline`-linkage functions,
+  which get COMDAT-folded across translation units — the direct pointer-arithmetic proof
+  stood in for it.) Fixed by adding an unconditional `if (next >= kPoolSize) std::abort();`
+  right after the (now debug-only-diagnostic) `assert()`, so release builds fail loudly
+  instead of corrupting memory. Verified the fix aborts correctly under `-DNDEBUG` (where it
+  previously didn't).
 
   Net effect: with a caller-supplied static-pool-backed `ZidlAllocator` registered via both
   `zzdds_create_factory_with_allocator` and `setCppAllocator` (in pool mode), the *entire* C++
