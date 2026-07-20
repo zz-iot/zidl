@@ -22,6 +22,17 @@
  * `Allocator` named requirement entirely, since that requirement's
  * throw-on-failure contract applies to any conforming allocator, not just
  * this one. Not built here; flagged as a deliberately deferred option.
+ *
+ * Bare-metal note: setCppAllocator's own bookkeeping (installing a
+ * ZidlAllocatorResource per registration) uses global `operator new` by
+ * default — the one spot in this header not itself routed through a
+ * caller-supplied ZidlAllocator. This is a one-time, bounded, startup/admin
+ * allocation (not hot-path), which is often an acceptable tradeoff even on
+ * constrained targets. For toolchains with no heap at all, define
+ * ZIDL_ALLOCATOR_PMR_STATIC_POOL_SIZE to an integer before including this
+ * header to switch setCppAllocator to placement-new into a fixed-size static
+ * pool instead — see the macro's own doc comment below for the bound this
+ * imposes.
  */
 #ifndef ZIDL_ALLOCATOR_PMR_HPP
 #define ZIDL_ALLOCATOR_PMR_HPP
@@ -106,6 +117,38 @@ private:
     }
 };
 
+#if defined(ZIDL_ALLOCATOR_PMR_STATIC_POOL_SIZE)
+
+namespace detail {
+
+/**
+ * Placement-news a ZidlAllocatorResource into a fixed-size pool of static
+ * storage instead of the heap, for setCppAllocator below when
+ * ZIDL_ALLOCATOR_PMR_STATIC_POOL_SIZE is defined. A slot, once used, is never
+ * reclaimed or reused within the process's lifetime — reusing one behind a
+ * still-outstanding object would resurrect exactly the wrong-allocator-freed
+ * bug that binding ZidlAllocatorResource permanently at construction (above)
+ * was built to close. Bounding the pool trades that risk for a hard, static
+ * cap on how many times setCppAllocator(non-null) can be called over the
+ * process's lifetime — acceptable given re-registration is a rare,
+ * startup/admin-time operation, not something done in a loop.
+ */
+inline ZidlAllocatorResource* allocateStaticPoolResource(const ZidlAllocator* allocator) {
+    constexpr std::size_t kPoolSize = (ZIDL_ALLOCATOR_PMR_STATIC_POOL_SIZE);
+    alignas(ZidlAllocatorResource) static unsigned char pool[kPoolSize][sizeof(ZidlAllocatorResource)];
+    static std::size_t next = 0;
+    assert(next < kPoolSize &&
+        "zidl_allocator_pmr.hpp: ZIDL_ALLOCATOR_PMR_STATIC_POOL_SIZE exceeded -- "
+        "increase the pool size, or reduce how many times setCppAllocator "
+        "is called with a non-null allocator over the process's lifetime");
+    void* slot = pool[next++];
+    return ::new (slot) ZidlAllocatorResource(allocator);
+}
+
+} // namespace detail
+
+#endif // ZIDL_ALLOCATOR_PMR_STATIC_POOL_SIZE
+
 /**
  * Register `allocator` as the process-wide default for std::pmr-based C++
  * allocation in generated code (entity wrapper objects via _getOrCreate, and
@@ -121,11 +164,18 @@ private:
  * ZidlAllocator was registered when that object was allocated) and keeps
  * freeing through it for its whole lifetime, exactly as it must for
  * allocators that validate ownership on free. Each non-null call here
- * allocates a small (sizeof(ZidlAllocatorResource)-ish) ZidlAllocatorResource
- * via plain `new` and deliberately never frees it — re-registration is a
- * rare, startup/admin-time operation, and outstanding objects must keep a
- * valid resource to deallocate through for as long as they're alive, so
- * there's no earlier-than-"never" safe point to reclaim it.
+ * installs a small (sizeof(ZidlAllocatorResource)-ish) ZidlAllocatorResource
+ * and deliberately never frees it — re-registration is a rare,
+ * startup/admin-time operation, and outstanding objects must keep a valid
+ * resource to deallocate through for as long as they're alive, so there's no
+ * earlier-than-"never" safe point to reclaim it. By default this comes from
+ * plain `new`; if ZIDL_ALLOCATOR_PMR_STATIC_POOL_SIZE is defined before this
+ * header is included, it instead comes from a fixed-size static pool (see
+ * that macro's doc comment above) for toolchains with no heap at all —
+ * setCppAllocator itself is the only place in this header not already routed
+ * through a caller-supplied ZidlAllocator (factory bootstrap and
+ * _getOrCreate/wrapFactoryHandle both already are), so it's the one gap this
+ * macro closes.
  *
  * Pass nullptr to restore std::pmr's own default (std::pmr::new_delete_resource,
  * i.e. ordinary global operator new/delete) — matching the NULL-means-default
@@ -142,7 +192,11 @@ inline void setCppAllocator(const ZidlAllocator* allocator) {
         std::pmr::set_default_resource(nullptr); // restores new_delete_resource
         return;
     }
+#if defined(ZIDL_ALLOCATOR_PMR_STATIC_POOL_SIZE)
+    std::pmr::set_default_resource(detail::allocateStaticPoolResource(allocator));
+#else
     std::pmr::set_default_resource(new ZidlAllocatorResource(allocator));
+#endif
 }
 
 } // namespace zidl

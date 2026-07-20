@@ -252,6 +252,27 @@ pub fn build(b: *std.Build) void {
         integ_step.dependOn(&b.addRunArtifact(no_rtti_exe).step);
     }
 
+    // zidl_allocator_pmr.hpp's opt-in ZIDL_ALLOCATOR_PMR_STATIC_POOL_SIZE
+    // mode (bare-metal / no-heap targets): CI-checks that setCppAllocator's
+    // own bookkeeping never calls global operator new when this macro is
+    // defined, by overriding operator new/delete to abort.
+    {
+        const static_pool_mod = b.createModule(.{
+            .root_source_file = null,
+            .target = target,
+            .optimize = .Debug,
+            .link_libc = true,
+            .link_libcpp = true,
+        });
+        static_pool_mod.addCSourceFiles(.{
+            .files = &.{"test/integration/cpp/test_allocator_pmr_static_pool.cpp"},
+            .flags = &.{ "-std=c++17", "-Wall", "-Wextra" },
+        });
+        static_pool_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+        const static_pool_exe = b.addExecutable(.{ .name = "test_allocator_pmr_static_pool", .root_module = static_pool_mod });
+        integ_step.dependOn(&b.addRunArtifact(static_pool_exe).step);
+    }
+
     // Java integration test — requires javac/java on PATH
     {
         const maybe_javac = b.findProgram(&.{"javac"}, &.{}) catch null;
