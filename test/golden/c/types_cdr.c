@@ -2,7 +2,6 @@
 
 #include "types.h"
 #include "zidl_cdr.h"
-#include <stdlib.h>
 #include <string.h>
 
 int Point_serialize(ZidlCdrWriter *_w, const Point *_v) {

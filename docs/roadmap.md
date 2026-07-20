@@ -92,6 +92,21 @@ discovery directly, without going through the Zig core.
   `Sample_deserialize` (a struct with both an unbounded `string` and an unbounded
   `sequence<long>` field) decoded a real CDR payload with a custom allocator registered:
   2 allocations, 2 frees, both fields correctly populated.
+- **C backend: `{Type}_free()` is declared but never given a body.** Found while verifying
+  `ZidlCdrAllocator` above, not by looking for it: every generated header declares `void
+  {Type}_free({Type} *v);` for every struct (`src/backend/c.zig` — search for the two
+  `"{s}{s}void {s}_free({s} *v);\n\n"` declaration sites), but no generator function
+  anywhere emits a matching definition — confirmed against the golden fixtures (declared in
+  `test/golden/c-split/Sample.h`, no body in `Sample_cdr.c` or anywhere else) and via a real
+  build. Calling it today is a link error. The only "free" logic that exists
+  (`emitFreeKeyField`/`emitFreeArrayElements`/`emitFreeSeqElements`) is reachable *only* from
+  `{Type}_compute_key_hash_from_cdr`'s cleanup path, for `@key` fields of a temporary
+  decode — not a general free of every heap-owned field. Needs a real implementation:
+  extend that existing logic (or a generalized version of it) to run over every field, not
+  just `@key` ones, recurse into nested structs, and route through the `ZidlCdrAllocator`
+  helpers above (`zidl_cdr_free_str`/`_free_wstr`/`_free`) rather than raw `free()` — see
+  zzdds's `docs/design/allocator-strategy.md` "Phase 5" for the fuller writeup and why it's
+  tracked as part of the allocator plan despite not being required by it.
 - ~~**C backend `--generate-interfaces` (opaque handles + free functions)**~~:
   **Implemented.** Entity interfaces emit opaque `typedef struct Foo_s *Foo;` handles
   and free function declarations matching the OMG C PSM binding and the idioms of

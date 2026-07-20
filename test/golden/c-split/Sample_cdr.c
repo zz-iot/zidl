@@ -2,7 +2,6 @@
 
 #include "Sample.h"
 #include "zidl_cdr.h"
-#include <stdlib.h>
 #include <string.h>
 
 int Sample_serialize(ZidlCdrWriter *_w, const Sample *_v) {

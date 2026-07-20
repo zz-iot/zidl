@@ -2,7 +2,6 @@
 
 #include "Beacon.h"
 #include "zidl_cdr.h"
-#include <stdlib.h>
 #include <string.h>
 
 int Beacon_serialize(ZidlCdrWriter *_w, const Beacon *_v) {
