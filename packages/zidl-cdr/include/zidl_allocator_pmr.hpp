@@ -28,6 +28,7 @@
 
 #include "zidl_allocator.h"
 
+#include <cassert>
 #include <cstddef>
 #include <memory_resource>
 #include <new>
@@ -56,13 +57,30 @@ namespace zidl {
  */
 class ZidlAllocatorResource final : public std::pmr::memory_resource {
 public:
+    // `allocator` must be non-null. setCppAllocator (below) only ever
+    // constructs this with a non-null allocator (its own nullptr case takes
+    // a separate branch that never reaches here); this precondition only
+    // matters for a caller directly constructing this class, which is
+    // discouraged but not made unrepresentable by the type itself. Asserts
+    // rather than silently tolerating null so misuse fails at the
+    // construction site instead of surfacing later as a puzzling
+    // silently-dropped deallocate() call.
     explicit ZidlAllocatorResource(const ZidlAllocator* allocator) noexcept
         : allocator_(allocator)
-    {}
+    {
+        assert(allocator_ != nullptr);
+    }
 
 private:
     const ZidlAllocator* allocator_;
 
+    // The `allocator_ ? ... : nullptr` / `if (allocator_)` guards below are
+    // defense-in-depth for NDEBUG builds (where the constructor's assert is
+    // compiled out) reaching this class via direct construction with
+    // nullptr, not a supported code path: do_allocate throws immediately
+    // rather than returning a pointer, which makes do_deallocate's guard
+    // provably unreachable for any memory legitimately obtained from this
+    // instance.
     void* do_allocate(std::size_t bytes, std::size_t alignment) override {
         void* p = allocator_ ? allocator_->alloc(allocator_->ctx, bytes, alignment) : nullptr;
         if (!p) throw std::bad_alloc();

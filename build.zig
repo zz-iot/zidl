@@ -231,6 +231,27 @@ pub fn build(b: *std.Build) void {
         integ_step.dependOn(&b.addRunArtifact(alloc_pmr_exe).step);
     }
 
+    // Same test again, but compiled with -fno-rtti: zidl_allocator_pmr.hpp is
+    // meant for embedded/RT builds that routinely disable RTTI, and that
+    // claim needs an actual CI-checked compile, not just a one-off manual
+    // check — a prior dynamic_cast in do_is_equal broke this silently.
+    {
+        const no_rtti_mod = b.createModule(.{
+            .root_source_file = null,
+            .target = target,
+            .optimize = .Debug,
+            .link_libc = true,
+            .link_libcpp = true,
+        });
+        no_rtti_mod.addCSourceFiles(.{
+            .files = &.{"test/integration/cpp/test_allocator_pmr.cpp"},
+            .flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-fno-rtti" },
+        });
+        no_rtti_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+        const no_rtti_exe = b.addExecutable(.{ .name = "test_allocator_pmr_no_rtti", .root_module = no_rtti_mod });
+        integ_step.dependOn(&b.addRunArtifact(no_rtti_exe).step);
+    }
+
     // Java integration test — requires javac/java on PATH
     {
         const maybe_javac = b.findProgram(&.{"javac"}, &.{}) catch null;
