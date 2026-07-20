@@ -92,6 +92,106 @@ discovery directly, without going through the Zig core.
   `Sample_deserialize` (a struct with both an unbounded `string` and an unbounded
   `sequence<long>` field) decoded a real CDR payload with a custom allocator registered:
   2 allocations, 2 frees, both fields correctly populated.
+- **C++ backend: `_getOrCreate`/`zzdds_cpp.hpp` allocator support. Done.** Entity wrapper
+  construction (`_getOrCreate`, this session's identity-cache work above) and zzdds's
+  hand-written factory bookkeeping (`wrapFactoryHandle`/`DomainParticipantFactorySupport`)
+  both hardcoded `std::make_shared`/global `new`. Landed as `std::pmr`-based, process-wide
+  registration via a new `zidl::setCppAllocator(const ZidlAllocator*)` (new
+  `zidl_allocator_pmr.hpp` in `zidl-cdr` — same `ZidlAllocator*` ABI as the C-side work
+  above, bridged into a `std::pmr::memory_resource`). Both surfaces now use
+  `std::allocate_shared` against `std::pmr::get_default_resource()`; `_getOrCreate`'s
+  generation is gated on the existing pre-scan pass so the extra includes/machinery are only
+  emitted where an entity is actually wrapped somewhere. Per the C++ `Allocator` named
+  requirement, OOM signals via `std::bad_alloc` rather than a graceful null return — a
+  deliberate, documented departure from every other allocator surface's contract, chosen
+  over a non-throwing alternative for idiomatic-C++ ergonomics (degrades to
+  `std::terminate()` under `-fno-exceptions`, matching libstdc++'s own `operator new`); the
+  registration surface was deliberately kept as `ZidlAllocator*` rather than a raw
+  `std::pmr::memory_resource*` so a future graceful/non-throwing option stays cheap to add
+  later without an API break.
+
+  **Correctness fix post-review (Greptile, PR #28, P1)**: the first cut of
+  `ZidlAllocatorResource` read the active `ZidlAllocator*` from a mutable global slot
+  *dynamically*, at both allocate- and deallocate-time, so that re-registering with a
+  different `ZidlAllocator*` would take effect immediately — but that meant an
+  already-outstanding object, allocated under allocator A, would have its eventual free
+  routed through whichever allocator was *currently* registered (B) when its `shared_ptr`
+  control block finally hit zero — silent heap corruption for any allocator that validates
+  ownership on free (pool allocators, bounds-checkers). Fixed by binding each
+  `ZidlAllocatorResource` permanently to one `ZidlAllocator*` at construction instead of a
+  shared mutable slot: `setCppAllocator` now allocates a small new resource instance per
+  registration (deliberately never freed — re-registration is a rare, startup/admin-time
+  operation) and installs it as the process-wide default. Since
+  `std::pmr::polymorphic_allocator` captures a `memory_resource*` by value at allocation
+  time, every object now keeps freeing through the exact resource — and hence the exact
+  `ZidlAllocator*` — that allocated it, for its whole lifetime, regardless of later
+  re-registration. New allocations still pick up a re-registered allocator immediately, as
+  originally advertised; what changed is that outstanding objects are no longer affected by
+  it. Verified via a standalone regression test (allocate under A, re-register B, free the
+  object allocated under A, assert A's `free` — not B's — is called): confirmed it fails
+  under the old dynamic-slot code and passes under the fix.
+
+  Verified end-to-end: real rebuild of zzdds against a local zidl checkout,
+  `dcps_impl.cpp`/`zzdds_impl.cpp` compiled clean with real g++, and a standalone C++
+  program (`zzdds::create_factory()` + `create_participant(...)`) proving construction
+  routes through a registered tracking `ZidlAllocator`, re-registration takes effect
+  immediately for new allocations, and `nullptr` restores the libc/`new`/`delete` default —
+  see zzdds's `docs/design/allocator-strategy.md` "Phase 3" for the fuller writeup,
+  including a note on why the identity-cache's control-block memory isn't asserted to free
+  promptly (a pre-existing property of the `weak_ptr` cache, independent of this phase).
+
+  **Follow-up (Greptile, PR #28, post-5/5 "worth a second read" note) + user-driven scoping
+  question**: `setCppAllocator`'s own bookkeeping (installing one `ZidlAllocatorResource` per
+  registration) used plain `new` unconditionally — the one spot in this header not already
+  routed through a caller-supplied `ZidlAllocator` (factory bootstrap and
+  `_getOrCreate`/`wrapFactoryHandle` both already are, via `zzdds_create_factory_with_allocator`
+  and `setCppAllocator` respectively). For a toolchain with a working heap this is an accepted,
+  bounded, one-time/startup-only allocation — but for a genuinely heap-free bare-metal target it
+  would be the only remaining gap. Added an opt-in escape hatch: defining
+  `ZIDL_ALLOCATOR_PMR_STATIC_POOL_SIZE` (an integer) before including the header switches
+  `setCppAllocator` to placement-new into a fixed-size static pool instead of the heap — bounded,
+  not wraparound-reused (reusing a slot behind a still-outstanding object would resurrect the
+  wrong-allocator-freed bug the construction-time-binding fix above closed), asserting if the
+  bound is exceeded. Default behavior (plain `new`) is unchanged unless the macro is defined.
+  This isn't a zidl backend/codegen flag — `zidl_allocator_pmr.hpp` is hand-written and
+  header-only, not generated per-IDL-spec, so a preprocessor macro the consumer defines in their
+  own build is the natural, toolchain-agnostic switch; no codegen (`cpp.zig`) changes were
+  needed. Verified: default mode still calls global `operator new` (confirmed via an
+  abort-on-call override, so the check is meaningful, not vacuous); pool mode never calls global
+  `operator new`/`delete` at all, for both `setCppAllocator` itself and the subsequent
+  `_getOrCreate`-style `allocate_shared` call through it (confirmed the same way); exceeding the
+  pool bound asserts rather than silently wrapping around onto a live slot. The first two are
+  now permanent, CI-checked integration tests
+  (`test/integration/cpp/test_allocator_pmr_static_pool.cpp`); the bound-exceeded check was
+  verified manually (an abort doesn't fit the existing "compile, run, expect exit 0"
+  integration-test harness without adding subprocess-based death-test infrastructure, judged
+  disproportionate for a defensive bound on a rare, non-hot-path admin operation).
+
+  **Correctness fix (Greptile, PR #28)**: the bound check was originally `assert()`-only —
+  which compiles to nothing under `-DNDEBUG`, the normal production/release build
+  configuration for the embedded targets this macro exists for. That meant in exactly the
+  deployment mode that matters, exceeding the pool bound wouldn't abort — `pool[next++]`
+  would silently index past the static array and placement-new construct a
+  `ZidlAllocatorResource` into whatever static/global storage happened to follow it in the
+  binary's layout. Confirmed this concretely (not just by inspection): computed the returned
+  pointer for a deliberate over-bound call and showed it landed exactly
+  `sizeof(ZidlAllocatorResource)` bytes past the last valid slot — a real out-of-bounds
+  pointer, not a hypothetical. (AddressSanitizer did not flag this specific case, due to a
+  known ASan blind spot around function-local statics inside `inline`-linkage functions,
+  which get COMDAT-folded across translation units — the direct pointer-arithmetic proof
+  stood in for it.) Fixed by adding an unconditional `if (next >= kPoolSize) std::abort();`
+  right after the (now debug-only-diagnostic) `assert()`, so release builds fail loudly
+  instead of corrupting memory. Verified the fix aborts correctly under `-DNDEBUG` (where it
+  previously didn't).
+
+  Net effect: with a caller-supplied static-pool-backed `ZidlAllocator` registered via both
+  `zzdds_create_factory_with_allocator` and `setCppAllocator` (in pool mode), the *entire* C++
+  allocation chain — factory bootstrap, everything the factory creates, and now
+  `setCppAllocator`'s own registration bookkeeping — can avoid libc `malloc`/global `operator
+  new` for the whole process lifetime, not just after some setup phase. That matters for the
+  planned showcase apps' `LD_PRELOAD` verification shim (see below): a from-process-start
+  abort-on-any-`malloc`/`new` shim becomes viable for a fully-configured app, rather than needing
+  a "only trip after setup completes" leniency window.
 - **C backend: `{Type}_free()` is declared but never given a body.** Found while verifying
   `ZidlCdrAllocator` above, not by looking for it: every generated header declares `void
   {Type}_free({Type} *v);` for every struct (`src/backend/c.zig` — search for the two
