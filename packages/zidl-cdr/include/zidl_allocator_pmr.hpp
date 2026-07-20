@@ -29,10 +29,22 @@
  * caller-supplied ZidlAllocator. This is a one-time, bounded, startup/admin
  * allocation (not hot-path), which is often an acceptable tradeoff even on
  * constrained targets. For toolchains with no heap at all, define
- * ZIDL_ALLOCATOR_PMR_STATIC_POOL_SIZE to an integer before including this
- * header to switch setCppAllocator to placement-new into a fixed-size static
- * pool instead — see the macro's own doc comment below for the bound this
- * imposes.
+ * ZIDL_ALLOCATOR_PMR_STATIC_POOL_SIZE to an integer to switch setCppAllocator
+ * to placement-new into a fixed-size static pool instead — see the macro's
+ * own doc comment below for the bound this imposes.
+ *
+ * ZIDL_ALLOCATOR_PMR_STATIC_POOL_SIZE MUST be defined identically (or not at
+ * all) for every translation unit that includes this header within one
+ * program — as a project-wide compiler flag (e.g. -D on the whole build's
+ * command line), not a per-.cpp-file #define before the #include.
+ * allocateStaticPoolResource and setCppAllocator are `inline` (external
+ * linkage, ODR-covered) functions whose *bodies* depend on this macro's
+ * value; if two translation units saw different values (or one saw it
+ * defined and another didn't), that's an ODR violation — the linker keeps
+ * exactly one definition and silently uses it everywhere, so some call
+ * sites could end up running with a different pool size (or the plain-`new`
+ * path instead of the pool path) than the macro they themselves defined
+ * would suggest.
  */
 #ifndef ZIDL_ALLOCATOR_PMR_HPP
 #define ZIDL_ALLOCATOR_PMR_HPP
@@ -133,6 +145,13 @@ namespace detail {
  * cap on how many times setCppAllocator(non-null) can be called over the
  * process's lifetime — acceptable given re-registration is a rare,
  * startup/admin-time operation, not something done in a loop.
+ *
+ * Reminder (see the file-level doc comment for the full explanation):
+ * ZIDL_ALLOCATOR_PMR_STATIC_POOL_SIZE must be set identically for every
+ * translation unit in the program that includes this header — a
+ * project-wide compiler flag, not a per-file #define — since this function
+ * and setCppAllocator are `inline`/ODR-covered and their bodies depend on
+ * this macro's value.
  */
 inline ZidlAllocatorResource* allocateStaticPoolResource(const ZidlAllocator* allocator) {
     constexpr std::size_t kPoolSize = (ZIDL_ALLOCATOR_PMR_STATIC_POOL_SIZE);
