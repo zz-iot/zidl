@@ -98,10 +98,17 @@ static void test_reregistration_does_not_redirect_outstanding_frees() {
     assert(b_free == 1);
     assert(a_free == 1); // unchanged
 
-    // Restore the default before returning: the pmr default resource
-    // currently installed wraps &zb, a local about to go out of scope, and
-    // the leaked ZidlAllocatorResource holding that pointer would otherwise
-    // outlive it as a dangling reference.
+    // sp_a/sp_b are already destroyed above, before za/zb go out of scope --
+    // that ordering, not this call, is what satisfies setCppAllocator's
+    // lifetime contract ("allocator must outlive every allocation made
+    // through it"). This final reset is a separate, narrower cleanup: without
+    // it, the process-wide pmr default would keep pointing at the leaked
+    // Resource_B (bound to &zb) after zb is destroyed, leaving a dangling
+    // reference sitting in global state for any *later, unrelated*
+    // allocation via get_default_resource() to stumble into. It does nothing
+    // to protect sp_a/sp_b themselves -- reset(nullptr) here does not reach
+    // into already-allocated objects' captured resource pointers, so it would
+    // not help if sp_a/sp_b were still alive at this point.
     zidl::setCppAllocator(nullptr);
 }
 
