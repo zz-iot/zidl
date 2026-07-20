@@ -84,7 +84,13 @@ const FixedPoolCtx = struct {
 
 fn poolAlloc(ctx: ?*anyopaque, len: usize, alignment: usize) callconv(.c) ?[*]u8 {
     const pool: *FixedPoolCtx = @ptrCast(@alignCast(ctx.?));
-    const aligned_start = std.mem.alignForward(usize, pool.used, alignment);
+    // Align against the buffer's actual absolute address, not an offset
+    // relative to it — pool.buf.ptr itself isn't guaranteed aligned to
+    // `alignment` (only ever exercised with u8/alignment=1 today, but this
+    // is the exact failure mode the ZidlAllocator contract exists to catch).
+    const base = @intFromPtr(pool.buf.ptr);
+    const aligned_abs = std.mem.alignForward(usize, base + pool.used, alignment);
+    const aligned_start = aligned_abs - base;
     if (aligned_start + len > pool.buf.len) return null;
     pool.used = aligned_start + len;
     return @ptrCast(pool.buf.ptr + aligned_start);
@@ -128,6 +134,26 @@ test "toAllocator: alloc/free round-trip through the C vtable" {
     try testing.expectEqual(@as(usize, 16), mem.len);
     @memset(mem, 0xAB);
     try testing.expect(pool.used >= 16);
+}
+
+test "toAllocator: alignment > 1 returns a genuinely aligned pointer even when the pool's base isn't" {
+    // storage is 8-aligned, but slicing off the first byte guarantees the
+    // pool's own base address is NOT a multiple of 8. Computing alignment
+    // relative to an offset from that base (instead of the real absolute
+    // address) would silently return a misaligned pointer here — this is
+    // the exact scenario the fix (align against @intFromPtr(pool.buf.ptr),
+    // not against pool.used alone) exists to catch.
+    var storage: [264]u8 align(8) = undefined;
+    const misaligned_base = storage[1..];
+    try testing.expect(@intFromPtr(misaligned_base.ptr) % 8 != 0);
+
+    var pool = FixedPoolCtx{ .buf = misaligned_base };
+    const c_alloc = testZidlAllocator(&pool);
+    const alloc = toAllocator(&c_alloc);
+
+    const vals = try alloc.alloc(u64, 4);
+    defer alloc.free(vals);
+    try testing.expectEqual(@as(usize, 0), @intFromPtr(vals.ptr) % @alignOf(u64));
 }
 
 test "toAllocator: OOM surfaces as error.OutOfMemory, not a crash" {

@@ -3156,16 +3156,22 @@ const ConcreteImplGenerator = struct {
         // classes failed this way before this pre-scan was added.
         {
             var scratch_hdr = std.ArrayList(u8).empty;
-            defer scratch_hdr.deinit(self.alloc);
             var scratch_src = std.ArrayList(u8).empty;
-            defer scratch_src.deinit(self.alloc);
             const real_hdr = self.hdr;
             const real_src = self.src;
             self.hdr = &scratch_hdr;
             self.src = &scratch_src;
-            try self.emitItems(spec.items);
+            // Restore self.hdr/self.src unconditionally before checking the
+            // result — on an error path, `try`-ing directly here would leave
+            // both pointing at the scratch buffers this block is about to
+            // deinit, a dangling-pointer trap for any future errdefer in
+            // emit() that touches self.hdr/self.src.
+            const prescan_result = self.emitItems(spec.items);
             self.hdr = real_hdr;
             self.src = real_src;
+            scratch_hdr.deinit(self.alloc);
+            scratch_src.deinit(self.alloc);
+            try prescan_result;
         }
 
         try self.srcPrint(
