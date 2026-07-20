@@ -252,15 +252,21 @@ char *zidl_cdr_strdup(const char *s);
  * Free a NUL-terminated string previously allocated by this file's own
  * reads or zidl_cdr_strdup (i.e. anything a generated `_free()` function
  * frees that came from here) via the registered allocator. Reconstructs
- * the original allocation size via strlen(s) + 1 — correct for every string
- * this file itself ever allocates, all of which are allocated at exactly
- * that size. `s` may be NULL (no-op).
+ * the original allocation size via strlen(s) + 1. This is exact — not an
+ * approximation — for every string this file itself ever allocates:
+ * zidl_cdr_read_string rejects (ZIDL_CDR_INVALID) any decoded content
+ * containing a NUL byte before the final one, specifically so that
+ * strlen(s) can never fall short of the true allocated length here. A
+ * size-class or slab allocator would otherwise receive a too-small size on
+ * free() for a string with an embedded NUL, misdirecting the block to the
+ * wrong pool and corrupting allocator state. `s` may be NULL (no-op).
  */
 void zidl_cdr_free_str(char *s);
 
 /**
  * Same as zidl_cdr_free_str, for a NUL-terminated (uint16_t 0) wstring
- * previously allocated by zidl_cdr_read_wstring. `s` may be NULL (no-op).
+ * previously allocated by zidl_cdr_read_wstring — which applies the same
+ * embedded-NUL-wchar rejection for the same reason. `s` may be NULL (no-op).
  */
 void zidl_cdr_free_wstr(uint16_t *s);
 
@@ -275,6 +281,13 @@ int zidl_cdr_read_string_zerocopy(ZidlCdrReader *r, const char **out, uint32_t *
  * Allocating string read. Caller must free(*out) via zidl_cdr_free_str(),
  * not free() directly — the registered allocator (see
  * zidl_cdr_set_allocator) may not be libc's.
+ *
+ * Returns ZIDL_CDR_INVALID if the decoded content contains a NUL byte
+ * before the final one. IDL string semantics are C-string-like (implicitly
+ * NUL-terminated) already, so such content is malformed, not merely
+ * unusual — rejecting it here (rather than silently truncating or
+ * accepting it) is also what guarantees zidl_cdr_free_str's strlen(s)+1
+ * size reconstruction is always exact for a string this function returns.
  */
 int zidl_cdr_read_string (ZidlCdrReader *r, char     **out);
 
@@ -283,6 +296,9 @@ int zidl_cdr_read_string (ZidlCdrReader *r, char     **out);
  * not free() directly (see zidl_cdr_read_string's note).
  * *out is NUL-terminated (a trailing uint16_t 0 is appended after the chars).
  * *out_len = wchar count excluding the trailing NUL wchar.
+ *
+ * Returns ZIDL_CDR_INVALID if the decoded content contains a NUL wchar
+ * before the final one — same reasoning as zidl_cdr_read_string.
  */
 int zidl_cdr_read_wstring(ZidlCdrReader *r, uint16_t **out, uint32_t *out_len);
 
