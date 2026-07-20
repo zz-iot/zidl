@@ -61,15 +61,37 @@ discovery directly, without going through the Zig core.
 
 ### C and C++ backends
 
-- **`ZidlCdrAllocator` (user-supplied allocator for strings/sequences)**: `zidl_cdr_read_string`
-  and sequence reads use `malloc` internally today; see `docs/backend_c.md` §"`zidl-cdr`
-  Dependency". Full sequencing now in zzdds's `docs/design/allocator-strategy.md` — this is
-  "Phase 2" there, required before an unbounded `string`/`sequence` field in a user-defined
-  topic type can avoid `malloc` in C (or C++ via the generated CDR path). It depends on
-  "Phase 0" landing first: a shared `ZidlAllocator` vtable struct, to be defined in
-  `zidl-cdr`'s public runtime header and reused (not duplicated) by zzdds's own C-ABI
-  bootstrap-allocator injection — don't invent a second, incompatible allocator-vtable
-  shape here independently of that one.
+- **`ZidlCdrAllocator` (user-supplied allocator for strings/sequences). Done.**
+  `zidl_cdr_read_string`/`read_wstring` and the C backend's generated inline sequence-buffer
+  allocation used `malloc` directly; `defaultValueToC`'s `@default("...")` string handling
+  used `strdup`. All now route through `zidl_cdr_alloc`/`zidl_cdr_free`/`zidl_cdr_strdup`/
+  `zidl_cdr_free_str`/`zidl_cdr_free_wstr` (`packages/zidl-cdr`), which fall back to
+  libc malloc/free/strdup unless a `ZidlAllocator` (the same shared vtable struct from Phase
+  0/1, `zidl_allocator.h`) is registered via `zidl_cdr_set_allocator()`.
+
+  **Design decision, not just an implementation detail**: the registered allocator is
+  **process-wide**, not per-`ZidlCdrReader`-instance as originally sketched. A decoded
+  string/sequence field is freed later by a generated `_free()`-adjacent function
+  (`zidl_cdr_free_str`/`_free_wstr`/`_free` call sites the C backend emits) that has no
+  reader or other per-call context in scope — there's nowhere to remember "which allocator
+  made this" without growing every generated struct with an extra field (an ABI break) or
+  breaking every `_free()` call site's signature. A single global, set once at startup
+  (mirroring e.g. SQLite's `sqlite3_config(SQLITE_CONFIG_MALLOC, ...)`), avoids both. The
+  real limitation this accepts: two different topic types (or two participants) can't have
+  two different CDR-layer allocators — only one process-wide default. `zidl_cdr_free_str`/
+  `_free_wstr` reconstruct the original allocation size (`strlen(s)+1` / scan-to-NUL-wchar)
+  since a bare `char*`/`uint16_t*` field has nowhere to remember it; sequence frees use the
+  already-stored `_maximum * sizeof(elem)`, no reconstruction needed. A fixed 8-byte
+  alignment is requested for every `zidl_cdr_alloc` call — provably sufficient for any IDL
+  primitive or struct (C99 target, no `_Alignof`, and no per-element-type alignment plumbed
+  through generated code).
+
+  Verified: `zig build test`/`integration-test` (including two `check-goldens` fixtures
+  updated to the new call sites), new `zidl-cdr` tests covering the allocator API directly,
+  and — separately, not just compiled — a standalone C program using the real generated
+  `Sample_deserialize` (a struct with both an unbounded `string` and an unbounded
+  `sequence<long>` field) decoded a real CDR payload with a custom allocator registered:
+  2 allocations, 2 frees, both fields correctly populated.
 - ~~**C backend `--generate-interfaces` (opaque handles + free functions)**~~:
   **Implemented.** Entity interfaces emit opaque `typedef struct Foo_s *Foo;` handles
   and free function declarations matching the OMG C PSM binding and the idioms of

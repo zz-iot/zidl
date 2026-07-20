@@ -715,3 +715,124 @@ test "pl_cdr: C multiple params with u8 padding" {
     try testing.expectEqual(@as(u8, 0xAB), v1);
     try testing.expectEqual(@as(u32, 0xDEAD_BEEF), v2);
 }
+
+// ── Allocator (zidl_cdr_set_allocator) ─────────────────────────────────────────
+//
+// zidl_cdr_set_allocator is process-wide global state (see its doc comment in
+// zidl_cdr.h for why), so every test below resets it to NULL (libc default) in
+// a defer — leaking a custom allocator into an unrelated, later-running test in
+// this same process would break it in a confusing way.
+
+const TrackingCtx = struct {
+    alloc_calls: usize = 0,
+    free_calls: usize = 0,
+};
+
+fn trackAlloc(ctx: ?*anyopaque, len: usize, alignment: usize) callconv(.c) ?*anyopaque {
+    _ = alignment;
+    const self: *TrackingCtx = @ptrCast(@alignCast(ctx.?));
+    self.alloc_calls += 1;
+    return std.c.malloc(len);
+}
+
+fn trackResize(ctx: ?*anyopaque, ptr: ?*anyopaque, old_len: usize, new_len: usize, alignment: usize) callconv(.c) bool {
+    _ = ctx;
+    _ = ptr;
+    _ = old_len;
+    _ = new_len;
+    _ = alignment;
+    return false;
+}
+
+fn trackFree(ctx: ?*anyopaque, ptr: ?*anyopaque, len: usize, alignment: usize) callconv(.c) void {
+    _ = len;
+    _ = alignment;
+    const self: *TrackingCtx = @ptrCast(@alignCast(ctx.?));
+    self.free_calls += 1;
+    std.c.free(ptr);
+}
+
+fn trackingAllocator(track: *TrackingCtx) c.ZidlAllocator {
+    return .{
+        .ctx = track,
+        .alloc = trackAlloc,
+        .resize = trackResize,
+        .free = trackFree,
+    };
+}
+
+test "allocator: zidl_cdr_read_string routes through the registered allocator" {
+    var track = TrackingCtx{};
+    var za = trackingAllocator(&track);
+    c.zidl_cdr_set_allocator(&za);
+    defer c.zidl_cdr_set_allocator(null);
+
+    var cw: c.ZidlCdrWriter = undefined;
+    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
+    defer c.zidl_cdr_writer_deinit(&cw);
+    _ = c.zidl_cdr_write_encap(&cw);
+    const src = "hello allocator";
+    _ = c.zidl_cdr_write_string(&cw, src.ptr, @intCast(src.len));
+
+    var r: c.ZidlCdrReader = undefined;
+    _ = c.zidl_cdr_reader_init(&r, cw.buf, cw.len);
+    var out: [*c]u8 = null;
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c.zidl_cdr_read_string(&r, &out));
+    try testing.expectEqual(@as(usize, 1), track.alloc_calls);
+    try testing.expectEqualStrings(src, std.mem.span(out));
+
+    c.zidl_cdr_free_str(out);
+    try testing.expectEqual(@as(usize, 1), track.free_calls);
+}
+
+test "allocator: zidl_cdr_read_wstring routes through the registered allocator" {
+    var track = TrackingCtx{};
+    var za = trackingAllocator(&track);
+    c.zidl_cdr_set_allocator(&za);
+    defer c.zidl_cdr_set_allocator(null);
+
+    var cw: c.ZidlCdrWriter = undefined;
+    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
+    defer c.zidl_cdr_writer_deinit(&cw);
+    _ = c.zidl_cdr_write_encap(&cw);
+    const src = [_]u16{ 'h', 'i', 0 };
+    _ = c.zidl_cdr_write_wstring(&cw, &src, 2);
+
+    var r: c.ZidlCdrReader = undefined;
+    _ = c.zidl_cdr_reader_init(&r, cw.buf, cw.len);
+    var out: [*c]u16 = null;
+    var out_len: u32 = 0;
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c.zidl_cdr_read_wstring(&r, &out, &out_len));
+    try testing.expectEqual(@as(usize, 1), track.alloc_calls);
+    try testing.expectEqual(@as(u32, 2), out_len);
+
+    c.zidl_cdr_free_wstr(out);
+    try testing.expectEqual(@as(usize, 1), track.free_calls);
+}
+
+test "allocator: zidl_cdr_strdup routes through the registered allocator" {
+    var track = TrackingCtx{};
+    var za = trackingAllocator(&track);
+    c.zidl_cdr_set_allocator(&za);
+    defer c.zidl_cdr_set_allocator(null);
+
+    const dup = c.zidl_cdr_strdup("some default value");
+    try testing.expectEqual(@as(usize, 1), track.alloc_calls);
+    try testing.expectEqualStrings("some default value", std.mem.span(dup));
+
+    c.zidl_cdr_free_str(dup);
+    try testing.expectEqual(@as(usize, 1), track.free_calls);
+}
+
+test "allocator: NULL restores the libc malloc/free default" {
+    c.zidl_cdr_set_allocator(null);
+    const p = c.zidl_cdr_alloc(16);
+    try testing.expect(p != null);
+    c.zidl_cdr_free(p, 16);
+}
+
+test "allocator: zidl_cdr_free/free_str/free_wstr accept NULL as a no-op" {
+    c.zidl_cdr_free(null, 16);
+    c.zidl_cdr_free_str(null);
+    c.zidl_cdr_free_wstr(null);
+}

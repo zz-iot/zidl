@@ -515,6 +515,59 @@ int zidl_cdr_read_fixed(ZidlCdrReader *r, uint8_t digits, uint8_t scale, double 
     return ZIDL_CDR_OK;
 }
 
+/* ── Allocator ───────────────────────────────────────────────────────────── */
+
+/*
+ * Fixed conservative alignment requested for every zidl_cdr_alloc/free call,
+ * regardless of what's being stored. No IDL primitive or struct needs more
+ * than 8-byte natural alignment (the widest IDL primitives — double,
+ * (u)int64_t — are 8 bytes; a struct's alignment is the max of its
+ * members', so it can't exceed that either), so a fixed 8 is provably
+ * sufficient without needing C11's _Alignof (this file targets C99) or
+ * threading a per-element alignment value through every call site,
+ * including the ones generated per-type by the C backend.
+ */
+#define ZIDL_CDR_ALLOC_ALIGN ((size_t)8)
+
+/* NULL means "use libc malloc/free" — the default, and what every allocation
+ * made before the first zidl_cdr_set_allocator() call uses. */
+static const ZidlAllocator *g_allocator = NULL;
+
+void zidl_cdr_set_allocator(const ZidlAllocator *allocator) {
+    g_allocator = allocator;
+}
+
+void *zidl_cdr_alloc(size_t n) {
+    if (g_allocator) return g_allocator->alloc(g_allocator->ctx, n, ZIDL_CDR_ALLOC_ALIGN);
+    return malloc(n);
+}
+
+void zidl_cdr_free(void *p, size_t n) {
+    if (!p) return;
+    if (g_allocator) { g_allocator->free(g_allocator->ctx, p, n, ZIDL_CDR_ALLOC_ALIGN); return; }
+    free(p);
+}
+
+char *zidl_cdr_strdup(const char *s) {
+    size_t n = strlen(s) + 1u;
+    char *buf = (char *)zidl_cdr_alloc(n);
+    if (!buf) return NULL;
+    memcpy(buf, s, n);
+    return buf;
+}
+
+void zidl_cdr_free_str(char *s) {
+    if (!s) return;
+    zidl_cdr_free(s, strlen(s) + 1u);
+}
+
+void zidl_cdr_free_wstr(uint16_t *s) {
+    if (!s) return;
+    uint32_t n = 0;
+    while (s[n] != 0) n++;
+    zidl_cdr_free(s, (n + 1u) * sizeof(uint16_t));
+}
+
 /* ── String / wstring reads ──────────────────────────────────────────────── */
 
 int zidl_cdr_read_string_zerocopy(ZidlCdrReader *r, const char **out, uint32_t *out_len) {
@@ -535,7 +588,7 @@ int zidl_cdr_read_string(ZidlCdrReader *r, char **out) {
     uint32_t    len;
     int rc = zidl_cdr_read_string_zerocopy(r, &p, &len);
     if (rc) return rc;
-    char *buf = (char *)malloc(len + 1u);
+    char *buf = (char *)zidl_cdr_alloc(len + 1u);
     if (!buf) return ZIDL_CDR_OVERFLOW;
     memcpy(buf, p, len);
     buf[len] = '\0';
@@ -550,15 +603,15 @@ int zidl_cdr_read_wstring(ZidlCdrReader *r, uint16_t **out, uint32_t *out_len) {
     if (len == 0) return ZIDL_CDR_INVALID;
     uint32_t char_count = len - 1u;
     /* +1 for NUL wchar so caller can treat *out as a NUL-terminated uint16_t string. */
-    uint16_t *buf = (uint16_t *)malloc((char_count + 1u) * sizeof(uint16_t));
+    uint16_t *buf = (uint16_t *)zidl_cdr_alloc((char_count + 1u) * sizeof(uint16_t));
     if (!buf) return ZIDL_CDR_OVERFLOW;
     for (uint32_t i = 0; i < char_count; i++) {
         rc = zidl_cdr_read_u16(r, &buf[i]);
-        if (rc) { free(buf); return rc; }
+        if (rc) { zidl_cdr_free(buf, (char_count + 1u) * sizeof(uint16_t)); return rc; }
     }
     uint16_t nul_wchar;
     rc = zidl_cdr_read_u16(r, &nul_wchar); /* discard NUL wchar */
-    if (rc) { free(buf); return rc; }
+    if (rc) { zidl_cdr_free(buf, (char_count + 1u) * sizeof(uint16_t)); return rc; }
     buf[char_count] = 0; /* NUL-terminate */
     *out     = buf;
     *out_len = char_count;
