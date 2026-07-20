@@ -715,3 +715,221 @@ test "pl_cdr: C multiple params with u8 padding" {
     try testing.expectEqual(@as(u8, 0xAB), v1);
     try testing.expectEqual(@as(u32, 0xDEAD_BEEF), v2);
 }
+
+// ── Allocator (zidl_cdr_set_allocator) ─────────────────────────────────────────
+//
+// zidl_cdr_set_allocator is process-wide global state (see its doc comment in
+// zidl_cdr.h for why), so every test below resets it to NULL (libc default) in
+// a defer — leaking a custom allocator into an unrelated, later-running test in
+// this same process would break it in a confusing way.
+
+const TrackingCtx = struct {
+    alloc_calls: usize = 0,
+    free_calls: usize = 0,
+    last_alloc_len: usize = 0,
+    last_free_len: usize = 0,
+};
+
+fn trackAlloc(ctx: ?*anyopaque, len: usize, alignment: usize) callconv(.c) ?*anyopaque {
+    _ = alignment;
+    const self: *TrackingCtx = @ptrCast(@alignCast(ctx.?));
+    self.alloc_calls += 1;
+    self.last_alloc_len = len;
+    return std.c.malloc(len);
+}
+
+fn trackResize(ctx: ?*anyopaque, ptr: ?*anyopaque, old_len: usize, new_len: usize, alignment: usize) callconv(.c) bool {
+    _ = ctx;
+    _ = ptr;
+    _ = old_len;
+    _ = new_len;
+    _ = alignment;
+    return false;
+}
+
+fn trackFree(ctx: ?*anyopaque, ptr: ?*anyopaque, len: usize, alignment: usize) callconv(.c) void {
+    _ = alignment;
+    const self: *TrackingCtx = @ptrCast(@alignCast(ctx.?));
+    self.free_calls += 1;
+    self.last_free_len = len;
+    std.c.free(ptr);
+}
+
+fn trackingAllocator(track: *TrackingCtx) c.ZidlAllocator {
+    return .{
+        .ctx = track,
+        .alloc = trackAlloc,
+        .resize = trackResize,
+        .free = trackFree,
+    };
+}
+
+test "allocator: zidl_cdr_read_string routes through the registered allocator" {
+    var track = TrackingCtx{};
+    var za = trackingAllocator(&track);
+    c.zidl_cdr_set_allocator(&za);
+    defer c.zidl_cdr_set_allocator(null);
+
+    var cw: c.ZidlCdrWriter = undefined;
+    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
+    defer c.zidl_cdr_writer_deinit(&cw);
+    _ = c.zidl_cdr_write_encap(&cw);
+    const src = "hello allocator";
+    _ = c.zidl_cdr_write_string(&cw, src.ptr, @intCast(src.len));
+
+    var r: c.ZidlCdrReader = undefined;
+    _ = c.zidl_cdr_reader_init(&r, cw.buf, cw.len);
+    var out: [*c]u8 = null;
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c.zidl_cdr_read_string(&r, &out));
+    try testing.expectEqual(@as(usize, 1), track.alloc_calls);
+    try testing.expectEqualStrings(src, std.mem.span(out));
+
+    c.zidl_cdr_free_str(out);
+    try testing.expectEqual(@as(usize, 1), track.free_calls);
+}
+
+test "allocator: zidl_cdr_read_wstring routes through the registered allocator" {
+    var track = TrackingCtx{};
+    var za = trackingAllocator(&track);
+    c.zidl_cdr_set_allocator(&za);
+    defer c.zidl_cdr_set_allocator(null);
+
+    var cw: c.ZidlCdrWriter = undefined;
+    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
+    defer c.zidl_cdr_writer_deinit(&cw);
+    _ = c.zidl_cdr_write_encap(&cw);
+    const src = [_]u16{ 'h', 'i', 0 };
+    _ = c.zidl_cdr_write_wstring(&cw, &src, 2);
+
+    var r: c.ZidlCdrReader = undefined;
+    _ = c.zidl_cdr_reader_init(&r, cw.buf, cw.len);
+    var out: [*c]u16 = null;
+    var out_len: u32 = 0;
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c.zidl_cdr_read_wstring(&r, &out, &out_len));
+    try testing.expectEqual(@as(usize, 1), track.alloc_calls);
+    try testing.expectEqual(@as(u32, 2), out_len);
+
+    c.zidl_cdr_free_wstr(out);
+    try testing.expectEqual(@as(usize, 1), track.free_calls);
+}
+
+test "allocator: zidl_cdr_strdup routes through the registered allocator" {
+    var track = TrackingCtx{};
+    var za = trackingAllocator(&track);
+    c.zidl_cdr_set_allocator(&za);
+    defer c.zidl_cdr_set_allocator(null);
+
+    const dup = c.zidl_cdr_strdup("some default value");
+    try testing.expectEqual(@as(usize, 1), track.alloc_calls);
+    try testing.expectEqualStrings("some default value", std.mem.span(dup));
+
+    c.zidl_cdr_free_str(dup);
+    try testing.expectEqual(@as(usize, 1), track.free_calls);
+}
+
+test "allocator: NULL restores the libc malloc/free default" {
+    c.zidl_cdr_set_allocator(null);
+    const p = c.zidl_cdr_alloc(16);
+    try testing.expect(p != null);
+    c.zidl_cdr_free(p, 16);
+}
+
+test "allocator: zidl_cdr_free/free_str/free_wstr accept NULL as a no-op" {
+    c.zidl_cdr_free(null, 16);
+    c.zidl_cdr_free_str(null);
+    c.zidl_cdr_free_wstr(null);
+}
+
+// ── Embedded-NUL rejection (zidl_cdr_free_str/free_wstr size-reconstruction) ───
+//
+// zidl_cdr_free_str/free_wstr reconstruct the original allocation size via
+// strlen(s)+1 / scan-to-NUL-wchar — correct only if the decoded content has no
+// NUL before the final byte. zidl_cdr_read_string/read_wstring must reject
+// (ZIDL_CDR_INVALID) any payload that violates that, or a size-class/slab
+// allocator would receive a too-small free() size and corrupt its state.
+// zidl_cdr_write_string/write_wstring take an explicit length rather than
+// relying on strlen/a NUL terminator, so a payload with an embedded NUL can be
+// constructed directly here without going through any C-string API.
+
+test "allocator: zidl_cdr_read_string rejects an embedded NUL byte" {
+    var cw: c.ZidlCdrWriter = undefined;
+    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
+    defer c.zidl_cdr_writer_deinit(&cw);
+    _ = c.zidl_cdr_write_encap(&cw);
+    const malformed = "ab\x00cd"; // embedded NUL before the final byte
+    _ = c.zidl_cdr_write_string(&cw, malformed.ptr, @intCast(malformed.len));
+
+    var r: c.ZidlCdrReader = undefined;
+    _ = c.zidl_cdr_reader_init(&r, cw.buf, cw.len);
+    var out: [*c]u8 = null;
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_INVALID), c.zidl_cdr_read_string(&r, &out));
+    try testing.expect(out == null); // nothing left allocated to free
+}
+
+test "allocator: zidl_cdr_read_string accepts a NUL exactly at the final byte (not \"embedded\")" {
+    // Sanity check the rejection is specifically about a NUL *before* the
+    // final position — an ordinary well-formed string's own wire-level
+    // trailing NUL (already excluded from `len`/content by
+    // zidl_cdr_read_string_zerocopy) must not trip this check.
+    var cw: c.ZidlCdrWriter = undefined;
+    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
+    defer c.zidl_cdr_writer_deinit(&cw);
+    _ = c.zidl_cdr_write_encap(&cw);
+    const ok = "hello";
+    _ = c.zidl_cdr_write_string(&cw, ok.ptr, @intCast(ok.len));
+
+    var r: c.ZidlCdrReader = undefined;
+    _ = c.zidl_cdr_reader_init(&r, cw.buf, cw.len);
+    var out: [*c]u8 = null;
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c.zidl_cdr_read_string(&r, &out));
+    try testing.expectEqualStrings(ok, std.mem.span(out));
+    c.zidl_cdr_free_str(out);
+}
+
+test "allocator: zidl_cdr_read_wstring rejects an embedded NUL wchar" {
+    var cw: c.ZidlCdrWriter = undefined;
+    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
+    defer c.zidl_cdr_writer_deinit(&cw);
+    _ = c.zidl_cdr_write_encap(&cw);
+    const malformed = [_]u16{ 'a', 0, 'b' }; // embedded NUL wchar before the end
+    _ = c.zidl_cdr_write_wstring(&cw, &malformed, malformed.len);
+
+    var r: c.ZidlCdrReader = undefined;
+    _ = c.zidl_cdr_reader_init(&r, cw.buf, cw.len);
+    var out: [*c]u16 = null;
+    var out_len: u32 = 0;
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_INVALID), c.zidl_cdr_read_wstring(&r, &out, &out_len));
+    try testing.expect(out == null);
+}
+
+test "allocator: embedded-NUL rejection makes free_str's strlen reconstruction exact (proof via tracking allocator)" {
+    // Confirms the fix actually closes the gap greptile flagged: with the
+    // rejection in place, every string zidl_cdr_read_string successfully
+    // returns has strlen(s)+1 == the true allocated size, so a size-tracking
+    // allocator's alloc() and free() calls always agree.
+    var track = TrackingCtx{};
+    var za = trackingAllocator(&track);
+    c.zidl_cdr_set_allocator(&za);
+    defer c.zidl_cdr_set_allocator(null);
+
+    var cw: c.ZidlCdrWriter = undefined;
+    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
+    defer c.zidl_cdr_writer_deinit(&cw);
+    _ = c.zidl_cdr_write_encap(&cw);
+    const ok = "no embedded nul here";
+    _ = c.zidl_cdr_write_string(&cw, ok.ptr, @intCast(ok.len));
+
+    var r: c.ZidlCdrReader = undefined;
+    _ = c.zidl_cdr_reader_init(&r, cw.buf, cw.len);
+    var out: [*c]u8 = null;
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c.zidl_cdr_read_string(&r, &out));
+    try testing.expectEqual(@as(usize, 1), track.alloc_calls);
+    try testing.expectEqual(@as(usize, ok.len + 1), track.last_alloc_len);
+
+    c.zidl_cdr_free_str(out);
+    try testing.expectEqual(@as(usize, 1), track.free_calls);
+    // The actual proof: the size free_str reconstructed via strlen(s)+1
+    // exactly matches the size originally passed to alloc — not just "some
+    // free happened."
+    try testing.expectEqual(track.last_alloc_len, track.last_free_len);
+}

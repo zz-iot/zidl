@@ -515,6 +515,71 @@ int zidl_cdr_read_fixed(ZidlCdrReader *r, uint8_t digits, uint8_t scale, double 
     return ZIDL_CDR_OK;
 }
 
+/* ── Allocator ───────────────────────────────────────────────────────────── */
+
+/*
+ * Fixed conservative alignment requested for every zidl_cdr_alloc/free call,
+ * regardless of what's being stored. No IDL primitive or struct needs more
+ * than 8-byte natural alignment (the widest IDL primitives — double,
+ * (u)int64_t — are 8 bytes; a struct's alignment is the max of its
+ * members', so it can't exceed that either), so a fixed 8 is provably
+ * sufficient without needing C11's _Alignof (this file targets C99) or
+ * threading a per-element alignment value through every call site,
+ * including the ones generated per-type by the C backend.
+ */
+#define ZIDL_CDR_ALLOC_ALIGN ((size_t)8)
+
+/* NULL means "use libc malloc/free" — the default, and what every allocation
+ * made before the first zidl_cdr_set_allocator() call uses.
+ *
+ * volatile does NOT make this thread-safe on its own — the documented
+ * contract (zidl_cdr_set_allocator's doc comment) still requires the
+ * caller to register the allocator once at startup, before any other
+ * thread starts decoding, since volatile provides no atomicity or memory
+ * ordering guarantee across cores. What it does provide: without it nothing
+ * stops a compiler from proving that no *visible* store to g_allocator
+ * occurs within a long call (e.g. zidl_cdr_read_wstring's per-character
+ * loop) and caching its value across that whole call, especially once
+ * inlined under LTO — a real risk even for within-contract usage (set,
+ * decode, later reset for a different pass), not just the cross-thread
+ * misuse the documented contract already disclaims. */
+static const ZidlAllocator *volatile g_allocator = NULL;
+
+void zidl_cdr_set_allocator(const ZidlAllocator *allocator) {
+    g_allocator = allocator;
+}
+
+void *zidl_cdr_alloc(size_t n) {
+    if (g_allocator) return g_allocator->alloc(g_allocator->ctx, n, ZIDL_CDR_ALLOC_ALIGN);
+    return malloc(n);
+}
+
+void zidl_cdr_free(void *p, size_t n) {
+    if (!p) return;
+    if (g_allocator) { g_allocator->free(g_allocator->ctx, p, n, ZIDL_CDR_ALLOC_ALIGN); return; }
+    free(p);
+}
+
+char *zidl_cdr_strdup(const char *s) {
+    size_t n = strlen(s) + 1u;
+    char *buf = (char *)zidl_cdr_alloc(n);
+    if (!buf) return NULL;
+    memcpy(buf, s, n);
+    return buf;
+}
+
+void zidl_cdr_free_str(char *s) {
+    if (!s) return;
+    zidl_cdr_free(s, strlen(s) + 1u);
+}
+
+void zidl_cdr_free_wstr(uint16_t *s) {
+    if (!s) return;
+    uint32_t n = 0;
+    while (s[n] != 0) n++;
+    zidl_cdr_free(s, (n + 1u) * sizeof(uint16_t));
+}
+
 /* ── String / wstring reads ──────────────────────────────────────────────── */
 
 int zidl_cdr_read_string_zerocopy(ZidlCdrReader *r, const char **out, uint32_t *out_len) {
@@ -535,7 +600,15 @@ int zidl_cdr_read_string(ZidlCdrReader *r, char **out) {
     uint32_t    len;
     int rc = zidl_cdr_read_string_zerocopy(r, &p, &len);
     if (rc) return rc;
-    char *buf = (char *)malloc(len + 1u);
+    /* Reject an embedded NUL before the content ends: IDL string semantics
+     * are C-string-like (NUL-terminated) already, so wire content with a
+     * NUL before the final byte is malformed, not merely unusual — and
+     * rejecting it here is what makes zidl_cdr_free_str's strlen(s)+1 size
+     * reconstruction provably correct for every string this function ever
+     * successfully returns, rather than merely correct for well-formed
+     * ones. Checked against the source bytes before allocating anything. */
+    if (len > 0 && memchr(p, '\0', len) != NULL) return ZIDL_CDR_INVALID;
+    char *buf = (char *)zidl_cdr_alloc(len + 1u);
     if (!buf) return ZIDL_CDR_OVERFLOW;
     memcpy(buf, p, len);
     buf[len] = '\0';
@@ -550,15 +623,20 @@ int zidl_cdr_read_wstring(ZidlCdrReader *r, uint16_t **out, uint32_t *out_len) {
     if (len == 0) return ZIDL_CDR_INVALID;
     uint32_t char_count = len - 1u;
     /* +1 for NUL wchar so caller can treat *out as a NUL-terminated uint16_t string. */
-    uint16_t *buf = (uint16_t *)malloc((char_count + 1u) * sizeof(uint16_t));
+    uint16_t *buf = (uint16_t *)zidl_cdr_alloc((char_count + 1u) * sizeof(uint16_t));
     if (!buf) return ZIDL_CDR_OVERFLOW;
     for (uint32_t i = 0; i < char_count; i++) {
         rc = zidl_cdr_read_u16(r, &buf[i]);
-        if (rc) { free(buf); return rc; }
+        if (rc) { zidl_cdr_free(buf, (char_count + 1u) * sizeof(uint16_t)); return rc; }
+        /* Reject an embedded NUL wchar before the content ends — see
+         * zidl_cdr_read_string's comment; same reasoning, same reason it
+         * makes zidl_cdr_free_wstr's scan-for-NUL size reconstruction
+         * provably correct. */
+        if (buf[i] == 0) { zidl_cdr_free(buf, (char_count + 1u) * sizeof(uint16_t)); return ZIDL_CDR_INVALID; }
     }
     uint16_t nul_wchar;
     rc = zidl_cdr_read_u16(r, &nul_wchar); /* discard NUL wchar */
-    if (rc) { free(buf); return rc; }
+    if (rc) { zidl_cdr_free(buf, (char_count + 1u) * sizeof(uint16_t)); return rc; }
     buf[char_count] = 0; /* NUL-terminate */
     *out     = buf;
     *out_len = char_count;

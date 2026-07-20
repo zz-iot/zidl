@@ -1687,7 +1687,6 @@ const CdrGenerator = struct {
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructC(spec.items)) {
             try self.write("#include \"zzdds_c.h\"\n");
         }
-        try self.write("#include <stdlib.h>\n");
         try self.write("#include <string.h>\n");
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructC(spec.items)) {
             try self.print("#define ZZDDS_KEY_VALUE_BUF_SIZE {d}\n", .{key_value_buf_size});
@@ -3009,15 +3008,17 @@ const CdrGenerator = struct {
         }
         switch (m.type_ref) {
             .string => |b| if (b == null) {
-                try self.printI("free((void *){s});\n", .{lval});
+                try self.printI("zidl_cdr_free_str({s});\n", .{lval});
             },
             .wstring => |b| if (b == null) {
-                try self.printI("free({s});\n", .{lval});
+                try self.printI("zidl_cdr_free_wstr({s});\n", .{lval});
             },
             .sequence => |seq| {
                 // Free individual elements before freeing the buffer.
                 try self.emitFreeSeqElements(seq.element.*, lval);
-                try self.printI("free({s}._buffer);\n", .{lval});
+                const elem_c = try self.elemCType(seq.element.*);
+                defer self.alloc.free(elem_c);
+                try self.printI("zidl_cdr_free({s}._buffer, {s}._maximum * sizeof({s}));\n", .{ lval, lval, elem_c });
             },
             else => {},
         }
@@ -3045,10 +3046,10 @@ const CdrGenerator = struct {
         } else {
             switch (elem_tr) {
                 .string => |b| if (b == null) {
-                    try self.printI("free((void *){s});\n", .{elem_lval});
+                    try self.printI("zidl_cdr_free_str({s});\n", .{elem_lval});
                 },
                 .wstring => |b| if (b == null) {
-                    try self.printI("free({s});\n", .{elem_lval});
+                    try self.printI("zidl_cdr_free_wstr({s});\n", .{elem_lval});
                 },
                 else => {},
             }
@@ -3069,14 +3070,19 @@ const CdrGenerator = struct {
         self.indent_depth += 1;
         switch (elem_tr) {
             .string => |b| if (b == null) {
-                try self.printI("free((void *){s}._buffer[_fsi]);\n", .{seq_lval});
+                try self.printI("zidl_cdr_free_str({s}._buffer[_fsi]);\n", .{seq_lval});
             },
             .wstring => |b| if (b == null) {
-                try self.printI("free({s}._buffer[_fsi]);\n", .{seq_lval});
+                try self.printI("zidl_cdr_free_wstr({s}._buffer[_fsi]);\n", .{seq_lval});
             },
-            .sequence => {
+            .sequence => |inner_seq| {
                 // Inner sequence: free its buffer (elements of elements not deep-freed).
-                try self.printI("free({s}._buffer[_fsi]._buffer);\n", .{seq_lval});
+                const inner_elem_c = try self.elemCType(inner_seq.element.*);
+                defer self.alloc.free(inner_elem_c);
+                try self.printI(
+                    "zidl_cdr_free({s}._buffer[_fsi]._buffer, {s}._buffer[_fsi]._maximum * sizeof({s}));\n",
+                    .{ seq_lval, seq_lval, inner_elem_c },
+                );
             },
             else => {},
         }
@@ -3279,14 +3285,14 @@ const CdrGenerator = struct {
                     self.indent_depth += 1;
                     try self.writeI("_rc = zidl_cdr_read_wstring(_r, &_wp, &_wl);\n");
                     try self.emitRcCheck();
-                    try self.printI("if (_wl > {d}u) {{ free(_wp);\n", .{n});
+                    try self.printI("if (_wl > {d}u) {{ zidl_cdr_free_wstr(_wp);\n", .{n});
                     self.indent_depth += 1;
                     try self.emitReturnRc("ZIDL_CDR_INVALID");
                     self.indent_depth -= 1;
                     try self.writeI("}\n");
                     try self.printI("memcpy({s}, _wp, _wl * sizeof(uint16_t));\n", .{lval});
                     try self.printI("{s}[_wl] = 0;\n", .{lval});
-                    try self.writeI("free(_wp);\n");
+                    try self.writeI("zidl_cdr_free_wstr(_wp);\n");
                     self.indent_depth -= 1;
                     try self.writeI("}\n");
                 } else {
@@ -3310,7 +3316,7 @@ const CdrGenerator = struct {
                 try self.printI("{s}._length = _sl;\n", .{lval});
                 try self.printI("{s}._maximum = _sl;\n", .{lval});
                 try self.printI("{s}._release = true;\n", .{lval});
-                try self.printI("{s}._buffer = ({s} *)malloc(_sl * sizeof({s}));\n", .{ lval, elem_c, elem_c });
+                try self.printI("{s}._buffer = ({s} *)zidl_cdr_alloc(_sl * sizeof({s}));\n", .{ lval, elem_c, elem_c });
                 try self.printI("if (!{s}._buffer && _sl > 0) {{\n", .{lval});
                 self.indent_depth += 1;
                 try self.emitReturnRc("ZIDL_CDR_OVERFLOW");
@@ -3537,7 +3543,7 @@ const CdrGenerator = struct {
             if (!from_default_ctor) {
                 // Preserve the existing required string on OOM; only replace it
                 // after the default string allocation succeeds.
-                try self.printI("free(_v->{s});\n", .{m.name});
+                try self.printI("zidl_cdr_free_str(_v->{s});\n", .{m.name});
             }
             try self.printI("_v->{s} = _s_{s};\n", .{ m.name, m.name });
             self.indent_depth -= 1;
@@ -3634,7 +3640,7 @@ const CdrGenerator = struct {
             .string => |s| blk: {
                 const esc = try escapeStringC(self.alloc, s);
                 defer self.alloc.free(esc);
-                break :blk std.fmt.allocPrint(self.alloc, "strdup(\"{s}\")", .{esc});
+                break :blk std.fmt.allocPrint(self.alloc, "zidl_cdr_strdup(\"{s}\")", .{esc});
             },
             .scoped_name => |n| self.scopedNameDefaultToC(n, type_ref),
             else => self.alloc.dupe(u8, "0"),
@@ -3950,7 +3956,6 @@ fn generateTypeCdrSource(
     try gen.print("/* Generated by zidl from {s}.idl — DO NOT EDIT */\n\n", .{opts.input_stem});
     try gen.print("#include \"{s}.h\"\n", .{type_stem});
     try gen.write("#include \"zidl_cdr.h\"\n");
-    try gen.write("#include <stdlib.h>\n");
     try gen.write("#include <string.h>\n\n");
     try gen.emitTypeDecl(td);
 }
@@ -4633,7 +4638,7 @@ test "c_backend cdr: bounded wstring read uses memcpy and bound check" {
     // Bound check with the correct bound (16).
     try testing.expect(has(src.items, "16u"));
     try testing.expect(has(src.items, "memcpy"));
-    try testing.expect(has(src.items, "free(_wp)"));
+    try testing.expect(has(src.items, "zidl_cdr_free_wstr(_wp)"));
 }
 
 test "c_backend cdr: unbounded wstring read uses zidl_cdr_read_wstring" {
@@ -4838,8 +4843,13 @@ test "c_backend cdr: source file banner and includes" {
     const s = c_src.items;
     try testing.expect(has(s, "#include \"pt.h\""));
     try testing.expect(has(s, "#include \"zidl_cdr.h\""));
-    try testing.expect(has(s, "#include <stdlib.h>"));
     try testing.expect(has(s, "#include <string.h>"));
+    // Generated code only ever calls zidl_cdr_alloc/_free/_strdup (declared in
+    // zidl_cdr.h, already included above) — never a bare libc allocation
+    // function — so <stdlib.h> is not needed and would be actively
+    // unwelcome on the freestanding/embedded toolchains this allocator work
+    // targets.
+    try testing.expect(!has(s, "#include <stdlib.h>"));
 }
 
 test "c_backend cdr: serialize @final struct primitives" {
@@ -4885,7 +4895,7 @@ test "c_backend cdr: compute_key_hash_from_cdr frees @key unbounded string" {
     // goto-based cleanup: _rc = compute_key_hash, label, free, return _rc
     try testing.expect(has(s, "_rc = Msg_compute_key_hash(_v, _hash)"));
     try testing.expect(has(s, "_kh_cleanup:"));
-    try testing.expect(has(s, "free((void *)_v->tag)"));
+    try testing.expect(has(s, "zidl_cdr_free_str(_v->tag)"));
     try testing.expect(has(s, "return _rc;"));
     // All reads before the label must use goto, not return
     try testing.expect(has(s, "if (_rc) goto _kh_cleanup;"));
@@ -4898,7 +4908,7 @@ test "c_backend cdr: compute_key_hash_from_cdr with @key sequence<long> frees bu
     const s = c_src.items;
     try testing.expect(has(s, "_rc = Msg_compute_key_hash(_v, _hash)"));
     try testing.expect(has(s, "_kh_cleanup:"));
-    try testing.expect(has(s, "free(_v->ids._buffer)"));
+    try testing.expect(has(s, "zidl_cdr_free(_v->ids._buffer,"));
     // No element loop needed for primitive elements
     try testing.expect(!has(s, "_fsi"));
 }
@@ -4910,8 +4920,8 @@ test "c_backend cdr: compute_key_hash_from_cdr with @key sequence<string> frees 
     const s = c_src.items;
     try testing.expect(has(s, "_kh_cleanup:"));
     // Element loop must appear before the buffer free
-    try testing.expect(has(s, "free((void *)_v->tags._buffer[_fsi])"));
-    try testing.expect(has(s, "free(_v->tags._buffer)"));
+    try testing.expect(has(s, "zidl_cdr_free_str(_v->tags._buffer[_fsi])"));
+    try testing.expect(has(s, "zidl_cdr_free(_v->tags._buffer,"));
 }
 
 test "c_backend cdr: compute_key_hash_from_cdr with @key string array frees each element" {
@@ -4923,7 +4933,7 @@ test "c_backend cdr: compute_key_hash_from_cdr with @key string array frees each
     // Must emit a free loop over the array elements
     try testing.expect(has(s, "_fai0"));
     try testing.expect(has(s, "< 3u"));
-    try testing.expect(has(s, "free((void *)_v->name[_fai0])"));
+    try testing.expect(has(s, "zidl_cdr_free_str(_v->name[_fai0])"));
     // Must NOT be just a comment
     try testing.expect(!has(s, "/* NOTE:"));
 }
@@ -4960,7 +4970,7 @@ test "c_backend cdr: serialize sequence member" {
     const s = c_src.items;
     try testing.expect(has(s, "zidl_cdr_write_u32(_w, _v->items._length)"));
     try testing.expect(has(s, "zidl_cdr_read_u32(_r, &_sl)"));
-    try testing.expect(has(s, "malloc"));
+    try testing.expect(has(s, "zidl_cdr_alloc"));
 }
 
 test "c_backend cdr: serialize enum member" {
@@ -5421,7 +5431,7 @@ test "c_backend cdr: @default emits apply_defaults prototype and implementation"
     const s = src.items;
     try testing.expect(has(s, "void UdpConfig_apply_defaults(UdpConfig *_v)"));
     try testing.expect(has(s, "_v->port_base = 7400;"));
-    try testing.expect(has(s, "char *_s_multicast_group_v4 = strdup(\"239.255.0.1\");"));
+    try testing.expect(has(s, "char *_s_multicast_group_v4 = zidl_cdr_strdup(\"239.255.0.1\");"));
     try testing.expect(has(s, "_v->multicast_group_v4 = _s_multicast_group_v4;"));
     try testing.expect(!has(s, "TODO"));
 }
@@ -5479,9 +5489,9 @@ test "c_backend cdr: non-optional string apply_defaults replaces only after strd
         \\struct Cfg { @default("default-url") string url; };
     , "cfg");
     defer src.deinit(testing.allocator);
-    try testing.expect(has(src.items, "char *_s_url = strdup(\"default-url\");"));
+    try testing.expect(has(src.items, "char *_s_url = zidl_cdr_strdup(\"default-url\");"));
     try testing.expect(has(src.items, "if (_s_url) {"));
-    try testing.expect(has(src.items, "free(_v->url);"));
+    try testing.expect(has(src.items, "zidl_cdr_free_str(_v->url);"));
     try testing.expect(has(src.items, "_v->url = _s_url;"));
 }
 
@@ -5511,7 +5521,7 @@ test "c_backend cdr: non-optional string default ctor assigns only after strdup 
     , "cfg");
     defer src.deinit(testing.allocator);
     try testing.expect(has(src.items, "void Cfg_default(Cfg *_v) {"));
-    try testing.expect(has(src.items, "char *_s_url = strdup(\"default-url\");"));
+    try testing.expect(has(src.items, "char *_s_url = zidl_cdr_strdup(\"default-url\");"));
     try testing.expect(has(src.items, "if (_s_url) {"));
     try testing.expect(has(src.items, "_v->url = _s_url;"));
     try testing.expect(!has(src.items, "_v->url = strdup(\"default-url\");"));
@@ -5525,7 +5535,7 @@ test "c_backend cdr: @default string with non-ASCII uses octal escape" {
     ;
     var src = try testGenCdr(idl, "cfg");
     defer src.deinit(testing.allocator);
-    try testing.expect(has(src.items, "strdup(\"\\001\")"));
+    try testing.expect(has(src.items, "zidl_cdr_strdup(\"\\001\")"));
 }
 
 test "c_backend: struct with sequence field gets _free declaration" {

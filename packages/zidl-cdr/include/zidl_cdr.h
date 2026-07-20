@@ -26,6 +26,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include "zidl_allocator.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -204,6 +205,71 @@ int zidl_cdr_read_f64 (ZidlCdrReader *r, double    *out);
  */
 int zidl_cdr_read_fixed(ZidlCdrReader *r, uint8_t digits, uint8_t scale, double *out);
 
+/* ── Allocator ───────────────────────────────────────────────────────────── */
+
+/**
+ * Register a process-wide allocator for every zidl-cdr heap allocation that
+ * outlives the call that made it: unbounded string/wstring/sequence decode
+ * (this file) and the generated `_free()`/default-value functions the C
+ * backend emits for the same fields (`src/backend/c.zig`). Pass NULL to
+ * restore the libc malloc/free default (the default if this is never
+ * called).
+ *
+ * Deliberately process-wide, not per-reader: a decoded string/sequence
+ * field is freed later, by a generated `_free()` function that has no
+ * `ZidlCdrReader` (or any other per-call context) in scope — there is
+ * nowhere to remember "which allocator made this" without growing every
+ * generated struct with an extra field. A single global, set once at
+ * startup, avoids that without changing any generated struct's layout or
+ * any `_free()` function's signature. If different topic types genuinely
+ * need different allocators, that isn't expressible here — this is a
+ * process-wide default, not a per-type or per-call override.
+ *
+ * Not safe to call concurrently with any decode or free in progress on
+ * another thread. Call once at startup, before decoding on any other
+ * thread. `allocator` (if non-NULL) must outlive every allocation made
+ * through it — in practice, the remaining lifetime of the process, since a
+ * later call with a different (or NULL) allocator does not retroactively
+ * convert already-allocated blocks to be freed some other way; they still
+ * need the allocator that made them, which is always "whichever one is
+ * currently registered" for every zidl-cdr-owned allocation.
+ */
+void zidl_cdr_set_allocator(const ZidlAllocator *allocator);
+
+/** Allocate `n` bytes via the registered allocator (malloc if none registered). */
+void *zidl_cdr_alloc(size_t n);
+
+/** Free a pointer previously returned by zidl_cdr_alloc, sized `n` bytes. `p` may be NULL. */
+void zidl_cdr_free(void *p, size_t n);
+
+/**
+ * strdup(), but via the registered allocator. Returns NULL on OOM (same as
+ * strdup()). `s` must not be NULL.
+ */
+char *zidl_cdr_strdup(const char *s);
+
+/**
+ * Free a NUL-terminated string previously allocated by this file's own
+ * reads or zidl_cdr_strdup (i.e. anything a generated `_free()` function
+ * frees that came from here) via the registered allocator. Reconstructs
+ * the original allocation size via strlen(s) + 1. This is exact — not an
+ * approximation — for every string this file itself ever allocates:
+ * zidl_cdr_read_string rejects (ZIDL_CDR_INVALID) any decoded content
+ * containing a NUL byte before the final one, specifically so that
+ * strlen(s) can never fall short of the true allocated length here. A
+ * size-class or slab allocator would otherwise receive a too-small size on
+ * free() for a string with an embedded NUL, misdirecting the block to the
+ * wrong pool and corrupting allocator state. `s` may be NULL (no-op).
+ */
+void zidl_cdr_free_str(char *s);
+
+/**
+ * Same as zidl_cdr_free_str, for a NUL-terminated (uint16_t 0) wstring
+ * previously allocated by zidl_cdr_read_wstring — which applies the same
+ * embedded-NUL-wchar rejection for the same reason. `s` may be NULL (no-op).
+ */
+void zidl_cdr_free_wstr(uint16_t *s);
+
 /**
  * Zero-copy string read: *out points into the CDR data buffer (no malloc).
  * *out_len = byte count excluding the trailing NUL.
@@ -212,14 +278,27 @@ int zidl_cdr_read_fixed(ZidlCdrReader *r, uint8_t digits, uint8_t scale, double 
 int zidl_cdr_read_string_zerocopy(ZidlCdrReader *r, const char **out, uint32_t *out_len);
 
 /**
- * Allocating string read.  Caller must free(*out) with free().
+ * Allocating string read. Caller must free(*out) via zidl_cdr_free_str(),
+ * not free() directly — the registered allocator (see
+ * zidl_cdr_set_allocator) may not be libc's.
+ *
+ * Returns ZIDL_CDR_INVALID if the decoded content contains a NUL byte
+ * before the final one. IDL string semantics are C-string-like (implicitly
+ * NUL-terminated) already, so such content is malformed, not merely
+ * unusual — rejecting it here (rather than silently truncating or
+ * accepting it) is also what guarantees zidl_cdr_free_str's strlen(s)+1
+ * size reconstruction is always exact for a string this function returns.
  */
 int zidl_cdr_read_string (ZidlCdrReader *r, char     **out);
 
 /**
- * Allocating wstring read.  Caller must free(*out) with free().
+ * Allocating wstring read. Caller must free(*out) via zidl_cdr_free_wstr(),
+ * not free() directly (see zidl_cdr_read_string's note).
  * *out is NUL-terminated (a trailing uint16_t 0 is appended after the chars).
  * *out_len = wchar count excluding the trailing NUL wchar.
+ *
+ * Returns ZIDL_CDR_INVALID if the decoded content contains a NUL wchar
+ * before the final one — same reasoning as zidl_cdr_read_string.
  */
 int zidl_cdr_read_wstring(ZidlCdrReader *r, uint16_t **out, uint32_t *out_len);
 

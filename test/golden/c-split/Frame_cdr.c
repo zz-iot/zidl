@@ -2,7 +2,6 @@
 
 #include "Frame.h"
 #include "zidl_cdr.h"
-#include <stdlib.h>
 #include <string.h>
 
 int Frame_serialize(ZidlCdrWriter *_w, const Frame *_v) {
