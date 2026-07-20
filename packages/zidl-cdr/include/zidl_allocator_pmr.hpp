@@ -73,9 +73,18 @@ private:
         if (allocator_) allocator_->free(allocator_->ctx, p, bytes, alignment);
     }
 
+    // Pointer identity, not a dynamic_cast-based "same underlying
+    // ZidlAllocator" check: dynamic_cast requires RTTI, which embedded/RT
+    // builds routinely disable (-fno-rtti) -- exactly the audience this
+    // header targets. Nothing in this codebase's actual usage
+    // (std::allocate_shared for entity wrappers) depends on two distinct
+    // ZidlAllocatorResource instances wrapping the same ZidlAllocator*
+    // comparing equal; is_equal only matters for pmr-container operations
+    // (e.g. swap/move-assignment across allocators), not in play here. Pure
+    // identity is RTTI-free and never wrong, just more conservative than a
+    // by-value comparison would be.
     bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override {
-        auto* o = dynamic_cast<const ZidlAllocatorResource*>(&other);
-        return o && o->allocator_ == allocator_;
+        return this == &other;
     }
 };
 
