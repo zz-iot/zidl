@@ -34,50 +34,48 @@
 
 namespace zidl {
 
-namespace detail {
-
-/// Process-wide slot holding the currently-registered ZidlAllocator (or
-/// nullptr). A function-local static reference rather than a plain global so
-/// this stays header-only with no companion .cpp translation unit to link.
-/// Not synchronized — same concurrency contract as setCppAllocator below and
-/// as zidl_cdr_set_allocator's (register once at startup, before any other
-/// thread allocates).
-inline const ZidlAllocator*& cppAllocatorSlot() noexcept {
-    static const ZidlAllocator* slot = nullptr;
-    return slot;
-}
-
-} // namespace detail
-
 /**
- * A std::pmr::memory_resource backed by a ZidlAllocator, read from the
- * process-wide slot set by setCppAllocator (below) — not captured at
- * construction time, so the single static instance setCppAllocator installs
- * stays correct across repeated setCppAllocator calls with a different
- * ZidlAllocator, rather than freezing whatever was current the first time
- * this class was instantiated.
+ * A std::pmr::memory_resource backed by a ZidlAllocator, bound permanently
+ * to that ZidlAllocator at construction — NOT read from a mutable slot that
+ * could change later. This is deliberate: std::pmr::polymorphic_allocator
+ * (and the control block std::allocate_shared builds from one) stores a
+ * `memory_resource*` by value, captured once at allocation time, and keeps
+ * using that same resource for the matching deallocate call for the whole
+ * lifetime of the allocated object. If this resource's target allocator
+ * could change after the fact (e.g. via a mutable global slot read
+ * dynamically in do_deallocate), an intervening setCppAllocator() call for a
+ * *different* ZidlAllocator would silently redirect frees for
+ * still-outstanding objects to the new allocator instead of the one that
+ * actually allocated them — undefined behavior, and silent heap corruption
+ * for any allocator that validates ownership (pool allocators,
+ * bounds-checkers, sanitizers) — exactly the kind of allocator this API
+ * targets. Binding the allocator at construction and never changing it
+ * closes that hole structurally rather than by convention.
  *
- * Prefer setCppAllocator over constructing this directly; it exists as a
- * named type mainly so do_is_equal has something concrete to compare.
+ * Prefer setCppAllocator over constructing this directly.
  */
 class ZidlAllocatorResource final : public std::pmr::memory_resource {
+public:
+    explicit ZidlAllocatorResource(const ZidlAllocator* allocator) noexcept
+        : allocator_(allocator)
+    {}
+
 private:
+    const ZidlAllocator* allocator_;
+
     void* do_allocate(std::size_t bytes, std::size_t alignment) override {
-        const ZidlAllocator* a = detail::cppAllocatorSlot();
-        void* p = a ? a->alloc(a->ctx, bytes, alignment) : nullptr;
+        void* p = allocator_ ? allocator_->alloc(allocator_->ctx, bytes, alignment) : nullptr;
         if (!p) throw std::bad_alloc();
         return p;
     }
 
     void do_deallocate(void* p, std::size_t bytes, std::size_t alignment) override {
-        const ZidlAllocator* a = detail::cppAllocatorSlot();
-        if (a) a->free(a->ctx, p, bytes, alignment);
+        if (allocator_) allocator_->free(allocator_->ctx, p, bytes, alignment);
     }
 
     bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override {
-        // Only ever one instance in practice (the static in setCppAllocator),
-        // so identity is exact, not an approximation.
-        return this == &other;
+        auto* o = dynamic_cast<const ZidlAllocatorResource*>(&other);
+        return o && o->allocator_ == allocator_;
     }
 };
 
@@ -87,6 +85,20 @@ private:
  * zzdds's hand-written factory bookkeeping) — a thin wrapper over
  * std::pmr::set_default_resource with the same concurrency contract (not
  * safe to call while another thread is allocating; call once at startup).
+ *
+ * Re-registering with a different `allocator` takes effect immediately for
+ * *new* allocations: every call after this one picks it up via
+ * std::pmr::get_default_resource(). It does NOT retroactively change how
+ * already-outstanding objects get freed — each object's shared_ptr control
+ * block captured a specific ZidlAllocatorResource (bound to whichever
+ * ZidlAllocator was registered when that object was allocated) and keeps
+ * freeing through it for its whole lifetime, exactly as it must for
+ * allocators that validate ownership on free. Each non-null call here
+ * allocates a small (sizeof(ZidlAllocatorResource)-ish) ZidlAllocatorResource
+ * via plain `new` and deliberately never frees it — re-registration is a
+ * rare, startup/admin-time operation, and outstanding objects must keep a
+ * valid resource to deallocate through for as long as they're alive, so
+ * there's no earlier-than-"never" safe point to reclaim it.
  *
  * Pass nullptr to restore std::pmr's own default (std::pmr::new_delete_resource,
  * i.e. ordinary global operator new/delete) — matching the NULL-means-default
@@ -103,9 +115,7 @@ inline void setCppAllocator(const ZidlAllocator* allocator) {
         std::pmr::set_default_resource(nullptr); // restores new_delete_resource
         return;
     }
-    detail::cppAllocatorSlot() = allocator;
-    static ZidlAllocatorResource resource;
-    std::pmr::set_default_resource(&resource);
+    std::pmr::set_default_resource(new ZidlAllocatorResource(allocator));
 }
 
 } // namespace zidl

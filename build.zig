@@ -213,6 +213,24 @@ pub fn build(b: *std.Build) void {
         integ_step.dependOn(&b.addRunArtifact(cpp_exe).step);
     }
 
+    // C++ integration test — zidl_allocator_pmr.hpp (ZidlAllocator <-> std::pmr bridge)
+    {
+        const alloc_pmr_mod = b.createModule(.{
+            .root_source_file = null,
+            .target = target,
+            .optimize = .Debug,
+            .link_libc = true,
+            .link_libcpp = true,
+        });
+        alloc_pmr_mod.addCSourceFiles(.{
+            .files = &.{"test/integration/cpp/test_allocator_pmr.cpp"},
+            .flags = &.{ "-std=c++17", "-Wall", "-Wextra" },
+        });
+        alloc_pmr_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+        const alloc_pmr_exe = b.addExecutable(.{ .name = "test_allocator_pmr", .root_module = alloc_pmr_mod });
+        integ_step.dependOn(&b.addRunArtifact(alloc_pmr_exe).step);
+    }
+
     // Java integration test — requires javac/java on PATH
     {
         const maybe_javac = b.findProgram(&.{"javac"}, &.{}) catch null;

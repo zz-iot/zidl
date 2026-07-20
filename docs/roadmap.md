@@ -108,14 +108,37 @@ discovery directly, without going through the Zig core.
   `std::terminate()` under `-fno-exceptions`, matching libstdc++'s own `operator new`); the
   registration surface was deliberately kept as `ZidlAllocator*` rather than a raw
   `std::pmr::memory_resource*` so a future graceful/non-throwing option stays cheap to add
-  later without an API break. Verified end-to-end: real rebuild of zzdds against a local
-  zidl checkout, `dcps_impl.cpp`/`zzdds_impl.cpp` compiled clean with real g++, and a
-  standalone C++ program (`zzdds::create_factory()` + `create_participant(...)`) proving
-  construction routes through a registered tracking `ZidlAllocator`, re-registration takes
-  effect immediately, and `nullptr` restores the libc/`new`/`delete` default — see zzdds's
-  `docs/design/allocator-strategy.md` "Phase 3" for the fuller writeup, including a note on
-  why the identity-cache's control-block memory isn't asserted to free promptly (a
-  pre-existing property of the `weak_ptr` cache, independent of this phase).
+  later without an API break.
+
+  **Correctness fix post-review (Greptile, PR #28, P1)**: the first cut of
+  `ZidlAllocatorResource` read the active `ZidlAllocator*` from a mutable global slot
+  *dynamically*, at both allocate- and deallocate-time, so that re-registering with a
+  different `ZidlAllocator*` would take effect immediately — but that meant an
+  already-outstanding object, allocated under allocator A, would have its eventual free
+  routed through whichever allocator was *currently* registered (B) when its `shared_ptr`
+  control block finally hit zero — silent heap corruption for any allocator that validates
+  ownership on free (pool allocators, bounds-checkers). Fixed by binding each
+  `ZidlAllocatorResource` permanently to one `ZidlAllocator*` at construction instead of a
+  shared mutable slot: `setCppAllocator` now allocates a small new resource instance per
+  registration (deliberately never freed — re-registration is a rare, startup/admin-time
+  operation) and installs it as the process-wide default. Since
+  `std::pmr::polymorphic_allocator` captures a `memory_resource*` by value at allocation
+  time, every object now keeps freeing through the exact resource — and hence the exact
+  `ZidlAllocator*` — that allocated it, for its whole lifetime, regardless of later
+  re-registration. New allocations still pick up a re-registered allocator immediately, as
+  originally advertised; what changed is that outstanding objects are no longer affected by
+  it. Verified via a standalone regression test (allocate under A, re-register B, free the
+  object allocated under A, assert A's `free` — not B's — is called): confirmed it fails
+  under the old dynamic-slot code and passes under the fix.
+
+  Verified end-to-end: real rebuild of zzdds against a local zidl checkout,
+  `dcps_impl.cpp`/`zzdds_impl.cpp` compiled clean with real g++, and a standalone C++
+  program (`zzdds::create_factory()` + `create_participant(...)`) proving construction
+  routes through a registered tracking `ZidlAllocator`, re-registration takes effect
+  immediately for new allocations, and `nullptr` restores the libc/`new`/`delete` default —
+  see zzdds's `docs/design/allocator-strategy.md` "Phase 3" for the fuller writeup,
+  including a note on why the identity-cache's control-block memory isn't asserted to free
+  promptly (a pre-existing property of the `weak_ptr` cache, independent of this phase).
 - **C backend: `{Type}_free()` is declared but never given a body.** Found while verifying
   `ZidlCdrAllocator` above, not by looking for it: every generated header declares `void
   {Type}_free({Type} *v);` for every struct (`src/backend/c.zig` — search for the two
