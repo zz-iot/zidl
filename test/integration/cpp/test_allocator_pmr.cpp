@@ -21,6 +21,8 @@ struct Widget {
 static void test_basic_routing_and_default_restore() {
     static size_t alloc_calls = 0;
     static size_t free_calls = 0;
+    alloc_calls = 0;
+    free_calls = 0;
     struct Fns {
         static void* alloc(void*, size_t len, size_t) { alloc_calls++; return std::malloc(len); }
         static bool resize(void*, void*, size_t, size_t, size_t) { return false; }
@@ -59,6 +61,7 @@ static void test_basic_routing_and_default_restore() {
 static void test_reregistration_does_not_redirect_outstanding_frees() {
     static size_t a_alloc = 0, a_free = 0;
     static size_t b_alloc = 0, b_free = 0;
+    a_alloc = a_free = b_alloc = b_free = 0;
     struct A {
         static void* alloc(void*, size_t len, size_t) { a_alloc++; return std::malloc(len); }
         static bool resize(void*, void*, size_t, size_t, size_t) { return false; }
@@ -94,6 +97,12 @@ static void test_reregistration_does_not_redirect_outstanding_frees() {
     sp_b.reset();
     assert(b_free == 1);
     assert(a_free == 1); // unchanged
+
+    // Restore the default before returning: the pmr default resource
+    // currently installed wraps &zb, a local about to go out of scope, and
+    // the leaked ZidlAllocatorResource holding that pointer would otherwise
+    // outlive it as a dangling reference.
+    zidl::setCppAllocator(nullptr);
 }
 
 int main() {
