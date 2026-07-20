@@ -92,6 +92,30 @@ discovery directly, without going through the Zig core.
   `Sample_deserialize` (a struct with both an unbounded `string` and an unbounded
   `sequence<long>` field) decoded a real CDR payload with a custom allocator registered:
   2 allocations, 2 frees, both fields correctly populated.
+- **C++ backend: `_getOrCreate`/`zzdds_cpp.hpp` allocator support. Done.** Entity wrapper
+  construction (`_getOrCreate`, this session's identity-cache work above) and zzdds's
+  hand-written factory bookkeeping (`wrapFactoryHandle`/`DomainParticipantFactorySupport`)
+  both hardcoded `std::make_shared`/global `new`. Landed as `std::pmr`-based, process-wide
+  registration via a new `zidl::setCppAllocator(const ZidlAllocator*)` (new
+  `zidl_allocator_pmr.hpp` in `zidl-cdr` — same `ZidlAllocator*` ABI as the C-side work
+  above, bridged into a `std::pmr::memory_resource`). Both surfaces now use
+  `std::allocate_shared` against `std::pmr::get_default_resource()`; `_getOrCreate`'s
+  generation is gated on the existing pre-scan pass so the extra includes/machinery are only
+  emitted where an entity is actually wrapped somewhere. Per the C++ `Allocator` named
+  requirement, OOM signals via `std::bad_alloc` rather than a graceful null return — a
+  deliberate, documented departure from every other allocator surface's contract, chosen
+  over a non-throwing alternative for idiomatic-C++ ergonomics (degrades to
+  `std::terminate()` under `-fno-exceptions`, matching libstdc++'s own `operator new`); the
+  registration surface was deliberately kept as `ZidlAllocator*` rather than a raw
+  `std::pmr::memory_resource*` so a future graceful/non-throwing option stays cheap to add
+  later without an API break. Verified end-to-end: real rebuild of zzdds against a local
+  zidl checkout, `dcps_impl.cpp`/`zzdds_impl.cpp` compiled clean with real g++, and a
+  standalone C++ program (`zzdds::create_factory()` + `create_participant(...)`) proving
+  construction routes through a registered tracking `ZidlAllocator`, re-registration takes
+  effect immediately, and `nullptr` restores the libc/`new`/`delete` default — see zzdds's
+  `docs/design/allocator-strategy.md` "Phase 3" for the fuller writeup, including a note on
+  why the identity-cache's control-block memory isn't asserted to free promptly (a
+  pre-existing property of the `weak_ptr` cache, independent of this phase).
 - **C backend: `{Type}_free()` is declared but never given a body.** Found while verifying
   `ZidlCdrAllocator` above, not by looking for it: every generated header declares `void
   {Type}_free({Type} *v);` for every struct (`src/backend/c.zig` — search for the two
