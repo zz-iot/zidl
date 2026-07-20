@@ -340,7 +340,8 @@ pub fn isCallbackInterface(iface: *const ir.Interface) bool {
 }
 
 /// Collect the qualified names of every (non-callback) interface that appears
-/// as a `base` of some other (non-callback) interface, anywhere in `items`.
+/// as a `base` of some other (non-callback) interface, anywhere in `items` —
+/// transitively, not just direct bases (see `collectBaseChain`).
 ///
 /// Used by the C++ backend's `ifaceDeclaresNativeHandle` to decide whether an
 /// interface gets its own `native_handle()` override or must instead delegate
@@ -359,17 +360,37 @@ pub fn collectEntityBaseNames(
             .type_decl => |td| switch (td) {
                 .interface => |iface| {
                     if (!isCallbackInterface(iface)) {
-                        for (iface.bases) |base| {
-                            switch (base) {
-                                .interface => |b| if (!isCallbackInterface(b)) {
-                                    try result.put(alloc, b.qualified_name, {});
-                                },
-                                else => {},
-                            }
-                        }
+                        try collectBaseChain(alloc, iface, result);
                     }
                 },
                 else => {},
+            },
+            else => {},
+        }
+    }
+}
+
+/// Walk `iface`'s base chain transitively (base-of-base, ...), adding every
+/// ancestor's qualified name to `result`. Direct-bases-only would miss an
+/// ancestor declared in an *imported* file: e.g. `zzdds::DomainParticipant`
+/// (in `zzdds.idl`) directly bases `DDS::DomainParticipant`, which itself
+/// bases `DDS::Entity` (in `dcps.idl`) — `DDS::Entity` is just as much "used
+/// as a base" as `DDS::DomainParticipant` is, and needs to be excluded from
+/// `ifaceDeclaresNativeHandle`'s leaf-entity check the same way, or it would
+/// look like an undeclared leaf the moment a *different* file's generation
+/// pass asks the question (its own `.bases` are only visible transitively
+/// now that the IR builder's cross-module fill preserves them — see
+/// `resetNonCallbackInterfaces` in `ir/builder.zig`).
+fn collectBaseChain(
+    alloc: std.mem.Allocator,
+    iface: *const ir.Interface,
+    result: *std.StringHashMapUnmanaged(void),
+) anyerror!void {
+    for (iface.bases) |base| {
+        switch (base) {
+            .interface => |b| if (!isCallbackInterface(b)) {
+                try result.put(alloc, b.qualified_name, {});
+                try collectBaseChain(alloc, b, result);
             },
             else => {},
         }
