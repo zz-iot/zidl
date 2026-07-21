@@ -20,4 +20,6 @@ int Frame_skip(ZidlCdrReader *_r);
 /* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. */
 void Frame_default(Frame *_v);
 
+void Frame_free(Frame *v);
+
 #endif /* FRAME_H */

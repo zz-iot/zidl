@@ -1355,9 +1355,21 @@ fn itemsHaveZzddsTopicStructC(items: []const ir.ModuleItem) bool {
     return false;
 }
 
-/// Returns true if the struct contains any unbounded sequence field (recursively
-/// through nested structs and typedefs), indicating it needs a _free function.
+/// Returns true if the struct contains any heap-allocating field (recursively
+/// through nested structs, typedefs, base structs, and array/sequence element
+/// types), indicating it needs a _free function: an unbounded string/wstring
+/// (char*/uint16_t*), or a sequence of any bound (sequences are always
+/// {_maximum, _length, T*_buffer, _release} in the C mapping — the bound only
+/// caps _maximum, it doesn't change _buffer from a heap pointer to an inline
+/// array, unlike bounded strings). Also checks base structs, since a derived
+/// struct's _free must free its base's heap-owned fields too.
 fn structHasSequenceFields(s: *const ir.Struct) bool {
+    if (s.base) |base| {
+        switch (base) {
+            .struct_ => |bs| if (structHasSequenceFields(bs)) return true,
+            else => {},
+        }
+    }
     for (s.members) |m| {
         if (typeRefHasSequence(m.type_ref)) return true;
     }
@@ -1366,9 +1378,16 @@ fn structHasSequenceFields(s: *const ir.Struct) bool {
 
 fn typeRefHasSequence(tr: ir.TypeRef) bool {
     return switch (tr) {
-        .sequence => |seq| seq.bound == null,
+        .string => |b| b == null,
+        .wstring => |b| b == null,
+        .sequence => true,
         .named => |td| switch (td) {
-            .typedef => |t| t.dimensions.len == 0 and typeRefHasSequence(t.type_ref),
+            // Whether the typedef is itself an array (t.dimensions.len > 0)
+            // doesn't change whether its *element* type owns heap memory --
+            // an array of unbounded strings still needs each element freed,
+            // it just needs a loop to do it (emitFreeArrayElementsGeneral),
+            // not a reason to skip generating a _free() at all.
+            .typedef => |t| typeRefHasSequence(t.type_ref),
             .struct_ => |s| structHasSequenceFields(s),
             else => false,
         },
@@ -1711,6 +1730,7 @@ const CdrGenerator = struct {
                 try self.emitStructFns(s);
                 try self.emitDefault(s);
                 if (structHasDefault(s)) try self.emitApplyDefaults(s);
+                if (structHasSequenceFields(s)) try self.emitStructFree(s);
             },
             .exception => |e| try self.emitExceptionFns(e),
             .union_ => |u| try self.emitUnionFns(u),
@@ -3496,6 +3516,147 @@ const CdrGenerator = struct {
             }
         }
         try self.write("}\n\n");
+    }
+
+    /// Emit `void <CName>_free(<CName> *v)` — frees every heap-owned field
+    /// (unbounded string/wstring, any sequence, or a nested struct that itself
+    /// needs freeing), recursing into nested structs by delegating to their own
+    /// generated `_free`, not by re-walking their members inline. Only called
+    /// when `structHasSequenceFields(s)` is true (see that function's doc for
+    /// why "sequence" in the name is now a misnomer — it covers strings too).
+    fn emitStructFree(self: *CdrGenerator, s: *const ir.Struct) !void {
+        const c_name = try self.prefixedCName(s.qualified_name);
+        defer self.alloc.free(c_name);
+
+        try self.print("void {s}_free({s} *v) {{\n", .{ c_name, c_name });
+        if (s.base) |base| {
+            switch (base) {
+                .struct_ => |bs| if (structHasSequenceFields(bs)) {
+                    const base_c = try self.prefixedCName(bs.qualified_name);
+                    defer self.alloc.free(base_c);
+                    try self.printI("{s}_free(&v->_base);\n", .{base_c});
+                },
+                else => {},
+            }
+        }
+        for (s.members, 0..) |m, idx| {
+            if (!typeRefHasSequence(m.type_ref)) continue;
+            const needs_guard = m.annotations.is_optional;
+            if (needs_guard) {
+                const bit_idx = optBitIdxForMember(s.*, idx);
+                try self.printI("if (v->_present & (1ULL << {d}u)) {{\n", .{bit_idx});
+                self.indent_depth += 1;
+            }
+            const lval = try std.fmt.allocPrint(self.alloc, "v->{s}", .{m.name});
+            defer self.alloc.free(lval);
+            if (m.dimensions.len > 0) {
+                try self.emitFreeArrayElementsGeneral(m.type_ref, lval, m.dimensions, 0);
+            } else {
+                try self.emitFreeTypeRefGeneral(m.type_ref, lval, 0);
+            }
+            if (needs_guard) {
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            }
+        }
+        try self.write("}\n\n");
+    }
+
+    /// Emit the free logic for a single non-array field/element lvalue of type
+    /// `tr`. Assumes `typeRefHasSequence(tr)` is already known true by the caller
+    /// (callers only invoke this for fields worth visiting).
+    ///
+    /// `depth` names the loop index variable for this nesting level (shared
+    /// counter across both array-dimension and sequence-element recursion, so
+    /// e.g. sequence<sequence<string>> never reuses the same index name at two
+    /// levels — a reused name would let the inner loop's declaration shadow the
+    /// outer one inside its own bound-check expression, silently indexing the
+    /// wrong element).
+    fn emitFreeTypeRefGeneral(self: *CdrGenerator, tr: ir.TypeRef, lval: []const u8, depth: usize) anyerror!void {
+        switch (tr) {
+            .string => |b| if (b == null) {
+                try self.printI("zidl_cdr_free_str({s});\n", .{lval});
+            },
+            .wstring => |b| if (b == null) {
+                try self.printI("zidl_cdr_free_wstr({s});\n", .{lval});
+            },
+            .sequence => |seq| {
+                // _release == false means this sequence is a non-owning view
+                // over caller-owned/static/stack storage (the OMG C sequence
+                // mapping's escape hatch for zero-copy borrowed data) -- must
+                // not free elements or the buffer in that case, or _free()
+                // corrupts memory it doesn't own.
+                try self.printI("if ({s}._release) {{\n", .{lval});
+                self.indent_depth += 1;
+                try self.emitFreeSeqElementsGeneral(seq.element.*, lval, depth);
+                const elem_c = try self.elemCType(seq.element.*);
+                defer self.alloc.free(elem_c);
+                try self.printI("zidl_cdr_free({s}._buffer, {s}._maximum * sizeof({s}));\n", .{ lval, lval, elem_c });
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            },
+            .named => |td| switch (td) {
+                .typedef => |t| if (t.dimensions.len == 0) {
+                    try self.emitFreeTypeRefGeneral(t.type_ref, lval, depth);
+                } else {
+                    try self.emitFreeArrayElementsGeneral(t.type_ref, lval, t.dimensions, depth);
+                },
+                .struct_ => |ns| if (structHasSequenceFields(ns)) {
+                    const ns_c = try self.prefixedCName(ns.qualified_name);
+                    defer self.alloc.free(ns_c);
+                    try self.printI("{s}_free(&{s});\n", .{ ns_c, lval });
+                },
+                else => {},
+            },
+            else => {},
+        }
+    }
+
+    /// Emit free loops for an array field/element whose element type
+    /// (recursively) needs freeing. Recursive to handle multi-dimensional
+    /// arrays (e.g. string[2][3], Foo[4] where Foo itself owns heap fields).
+    fn emitFreeArrayElementsGeneral(
+        self: *CdrGenerator,
+        elem_tr: ir.TypeRef,
+        lval: []const u8,
+        dims: []const u64,
+        depth: usize,
+    ) anyerror!void {
+        const idx_var = try std.fmt.allocPrint(self.alloc, "_fai{d}", .{depth});
+        defer self.alloc.free(idx_var);
+        try self.printI("{{ uint32_t {s}; for ({s} = 0; {s} < {d}u; {s}++) {{\n", .{
+            idx_var, idx_var, idx_var, dims[0], idx_var,
+        });
+        self.indent_depth += 1;
+        const elem_lval = try std.fmt.allocPrint(self.alloc, "{s}[{s}]", .{ lval, idx_var });
+        defer self.alloc.free(elem_lval);
+        if (dims.len > 1) {
+            try self.emitFreeArrayElementsGeneral(elem_tr, elem_lval, dims[1..], depth + 1);
+        } else {
+            try self.emitFreeTypeRefGeneral(elem_tr, elem_lval, depth + 1);
+        }
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.writeI("}\n");
+    }
+
+    /// Emit a free loop for the elements of a sequence whose element type
+    /// (recursively) needs freeing, before the sequence's own buffer is freed.
+    fn emitFreeSeqElementsGeneral(self: *CdrGenerator, elem_tr: ir.TypeRef, seq_lval: []const u8, depth: usize) anyerror!void {
+        if (!typeRefHasSequence(elem_tr)) return;
+        const idx_var = try std.fmt.allocPrint(self.alloc, "_fsi{d}", .{depth});
+        defer self.alloc.free(idx_var);
+        try self.printI("{{ uint32_t {s};\n", .{idx_var});
+        self.indent_depth += 1;
+        try self.printI("for ({s} = 0; {s} < {s}._length; {s}++) {{\n", .{ idx_var, idx_var, seq_lval, idx_var });
+        self.indent_depth += 1;
+        const elem_lval = try std.fmt.allocPrint(self.alloc, "{s}._buffer[{s}]", .{ seq_lval, idx_var });
+        defer self.alloc.free(elem_lval);
+        try self.emitFreeTypeRefGeneral(elem_tr, elem_lval, depth + 1);
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
     }
 
     fn emitMemberDefaultAssign(
@@ -5547,13 +5708,84 @@ test "c_backend: struct with sequence field gets _free declaration" {
     try testing.expect(has(h.items, "void Policy_free(Policy *v);"));
 }
 
-test "c_backend: struct without sequence fields has no _free declaration" {
+test "c_backend: struct with only primitives/bounded string has no _free declaration" {
+    const idl =
+        \\struct Simple { long x; string<16> name; };
+    ;
+    var h = try testGen(idl, "t");
+    defer h.deinit(testing.allocator);
+    try testing.expect(!has(h.items, "_free"));
+}
+
+test "c_backend: struct with only an unbounded string field gets _free declared and defined" {
     const idl =
         \\struct Simple { long x; string name; };
     ;
     var h = try testGen(idl, "t");
     defer h.deinit(testing.allocator);
-    try testing.expect(!has(h.items, "_free"));
+    try testing.expect(has(h.items, "void Simple_free(Simple *v);"));
+    var src = try testGenCdr(idl, "t");
+    defer src.deinit(testing.allocator);
+    try testing.expect(has(src.items, "void Simple_free(Simple *v) {"));
+    try testing.expect(has(src.items, "zidl_cdr_free_str(v->name);"));
+}
+
+test "c_backend: struct with only a bounded sequence field gets _free declared and defined" {
+    const idl =
+        \\struct Simple { long x; sequence<long, 4> items; };
+    ;
+    var h = try testGen(idl, "t");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "void Simple_free(Simple *v);"));
+    var src = try testGenCdr(idl, "t");
+    defer src.deinit(testing.allocator);
+    try testing.expect(has(src.items, "void Simple_free(Simple *v) {"));
+    try testing.expect(has(src.items, "zidl_cdr_free(v->items._buffer, v->items._maximum * sizeof(int32_t));"));
+}
+
+test "c_backend: generated sequence free checks _release before freeing (non-owning views must not be freed)" {
+    const idl =
+        \\struct Simple { sequence<long> items; };
+    ;
+    var src = try testGenCdr(idl, "t");
+    defer src.deinit(testing.allocator);
+    const s = src.items;
+    try testing.expect(has(s, "if (v->items._release) {"));
+    try testing.expect(has(s, "zidl_cdr_free(v->items._buffer, v->items._maximum * sizeof(int32_t));"));
+}
+
+test "c_backend: nested sequence free uses distinct index variables per level (no shadowing)" {
+    const idl =
+        \\struct Simple { sequence<sequence<string>> items; };
+    ;
+    var src = try testGenCdr(idl, "t");
+    defer src.deinit(testing.allocator);
+    const s = src.items;
+    // Outer loop over items, inner loop over items._buffer[_fsi0] -- must use a
+    // *different* index name, or the inner declaration shadows the outer one
+    // inside its own bound-check expression (v->items._buffer[_fsiN]._length),
+    // silently reading the wrong element's length.
+    try testing.expect(has(s, "uint32_t _fsi0;"));
+    try testing.expect(has(s, "uint32_t _fsi1;"));
+    try testing.expect(has(s, "for (_fsi0 = 0; _fsi0 < v->items._length; _fsi0++)"));
+    try testing.expect(has(s, "for (_fsi1 = 0; _fsi1 < v->items._buffer[_fsi0]._length; _fsi1++)"));
+    try testing.expect(has(s, "zidl_cdr_free_str(v->items._buffer[_fsi0]._buffer[_fsi1]);"));
+}
+
+test "c_backend: array typedef of unbounded strings gets _free declared with element loop" {
+    const idl =
+        \\typedef string NameList[4];
+        \\struct Simple { NameList names; };
+    ;
+    var h = try testGen(idl, "t");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "void Simple_free(Simple *v);"));
+    var src = try testGenCdr(idl, "t");
+    defer src.deinit(testing.allocator);
+    const s = src.items;
+    try testing.expect(has(s, "void Simple_free(Simple *v) {"));
+    try testing.expect(has(s, "for (_fai0 = 0; _fai0 < 4u; _fai0++)"));
+    try testing.expect(has(s, "zidl_cdr_free_str(v->names[_fai0]);"));
 }
 
 test "c_backend: nested struct with sequence field gets _free on outer struct" {

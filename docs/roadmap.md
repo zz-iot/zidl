@@ -256,21 +256,67 @@ discovery directly, without going through the Zig core.
   and a linked, run standalone program proved both the returned values are correct and
   allocation for them routes through a registered tracking `ZidlAllocator` (matched
   alloc/free counts).
-- **C backend: `{Type}_free()` is declared but never given a body.** Found while verifying
-  `ZidlCdrAllocator` above, not by looking for it: every generated header declares `void
-  {Type}_free({Type} *v);` for every struct (`src/backend/c.zig` — search for the two
-  `"{s}{s}void {s}_free({s} *v);\n\n"` declaration sites), but no generator function
-  anywhere emits a matching definition — confirmed against the golden fixtures (declared in
-  `test/golden/c-split/Sample.h`, no body in `Sample_cdr.c` or anywhere else) and via a real
-  build. Calling it today is a link error. The only "free" logic that exists
-  (`emitFreeKeyField`/`emitFreeArrayElements`/`emitFreeSeqElements`) is reachable *only* from
-  `{Type}_compute_key_hash_from_cdr`'s cleanup path, for `@key` fields of a temporary
-  decode — not a general free of every heap-owned field. Needs a real implementation:
-  extend that existing logic (or a generalized version of it) to run over every field, not
-  just `@key` ones, recurse into nested structs, and route through the `ZidlCdrAllocator`
-  helpers above (`zidl_cdr_free_str`/`_free_wstr`/`_free`) rather than raw `free()` — see
-  zzdds's `docs/design/allocator-strategy.md` "Phase 5" for the fuller writeup and why it's
-  tracked as part of the allocator plan despite not being required by it.
+- **C backend: `{Type}_free()` is declared but never given a body. Done.** Found while
+  verifying `ZidlCdrAllocator` above, not by looking for it: generated headers declared
+  `void {Type}_free({Type} *v);` for structs with an unbounded sequence field
+  (`src/backend/c.zig` — search for the two `"{s}{s}void {s}_free({s} *v);\n\n"` declaration
+  sites), but no generator function anywhere emitted a matching definition — confirmed
+  against the golden fixtures and via a real build; calling it was a link error. The only
+  "free" logic that existed (`emitFreeKeyField`/`emitFreeArrayElements`/`emitFreeSeqElements`)
+  was reachable *only* from `{Type}_compute_key_hash_from_cdr`'s cleanup path, for `@key`
+  fields of a temporary decode — not a general free of every heap-owned field.
+
+  Investigating turned up two more silent gaps beyond "declared but bodyless": the
+  declaration gate itself (`structHasSequenceFields`) only checked for *unbounded* sequence
+  fields, so (1) a struct with only an unbounded `string`/`wstring` field (no sequence at
+  all) got no `_free()` declared, and (2) a struct with only a *bounded* `sequence<T,N>`
+  field also got nothing declared — bounded sequences are still `{_maximum, _length,
+  T*_buffer, _release}` in the C mapping (only `_maximum` is capped; `_buffer` stays a heap
+  pointer, unlike bounded strings which get a genuine inline `char[N+1]`), confirmed by
+  generating one and inspecting the header. All three folded into one fix: widened the
+  gating check to treat any unbounded string/wstring or *any* sequence (bound or not) as
+  needing a free, matching `keyFieldAllocatesC`'s already-correct semantics for the
+  pre-existing `@key`-only path (kept the function's existing name,
+  `structHasSequenceFields`, for minimal churn despite it now covering more than sequences).
+
+  Implemented the real body generator (`emitStructFree` +
+  `emitFreeTypeRefGeneral`/`emitFreeArrayElementsGeneral`/`emitFreeSeqElementsGeneral`,
+  modeled on the existing `emitDefault`/`emitApplyDefaults` pair): walks *every* member (not
+  just `@key` ones), correctly skips absent `@optional` fields via the same `_present`
+  bitmask check `emitApplyDefaults` uses, frees a struct's base class's heap-owned fields
+  too, and recurses into nested structs by *calling* their own generated `_free()` rather
+  than re-inlining their member walk — which also incidentally fixed a narrower pre-existing
+  gap in the `@key`-only helpers (nested sequences-of-sequences-of-strings only freed one
+  level deep; the new general version fully recurses). Routes every free through the Phase 2
+  allocator-aware helpers (`zidl_cdr_free_str`/`_free_wstr`/`_free`), never raw `free()`.
+
+  Verified: new/updated unit tests for all three gaps, golden fixtures regenerated and
+  reviewed as a clean expected diff (`Frame`/`Beacon` gain a `_free`; `Sample`'s already-
+  declared one gains its body), and — real, not just unit-tested — a standalone C program
+  registering a tracking `ZidlAllocator`, decoding a real CDR payload into a `Sample`
+  (string + sequence fields), calling the generated `Sample_free`, and confirming exact
+  alloc/free count match (2/2) — no leaks, no double-frees, no under-frees. See zzdds's
+  `docs/design/allocator-strategy.md` "Phase 5" for the fuller writeup.
+
+  **Correctness fixes (Greptile, PR #30)**: three real, serious bugs, all in the new
+  general free-function generator specifically (the pre-existing `@key`-only one doesn't
+  share these exposures, since it only ever runs on values it just decoded itself):
+  (1) sequences were freed without checking `_release` (the C mapping's non-owning/
+  borrowed-view flag) — fixed by wrapping each sequence's free in
+  `if (seq._release) { ... }`; confirmed a stack-backed non-owning sequence crashed with
+  `free(): invalid size` before the fix, made zero free calls after. (2) nested sequences
+  (`sequence<sequence<T>>`) reused the same loop-index name (`_fsi`) at every recursion
+  level, so the inner declaration's own bound-check shadowed the outer loop's index,
+  silently reading the wrong element's length — fixed by threading a shared `depth` counter
+  (across both array and sequence recursion) so each level gets a distinct `_fai{depth}`/
+  `_fsi{depth}` name; confirmed a `sequence<sequence<string>>` with differing inner lengths
+  segfaulted before the fix, freed exactly the real allocation count after. (3) array
+  typedefs (`typedef string NameList[N];`) were skipped entirely by the declaration gate
+  regardless of element type — fixed by checking the element type unconditionally and
+  teaching the free-body generator's typedef case to delegate to the array-loop helper when
+  dimensioned. All three verified by mechanically reverting just that one fix in real
+  generated output and re-running to reproduce the exact reported failure, before
+  confirming the fix resolves it.
 - ~~**C backend `--generate-interfaces` (opaque handles + free functions)**~~:
   **Implemented.** Entity interfaces emit opaque `typedef struct Foo_s *Foo;` handles
   and free function declarations matching the OMG C PSM binding and the idioms of
