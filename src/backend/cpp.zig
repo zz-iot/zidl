@@ -3577,7 +3577,8 @@ const ConcreteImplGenerator = struct {
                 try self.srcPrint("    const char* _r = {s}_{s}({s}", .{ owner_c_name, op.name, handle_expr });
                 try self.emitAdaptedParams(op.params);
                 try self.srcWrite(");\n");
-                try self.srcWrite("    return _r ? std::string(_r) : std::string{};\n");
+                const str_t = stringTypeName(self.opts);
+                try self.srcPrint("    return _r ? {s}(_r) : {s}{{}};\n", .{ str_t, str_t });
             },
             .direct => {
                 const needs_post = is_listener_setter or for (op.params) |p| {
@@ -3653,7 +3654,8 @@ const ConcreteImplGenerator = struct {
             },
             .str_ret => {
                 try self.srcPrint("    const char* _r = {s}_get_{s}({s});\n", .{ owner_c_name, attr.name, handle_expr });
-                try self.srcWrite("    return _r ? std::string(_r) : std::string{};\n");
+                const str_t = stringTypeName(self.opts);
+                try self.srcPrint("    return _r ? {s}(_r) : {s}{{}};\n", .{ str_t, str_t });
             },
             .direct => {
                 if (typeRefIsEnumLike(attr.type_ref)) {
@@ -4011,8 +4013,8 @@ const ConcreteImplGenerator = struct {
         switch (tr) {
             .base, .fixed_pt => try self.srcPrint("    {s} = {s};\n", .{ cpp_dst, c_src }),
             .string => try self.srcPrint(
-                "    {s} = {s} ? std::string({s}) : std::string{{}};\n",
-                .{ cpp_dst, c_src, c_src },
+                "    {s} = {s} ? {s}({s}) : {s}{{}};\n",
+                .{ cpp_dst, c_src, stringTypeName(self.opts), c_src, stringTypeName(self.opts) },
             ),
             .sequence => |seq| try self.emitSeqFieldAdaptOut(cpp_dst, c_src, seq.element.*),
             .named => |td| switch (td) {
@@ -4942,7 +4944,7 @@ const ImplGenerator = struct {
                 break :blk true;
             };
             if (is_str_return and all_adaptable) {
-                try self.print("        return std::string(zidl_{s}_{s}(ptr_", .{ c_name, op.name });
+                try self.print("        return {s}(zidl_{s}_{s}(ptr_", .{ stringTypeName(self.opts), c_name, op.name });
                 for (op.params) |p| try self.emitParamAdapt(p);
                 try self.write("));\n");
             } else if ((is_void_return or is_simple_return) and all_adaptable) {
@@ -4974,7 +4976,7 @@ const ImplGenerator = struct {
         if (self.isSimpleType(attr.type_ref)) {
             try self.print("        return zidl_{s}_get_{s}(ptr_);\n", .{ c_name, attr.name });
         } else if (attr.type_ref == .string) {
-            try self.print("        return std::string(zidl_{s}_get_{s}(ptr_));\n", .{ c_name, attr.name });
+            try self.print("        return {s}(zidl_{s}_get_{s}(ptr_));\n", .{ stringTypeName(self.opts), c_name, attr.name });
         } else {
             try self.print(
                 "        /* TODO: adapt C++ type for get_{s} */\n        return {{}};\n",
@@ -6521,6 +6523,12 @@ test "cpp_backend cdr: unbounded wstring read has no bound check" {
 // ── --generate-interfaces tests ───────────────────────────────────────────────
 
 fn testGenImpl(source: []const u8, stem: []const u8) !std.ArrayList(u8) {
+    return testGenImplOpts(source, stem, .{});
+}
+
+fn testGenImplOpts(source: []const u8, stem: []const u8, extra: struct {
+    cpp_pmr_containers: bool = false,
+}) !std.ArrayList(u8) {
     const alloc = testing.allocator;
     var ast_arena = std.heap.ArenaAllocator.init(alloc);
     defer ast_arena.deinit();
@@ -6533,7 +6541,11 @@ fn testGenImpl(source: []const u8, stem: []const u8) !std.ArrayList(u8) {
     defer ir_spec.deinit();
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
-    const opts = interface.Options{ .input_stem = stem, .generate_interfaces = true };
+    const opts = interface.Options{
+        .input_stem = stem,
+        .generate_interfaces = true,
+        .cpp_pmr_containers = extra.cpp_pmr_containers,
+    };
     try generateImplSource(alloc, &ir_spec, opts, &out);
     return out;
 }
@@ -6969,6 +6981,20 @@ test "cpp_backend: impl simple return with string param forwards correctly" {
     try testing.expect(!has(s, "TODO"));
 }
 
+test "cpp_backend: --cpp-pmr-containers on — impl string-returning op/attr use std::pmr::string" {
+    var out = try testGenImplOpts(
+        \\interface Foo {
+        \\  string greet();
+        \\  readonly attribute string label;
+        \\};
+    , "foo", .{ .cpp_pmr_containers = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "return std::pmr::string(zidl_Foo_greet(ptr_));"));
+    try testing.expect(has(s, "return std::pmr::string(zidl_Foo_get_label(ptr_));"));
+    try testing.expect(!has(s, "std::string(zidl_"));
+}
+
 test "cpp_backend: @default on non-optional field sets initializer" {
     var h = try testGen(
         \\struct Cfg {
@@ -7096,6 +7122,12 @@ const ConcreteImplResult = struct {
 };
 
 fn testGenConcreteImpl(source: []const u8) !ConcreteImplResult {
+    return testGenConcreteImplOpts(source, .{});
+}
+
+fn testGenConcreteImplOpts(source: []const u8, extra: struct {
+    cpp_pmr_containers: bool = false,
+}) !ConcreteImplResult {
     const alloc = testing.allocator;
     var ast_arena = std.heap.ArenaAllocator.init(alloc);
     defer ast_arena.deinit();
@@ -7106,7 +7138,11 @@ fn testGenConcreteImpl(source: []const u8) !ConcreteImplResult {
     try az.analyze(&spec);
     var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
     defer ir_spec.deinit();
-    const opts = interface.Options{ .input_stem = "dcps", .cpp_generate_impl = true };
+    const opts = interface.Options{
+        .input_stem = "dcps",
+        .cpp_generate_impl = true,
+        .cpp_pmr_containers = extra.cpp_pmr_containers,
+    };
     var hdr_out = std.ArrayList(u8).empty;
     errdefer hdr_out.deinit(alloc);
     var src_out = std.ArrayList(u8).empty;
@@ -7135,6 +7171,41 @@ test "cpp_backend: B1+B3 — entity Impl class generated" {
     try testing.expect(!has(hdr, "class FooListenerBridge"));
     try testing.expect(has(src, "DDS_Foo_do_something(ptr_)"));
     try testing.expect(has(src, "DDS_Entity_enable(DDS_Foo_as_DDS_Entity(ptr_))"));
+}
+
+test "cpp_backend: --cpp-pmr-containers on — str_ret operation/attribute adapters use std::pmr::string" {
+    var res = try testGenConcreteImplOpts(
+        \\module DDS {
+        \\    @callback interface FooListener {};
+        \\    interface Entity { long enable(); };
+        \\    interface Foo : Entity {
+        \\        string get_name();
+        \\        readonly attribute string label;
+        \\    };
+        \\};
+    , .{ .cpp_pmr_containers = true });
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "return _r ? std::pmr::string(_r) : std::pmr::string{};"));
+    try testing.expect(!has(src, "std::string(_r)"));
+    try testing.expect(!has(src, ": std::string{}"));
+}
+
+test "cpp_backend: --cpp-pmr-containers off — str_ret operation/attribute adapters still use std::string" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    @callback interface FooListener {};
+        \\    interface Entity { long enable(); };
+        \\    interface Foo : Entity {
+        \\        string get_name();
+        \\        readonly attribute string label;
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "return _r ? std::string(_r) : std::string{};"));
+    try testing.expect(!has(src, "std::pmr::"));
 }
 
 test "cpp_backend: extension Impl forwards inherited operations through generated C casts" {

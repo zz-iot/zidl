@@ -236,6 +236,26 @@ discovery directly, without going through the Zig core.
   types (std::string, std::vector, …) produce C++ that requires explicit
   constructor/destructor; not generated here") — not a regression introduced here, and out
   of scope for this flag.
+
+  **Correctness fix (Greptile, PR #29, P1)**: the first cut only updated *type declarations*
+  (struct/union member types, CDR locals, function signatures) to `std::pmr::string` under
+  the flag, but missed the *value-construction* expressions in the generated interface
+  adapters — `ConcreteImplGenerator`'s `str_ret` operation/attribute-getter bodies and
+  `emitFieldAdaptOut`'s string-field assignment, plus `ImplGenerator`'s equivalent
+  string-returning operation/attribute bodies — which still hardcoded
+  `std::string(raw_c_string)`. This is worse than a stray extra allocation: confirmed via a
+  real, minimal standalone compile that `std::pmr::string` has no implicit conversion from
+  `std::string`, so any interface with a string-returning operation or attribute (or a
+  string-typed out-adapted field) failed to *compile at all* under the flag — not merely
+  bypassed the registered allocator, as originally suspected. Fixed by routing all five
+  construction sites through the same `stringTypeName(opts)` helper the type declarations
+  already use. Verified: 4 new unit tests (both generators, flag on/off) — confirmed
+  meaningful the same way (break one, watch it fail, restore); a real generated
+  (non-golden) interface with a string-returning operation/attribute now compiles clean
+  under `--generate-interfaces --cpp-pmr-containers` where it previously failed to compile;
+  and a linked, run standalone program proved both the returned values are correct and
+  allocation for them routes through a registered tracking `ZidlAllocator` (matched
+  alloc/free counts).
 - **C backend: `{Type}_free()` is declared but never given a body.** Found while verifying
   `ZidlCdrAllocator` above, not by looking for it: every generated header declares `void
   {Type}_free({Type} *v);` for every struct (`src/backend/c.zig` — search for the two
