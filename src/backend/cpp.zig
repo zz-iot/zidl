@@ -275,6 +275,7 @@ const Generator = struct {
         try self.write("#include <cstdint>\n");
         try self.write("#include <string>\n");
         try self.write("#include <vector>\n");
+        if (self.opts.cpp_pmr_containers) try self.write("#include <memory_resource>\n");
         // Entity interfaces and entity_in adapters use std::shared_ptr whenever
         // interface generation is enabled.
         if (self.opts.generate_interfaces) try self.write("#include <memory>\n");
@@ -1118,17 +1119,17 @@ const Generator = struct {
             .sequence => |seq| blk: {
                 const elem = try self.typeRefToCpp(seq.element.*);
                 defer self.alloc.free(elem);
-                break :blk std.fmt.allocPrint(self.alloc, "std::vector<{s}>", .{elem});
+                break :blk std.fmt.allocPrint(self.alloc, "{s}<{s}>", .{ vectorTypeName(self.opts), elem });
             },
-            .string => self.alloc.dupe(u8, "std::string"),
-            .wstring => self.alloc.dupe(u8, "std::wstring"),
+            .string => self.alloc.dupe(u8, stringTypeName(self.opts)),
+            .wstring => self.alloc.dupe(u8, wstringTypeName(self.opts)),
             .fixed_pt => self.alloc.dupe(u8, "double"),
             .map => |m| blk: {
                 const key_s = try self.typeRefToCpp(m.key.*);
                 defer self.alloc.free(key_s);
                 const val_s = try self.typeRefToCpp(m.value.*);
                 defer self.alloc.free(val_s);
-                break :blk std.fmt.allocPrint(self.alloc, "std::map<{s}, {s}>", .{ key_s, val_s });
+                break :blk std.fmt.allocPrint(self.alloc, "{s}<{s}, {s}>", .{ mapTypeName(self.opts), key_s, val_s });
             },
         };
     }
@@ -1174,6 +1175,29 @@ fn escapeStringLiteral(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
         }
     }
     return buf.toOwnedSlice(alloc);
+}
+
+// ── --cpp-pmr-containers type-name selection ──────────────────────────────────
+//
+// Applies uniformly to bounded and unbounded string/wstring/sequence fields:
+// the flag only changes the container's allocator (via its type), not whether
+// zidl treats the field as bounded (bound enforcement still happens the same
+// way it does today, in the CDR read/write bodies -- unaffected by this flag).
+
+fn vectorTypeName(opts: interface.Options) []const u8 {
+    return if (opts.cpp_pmr_containers) "std::pmr::vector" else "std::vector";
+}
+
+fn stringTypeName(opts: interface.Options) []const u8 {
+    return if (opts.cpp_pmr_containers) "std::pmr::string" else "std::string";
+}
+
+fn wstringTypeName(opts: interface.Options) []const u8 {
+    return if (opts.cpp_pmr_containers) "std::pmr::wstring" else "std::wstring";
+}
+
+fn mapTypeName(opts: interface.Options) []const u8 {
+    return if (opts.cpp_pmr_containers) "std::pmr::map" else "std::map";
 }
 
 fn baseToCppType(b: ast.BaseTypeSpec) []const u8 {
@@ -1274,8 +1298,8 @@ const CdrGenerator = struct {
     fn cppTypeForLocal(self: *CdrGenerator, tr: ir.TypeRef) ![]u8 {
         return switch (tr) {
             .base => |b| self.alloc.dupe(u8, baseToCppType(b)),
-            .string => self.alloc.dupe(u8, "std::string"),
-            .wstring => self.alloc.dupe(u8, "std::wstring"),
+            .string => self.alloc.dupe(u8, stringTypeName(self.opts)),
+            .wstring => self.alloc.dupe(u8, wstringTypeName(self.opts)),
             .fixed_pt => self.alloc.dupe(u8, "double"),
             .named => |td| switch (td) {
                 .enum_ => |e| std.fmt.allocPrint(self.alloc, "::{s}", .{e.qualified_name}),
@@ -1285,14 +1309,14 @@ const CdrGenerator = struct {
             .sequence => |seq| blk: {
                 const elem = try self.cppTypeForLocal(seq.element.*);
                 defer self.alloc.free(elem);
-                break :blk std.fmt.allocPrint(self.alloc, "std::vector<{s}>", .{elem});
+                break :blk std.fmt.allocPrint(self.alloc, "{s}<{s}>", .{ vectorTypeName(self.opts), elem });
             },
             .map => |m| blk: {
                 const k = try self.cppTypeForLocal(m.key.*);
                 defer self.alloc.free(k);
                 const v = try self.cppTypeForLocal(m.value.*);
                 defer self.alloc.free(v);
-                break :blk std.fmt.allocPrint(self.alloc, "std::map<{s}, {s}>", .{ k, v });
+                break :blk std.fmt.allocPrint(self.alloc, "{s}<{s}, {s}>", .{ mapTypeName(self.opts), k, v });
             },
         };
     }
@@ -2271,7 +2295,7 @@ const CdrGenerator = struct {
                 try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
                 self.indent_depth += 1;
                 if (cas.dimensions.len > 0) {
-                    const cpp_type = try cppTypeStr(self.alloc, cas.type_ref);
+                    const cpp_type = try cppTypeStr(self.alloc, self.opts, cas.type_ref);
                     defer self.alloc.free(cpp_type);
                     const dims_str = try cArrayDimsStr(self.alloc, cas.dimensions);
                     defer self.alloc.free(dims_str);
@@ -2281,7 +2305,7 @@ const CdrGenerator = struct {
                     try self.emitReadArray(cas.type_ref, cas.name, tmp_name, cas.dimensions, 0);
                     try self.printI("_v->{s}({s});\n", .{ cas.name, tmp_name });
                 } else {
-                    const cpp_type = try cppTypeStr(self.alloc, cas.type_ref);
+                    const cpp_type = try cppTypeStr(self.alloc, self.opts, cas.type_ref);
                     defer self.alloc.free(cpp_type);
                     const tmp_name = try std.fmt.allocPrint(self.alloc, "_tmp_{s}", .{cas.name});
                     defer self.alloc.free(tmp_name);
@@ -2325,7 +2349,7 @@ const CdrGenerator = struct {
                 try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
                 self.indent_depth += 1;
                 if (cas.dimensions.len > 0) {
-                    const cpp_type = try cppTypeStr(self.alloc, cas.type_ref);
+                    const cpp_type = try cppTypeStr(self.alloc, self.opts, cas.type_ref);
                     defer self.alloc.free(cpp_type);
                     const dims_str = try cArrayDimsStr(self.alloc, cas.dimensions);
                     defer self.alloc.free(dims_str);
@@ -2335,7 +2359,7 @@ const CdrGenerator = struct {
                     try self.emitReadArray(cas.type_ref, cas.name, tmp_name, cas.dimensions, 0);
                     try self.printI("_v->{s}({s});\n", .{ cas.name, tmp_name });
                 } else {
-                    const cpp_type = try cppTypeStr(self.alloc, cas.type_ref);
+                    const cpp_type = try cppTypeStr(self.alloc, self.opts, cas.type_ref);
                     defer self.alloc.free(cpp_type);
                     const tmp_name = try std.fmt.allocPrint(self.alloc, "_tmp_{s}", .{cas.name});
                     defer self.alloc.free(tmp_name);
@@ -3895,7 +3919,7 @@ const ConcreteImplGenerator = struct {
             },
             else => {},
         }
-        const cpp_elem_type = try cppTypeStr(self.alloc, elem_tr);
+        const cpp_elem_type = try cppTypeStr(self.alloc, self.opts, elem_tr);
         defer self.alloc.free(cpp_elem_type);
         try self.srcPrint("{s}// Borrowed sequence buffer; valid only for the duration of this C ABI call.\n", .{indent});
         try self.srcPrint(
@@ -4223,17 +4247,17 @@ const ConcreteImplGenerator = struct {
             .sequence => |seq| blk: {
                 const elem = try self.typeRefToCpp(seq.element.*);
                 defer self.alloc.free(elem);
-                break :blk std.fmt.allocPrint(self.alloc, "std::vector<{s}>", .{elem});
+                break :blk std.fmt.allocPrint(self.alloc, "{s}<{s}>", .{ vectorTypeName(self.opts), elem });
             },
-            .string => self.alloc.dupe(u8, "std::string"),
-            .wstring => self.alloc.dupe(u8, "std::wstring"),
+            .string => self.alloc.dupe(u8, stringTypeName(self.opts)),
+            .wstring => self.alloc.dupe(u8, wstringTypeName(self.opts)),
             .fixed_pt => self.alloc.dupe(u8, "double"),
             .map => |m| blk: {
                 const ks = try self.typeRefToCpp(m.key.*);
                 defer self.alloc.free(ks);
                 const vs = try self.typeRefToCpp(m.value.*);
                 defer self.alloc.free(vs);
-                break :blk std.fmt.allocPrint(self.alloc, "std::map<{s}, {s}>", .{ ks, vs });
+                break :blk std.fmt.allocPrint(self.alloc, "{s}<{s}, {s}>", .{ mapTypeName(self.opts), ks, vs });
             },
         };
     }
@@ -5067,17 +5091,17 @@ const ImplGenerator = struct {
             .sequence => |seq| blk: {
                 const elem = try self.typeRefToCpp(seq.element.*);
                 defer self.alloc.free(elem);
-                break :blk std.fmt.allocPrint(self.alloc, "std::vector<{s}>", .{elem});
+                break :blk std.fmt.allocPrint(self.alloc, "{s}<{s}>", .{ vectorTypeName(self.opts), elem });
             },
-            .string => self.alloc.dupe(u8, "std::string"),
-            .wstring => self.alloc.dupe(u8, "std::wstring"),
+            .string => self.alloc.dupe(u8, stringTypeName(self.opts)),
+            .wstring => self.alloc.dupe(u8, wstringTypeName(self.opts)),
             .fixed_pt => self.alloc.dupe(u8, "double"),
             .map => |m| blk: {
                 const ks = try self.typeRefToCpp(m.key.*);
                 defer self.alloc.free(ks);
                 const vs = try self.typeRefToCpp(m.value.*);
                 defer self.alloc.free(vs);
-                break :blk std.fmt.allocPrint(self.alloc, "std::map<{s}, {s}>", .{ ks, vs });
+                break :blk std.fmt.allocPrint(self.alloc, "{s}<{s}, {s}>", .{ mapTypeName(self.opts), ks, vs });
             },
         };
     }
@@ -5179,24 +5203,24 @@ fn itemsHaveZzddsTopicStructCpp(items: []const ir.ModuleItem) bool {
 
 /// C++ type string for a TypeRef — file-level helper for CdrGenerator.
 /// Caller owns the returned slice.
-fn cppTypeStr(alloc: std.mem.Allocator, tr: ir.TypeRef) anyerror![]u8 {
+fn cppTypeStr(alloc: std.mem.Allocator, opts: interface.Options, tr: ir.TypeRef) anyerror![]u8 {
     return switch (tr) {
         .base => |b| alloc.dupe(u8, baseToCppType(b)),
         .named => |td| std.fmt.allocPrint(alloc, "::{s}", .{ir.typeDeclQualifiedName(td)}),
         .sequence => |seq| blk: {
-            const elem = try cppTypeStr(alloc, seq.element.*);
+            const elem = try cppTypeStr(alloc, opts, seq.element.*);
             defer alloc.free(elem);
-            break :blk std.fmt.allocPrint(alloc, "std::vector<{s}>", .{elem});
+            break :blk std.fmt.allocPrint(alloc, "{s}<{s}>", .{ vectorTypeName(opts), elem });
         },
-        .string => alloc.dupe(u8, "std::string"),
-        .wstring => alloc.dupe(u8, "std::wstring"),
+        .string => alloc.dupe(u8, stringTypeName(opts)),
+        .wstring => alloc.dupe(u8, wstringTypeName(opts)),
         .fixed_pt => alloc.dupe(u8, "double"),
         .map => |m| blk: {
-            const ks = try cppTypeStr(alloc, m.key.*);
+            const ks = try cppTypeStr(alloc, opts, m.key.*);
             defer alloc.free(ks);
-            const vs = try cppTypeStr(alloc, m.value.*);
+            const vs = try cppTypeStr(alloc, opts, m.value.*);
             defer alloc.free(vs);
-            break :blk std.fmt.allocPrint(alloc, "std::map<{s}, {s}>", .{ ks, vs });
+            break :blk std.fmt.allocPrint(alloc, "{s}<{s}, {s}>", .{ mapTypeName(opts), ks, vs });
         },
     };
 }
@@ -5489,6 +5513,7 @@ fn generateTypeHeader(
     try gen.write("#include <cstdint>\n");
     try gen.write("#include <string>\n");
     try gen.write("#include <vector>\n");
+    if (opts.cpp_pmr_containers) try gen.write("#include <memory_resource>\n");
     if (opts.generate_interfaces and needs.memory) try gen.write("#include <memory>\n");
     if (needs.map) try gen.write("#include <map>\n");
     if (needs.optional) try gen.write("#include <optional>\n");
@@ -5672,6 +5697,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra: struct {
     export_macro: []const u8 = "",
     no_typesupport: bool = false,
     generate_zzdds_wrappers: bool = false,
+    cpp_pmr_containers: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
     var ast_arena = std.heap.ArenaAllocator.init(alloc);
@@ -5694,6 +5720,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra: struct {
         .export_macro = extra.export_macro,
         .no_typesupport = extra.no_typesupport,
         .generate_zzdds_wrappers = extra.generate_zzdds_wrappers,
+        .cpp_pmr_containers = extra.cpp_pmr_containers,
     };
     try generateHeader(alloc, &ir_spec, opts, &out);
     return out;
@@ -5707,6 +5734,7 @@ fn testGenCdr(source: []const u8, stem: []const u8) !std.ArrayList(u8) {
 fn testGenCdrOpts(source: []const u8, stem: []const u8, extra: struct {
     type_prefix: []const u8 = "",
     generate_zzdds_wrappers: bool = false,
+    cpp_pmr_containers: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
     var ast_arena = std.heap.ArenaAllocator.init(alloc);
@@ -5724,6 +5752,7 @@ fn testGenCdrOpts(source: []const u8, stem: []const u8, extra: struct {
         .input_stem = stem,
         .type_prefix = extra.type_prefix,
         .generate_zzdds_wrappers = extra.generate_zzdds_wrappers,
+        .cpp_pmr_containers = extra.cpp_pmr_containers,
     };
     try generateCdrSource(alloc, &ir_spec, opts, &out);
     return out;
@@ -5985,6 +6014,63 @@ test "cpp_backend: string member becomes std::string" {
     var out = try testGen("struct Msg { string text; };", "msg");
     defer out.deinit(testing.allocator);
     try testing.expect(has(out.items, "std::string text{};"));
+}
+
+test "cpp_backend: --cpp-pmr-containers off (default) leaves std::vector/string/map unchanged" {
+    var out = try testGenOpts(
+        "struct Foo { sequence<long> items; string text; map<string, long> counts; };",
+        "seq",
+        .{},
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "std::vector<int32_t> items{};"));
+    try testing.expect(has(s, "std::string text{};"));
+    try testing.expect(has(s, "std::map<std::string, int32_t> counts{};"));
+    try testing.expect(!has(s, "std::pmr::"));
+    try testing.expect(!has(s, "#include <memory_resource>"));
+}
+
+test "cpp_backend: --cpp-pmr-containers on emits std::pmr:: container fields + include" {
+    var out = try testGenOpts(
+        "struct Foo { sequence<long> items; string text; wstring wtext; map<string, long> counts; };",
+        "seq",
+        .{ .cpp_pmr_containers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "std::pmr::vector<int32_t> items{};"));
+    try testing.expect(has(s, "std::pmr::string text{};"));
+    try testing.expect(has(s, "std::pmr::wstring wtext{};"));
+    try testing.expect(has(s, "std::pmr::map<std::pmr::string, int32_t> counts{};"));
+    try testing.expect(has(s, "#include <memory_resource>"));
+    try testing.expect(!has(s, "std::vector<int32_t>"));
+    try testing.expect(!has(s, "std::string text"));
+}
+
+test "cpp_backend: --cpp-pmr-containers on applies equally to bounded string/sequence fields" {
+    var out = try testGenOpts(
+        "struct Foo { string<16> text; sequence<long, 4> items; };",
+        "bounded",
+        .{ .cpp_pmr_containers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "std::pmr::string text{};"));
+    try testing.expect(has(s, "std::pmr::vector<int32_t> items{};"));
+}
+
+test "cpp_backend: --cpp-pmr-containers on emits pmr locals in CDR union case decode" {
+    var out = try testGenCdrOpts(
+        \\union U switch (long) {
+        \\  case 1: sequence<long> items;
+        \\  case 2: string text;
+        \\};
+    , "u", .{ .cpp_pmr_containers = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "std::pmr::vector<int32_t> _tmp_items{};"));
+    try testing.expect(has(s, "std::pmr::string _tmp_text{};"));
 }
 
 test "cpp_backend: optional member" {
