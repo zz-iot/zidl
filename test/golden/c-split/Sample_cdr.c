@@ -193,6 +193,8 @@ void Sample_default(Sample *_v) {
 
 void Sample_free(Sample *v) {
     zidl_cdr_free_str(v->str);
-    zidl_cdr_free(v->nums._buffer, v->nums._maximum * sizeof(int32_t));
+    if (v->nums._release) {
+        zidl_cdr_free(v->nums._buffer, v->nums._maximum * sizeof(int32_t));
+    }
 }
 

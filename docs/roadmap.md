@@ -297,6 +297,26 @@ discovery directly, without going through the Zig core.
   (string + sequence fields), calling the generated `Sample_free`, and confirming exact
   alloc/free count match (2/2) — no leaks, no double-frees, no under-frees. See zzdds's
   `docs/design/allocator-strategy.md` "Phase 5" for the fuller writeup.
+
+  **Correctness fixes (Greptile, PR #30)**: three real, serious bugs, all in the new
+  general free-function generator specifically (the pre-existing `@key`-only one doesn't
+  share these exposures, since it only ever runs on values it just decoded itself):
+  (1) sequences were freed without checking `_release` (the C mapping's non-owning/
+  borrowed-view flag) — fixed by wrapping each sequence's free in
+  `if (seq._release) { ... }`; confirmed a stack-backed non-owning sequence crashed with
+  `free(): invalid size` before the fix, made zero free calls after. (2) nested sequences
+  (`sequence<sequence<T>>`) reused the same loop-index name (`_fsi`) at every recursion
+  level, so the inner declaration's own bound-check shadowed the outer loop's index,
+  silently reading the wrong element's length — fixed by threading a shared `depth` counter
+  (across both array and sequence recursion) so each level gets a distinct `_fai{depth}`/
+  `_fsi{depth}` name; confirmed a `sequence<sequence<string>>` with differing inner lengths
+  segfaulted before the fix, freed exactly the real allocation count after. (3) array
+  typedefs (`typedef string NameList[N];`) were skipped entirely by the declaration gate
+  regardless of element type — fixed by checking the element type unconditionally and
+  teaching the free-body generator's typedef case to delegate to the array-loop helper when
+  dimensioned. All three verified by mechanically reverting just that one fix in real
+  generated output and re-running to reproduce the exact reported failure, before
+  confirming the fix resolves it.
 - ~~**C backend `--generate-interfaces` (opaque handles + free functions)**~~:
   **Implemented.** Entity interfaces emit opaque `typedef struct Foo_s *Foo;` handles
   and free function declarations matching the OMG C PSM binding and the idioms of
