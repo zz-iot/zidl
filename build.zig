@@ -273,6 +273,34 @@ pub fn build(b: *std.Build) void {
         integ_step.dependOn(&b.addRunArtifact(static_pool_exe).step);
     }
 
+    // C++ integration test — --cpp-pmr-containers backend flag: proves
+    // generated struct fields actually route through zidl::setCppAllocator.
+    // Generates its own fresh (non-golden) types.hpp from the shared
+    // test/golden/types.idl with the flag on, since the checked-in cpp
+    // goldens are generated without it.
+    {
+        const gen_pmr_cpp = b.addRunArtifact(exe);
+        gen_pmr_cpp.addArgs(&.{ "-b", "cpp", "--cpp-pmr-containers", "-o" });
+        const gen_pmr_cpp_dir = gen_pmr_cpp.addOutputDirectoryArg("integ-cpp-pmr-containers");
+        gen_pmr_cpp.addFileArg(b.path("test/golden/types.idl"));
+
+        const pmr_containers_mod = b.createModule(.{
+            .root_source_file = null,
+            .target = target,
+            .optimize = .Debug,
+            .link_libc = true,
+            .link_libcpp = true,
+        });
+        pmr_containers_mod.addCSourceFiles(.{
+            .files = &.{"test/integration/cpp/test_pmr_containers.cpp"},
+            .flags = &.{ "-std=c++17", "-Wall", "-Wextra" },
+        });
+        pmr_containers_mod.addIncludePath(gen_pmr_cpp_dir);
+        pmr_containers_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+        const pmr_containers_exe = b.addExecutable(.{ .name = "test_pmr_containers", .root_module = pmr_containers_mod });
+        integ_step.dependOn(&b.addRunArtifact(pmr_containers_exe).step);
+    }
+
     // Java integration test — requires javac/java on PATH
     {
         const maybe_javac = b.findProgram(&.{"javac"}, &.{}) catch null;

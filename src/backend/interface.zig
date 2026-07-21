@@ -134,6 +134,15 @@ pub const Options = struct {
     /// C++ backend: generate concrete Impl classes and listener bridges.
     /// Outputs ${stem}_impl.hpp and ${stem}_impl.cpp alongside the abstract interface header.
     cpp_generate_impl: bool = false,
+    /// C++ backend: emit std::pmr::vector<T>/std::pmr::string/std::pmr::wstring for
+    /// sequence<T>/string/wstring fields (bounded or unbounded) instead of
+    /// std::vector<T>/std::string/std::wstring, so struct-field allocation routes
+    /// through zidl::setCppAllocator's process-wide std::pmr default resource
+    /// (zidl_allocator_pmr.hpp) the same way _getOrCreate's entity-wrapper
+    /// allocation already does. Off by default: this changes the concrete C++
+    /// type of every sequence/string/wstring field, a source/ABI break for any
+    /// consumer code that names std::vector<T>/std::string directly.
+    cpp_pmr_containers: bool = false,
 };
 
 /// Map an imported IDL module name to the generated C/C++ include stem.

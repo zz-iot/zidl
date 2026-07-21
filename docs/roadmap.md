@@ -192,6 +192,70 @@ discovery directly, without going through the Zig core.
   planned showcase apps' `LD_PRELOAD` verification shim (see below): a from-process-start
   abort-on-any-`malloc`/`new` shim becomes viable for a fully-configured app, rather than needing
   a "only trip after setup completes" leniency window.
+- **C++ backend: `--cpp-pmr-containers` flag — STL-container allocator injection. Done.**
+  The remaining allocator-injection gap after the above: generated `sequence<T>`/`string`/
+  `wstring`/`map<K,V>` fields (struct members, union case payloads, CDR-source local
+  temporaries) were hardcoded to `std::vector`/`std::string`/`std::wstring`/`std::map`,
+  regardless of any `ZidlAllocator` registered elsewhere. Landed as a new opt-in backend
+  flag (`--cpp-pmr-containers`, off by default) that switches all of these to their
+  `std::pmr::` equivalents across all four C++ generator structs (`Generator`,
+  `CdrGenerator`, `ConcreteImplGenerator`, `ImplGenerator`) plus the shared `cppTypeStr`
+  helper, and emits `#include <memory_resource>` alongside the existing `<vector>`/
+  `<string>` includes when set. Reuses Phase 3's `zidl::setCppAllocator`/process-wide
+  `std::pmr` default resource directly — no new registration API, no per-instance
+  scoped-allocator constructor plumbing, since `std::pmr::vector`/`string`/`map` all
+  default-construct against `std::pmr::get_default_resource()` on their own. Applies
+  uniformly to bounded and unbounded fields alike (only the allocator changes; existing
+  bound-enforcement logic in the CDR read/write bodies is untouched). Off by default since
+  it changes the concrete C++ type of every affected field — a real source/ABI break for
+  any consumer naming `std::vector<T>`/`std::string` directly.
+
+  Considered and rejected two alternatives (see zzdds's `docs/design/allocator-strategy.md`
+  "the C++ template problem" for the fuller writeup): threading an allocator template
+  parameter through every generated type (cascades through every interface signature,
+  forces today's separately-compiled impl model into header-only templates — largest blast
+  radius by far); and giving *bounded* fields a genuinely fixed-capacity, non-heap-allocating
+  type mirroring `zidl_rt.BoundedArray` (dropped — the actual goal is caller-controlled
+  allocation, not literally zero allocation, and a real `std::vector`/`std::string`-compatible
+  bounded container satisfying the OMG C++11 PSM's requirements (formal-24-07-01 §6.10/§6.12)
+  would have been a genuine from-scratch STL-container implementation, not a cheap wrapper).
+
+  Verified: three new `zig build test` unit tests (flag off leaves output unchanged; flag on
+  emits `std::pmr::` types + the include, for both bounded and unbounded fields; union-case
+  CDR-decode locals also switch) — confirmed meaningful by breaking one assertion and
+  watching it fail before restoring it. Plus a real, CI-tracked `zig build integration-test`
+  addition: generates a fresh (non-golden) `types.hpp` from the shared
+  `test/golden/types.idl` with the flag on, compiles it for real, and proves struct-field
+  construction/assignment/destruction routes through a registered tracking `ZidlAllocator`
+  (matched alloc/free counts) while defaulting to untracked `new`/libc when unregistered.
+  Also manually confirmed (real compile, not just the unit tests) that a CDR
+  serialize/deserialize roundtrip through `std::pmr::` struct fields works correctly. Along
+  the way, confirmed a *pre-existing, flag-independent* gap while testing a union with a
+  sequence/string case payload: it fails to compile with or without this flag, matching
+  `cpp.zig`'s own documented limitation ("Unions with members of non-trivially-constructible
+  types (std::string, std::vector, …) produce C++ that requires explicit
+  constructor/destructor; not generated here") — not a regression introduced here, and out
+  of scope for this flag.
+
+  **Correctness fix (Greptile, PR #29, P1)**: the first cut only updated *type declarations*
+  (struct/union member types, CDR locals, function signatures) to `std::pmr::string` under
+  the flag, but missed the *value-construction* expressions in the generated interface
+  adapters — `ConcreteImplGenerator`'s `str_ret` operation/attribute-getter bodies and
+  `emitFieldAdaptOut`'s string-field assignment, plus `ImplGenerator`'s equivalent
+  string-returning operation/attribute bodies — which still hardcoded
+  `std::string(raw_c_string)`. This is worse than a stray extra allocation: confirmed via a
+  real, minimal standalone compile that `std::pmr::string` has no implicit conversion from
+  `std::string`, so any interface with a string-returning operation or attribute (or a
+  string-typed out-adapted field) failed to *compile at all* under the flag — not merely
+  bypassed the registered allocator, as originally suspected. Fixed by routing all five
+  construction sites through the same `stringTypeName(opts)` helper the type declarations
+  already use. Verified: 4 new unit tests (both generators, flag on/off) — confirmed
+  meaningful the same way (break one, watch it fail, restore); a real generated
+  (non-golden) interface with a string-returning operation/attribute now compiles clean
+  under `--generate-interfaces --cpp-pmr-containers` where it previously failed to compile;
+  and a linked, run standalone program proved both the returned values are correct and
+  allocation for them routes through a registered tracking `ZidlAllocator` (matched
+  alloc/free counts).
 - **C backend: `{Type}_free()` is declared but never given a body.** Found while verifying
   `ZidlCdrAllocator` above, not by looking for it: every generated header declares `void
   {Type}_free({Type} *v);` for every struct (`src/backend/c.zig` — search for the two

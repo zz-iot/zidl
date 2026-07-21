@@ -77,6 +77,7 @@ const Opts = struct {
     zig_generate_c_api: bool = false,
     zig_idiomatic_enums: bool = false,
     cpp_generate_impl: bool = false,
+    cpp_pmr_containers: bool = false,
     preprocess_timestamp_seconds: ?u64 = null,
     inputs: std.ArrayListUnmanaged([]const u8) = .empty,
 };
@@ -122,6 +123,8 @@ pub fn main(init: std.process.Init) !void {
             opts.generate_interfaces = true;
         } else if (std.mem.eql(u8, arg, "--cpp-generate-impl")) {
             opts.cpp_generate_impl = true;
+        } else if (std.mem.eql(u8, arg, "--cpp-pmr-containers")) {
+            opts.cpp_pmr_containers = true;
         } else if (std.mem.eql(u8, arg, "-b")) {
             i += 1;
             if (i >= args.len) {
@@ -597,6 +600,7 @@ fn processFile(
         .generate_zzdds_wrappers = opts.generate_zzdds_wrappers,
         .zig_version = opts.zig_version,
         .cpp_generate_impl = opts.cpp_generate_impl,
+        .cpp_pmr_containers = opts.cpp_pmr_containers,
     };
     try be.generate(&ir_spec, gen_opts);
 }
@@ -686,6 +690,9 @@ fn printUsage(w: *Io.Writer) !void {
         \\  --c-pragma-once                Use #pragma once instead of #ifndef guards (C, C++ backends)
         \\  --cpp-namespace <ns>           Wrap all output in an outer namespace (C++ backend)
         \\  --cpp-generate-impl            Emit concrete Impl classes and listener bridges (C++ backend)
+        \\  --cpp-pmr-containers           Use std::pmr::vector/string/wstring for sequence/string/wstring
+        \\                                 fields instead of std::vector/std::string/std::wstring, so they
+        \\                                 route through zidl::setCppAllocator (C++ backend)
         \\
         \\  --java-jni-library <name>      System.loadLibrary() name for JNI impls (Java backend)
         \\  --java-package <pkg>           Package prefix, e.g. com.example (Java backend)
