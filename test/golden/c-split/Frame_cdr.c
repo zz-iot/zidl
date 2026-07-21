@@ -45,3 +45,7 @@ void Frame_default(Frame *_v) {
     memset(_v, 0, sizeof(*_v));
 }
 
+void Frame_free(Frame *v) {
+    zidl_cdr_free_str(v->topic);
+}
+

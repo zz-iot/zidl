@@ -220,6 +220,11 @@ void Sample_default(Sample *_v) {
     memset(_v, 0, sizeof(*_v));
 }
 
+void Sample_free(Sample *v) {
+    zidl_cdr_free_str(v->str);
+    zidl_cdr_free(v->nums._buffer, v->nums._maximum * sizeof(int32_t));
+}
+
 int Frame_serialize(ZidlCdrWriter *_w, const Frame *_v) {
     int _rc;
     size_t _dh;
@@ -259,6 +264,10 @@ int Frame_skip(ZidlCdrReader *_r) {
 
 void Frame_default(Frame *_v) {
     memset(_v, 0, sizeof(*_v));
+}
+
+void Frame_free(Frame *v) {
+    zidl_cdr_free_str(v->topic);
 }
 
 int Beacon_serialize(ZidlCdrWriter *_w, const Beacon *_v) {
@@ -358,5 +367,9 @@ int Beacon_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8
 
 void Beacon_default(Beacon *_v) {
     memset(_v, 0, sizeof(*_v));
+}
+
+void Beacon_free(Beacon *v) {
+    zidl_cdr_free_str(v->payload);
 }
 

@@ -191,3 +191,8 @@ void Sample_default(Sample *_v) {
     memset(_v, 0, sizeof(*_v));
 }
 
+void Sample_free(Sample *v) {
+    zidl_cdr_free_str(v->str);
+    zidl_cdr_free(v->nums._buffer, v->nums._maximum * sizeof(int32_t));
+}
+

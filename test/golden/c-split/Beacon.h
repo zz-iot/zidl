@@ -24,4 +24,6 @@ int Beacon_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8
 /* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. */
 void Beacon_default(Beacon *_v);
 
+void Beacon_free(Beacon *v);
+
 #endif /* BEACON_H */

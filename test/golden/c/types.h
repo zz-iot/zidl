@@ -90,6 +90,8 @@ int Frame_skip(ZidlCdrReader *_r);
 /* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. */
 void Frame_default(Frame *_v);
 
+void Frame_free(Frame *v);
+
 typedef struct Beacon_s {
     uint32_t id;
     char *payload;
@@ -106,6 +108,8 @@ int Beacon_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8
 
 /* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. */
 void Beacon_default(Beacon *_v);
+
+void Beacon_free(Beacon *v);
 
 /* IDL interface: Greeter */
 char *Greeter_greet(Greeter self, const char *name);

@@ -103,3 +103,7 @@ void Beacon_default(Beacon *_v) {
     memset(_v, 0, sizeof(*_v));
 }
 
+void Beacon_free(Beacon *v) {
+    zidl_cdr_free_str(v->payload);
+}
+
