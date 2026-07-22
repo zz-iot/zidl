@@ -636,13 +636,13 @@ const Generator = struct {
         try self.print("}} {s}DataReader;\n\n", .{c_name});
         try self.print("{s}{s}int {s}TypeSupport_register(DDS_DomainParticipant participant, const char *type_name);\n", .{ em, sp, c_name });
         try self.print("{s}{s}void {s}DataWriter_init({s}DataWriter *self, DDS_DataWriter writer, int xcdr_version);\n", .{ em, sp, c_name, c_name });
-        try self.print("{s}{s}int {s}DataWriter_write({s}DataWriter *self, const {s} *value);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}int {s}DataWriter_dispose({s}DataWriter *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}int {s}DataWriter_unregister({s}DataWriter *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataWriter_write({s}DataWriter *self, const {s} *value, DDS_InstanceHandle_t handle);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataWriter_dispose({s}DataWriter *self, const {s} *key, DDS_InstanceHandle_t handle);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataWriter_unregister({s}DataWriter *self, const {s} *key, DDS_InstanceHandle_t handle);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}DDS_InstanceHandle_t {s}DataWriter_register_instance({s}DataWriter *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}int {s}DataWriter_write_w_timestamp({s}DataWriter *self, const {s} *value, DDS_Time_t timestamp);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}int {s}DataWriter_dispose_w_timestamp({s}DataWriter *self, const {s} *key, DDS_Time_t timestamp);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}int {s}DataWriter_unregister_w_timestamp({s}DataWriter *self, const {s} *key, DDS_Time_t timestamp);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataWriter_write_w_timestamp({s}DataWriter *self, const {s} *value, DDS_InstanceHandle_t handle, DDS_Time_t timestamp);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataWriter_dispose_w_timestamp({s}DataWriter *self, const {s} *key, DDS_InstanceHandle_t handle, DDS_Time_t timestamp);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataWriter_unregister_w_timestamp({s}DataWriter *self, const {s} *key, DDS_InstanceHandle_t handle, DDS_Time_t timestamp);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataWriter_get_key_value({s}DataWriter *self, DDS_InstanceHandle_t handle, {s} *key_out);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}DDS_InstanceHandle_t {s}DataWriter_lookup_instance({s}DataWriter *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}void {s}DataReader_init({s}DataReader *self, DDS_DataReader reader);\n", .{ em, sp, c_name, c_name });
@@ -2137,6 +2137,11 @@ const CdrGenerator = struct {
             try self.writeI("ZidlCdrWriter _w;\n");
             // XCDR1: reserve_dheader_maybe is a no-op, so key bytes are
             // written without a DHEADER regardless of extensibility.
+            // zidl_cdr_writer_init routes its internal growth through
+            // zidl_cdr_set_allocator's registered allocator (falling back to
+            // libc realloc only if none is registered) -- callers wanting no
+            // heap involvement at all register their own bounded allocator,
+            // rather than this function guessing a fixed buffer size.
             try self.writeI("int _rc = zidl_cdr_writer_init(&_w, ZIDL_XCDR1);\n");
             try self.writeI("if (_rc) return _rc;\n");
             try self.writeI("zidl_cdr_writer_set_byte_order(&_w, ZIDL_CDR_BE);\n");
@@ -2280,9 +2285,13 @@ const CdrGenerator = struct {
         try self.writeI("self->xcdr_version = xcdr_version;\n");
         try self.write("}\n\n");
 
-        try self.print("static int {s}DataWriter_write_kind({s}DataWriter *self, zzdds_write_kind kind, const {s} *value, int key_only) {{\n", .{ c_name, c_name, c_name });
+        try self.print("static int {s}DataWriter_write_kind({s}DataWriter *self, zzdds_write_kind kind, const {s} *value, int key_only, DDS_InstanceHandle_t handle) {{\n", .{ c_name, c_name, c_name });
         try self.writeI("ZidlCdrWriter _w;\n");
         try self.writeI("uint8_t _hash[16];\n");
+        // zidl_cdr_writer_init routes its internal growth through
+        // zidl_cdr_set_allocator's registered allocator (falling back to
+        // libc realloc only if none is registered) -- callers wanting no
+        // heap involvement at all register their own bounded allocator.
         try self.writeI("int _rc = zidl_cdr_writer_init(&_w, self->xcdr_version);\n");
         try self.writeI("if (_rc) return _rc;\n");
         try self.writeI("_rc = zidl_cdr_write_encap(&_w);\n");
@@ -2290,19 +2299,19 @@ const CdrGenerator = struct {
         try self.print("{s}_serialize_key(&_w, value) : {s}_serialize(&_w, value);\n", .{ c_name, c_name });
         try self.writeI("if (!_rc) _rc = ");
         try self.print("{s}_compute_key_hash(value, _hash);\n", .{c_name});
-        try self.writeI("if (!_rc) _rc = zzdds_write_raw_kind(self->writer, kind, _hash, _w.buf, _w.len);\n");
+        try self.writeI("if (!_rc) _rc = zzdds_write_raw_kind(self->writer, kind, _hash, handle, _w.buf, _w.len);\n");
         try self.writeI("zidl_cdr_writer_deinit(&_w);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
-        try self.print("int {s}DataWriter_write({s}DataWriter *self, const {s} *value) {{\n", .{ c_name, c_name, c_name });
-        try self.printI("return {s}DataWriter_write_kind(self, ZZDDS_WRITE_ALIVE, value, 0);\n", .{c_name});
+        try self.print("int {s}DataWriter_write({s}DataWriter *self, const {s} *value, DDS_InstanceHandle_t handle) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataWriter_write_kind(self, ZZDDS_WRITE_ALIVE, value, 0, handle);\n", .{c_name});
         try self.write("}\n\n");
-        try self.print("int {s}DataWriter_dispose({s}DataWriter *self, const {s} *key) {{\n", .{ c_name, c_name, c_name });
-        try self.printI("return {s}DataWriter_write_kind(self, ZZDDS_WRITE_DISPOSE, key, 1);\n", .{c_name});
+        try self.print("int {s}DataWriter_dispose({s}DataWriter *self, const {s} *key, DDS_InstanceHandle_t handle) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataWriter_write_kind(self, ZZDDS_WRITE_DISPOSE, key, 1, handle);\n", .{c_name});
         try self.write("}\n\n");
-        try self.print("int {s}DataWriter_unregister({s}DataWriter *self, const {s} *key) {{\n", .{ c_name, c_name, c_name });
-        try self.printI("return {s}DataWriter_write_kind(self, ZZDDS_WRITE_UNREGISTER, key, 1);\n", .{c_name});
+        try self.print("int {s}DataWriter_unregister({s}DataWriter *self, const {s} *key, DDS_InstanceHandle_t handle) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataWriter_write_kind(self, ZZDDS_WRITE_UNREGISTER, key, 1, handle);\n", .{c_name});
         try self.write("}\n\n");
 
         try self.print("DDS_InstanceHandle_t {s}DataWriter_register_instance({s}DataWriter *self, const {s} *key) {{\n", .{ c_name, c_name, c_name });
@@ -2311,7 +2320,7 @@ const CdrGenerator = struct {
         try self.writeI("return zzdds_register_instance_raw(self->writer, _hash);\n");
         try self.write("}\n\n");
 
-        try self.print("static int {s}DataWriter_write_kind_w_timestamp({s}DataWriter *self, zzdds_write_kind kind, const {s} *value, int key_only, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
+        try self.print("static int {s}DataWriter_write_kind_w_timestamp({s}DataWriter *self, zzdds_write_kind kind, const {s} *value, int key_only, DDS_InstanceHandle_t handle, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
         try self.writeI("ZidlCdrWriter _w;\n");
         try self.writeI("uint8_t _hash[16];\n");
         try self.writeI("int _rc = zidl_cdr_writer_init(&_w, self->xcdr_version);\n");
@@ -2320,19 +2329,19 @@ const CdrGenerator = struct {
         try self.writeI("if (!_rc) _rc = key_only ? ");
         try self.print("{s}_serialize_key(&_w, value) : {s}_serialize(&_w, value);\n", .{ c_name, c_name });
         try self.printI("if (!_rc) _rc = {s}_compute_key_hash(value, _hash);\n", .{c_name});
-        try self.writeI("if (!_rc) _rc = zzdds_write_raw_w_timestamp(self->writer, kind, _hash, _w.buf, _w.len, timestamp);\n");
+        try self.writeI("if (!_rc) _rc = zzdds_write_raw_w_timestamp(self->writer, kind, _hash, handle, _w.buf, _w.len, timestamp);\n");
         try self.writeI("zidl_cdr_writer_deinit(&_w);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
-        try self.print("int {s}DataWriter_write_w_timestamp({s}DataWriter *self, const {s} *value, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
-        try self.printI("return {s}DataWriter_write_kind_w_timestamp(self, ZZDDS_WRITE_ALIVE, value, 0, timestamp);\n", .{c_name});
+        try self.print("int {s}DataWriter_write_w_timestamp({s}DataWriter *self, const {s} *value, DDS_InstanceHandle_t handle, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataWriter_write_kind_w_timestamp(self, ZZDDS_WRITE_ALIVE, value, 0, handle, timestamp);\n", .{c_name});
         try self.write("}\n\n");
-        try self.print("int {s}DataWriter_dispose_w_timestamp({s}DataWriter *self, const {s} *key, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
-        try self.printI("return {s}DataWriter_write_kind_w_timestamp(self, ZZDDS_WRITE_DISPOSE, key, 1, timestamp);\n", .{c_name});
+        try self.print("int {s}DataWriter_dispose_w_timestamp({s}DataWriter *self, const {s} *key, DDS_InstanceHandle_t handle, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataWriter_write_kind_w_timestamp(self, ZZDDS_WRITE_DISPOSE, key, 1, handle, timestamp);\n", .{c_name});
         try self.write("}\n\n");
-        try self.print("int {s}DataWriter_unregister_w_timestamp({s}DataWriter *self, const {s} *key, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
-        try self.printI("return {s}DataWriter_write_kind_w_timestamp(self, ZZDDS_WRITE_UNREGISTER, key, 1, timestamp);\n", .{c_name});
+        try self.print("int {s}DataWriter_unregister_w_timestamp({s}DataWriter *self, const {s} *key, DDS_InstanceHandle_t handle, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataWriter_write_kind_w_timestamp(self, ZZDDS_WRITE_UNREGISTER, key, 1, handle, timestamp);\n", .{c_name});
         try self.write("}\n\n");
 
         try self.print("int {s}DataWriter_get_key_value({s}DataWriter *self, DDS_InstanceHandle_t handle, {s} *key_out) {{\n", .{ c_name, c_name, c_name });
@@ -4945,8 +4954,8 @@ test "c_backend cdr: zzdds wrapper implementations for keyed topic" {
     try testing.expect(has(s, "#include \"zzdds_c.h\""));
     try testing.expect(has(s, "int TopicTypeSupport_register(DDS_DomainParticipant participant, const char *type_name) {"));
     try testing.expect(has(s, "void TopicDataWriter_init(TopicDataWriter *self, DDS_DataWriter writer, int xcdr_version) {"));
-    try testing.expect(has(s, "static int TopicDataWriter_write_kind(TopicDataWriter *self, zzdds_write_kind kind, const Topic *value, int key_only) {"));
-    try testing.expect(has(s, "return TopicDataWriter_write_kind(self, ZZDDS_WRITE_ALIVE, value, 0);"));
+    try testing.expect(has(s, "static int TopicDataWriter_write_kind(TopicDataWriter *self, zzdds_write_kind kind, const Topic *value, int key_only, DDS_InstanceHandle_t handle) {"));
+    try testing.expect(has(s, "return TopicDataWriter_write_kind(self, ZZDDS_WRITE_ALIVE, value, 0, handle);"));
     try testing.expect(has(s, "int TopicDataReader_take_loaned(TopicDataReader *self, Topic *out, zzdds_sample_info *info, zzdds_loaned_sample *loan) {"));
     try testing.expect(has(s, "zzdds_return_loaned_raw(self->reader, loan);"));
 }
