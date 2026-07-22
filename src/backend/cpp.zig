@@ -1863,7 +1863,7 @@ const CdrGenerator = struct {
         try self.printI("return zzdds_register_type_support_c(participant, type_name ? type_name : \"{s}\", {s}_compute_key_hash_from_cdr);\n", .{ s.qualified_name, c_name });
         try self.write("}\n\n");
 
-        try self.print("static int {s}_write_kind(DDS_DataWriter writer, int xcdr_version, zzdds_write_kind kind, const {s}& value, bool key_only) {{\n", .{ class_name, cpp_qname });
+        try self.print("static int {s}_write_kind(DDS_DataWriter writer, int xcdr_version, zzdds_write_kind kind, const {s}& value, bool key_only, DDS_InstanceHandle_t handle) {{\n", .{ class_name, cpp_qname });
         try self.writeI("ZidlCdrWriter _w;\n");
         try self.writeI("uint8_t _hash[16];\n");
         try self.writeI("int _rc = zidl_cdr_writer_init(&_w, xcdr_version);\n");
@@ -1871,7 +1871,7 @@ const CdrGenerator = struct {
         try self.writeI("_rc = zidl_cdr_write_encap(&_w);\n");
         try self.printI("if (!_rc) _rc = key_only ? {s}_serialize_key(&_w, &value) : {s}_serialize(&_w, &value);\n", .{ c_name, c_name });
         try self.printI("if (!_rc) _rc = {s}_compute_key_hash(&value, _hash);\n", .{c_name});
-        try self.writeI("if (!_rc) _rc = zzdds_write_raw_kind(writer, kind, _hash, _w.buf, _w.len);\n");
+        try self.writeI("if (!_rc) _rc = zzdds_write_raw_kind(writer, kind, _hash, handle, _w.buf, _w.len);\n");
         try self.writeI("zidl_cdr_writer_deinit(&_w);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
@@ -1888,7 +1888,7 @@ const CdrGenerator = struct {
         try self.writeI("return _ih;\n");
         try self.write("}\n\n");
 
-        try self.print("static int {s}_write_kind_w_timestamp(DDS_DataWriter writer, int xcdr_version, zzdds_write_kind kind, const {s}& value, bool key_only, DDS_Time_t timestamp) {{\n", .{ class_name, cpp_qname });
+        try self.print("static int {s}_write_kind_w_timestamp(DDS_DataWriter writer, int xcdr_version, zzdds_write_kind kind, const {s}& value, bool key_only, DDS_InstanceHandle_t handle, DDS_Time_t timestamp) {{\n", .{ class_name, cpp_qname });
         try self.writeI("ZidlCdrWriter _w;\n");
         try self.writeI("uint8_t _hash[16];\n");
         try self.writeI("int _rc = zidl_cdr_writer_init(&_w, xcdr_version);\n");
@@ -1896,39 +1896,39 @@ const CdrGenerator = struct {
         try self.writeI("_rc = zidl_cdr_write_encap(&_w);\n");
         try self.printI("if (!_rc) _rc = key_only ? {s}_serialize_key(&_w, &value) : {s}_serialize(&_w, &value);\n", .{ c_name, c_name });
         try self.printI("if (!_rc) _rc = {s}_compute_key_hash(&value, _hash);\n", .{c_name});
-        try self.writeI("if (!_rc) _rc = zzdds_write_raw_w_timestamp(writer, kind, _hash, _w.buf, _w.len, timestamp);\n");
+        try self.writeI("if (!_rc) _rc = zzdds_write_raw_w_timestamp(writer, kind, _hash, handle, _w.buf, _w.len, timestamp);\n");
         try self.writeI("zidl_cdr_writer_deinit(&_w);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
-        try self.print("static int {s}_write_kind_w_hash(DDS_DataWriter writer, int xcdr_version, zzdds_write_kind kind, const {s}& value, bool key_only, const uint8_t *hash) {{\n", .{ class_name, cpp_qname });
+        try self.print("static int {s}_write_kind_w_hash(DDS_DataWriter writer, int xcdr_version, zzdds_write_kind kind, const {s}& value, bool key_only, const uint8_t *hash, DDS_InstanceHandle_t handle) {{\n", .{ class_name, cpp_qname });
         try self.writeI("ZidlCdrWriter _w;\n");
         try self.writeI("int _rc = zidl_cdr_writer_init(&_w, xcdr_version);\n");
         try self.writeI("if (_rc) return _rc;\n");
         try self.writeI("_rc = zidl_cdr_write_encap(&_w);\n");
         try self.printI("if (!_rc) _rc = key_only ? {s}_serialize_key(&_w, &value) : {s}_serialize(&_w, &value);\n", .{ c_name, c_name });
-        try self.writeI("if (!_rc) _rc = zzdds_write_raw_kind(writer, kind, hash, _w.buf, _w.len);\n");
+        try self.writeI("if (!_rc) _rc = zzdds_write_raw_kind(writer, kind, hash, handle, _w.buf, _w.len);\n");
         try self.writeI("zidl_cdr_writer_deinit(&_w);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
         try self.print("int {s}DataWriter::write(const {s}& value) {{\n", .{ class_name, cpp_qname });
-        try self.printI("return {s}_write_kind(writer_, xcdr_version_, ZZDDS_WRITE_ALIVE, value, false);\n", .{class_name});
+        try self.printI("return {s}_write_kind(writer_, xcdr_version_, ZZDDS_WRITE_ALIVE, value, false, DDS_HANDLE_NIL);\n", .{class_name});
         try self.write("}\n\n");
         try self.print("int {s}DataWriter::write_w_timestamp(const {s}& value, DDS_Time_t timestamp) {{\n", .{ class_name, cpp_qname });
-        try self.printI("return {s}_write_kind_w_timestamp(writer_, xcdr_version_, ZZDDS_WRITE_ALIVE, value, false, timestamp);\n", .{class_name});
+        try self.printI("return {s}_write_kind_w_timestamp(writer_, xcdr_version_, ZZDDS_WRITE_ALIVE, value, false, DDS_HANDLE_NIL, timestamp);\n", .{class_name});
         try self.write("}\n\n");
         try self.print("int {s}DataWriter::dispose(const {s}& key) {{\n", .{ class_name, cpp_qname });
-        try self.printI("return {s}_write_kind(writer_, xcdr_version_, ZZDDS_WRITE_DISPOSE, key, true);\n", .{class_name});
+        try self.printI("return {s}_write_kind(writer_, xcdr_version_, ZZDDS_WRITE_DISPOSE, key, true, DDS_HANDLE_NIL);\n", .{class_name});
         try self.write("}\n\n");
         try self.print("int {s}DataWriter::dispose_w_timestamp(const {s}& key, DDS_Time_t timestamp) {{\n", .{ class_name, cpp_qname });
-        try self.printI("return {s}_write_kind_w_timestamp(writer_, xcdr_version_, ZZDDS_WRITE_DISPOSE, key, true, timestamp);\n", .{class_name});
+        try self.printI("return {s}_write_kind_w_timestamp(writer_, xcdr_version_, ZZDDS_WRITE_DISPOSE, key, true, DDS_HANDLE_NIL, timestamp);\n", .{class_name});
         try self.write("}\n\n");
         try self.print("int {s}DataWriter::unregister_instance(const {s}& key) {{\n", .{ class_name, cpp_qname });
-        try self.printI("return {s}_write_kind(writer_, xcdr_version_, ZZDDS_WRITE_UNREGISTER, key, true);\n", .{class_name});
+        try self.printI("return {s}_write_kind(writer_, xcdr_version_, ZZDDS_WRITE_UNREGISTER, key, true, DDS_HANDLE_NIL);\n", .{class_name});
         try self.write("}\n\n");
         try self.print("int {s}DataWriter::unregister_instance_w_timestamp(const {s}& key, DDS_Time_t timestamp) {{\n", .{ class_name, cpp_qname });
-        try self.printI("return {s}_write_kind_w_timestamp(writer_, xcdr_version_, ZZDDS_WRITE_UNREGISTER, key, true, timestamp);\n", .{class_name});
+        try self.printI("return {s}_write_kind_w_timestamp(writer_, xcdr_version_, ZZDDS_WRITE_UNREGISTER, key, true, DDS_HANDLE_NIL, timestamp);\n", .{class_name});
         try self.write("}\n\n");
         try self.print("int {s}DataWriter::get_key_value(DDS_InstanceHandle_t handle, {s}& key_out) {{\n", .{ class_name, cpp_qname });
         try self.writeI("uint8_t _buf[ZZDDS_KEY_VALUE_BUF_SIZE];\n");
@@ -1955,17 +1955,17 @@ const CdrGenerator = struct {
         try self.print("int {s}DataWriter::write_w_handle(const {s}& value, DDS_InstanceHandle_t handle) {{\n", .{ class_name, cpp_qname });
         try self.writeI("auto it = instance_handles_.find(handle);\n");
         try self.writeI("if (it == instance_handles_.end()) return DDS_RETCODE_BAD_PARAMETER;\n");
-        try self.printI("return {s}_write_kind_w_hash(writer_, xcdr_version_, ZZDDS_WRITE_ALIVE, value, false, it->second.data());\n", .{class_name});
+        try self.printI("return {s}_write_kind_w_hash(writer_, xcdr_version_, ZZDDS_WRITE_ALIVE, value, false, it->second.data(), handle);\n", .{class_name});
         try self.write("}\n\n");
         try self.print("int {s}DataWriter::dispose_w_handle(const {s}& key, DDS_InstanceHandle_t handle) {{\n", .{ class_name, cpp_qname });
         try self.writeI("auto it = instance_handles_.find(handle);\n");
         try self.writeI("if (it == instance_handles_.end()) return DDS_RETCODE_BAD_PARAMETER;\n");
-        try self.printI("return {s}_write_kind_w_hash(writer_, xcdr_version_, ZZDDS_WRITE_DISPOSE, key, true, it->second.data());\n", .{class_name});
+        try self.printI("return {s}_write_kind_w_hash(writer_, xcdr_version_, ZZDDS_WRITE_DISPOSE, key, true, it->second.data(), handle);\n", .{class_name});
         try self.write("}\n\n");
         try self.print("int {s}DataWriter::unregister_instance_w_handle(const {s}& key, DDS_InstanceHandle_t handle) {{\n", .{ class_name, cpp_qname });
         try self.writeI("auto it = instance_handles_.find(handle);\n");
         try self.writeI("if (it == instance_handles_.end()) return DDS_RETCODE_BAD_PARAMETER;\n");
-        try self.printI("int _rc = {s}_write_kind_w_hash(writer_, xcdr_version_, ZZDDS_WRITE_UNREGISTER, key, true, it->second.data());\n", .{class_name});
+        try self.printI("int _rc = {s}_write_kind_w_hash(writer_, xcdr_version_, ZZDDS_WRITE_UNREGISTER, key, true, it->second.data(), handle);\n", .{class_name});
         try self.writeI("if (!_rc) instance_handles_.erase(it);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
@@ -6832,8 +6832,8 @@ test "cpp_backend cdr: zzdds wrapper implementations for keyed topic" {
     const s = out.items;
     try testing.expect(has(s, "#include \"zzdds_c.h\""));
     try testing.expect(has(s, "int TopicTypeSupport::register_type(DDS_DomainParticipant participant, const char *type_name) {"));
-    try testing.expect(has(s, "static int Topic_write_kind(DDS_DataWriter writer, int xcdr_version, zzdds_write_kind kind, const ::Topic& value, bool key_only) {"));
-    try testing.expect(has(s, "return Topic_write_kind(writer_, xcdr_version_, ZZDDS_WRITE_ALIVE, value, false);"));
+    try testing.expect(has(s, "static int Topic_write_kind(DDS_DataWriter writer, int xcdr_version, zzdds_write_kind kind, const ::Topic& value, bool key_only, DDS_InstanceHandle_t handle) {"));
+    try testing.expect(has(s, "return Topic_write_kind(writer_, xcdr_version_, ZZDDS_WRITE_ALIVE, value, false, DDS_HANDLE_NIL);"));
     try testing.expect(has(s, "int TopicDataReader::take_loaned(Loan& out) {"));
     try testing.expect(has(s, "out = Loan(this, _loan, _sample);"));
     try testing.expect(has(s, "void TopicDataReader::Loan::reset() {"));

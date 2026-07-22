@@ -31,7 +31,11 @@ static size_t align_cap(int xcdr_version, size_t wire_size) {
 static int writer_grow_default(ZidlCdrWriter *w, size_t needed) {
     size_t new_cap = (w->cap == 0) ? 64u : w->cap * 2u;
     while (new_cap < w->len + needed) new_cap *= 2u;
-    uint8_t *p = (uint8_t *)realloc(w->buf, new_cap);
+    // Routes through the registered allocator (zidl_cdr_set_allocator), same
+    // as the read/decode side -- falls back to libc realloc only if none is
+    // registered. It's the caller's responsibility to register an allocator
+    // whose backing store is large enough for whatever it serializes.
+    uint8_t *p = (uint8_t *)zidl_cdr_realloc(w->buf, w->cap, new_cap);
     if (!p) return ZIDL_CDR_OVERFLOW;
     w->buf = p;
     w->cap = new_cap;
@@ -61,7 +65,7 @@ void zidl_cdr_writer_init_fixed(ZidlCdrWriter *w, uint8_t *buf, size_t cap, int 
 
 void zidl_cdr_writer_deinit(ZidlCdrWriter *w) {
     if (w->grow_fn == writer_grow_default) {
-        free(w->buf);
+        zidl_cdr_free(w->buf, w->cap);
         w->buf = NULL;
         w->cap = 0;
         w->len = 0;
@@ -566,6 +570,21 @@ char *zidl_cdr_strdup(const char *s) {
     if (!buf) return NULL;
     memcpy(buf, s, n);
     return buf;
+}
+
+void *zidl_cdr_realloc(void *ptr, size_t old_len, size_t new_len) {
+    if (!g_allocator) return realloc(ptr, new_len);
+    if (ptr && g_allocator->resize(g_allocator->ctx, ptr, old_len, new_len, ZIDL_CDR_ALLOC_ALIGN)) {
+        return ptr;
+    }
+    void *new_ptr = g_allocator->alloc(g_allocator->ctx, new_len, ZIDL_CDR_ALLOC_ALIGN);
+    if (!new_ptr) return NULL;
+    if (ptr) {
+        size_t copy_len = old_len < new_len ? old_len : new_len;
+        memcpy(new_ptr, ptr, copy_len);
+        g_allocator->free(g_allocator->ctx, ptr, old_len, ZIDL_CDR_ALLOC_ALIGN);
+    }
+    return new_ptr;
 }
 
 void zidl_cdr_free_str(char *s) {

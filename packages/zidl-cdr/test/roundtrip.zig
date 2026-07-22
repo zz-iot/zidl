@@ -781,7 +781,11 @@ test "allocator: zidl_cdr_read_string routes through the registered allocator" {
     _ = c.zidl_cdr_reader_init(&r, cw.buf, cw.len);
     var out: [*c]u8 = null;
     try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c.zidl_cdr_read_string(&r, &out));
-    try testing.expectEqual(@as(usize, 1), track.alloc_calls);
+    // 2, not 1: the writer above also routes its own buffer growth through
+    // the registered allocator now (writer_grow_default), so this counts
+    // both the writer's payload-construction allocation and the reader's
+    // decode allocation -- not just the latter, as before that fix.
+    try testing.expectEqual(@as(usize, 2), track.alloc_calls);
     try testing.expectEqualStrings(src, std.mem.span(out));
 
     c.zidl_cdr_free_str(out);
@@ -806,7 +810,9 @@ test "allocator: zidl_cdr_read_wstring routes through the registered allocator" 
     var out: [*c]u16 = null;
     var out_len: u32 = 0;
     try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c.zidl_cdr_read_wstring(&r, &out, &out_len));
-    try testing.expectEqual(@as(usize, 1), track.alloc_calls);
+    // 2, not 1: see the analogous comment in the read_string test above --
+    // the writer's own buffer growth is now also tracked.
+    try testing.expectEqual(@as(usize, 2), track.alloc_calls);
     try testing.expectEqual(@as(u32, 2), out_len);
 
     c.zidl_cdr_free_wstr(out);
@@ -923,7 +929,12 @@ test "allocator: embedded-NUL rejection makes free_str's strlen reconstruction e
     _ = c.zidl_cdr_reader_init(&r, cw.buf, cw.len);
     var out: [*c]u8 = null;
     try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c.zidl_cdr_read_string(&r, &out));
-    try testing.expectEqual(@as(usize, 1), track.alloc_calls);
+    // 2, not 1: see the analogous comment in the read_string test above --
+    // the writer's own buffer growth is now also tracked. last_alloc_len
+    // still correctly reflects the reader's own allocation, since it's the
+    // most recent of the two (the writer's happened earlier, during payload
+    // construction).
+    try testing.expectEqual(@as(usize, 2), track.alloc_calls);
     try testing.expectEqual(@as(usize, ok.len + 1), track.last_alloc_len);
 
     c.zidl_cdr_free_str(out);

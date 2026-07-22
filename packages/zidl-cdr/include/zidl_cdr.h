@@ -249,6 +249,15 @@ void zidl_cdr_free(void *p, size_t n);
 char *zidl_cdr_strdup(const char *s);
 
 /**
+ * realloc(), but via the registered allocator (falls back to libc realloc if
+ * none registered). `ptr` may be NULL (equivalent to a fresh alloc, matching
+ * realloc(NULL, n) semantics); `old_len` must be the size `ptr` was last
+ * allocated/resized to (0 if `ptr` is NULL). Returns NULL on OOM, in which
+ * case `ptr` is left untouched (as with realloc()).
+ */
+void *zidl_cdr_realloc(void *ptr, size_t old_len, size_t new_len);
+
+/**
  * Free a NUL-terminated string previously allocated by this file's own
  * reads or zidl_cdr_strdup (i.e. anything a generated `_free()` function
  * frees that came from here) via the registered allocator. Reconstructs
