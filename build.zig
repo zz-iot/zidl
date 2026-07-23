@@ -76,6 +76,7 @@ pub fn build(b: *std.Build) void {
     const golden_zig_mod = b.createModule(.{
         .root_source_file = b.path("test/golden/zig/types.zig"),
         .target = target,
+        .sanitize_thread = sanitize_thread,
         .imports = &.{
             .{ .name = "zidl_rt", .module = zidl_rt_mod },
         },
@@ -84,6 +85,7 @@ pub fn build(b: *std.Build) void {
     const stub_mod = b.createModule(.{
         .root_source_file = b.path("test/integration/zig/stub_impl.zig"),
         .target = target,
+        .sanitize_thread = sanitize_thread,
         .imports = &.{
             .{ .name = "types", .module = golden_zig_mod },
             .{ .name = "zidl_rt", .module = zidl_rt_mod },
@@ -95,6 +97,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/integration/zig/test.zig"),
             .target = target,
+            .sanitize_thread = sanitize_thread,
             .imports = &.{
                 .{ .name = "zidl_rt", .module = zidl_rt_mod },
                 .{ .name = "types", .module = golden_zig_mod },
@@ -340,6 +343,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("interop/zig_interop_test.zig"),
             .target = target,
+            .sanitize_thread = sanitize_thread,
             .imports = &.{
                 .{ .name = "zidl_rt", .module = zidl_rt_mod },
             },

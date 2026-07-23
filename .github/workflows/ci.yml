@@ -122,14 +122,25 @@ jobs:
       - name: Install Valgrind
         run: sudo apt-get install -y --no-install-recommends valgrind
 
-      - name: Build test binaries
+      - name: Build test binaries (main)
         run: zig build emit-tests -Doptimize=Debug
+
+      - name: Build test binaries (zidl-rt)
+        run: zig build emit-tests -Doptimize=Debug
+        working-directory: packages/zidl-rt
+
+      - name: Build test binaries (zidl-cdr)
+        run: zig build emit-tests -Doptimize=Debug
+        working-directory: packages/zidl-cdr
 
       - name: Run tests under Valgrind
         run: |
           set -e
           ERRORS=0
-          for bin in zig-out/tests/*; do
+          for bin in \
+            zig-out/tests/* \
+            packages/zidl-rt/zig-out/tests/* \
+            packages/zidl-cdr/zig-out/tests/*; do
             [ -x "$bin" ] || continue
             echo "=== valgrind: $(basename $bin) ==="
             if ! valgrind \
