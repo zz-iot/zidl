@@ -123,14 +123,14 @@ jobs:
         run: sudo apt-get install -y --no-install-recommends valgrind
 
       - name: Build test binaries (main)
-        run: zig build emit-tests -Doptimize=Debug
+        run: zig build emit-tests -Doptimize=Debug -Dtarget=x86_64-linux-gnu
 
       - name: Build test binaries (zidl-rt)
-        run: zig build emit-tests -Doptimize=Debug
+        run: zig build emit-tests -Doptimize=Debug -Dtarget=x86_64-linux-gnu
         working-directory: packages/zidl-rt
 
       - name: Build test binaries (zidl-cdr)
-        run: zig build emit-tests -Doptimize=Debug
+        run: zig build emit-tests -Doptimize=Debug -Dtarget=x86_64-linux-gnu
         working-directory: packages/zidl-cdr
 
       - name: Run tests under Valgrind
