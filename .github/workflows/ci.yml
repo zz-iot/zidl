@@ -143,17 +143,20 @@ jobs:
             packages/zidl-cdr/zig-out/tests/*; do
             [ -x "$bin" ] || continue
             echo "=== valgrind: $(basename $bin) ==="
+            VALOUT=$(mktemp)
             if ! valgrind \
                 --error-exitcode=1 \
                 --leak-check=full \
                 --show-leak-kinds=definite,indirect \
                 --errors-for-leak-kinds=definite,indirect \
                 --track-origins=yes \
-                --quiet \
+                --log-file="$VALOUT" \
                 "$bin"; then
               echo "::error::Valgrind reported errors in $(basename $bin)"
+              cat "$VALOUT"
               ERRORS=$((ERRORS + 1))
             fi
+            rm -f "$VALOUT"
           done
           [ $ERRORS -eq 0 ]
 
