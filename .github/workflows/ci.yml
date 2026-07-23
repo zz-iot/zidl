@@ -51,8 +51,17 @@ jobs:
       - name: Test (main)
         run: zig build test
 
+      - name: Test (TSan)
+        if: matrix.os == 'ubuntu-latest'
+        run: zig build test -Dsanitize-thread
+
       - name: Test (zidl-rt)
         run: zig build test
+        working-directory: packages/zidl-rt
+
+      - name: Test (zidl-rt TSan)
+        if: matrix.os == 'ubuntu-latest'
+        run: zig build test -Dsanitize-thread
         working-directory: packages/zidl-rt
 
       - name: Test (zidl-cdr)
@@ -93,6 +102,49 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: zig build test
         working-directory: test/xrce-microzig
+
+  # ── Valgrind ──────────────────────────────────────────────────────────────
+
+  valgrind:
+    name: Valgrind (memcheck)
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+
+      - name: Install Valgrind
+        run: sudo apt-get install -y --no-install-recommends valgrind
+
+      - name: Build test binaries
+        run: zig build emit-tests -Doptimize=Debug
+
+      - name: Run tests under Valgrind
+        run: |
+          set -e
+          ERRORS=0
+          for bin in zig-out/tests/*; do
+            [ -x "$bin" ] || continue
+            echo "=== valgrind: $(basename $bin) ==="
+            if ! valgrind \
+                --error-exitcode=1 \
+                --leak-check=full \
+                --show-leak-kinds=definite,indirect \
+                --errors-for-leak-kinds=definite,indirect \
+                --track-origins=yes \
+                --quiet \
+                "$bin"; then
+              echo "::error::Valgrind reported errors in $(basename $bin)"
+              ERRORS=$((ERRORS + 1))
+            fi
+          done
+          [ $ERRORS -eq 0 ]
 
   # ── Coverage ──────────────────────────────────────────────────────────────
   #

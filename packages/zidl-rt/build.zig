@@ -4,10 +4,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     _ = optimize;
+    const sanitize_thread = b.option(bool, "sanitize-thread", "Enable ThreadSanitizer") orelse false;
 
     const mod = b.addModule("zidl-rt", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .sanitize_thread = sanitize_thread,
     });
 
     const mod_tests = b.addTest(.{

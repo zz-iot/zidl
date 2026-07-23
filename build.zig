@@ -12,15 +12,18 @@ fn versionFromZon(comptime zon: []const u8) []const u8 {
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const sanitize_thread = b.option(bool, "sanitize-thread", "Enable ThreadSanitizer") orelse false;
 
     const zidl_xtypes_mod = b.addModule("zidl_xtypes", .{
         .root_source_file = b.path("packages/zidl-xtypes/src/root.zig"),
         .target = target,
+        .sanitize_thread = sanitize_thread,
     });
 
     const mod = b.addModule("zidl", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .sanitize_thread = sanitize_thread,
         .imports = &.{
             .{ .name = "zidl_xtypes", .module = zidl_xtypes_mod },
         },
@@ -35,6 +38,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = sanitize_thread,
             .imports = &.{
                 .{ .name = "zidl", .module = mod },
                 .{ .name = "build_options", .module = build_options.createModule() },
@@ -66,6 +70,7 @@ pub fn build(b: *std.Build) void {
     const zidl_rt_mod = b.addModule("zidl_rt", .{
         .root_source_file = b.path("packages/zidl-rt/src/root.zig"),
         .target = target,
+        .sanitize_thread = sanitize_thread,
     });
 
     const golden_zig_mod = b.createModule(.{
