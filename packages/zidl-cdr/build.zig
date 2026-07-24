@@ -8,6 +8,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const sanitize_thread = b.option(bool, "sanitize-thread", "Enable ThreadSanitizer") orelse false;
 
     // ── Library ────────────────────────────────────────────────────────────────
 
@@ -15,6 +16,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = null, // C-only module
         .target = target,
         .optimize = optimize,
+        .sanitize_thread = sanitize_thread,
         .link_libc = true,
     });
     lib_mod.addCSourceFile(.{
@@ -36,6 +38,7 @@ pub fn build(b: *std.Build) void {
     const zidl_rt_dep = b.dependency("zidl_rt", .{
         .target = target,
         .optimize = optimize,
+        .@"sanitize-thread" = sanitize_thread,
     });
     const zidl_rt_mod = zidl_rt_dep.module("zidl-rt");
 
@@ -43,6 +46,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("test/roundtrip.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_thread = sanitize_thread,
         .link_libc = true,
         .imports = &.{
             .{ .name = "zidl_rt", .module = zidl_rt_mod },
