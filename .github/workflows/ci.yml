@@ -68,6 +68,11 @@ jobs:
         run: zig build test
         working-directory: packages/zidl-cdr
 
+      - name: Test (zidl-cdr TSan)
+        if: matrix.os == 'ubuntu-latest'
+        run: zig build test -Dsanitize-thread
+        working-directory: packages/zidl-cdr
+
       # ── Integration tests ─────────────────────────────────────────────────
       # C and C++ use Zig's bundled clang/clang++; no external compiler needed.
       # Java requires javac/java; GitHub-hosted runners include a JDK on all
