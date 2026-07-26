@@ -131,6 +131,19 @@ pub const Options = struct {
     /// use the original IDL name as the canonical string representation so that
     /// config files and wire diagnostics remain language-agnostic.
     zig_idiomatic_enums: bool = false,
+    /// Zig backend only: emit `pub fn applyToml(self: *@This(), alloc: std.mem.Allocator,
+    /// table: anytype) !void` for every struct, overriding fields present in `table` and
+    /// leaving absent ones at whatever default the struct literal already established.
+    /// `table` is duck-typed via `anytype` — zidl has no compile-time dependency on any
+    /// concrete TOML parser or value-tree type; the caller supplies any type exposing
+    /// getString/getBool/getInt/getFloat/getTable/getStringArray(key: []const u8) ->
+    /// `!?T` (absent key = null, key present with the wrong type = an error).
+    /// Supports: booleans, integers (bounds-checked via std.math.cast), floats, strings,
+    /// enums (via the enum's existing generated `_fromString` helper), nested structs
+    /// (recursively), and `sequence<string>` fields. Fixed-size arrays, unions, bitmasks,
+    /// bounded strings, and sequences of anything other than `string` are not supported —
+    /// generated code `@compileError`s on those fields rather than silently mishandling them.
+    zig_generate_toml_config: bool = false,
     /// C++ backend: generate concrete Impl classes and listener bridges.
     /// Outputs ${stem}_impl.hpp and ${stem}_impl.cpp alongside the abstract interface header.
     cpp_generate_impl: bool = false,

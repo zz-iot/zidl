@@ -79,6 +79,15 @@ pub const MyStruct = struct {
     // @optional members:
     tag: ?i32 = null,
 
+    // Only if this struct (transitively) has a sequence field that may hold
+    // heap memory — independent of --no-typesupport, since these are lifecycle
+    // operations, not CDR/wire concerns:
+    pub fn deinit(self: *MyStruct, alloc: std.mem.Allocator) void { ... }
+    pub fn clone(self: MyStruct, alloc: std.mem.Allocator) !MyStruct { ... }
+
+    // Only with --zig-generate-toml-config — see §TOML config application below:
+    pub fn applyToml(self: *MyStruct, alloc: std.mem.Allocator, table: anytype) !void { ... }
+
     // CDR serialization (unless --no-typesupport):
     pub fn serialize(writer: anytype, value: *const MyStruct) !void { ... }
     pub fn deserialize(reader: anytype, alloc: std.mem.Allocator) !MyStruct { ... }
@@ -115,6 +124,45 @@ pub fn takeRaw(dr: DDS.DataReader) ?TakenSample;
 `.deinit()`. In zzdds, this adapter should wrap the hand-written DCPS runtime
 (`DataWriterImpl.writeRaw` / `DataReaderImpl.takeRaw`) rather than the C ABI
 exports from `--zig-generate-c-api`.
+
+### TOML config application (`--zig-generate-toml-config`)
+
+Emits `pub fn applyToml(self: *@This(), alloc: std.mem.Allocator, table: anytype) !void` on
+every struct. `table` is duck-typed via `anytype` — this backend has zero compile-time
+dependency on any concrete TOML parser or value-tree type. The contract `table` must satisfy:
+
+```zig
+pub fn getString(self: T, key: []const u8) SomeError!?[]const u8;
+pub fn getBool(self: T, key: []const u8) SomeError!?bool;
+pub fn getInt(self: T, key: []const u8) SomeError!?i64;
+pub fn getFloat(self: T, key: []const u8) SomeError!?f64;
+pub fn getTable(self: T, key: []const u8) SomeError!?T;       // same T, for nested-table recursion
+pub fn getStringArray(self: T, key: []const u8) SomeError!?[]const []const u8;
+```
+
+Absent key → `null` (the field is left at whatever `@default`/zero-value the struct literal
+already set). Key present with the wrong type → an error (never silently treated as absent —
+a consumer supplying `table` decides what that error is; `zzdds`'s own implementation, for
+instance, is `src/config/toml.zig`, kept entirely outside `zidl` on purpose — see `zzdds`'s
+`docs/decisions.md` §Configuration for why the parser itself isn't shared `zidl` infrastructure).
+
+Supported field types: `boolean`, integers (bounds-checked via `std.math.cast(...) orelse
+return error.InvalidValue`), floats (`@floatCast`), `string` (unbounded only — `alloc.dupe`),
+enums (dispatches through that enum's own generated `_fromString` helper — cross-module enums
+get the same `qualNameToZig`-qualified reference an ordinary field-type reference would, e.g.
+`DDS.ReliabilityQosPolicyKind_fromString`, not a bare name), nested structs (recursive
+`.applyToml` call), and `sequence<string>` (builds the same `{_buffer, _length, _maximum,
+_release}` shape `clone`/`deinit` already use, whether the field is an inline sequence or a
+named typedef of one).
+
+Not supported: fixed-size arrays, unions, bitmasks, bounded strings, and sequences of anything
+other than `string`. A struct with one such field gets a single `@compileError` naming it —
+and *only* that: `@compileError` makes everything textually after it in the same block
+"unreachable code" (a separate hard error), so an unsupported field can't have per-field
+statements for other members interspersed around it. `self`/`alloc`/`table` are each discarded
+(`_ = x;`) exactly when nothing else in the generated body would reference them — Zig errors on
+both an unused parameter and a "pointless" discard of one that's genuinely used later, so this
+can't be unconditional in either direction.
 
 ### Union
 IDL unions map to a struct with a discriminant field `_d` and a Zig anonymous union `_u`:

@@ -126,6 +126,17 @@ fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: st
 
 **Tests:** 15 new (9 codegen + 6 zidl-rt round-trip).
 
+### TOML config application (`--zig-generate-toml-config`)
+
+Emits `applyToml(alloc, table: anytype) !void` per struct, driven by the IR (including
+`@default` metadata and each enum's existing `_fromString` helper) — no new parser dependency;
+`table` is duck-typed, see `docs/backend_zig.md` §TOML config application for the full accessor
+contract and supported field-type subset. Built for `zzdds`'s config-file support.
+
+**Tests:** 10 codegen (`backend/zig.zig`), plus full functional verification (compile + run
+against a hand-written duck-typed table, all field kinds and both error paths) done out-of-tree
+during development, not committed as an in-repo test.
+
 ---
 
 ## src/backend/zig_typeobject.zig

@@ -256,8 +256,9 @@ instead.
 
 ## Non-CDR Encodings
 
-JSON, XML, TOML, and other non-CDR encodings are not a code-generation concern. The
-right approach is a schema-driven runtime that uses TypeObject as the schema descriptor:
+JSON, XML, and general-purpose non-CDR *wire* encodings for arbitrary DDS data are not a
+code-generation concern. The right approach is a schema-driven runtime that uses TypeObject
+as the schema descriptor:
 
 - Every generated type carries pre-computed `type_object` bytes (Zig backend).
 - A DynamicType/DynamicData implementation (owned by the forthcoming DDS runtime)
@@ -268,6 +269,14 @@ right approach is a schema-driven runtime that uses TypeObject as the schema des
 DynamicType/DynamicData and the TypeObjectFactory belong in the DDS runtime, not in
 zidl or `zidl-xtypes`. The `zidl-xtypes` package provides only the constants
 (`EK_*`/`TK_*`/`TI_*`/flag values) shared by zidl and the DDS runtime.
+
+**This doesn't cover `--zig-generate-toml-config`** (Zig backend — see `docs/backend_zig.md`
+§TOML config application), which is a narrower, different thing: applying a TOML *config file*
+onto a curated field-type subset (scalars, strings, enums, nested structs, `sequence<string>`)
+of an ordinary generated struct, for a consumer (`zzdds`) that wants config objects
+IDL-described the same way everything else is. It isn't a general DynamicData-style encoding
+for arbitrary DDS data — unsupported constructs (unions, bitmasks, other sequence element
+types) are a compile error in the generated code, not something the backend tries to handle.
 
 ---
 

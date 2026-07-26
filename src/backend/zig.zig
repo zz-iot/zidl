@@ -359,11 +359,20 @@ const Generator = struct {
         if (!self.opts.no_typesupport or self.opts.pl_cdr) {
             try self.emitStructSerializeFns(s);
         } else if (structNeedsSeqDeinit(s)) {
+            // deinit/clone are lifecycle operations, not CDR typesupport — a
+            // struct with heap-owning sequence fields needs them regardless of
+            // whether wire (de)serialization was also requested.
             try self.write("\n");
             try self.emitStructDeinitFn(s);
+            try self.write("\n");
+            try self.emitStructCloneFn(s);
         }
         if (!self.opts.no_typeobject_support) {
             try self.emitStructTypeObjectConsts(s);
+        }
+        if (self.opts.zig_generate_toml_config) {
+            try self.write("\n");
+            try self.emitStructApplyTomlFn(s);
         }
         try self.ind();
         try self.print("}}; // {s}{s}\n\n", .{ pfx, s.name });
@@ -3507,6 +3516,252 @@ const Generator = struct {
         }
     }
 
+    // ── TOML config application (--zig-generate-toml-config) ─────────────────
+
+    /// Emit `pub fn applyToml(self: *@This(), alloc: std.mem.Allocator, table: anytype) !void`.
+    /// See the `zig_generate_toml_config` doc comment in `interface.zig` for the
+    /// full contract `table` must satisfy and the supported field-type subset.
+    ///
+    /// Two things that aren't obvious from `emitTypeRefApplyToml` alone:
+    ///   - Zig errors on both an unused parameter AND a "pointless" discard of
+    ///     one that's genuinely used afterward — so `self`/`alloc`/`table` are
+    ///     each discarded *only* when nothing else in the body will reference
+    ///     them (no members at all, or — for `alloc` specifically — no member
+    ///     needing it, e.g. an all-integer struct).
+    ///   - if ANY member is unsupported, the whole body becomes a single
+    ///     `@compileError` and nothing else. `@compileError` makes everything
+    ///     textually after it in the same block "unreachable code" — itself a
+    ///     hard error — so per-field statements can't be interspersed with it;
+    ///     `memberApplyTomlSupported` below must keep recognizing exactly the
+    ///     same cases `emitTypeRefApplyToml`'s dispatch handles.
+    fn emitStructApplyTomlFn(self: *Generator, s: *const ir.Struct) !void {
+        try self.ind();
+        try self.write("    pub fn applyToml(self: *@This(), alloc: std.mem.Allocator, table: anytype) !void {\n");
+
+        var unsupported: ?*const ir.StructMember = null;
+        for (s.members) |*m| {
+            if (!memberApplyTomlSupported(m)) {
+                unsupported = m;
+                break;
+            }
+        }
+
+        // self/table are used by every per-member statement (assignment target,
+        // accessor receiver respectively) — nothing to discard for either one
+        // unless the body ends up empty (no members, or the single-compileError
+        // path, which references neither).
+        if (unsupported != null or s.members.len == 0) {
+            try self.ind();
+            try self.write("        _ = self;\n");
+            try self.ind();
+            try self.write("        _ = alloc;\n");
+            try self.ind();
+            try self.write("        _ = table;\n");
+        } else {
+            var needs_alloc = false;
+            for (s.members) |*m| {
+                if (memberApplyTomlNeedsAlloc(m)) {
+                    needs_alloc = true;
+                    break;
+                }
+            }
+            if (!needs_alloc) {
+                try self.ind();
+                try self.write("        _ = alloc;\n");
+            }
+        }
+
+        if (unsupported) |m| {
+            try self.ind();
+            try self.print(
+                "        @compileError(\"--zig-generate-toml-config does not support this field type ('{s}.{s}')\");\n",
+                .{ s.name, m.name },
+            );
+        } else {
+            for (s.members) |m| {
+                try self.emitTypeRefApplyToml(s.name, m.name, m.type_ref, "        ");
+            }
+        }
+        try self.ind();
+        try self.write("    }\n");
+    }
+
+    /// True if this member's generated statement references `alloc` (a string
+    /// dupe, a recursive `applyToml(alloc, ...)` call, or building a sequence).
+    /// Must stay in sync with `emitTypeRefApplyToml` the same way
+    /// `memberApplyTomlSupported` does.
+    fn memberApplyTomlNeedsAlloc(m: *const ir.StructMember) bool {
+        return switch (resolveTomlTypeRef(m.type_ref)) {
+            .base => false,
+            .string => true,
+            .named => |td| switch (td) {
+                .struct_ => true,
+                else => false, // enum_: fromString needs no alloc
+            },
+            .sequence => true,
+            else => false,
+        };
+    }
+
+    /// Resolve through any typedef chain to the underlying representation
+    /// (e.g. a `StringSeq` typedef field resolves to its `sequence<string>`).
+    /// Shared by `memberApplyTomlSupported` and `emitTypeRefApplyToml` so the
+    /// two can't independently drift on what a typedef chain resolves to.
+    fn resolveTomlTypeRef(tr_in: ir.TypeRef) ir.TypeRef {
+        var tr = tr_in;
+        while (tr == .named and tr.named == .typedef) {
+            tr = tr.named.typedef.type_ref;
+        }
+        return tr;
+    }
+
+    /// Must recognize exactly the field-type subset `emitTypeRefApplyToml`
+    /// handles (see the note on `emitStructApplyTomlFn` for why this can't
+    /// just be discovered by attempting to emit and catching a failure).
+    fn memberApplyTomlSupported(m: *const ir.StructMember) bool {
+        if (m.dimensions.len > 0) return false;
+        return switch (resolveTomlTypeRef(m.type_ref)) {
+            .base => |b| switch (b) {
+                .any, .object, .value_base => false,
+                else => true,
+            },
+            .string => |bound| bound == null,
+            .named => |td| switch (td) {
+                .struct_, .enum_ => true,
+                else => false,
+            },
+            .sequence => |seq| seq.bound == null and seq.element.* == .string,
+            else => false,
+        };
+    }
+
+    /// Emit the override statement(s) for a single field. Resolves through any
+    /// typedef chain first (e.g. a `StringSeq` typedef field dispatches as its
+    /// underlying `sequence<string>`), then dispatches on the resolved type.
+    /// Only called once every member of the enclosing struct has already been
+    /// confirmed supported by `memberApplyTomlSupported` — the `@compileError`
+    /// branches below are an unreachable-in-practice safety net, not the
+    /// primary way unsupported fields are handled.
+    fn emitTypeRefApplyToml(
+        self: *Generator,
+        struct_name: []const u8,
+        field_name: []const u8,
+        tr_in: ir.TypeRef,
+        indent: []const u8,
+    ) anyerror!void {
+        const tr = resolveTomlTypeRef(tr_in);
+
+        switch (tr) {
+            .base => |b| switch (b) {
+                .boolean => {
+                    try self.ind();
+                    try self.print("{s}if (try table.getBool(\"{s}\")) |_v| self.{s} = _v;\n", .{ indent, field_name, field_name });
+                },
+                .float, .double, .long_double => {
+                    try self.ind();
+                    try self.print("{s}if (try table.getFloat(\"{s}\")) |_v| self.{s} = @floatCast(_v);\n", .{ indent, field_name, field_name });
+                },
+                .any, .object, .value_base => {
+                    try self.emitApplyTomlUnsupported(struct_name, field_name, indent);
+                },
+                else => {
+                    try self.ind();
+                    try self.print(
+                        "{s}if (try table.getInt(\"{s}\")) |_v| self.{s} = std.math.cast({s}, _v) orelse return error.InvalidValue;\n",
+                        .{ indent, field_name, field_name, baseToZigType(b) },
+                    );
+                },
+            },
+            .string => |bound| {
+                if (bound != null) {
+                    try self.emitApplyTomlUnsupported(struct_name, field_name, indent);
+                } else {
+                    try self.ind();
+                    try self.print("{s}if (try table.getString(\"{s}\")) |_v| self.{s} = try alloc.dupe(u8, _v);\n", .{ indent, field_name, field_name });
+                }
+            },
+            .named => |td| switch (td) {
+                .struct_ => {
+                    try self.ind();
+                    try self.print("{s}if (try table.getTable(\"{s}\")) |_t| try self.{s}.applyToml(alloc, _t);\n", .{ indent, field_name, field_name });
+                },
+                .enum_ => {
+                    // Use the same qualified-name mapping as ordinary field-type
+                    // references (qualNameToZig) rather than the bare enum name +
+                    // type_prefix: an enum from another module (e.g. DDS::Foo) needs
+                    // its module qualifier, since _fromString lives alongside the
+                    // enum itself, not in the struct's own enclosing module.
+                    const qual = try self.qualNameToZig(ir.typeDeclQualifiedName(td));
+                    defer self.alloc.free(qual);
+                    try self.ind();
+                    try self.print(
+                        "{s}if (try table.getString(\"{s}\")) |_v| self.{s} = {s}_fromString(_v) orelse return error.InvalidValue;\n",
+                        .{ indent, field_name, field_name, qual },
+                    );
+                },
+                else => try self.emitApplyTomlUnsupported(struct_name, field_name, indent),
+            },
+            .sequence => |seq| {
+                if (seq.bound == null and seq.element.* == .string) {
+                    try self.emitStringSeqApplyToml(field_name, indent);
+                } else {
+                    try self.emitApplyTomlUnsupported(struct_name, field_name, indent);
+                }
+            },
+            else => try self.emitApplyTomlUnsupported(struct_name, field_name, indent),
+        }
+    }
+
+    fn emitApplyTomlUnsupported(self: *Generator, struct_name: []const u8, field_name: []const u8, indent: []const u8) !void {
+        try self.ind();
+        try self.print(
+            "{s}@compileError(\"--zig-generate-toml-config does not support this field type ('{s}.{s}')\");\n",
+            .{ indent, struct_name, field_name },
+        );
+    }
+
+    /// Build a `{ ._buffer, ._length, ._maximum, ._release = true }` sequence value
+    /// from a TOML string array — the same C-PSM sequence shape `clone`/`deinit`
+    /// already use, so the anonymous struct literal coerces to whatever concrete
+    /// named type (e.g. a `StringSeq` typedef) the field actually declares.
+    fn emitStringSeqApplyToml(self: *Generator, field_name: []const u8, indent: []const u8) !void {
+        try self.ind();
+        try self.print("{s}if (try table.getStringArray(\"{s}\")) |_arr| {{\n", .{ indent, field_name });
+        try self.ind();
+        try self.print("{s}    const _buf = try alloc.alloc([*:0]const u8, _arr.len);\n", .{indent});
+        try self.ind();
+        try self.print("{s}    var _n: usize = 0;\n", .{indent});
+        try self.ind();
+        try self.print("{s}    errdefer {{\n", .{indent});
+        try self.ind();
+        try self.print("{s}        for (_buf[0.._n]) |_s| {{\n", .{indent});
+        try self.ind();
+        try self.print("{s}            const _sl = std.mem.span(_s);\n", .{indent});
+        try self.ind();
+        try self.print("{s}            alloc.free(_sl.ptr[0.._sl.len + 1]);\n", .{indent});
+        try self.ind();
+        try self.print("{s}        }}\n", .{indent});
+        try self.ind();
+        try self.print("{s}        alloc.free(_buf);\n", .{indent});
+        try self.ind();
+        try self.print("{s}    }}\n", .{indent});
+        try self.ind();
+        try self.print("{s}    for (_arr) |_s| {{\n", .{indent});
+        try self.ind();
+        try self.print("{s}        _buf[_n] = (try alloc.dupeZ(u8, _s)).ptr;\n", .{indent});
+        try self.ind();
+        try self.print("{s}        _n += 1;\n", .{indent});
+        try self.ind();
+        try self.print("{s}    }}\n", .{indent});
+        try self.ind();
+        try self.print(
+            "{s}    self.{s} = .{{ ._buffer = _buf.ptr, ._length = @intCast(_arr.len), ._maximum = @intCast(_arr.len), ._release = true }};\n",
+            .{ indent, field_name },
+        );
+        try self.ind();
+        try self.print("{s}}}\n", .{indent});
+    }
+
     // ── TypeObject / TypeIdentifier constant emission ─────────────────────────
 
     /// Emit `type_object`, `equivalence_hash`, and `type_identifier` constants
@@ -4846,6 +5101,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
     zig_version: interface.ZigVersion = .@"0.16.0",
     zig_generate_c_api: bool = false,
     zig_idiomatic_enums: bool = false,
+    zig_generate_toml_config: bool = false,
     /// Module names to inject as if they came from `import "file.idl";` directives.
     imports: []const []const u8 = &.{},
 }) !std.ArrayList(u8) {
@@ -4878,6 +5134,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
         .zig_version = extra_opts.zig_version,
         .zig_generate_c_api = extra_opts.zig_generate_c_api,
         .zig_idiomatic_enums = extra_opts.zig_idiomatic_enums,
+        .zig_generate_toml_config = extra_opts.zig_generate_toml_config,
     };
     try generateFile(alloc, &ir_spec, opts, &out);
     return out;
@@ -7063,4 +7320,117 @@ test "zig_backend: interface with no bases gets no as_Base slot" {
     , "t", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true });
     defer out.deinit(testing.allocator);
     try testing.expect(!has(out.items, "as_"));
+}
+
+// ── --zig-generate-toml-config ────────────────────────────────────────────────
+//
+// Full functional correctness (compiles + runs against a hand-written duck-typed
+// table, exercises every supported field kind plus both error paths) was verified
+// out-of-tree during development; these are lightweight regression guards over
+// the generated source shape.
+
+test "toml config: scalar fields call the expected accessors" {
+    var out = try testGenOpts(
+        \\struct Cfg {
+        \\    @default(TRUE) boolean enabled;
+        \\    @default(5) unsigned short base;
+        \\    @default(1.5) float gain;
+        \\    @default("hi") string label;
+        \\};
+    , "t", .{ .zig_generate_toml_config = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "pub fn applyToml(self: *@This(), alloc: std.mem.Allocator, table: anytype) !void {"));
+    try testing.expect(has(s, "if (try table.getBool(\"enabled\")) |_v| self.enabled = _v;"));
+    try testing.expect(has(s, "if (try table.getInt(\"base\")) |_v| self.base = std.math.cast(u16, _v) orelse return error.InvalidValue;"));
+    try testing.expect(has(s, "if (try table.getFloat(\"gain\")) |_v| self.gain = @floatCast(_v);"));
+    try testing.expect(has(s, "if (try table.getString(\"label\")) |_v| self.label = try alloc.dupe(u8, _v);"));
+}
+
+test "toml config: enum field dispatches through the generated fromString helper" {
+    var out = try testGenOpts(
+        \\enum Kind { KIND_A, KIND_B };
+        \\struct Cfg { @default(KIND_A) Kind kind; };
+    , "t", .{ .zig_generate_toml_config = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "if (try table.getString(\"kind\")) |_v| self.kind = Kind_fromString(_v) orelse return error.InvalidValue;"));
+}
+
+test "toml config: nested struct field recurses via getTable + applyToml" {
+    var out = try testGenOpts(
+        \\struct Inner { @default(1) unsigned short x; };
+        \\struct Outer { Inner inner; };
+    , "t", .{ .zig_generate_toml_config = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "if (try table.getTable(\"inner\")) |_t| try self.inner.applyToml(alloc, _t);"));
+}
+
+test "toml config: sequence<string> field builds a released buffer from getStringArray" {
+    var out = try testGenOpts(
+        \\typedef sequence<string> StringSeq;
+        \\struct Cfg { StringSeq items; };
+    , "t", .{ .zig_generate_toml_config = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "if (try table.getStringArray(\"items\")) |_arr| {"));
+    try testing.expect(has(s, "_buf[_n] = (try alloc.dupeZ(u8, _s)).ptr;"));
+    try testing.expect(has(s, "self.items = .{ ._buffer = _buf.ptr, ._length = @intCast(_arr.len), ._maximum = @intCast(_arr.len), ._release = true };"));
+}
+
+test "toml config: unsupported field kinds compile-error instead of silently mishandling" {
+    var out = try testGenOpts(
+        \\struct Cfg { long v[3]; };
+    , "t", .{ .zig_generate_toml_config = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "@compileError(\"--zig-generate-toml-config does not support this field type ('Cfg.v')\");"));
+}
+
+test "toml config: optional field has no special-cased handling (plain assignment covers it)" {
+    var out = try testGenOpts(
+        \\struct Cfg { @optional unsigned long maybe; };
+    , "t", .{ .zig_generate_toml_config = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "if (try table.getInt(\"maybe\")) |_v| self.maybe = std.math.cast(u32, _v) orelse return error.InvalidValue;"));
+}
+
+test "toml config: alloc is discarded for an all-integer struct (self/table are genuinely used, so not discarded)" {
+    var out = try testGenOpts(
+        \\struct Cfg { @default(1) unsigned short x; };
+    , "t", .{ .zig_generate_toml_config = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "_ = alloc;"));
+    try testing.expect(!has(s, "_ = self;"));
+    try testing.expect(!has(s, "_ = table;"));
+}
+
+test "toml config: alloc is NOT discarded when a string field needs it" {
+    var out = try testGenOpts(
+        \\struct Cfg { @default("") string name; };
+    , "t", .{ .zig_generate_toml_config = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    try testing.expect(!has(out.items, "_ = alloc;"));
+}
+
+test "toml config: a struct with no members discards all three parameters" {
+    var out = try testGenOpts(
+        \\struct Empty {};
+    , "t", .{ .zig_generate_toml_config = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "_ = self;"));
+    try testing.expect(has(s, "_ = alloc;"));
+    try testing.expect(has(s, "_ = table;"));
+}
+
+test "toml config: one unsupported field makes the whole body a single compileError (no unreachable-code statements after it)" {
+    var out = try testGenOpts(
+        \\struct Cfg { long v[3]; @default(1) unsigned short x; };
+    , "t", .{ .zig_generate_toml_config = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "@compileError(\"--zig-generate-toml-config does not support this field type ('Cfg.v')\");"));
+    // The supported field's statement must NOT appear — nothing follows the
+    // compileError in the generated body, since that would be unreachable code.
+    try testing.expect(!has(s, "self.x = std.math.cast"));
 }
