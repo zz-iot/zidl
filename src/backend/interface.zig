@@ -169,10 +169,13 @@ pub const Options = struct {
     ///   - `deinit` only frees a non-empty string field `if (self._toml_applied and ...)`. A
     ///     bare, untouched `T{}` (flag defaults `false`) correctly skips cleanup — its fields
     ///     are still whatever `@default` literal they started with, and freeing one would be
-    ///     undefined behavior. A struct whose `applyToml` call failed partway through also
-    ///     still has the flag `false` (it's never set except on full success), so `deinit` is
-    ///     safe there too — it just leaves whatever fields *were* duped before the failure
-    ///     unfreed (a leak on that one rare error path, not undefined behavior).
+    ///     undefined behavior.
+    ///   - Each string field's dupe statement in `applyToml` is immediately followed by its own
+    ///     `errdefer` (freeing and resetting that one field to `""`) — so if a *later* field's
+    ///     statement fails, every string `applyToml` already duped in this same call is cleaned
+    ///     up rather than leaked, and `self`'s remaining fields are left in a safe state
+    ///     (`_toml_applied` stays `false`, so `deinit` afterward is a correct no-op, not a
+    ///     double-free of what the errdefers already handled).
     ///   - `clone` sets `result._toml_applied = true` unconditionally — deliberately NOT
     ///     inherited from `self` via the `var result = self;` shallow copy. Clone's own
     ///     string-copy statements dupe every non-empty field regardless of `self`'s flag (a
@@ -182,6 +185,12 @@ pub const Options = struct {
     ///     whatever `self` had, cloning an untouched `T{}` would silently produce a struct that
     ///     owns real heap memory yet is flagged as if it didn't — `result.deinit()` would then
     ///     leak that clone's allocation.
+    ///   - A `typedef` that ultimately resolves to a plain unbounded string (through any chain,
+    ///     as long as no typedef in it has array dimensions) is treated exactly like a direct
+    ///     string field for `deinit`/`clone` purposes too, not delegated to a `.deinit()`/
+    ///     `.clone()` a bare `[]const u8` alias doesn't have (that delegation is still correct,
+    ///     and unchanged, for a typedef that resolves to a `struct` or `sequence`, both of which
+    ///     do have generated lifecycle methods of their own).
     ///
     /// One limitation remains, inherent to not tracking ownership per-field: calling
     /// `applyToml` a *second* time on an already-populated struct re-dupes every string field

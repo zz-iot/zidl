@@ -186,6 +186,12 @@ pub const Cfg = struct {
 
     pub fn applyToml(self: *@This(), alloc: std.mem.Allocator, table: anytype) !void {
         self.name = try alloc.dupe(u8, (try table.getString("name")) orelse self.name);
+        errdefer {                          // frees THIS dupe if a later field fails
+            if (self.name.len != 0) {
+                alloc.free(self.name);
+                self.name = "";
+            }
+        }
         self._toml_applied = true;  // the function's own literal last statement
     }
 
@@ -204,11 +210,14 @@ pub const Cfg = struct {
 
 - `applyToml` sets `_toml_applied = true` as its own literal last statement — reached only if
   every field's statement above it succeeded (a `try` failing anywhere returns early and never
-  reaches it). So a bare, untouched `T{}` (flag defaults `false`) and a struct whose `applyToml`
-  call failed partway through are *both* safe to `deinit()`: the flag is `false` in both cases,
-  so cleanup is correctly skipped rather than freeing a literal (untouched case) or fields it
-  never reached (partial-failure case — those leak, but that's a rare-error-path leak, not
-  undefined behavior).
+  reaches it). So a bare, untouched `T{}` (flag defaults `false`) is safe to `deinit()`: cleanup
+  is correctly skipped rather than freeing a literal.
+- Each string field's dupe is immediately followed by its own `errdefer`, freeing and resetting
+  that field to `""` if a *later* field's statement fails — so a partially-failed `applyToml`
+  call doesn't leak the strings it already duped either. `self`'s remaining, unreached fields
+  are still their original literals either way (`_toml_applied` stays `false`), so a `deinit()`
+  call afterward is a correct no-op rather than double-freeing what the errdefers already
+  cleaned up.
 - `clone` sets `result._toml_applied = true` **unconditionally, not inherited from `self`**.
   Clone's string-copy statements dupe every non-empty field regardless of `self`'s own flag (a
   dupe is always safe, whatever the source), so `result` ends up genuinely, fully owned by the
@@ -216,6 +225,11 @@ pub const Cfg = struct {
   If `result._toml_applied` were left as whatever `self` had (`var result = self;` shallow-copies
   it), cloning an untouched `T{}` would produce a struct that owns real heap memory yet is
   flagged as if it didn't, and `result.deinit()` would leak the clone's allocation.
+- A `typedef` that ultimately resolves to a plain unbounded string (through any chain, as long
+  as no typedef in it has array dimensions) gets exactly this same direct free/dupe/errdefer
+  treatment for `deinit`/`clone`, not a delegated `.deinit()`/`.clone()` call a bare `[]const u8`
+  alias doesn't have. A typedef resolving to a `struct` or `sequence` still delegates as before,
+  since those *do* have their own generated lifecycle methods.
 
 One limitation remains, inherent to not tracking ownership per-field: calling `applyToml` a
 *second* time on an already-populated struct re-dupes every string field without freeing the
