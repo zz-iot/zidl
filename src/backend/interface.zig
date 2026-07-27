@@ -184,7 +184,19 @@ pub const Options = struct {
     ///     statement fails, every string `applyToml` already duped in this same call is cleaned
     ///     up rather than leaked, and `self`'s remaining fields are left in a safe state
     ///     (`_toml_applied` stays `false`, so `deinit` afterward is a correct no-op, not a
-    ///     double-free of what the errdefers already handled).
+    ///     double-free of what the errdefers already handled). This generalizes cleanly: Zig
+    ///     fires *every* errdefer registered so far (not just the most recently registered one)
+    ///     when a function returns an error, so calling `deinit` on a struct whose `applyToml`
+    ///     call just failed is fully safe — any field duped before the failure point already
+    ///     unwound itself, and fields never reached are untouched literals that `_toml_applied
+    ///     == false` correctly tells `deinit` to leave alone.
+    ///   - A string field's dupe is itself free-before-replace: the new value is duped into a
+    ///     temporary *first* (from the still-valid current value, since the TOML-key-absent
+    ///     fallback `orelse self.field` reads it), and only once that dupe succeeds is the old
+    ///     buffer freed — guarded by `_toml_applied` so an untouched literal default is never
+    ///     freed. This makes calling `applyToml` a second time on an already-populated struct
+    ///     safe: the previous allocation is freed, not leaked, matching how sequence fields
+    ///     already free-before-replace keyed off their own `._release`.
     ///   - `clone` sets `result._toml_applied = true` unconditionally — deliberately NOT
     ///     inherited from `self` via the `var result = self;` shallow copy. Clone's own
     ///     string-copy statements dupe every non-empty field regardless of `self`'s flag (a
@@ -204,12 +216,6 @@ pub const Options = struct {
     ///     check recurses through the same typedef chain either way — a `typedef SomeStruct
     ///     Foo;` field where `SomeStruct` owns a string still correctly triggers lifecycle
     ///     generation for the struct containing it, exactly as a direct `SomeStruct` field would.
-    ///
-    /// One limitation remains, inherent to not tracking ownership per-field: calling
-    /// `applyToml` a *second* time on an already-populated struct re-dupes every string field
-    /// without freeing the previous allocation first (unlike sequence fields, which do
-    /// free-before-replace, keyed off their own `._release`). Construct a fresh `T{}` and call
-    /// `applyToml` once per config resolution, rather than re-applying to the same instance.
     zig_generate_toml_config: bool = false,
     /// C++ backend: generate concrete Impl classes and listener bridges.
     /// Outputs ${stem}_impl.hpp and ${stem}_impl.cpp alongside the abstract interface header.

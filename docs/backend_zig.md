@@ -193,7 +193,14 @@ pub const Cfg = struct {
     _toml_applied: bool = false,   // true only once applyToml has fully succeeded
 
     pub fn applyToml(self: *@This(), alloc: std.mem.Allocator, table: anytype) !void {
-        self.name = try alloc.dupe(u8, (try table.getString("name")) orelse self.name);
+        // Dupe into a temporary FIRST, from the still-valid current value —
+        // the TOML-key-absent fallback (`orelse self.name`) reads that same
+        // current value, so freeing it before this dupe would be a
+        // use-after-free read. Only free the old buffer once the new dupe
+        // has succeeded, and only if it's a real allocation (`_toml_applied`).
+        const _new_name = try alloc.dupe(u8, (try table.getString("name")) orelse self.name);
+        if (self._toml_applied and self.name.len != 0) alloc.free(self.name);
+        self.name = _new_name;
         errdefer {                          // frees THIS dupe if a later field fails
             if (self.name.len != 0) {
                 alloc.free(self.name);
@@ -216,6 +223,11 @@ pub const Cfg = struct {
 };
 ```
 
+Calling `applyToml` a second time on an already-populated struct is safe: the free-before-replace
+above frees the previous allocation rather than leaking it, keyed off `_toml_applied` so an
+untouched literal default is never freed. This matches how sequence fields already
+free-before-replace, keyed off their own `._release`.
+
 - `applyToml` sets `_toml_applied = true` as its own literal last statement — reached only if
   every field's statement above it succeeded (a `try` failing anywhere returns early and never
   reaches it). So a bare, untouched `T{}` (flag defaults `false`) is safe to `deinit()`: cleanup
@@ -225,7 +237,9 @@ pub const Cfg = struct {
   call doesn't leak the strings it already duped either. `self`'s remaining, unreached fields
   are still their original literals either way (`_toml_applied` stays `false`), so a `deinit()`
   call afterward is a correct no-op rather than double-freeing what the errdefers already
-  cleaned up.
+  cleaned up. This generalizes: Zig fires *every* errdefer registered so far, not just the most
+  recent, when a function returns an error — so calling `deinit()` on a struct whose `applyToml`
+  call just failed is always safe, regardless of how many fields succeeded first.
 - `clone` sets `result._toml_applied = true` **unconditionally, not inherited from `self`**.
   Clone's string-copy statements dupe every non-empty field regardless of `self`'s own flag (a
   dupe is always safe, whatever the source), so `result` ends up genuinely, fully owned by the
@@ -241,12 +255,6 @@ pub const Cfg = struct {
   a `typedef SomeStruct Foo;` field (`SomeStruct` itself owning a string) still correctly gets
   `deinit`/`clone` generated for *itself*, exactly as if `Foo` were declared as `SomeStruct`
   directly: the "does any field need cleanup" check recurses through the same typedef chain.
-
-One limitation remains, inherent to not tracking ownership per-field: calling `applyToml` a
-*second* time on an already-populated struct re-dupes every string field without freeing the
-previous allocation first (unlike sequences, which do free-before-replace, keyed off their own
-`._release`). Construct a fresh `T{}` and call `applyToml` once per config resolution, rather
-than re-applying to the same instance.
 
 ### Union
 IDL unions map to a struct with a discriminant field `_d` and a Zig anonymous union `_u`:

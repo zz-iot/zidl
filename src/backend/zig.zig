@@ -3829,19 +3829,38 @@ const Generator = struct {
                 if (bound != null) {
                     try self.emitApplyTomlUnsupported(struct_name, field_name, indent);
                 } else {
-                    // Unconditionally dupes — even when the TOML key is absent,
-                    // duping the field's current (default-literal) value — so
-                    // the field is always heap-owned after this call returns,
-                    // never a mix of "literal" and "allocated" depending on
-                    // which keys happened to be present. That's what makes the
-                    // generated deinit/clone (typeRefNeedsCleanup) safe to free/
-                    // dupe every string field unconditionally, with no
-                    // per-field ownership flag needed.
+                    // Dupe into a fresh buffer FIRST, from the still-valid
+                    // current value — critically, BEFORE freeing anything,
+                    // since the TOML-key-absent fallback (`orelse self.field`)
+                    // reads from that same current value; freeing it first
+                    // would make this a use-after-free read. Only once the new
+                    // dupe has succeeded do we free the old buffer and assign.
                     try self.ind();
                     try self.print(
-                        "{s}self.{s} = try alloc.dupe(u8, (try table.getString(\"{s}\")) orelse self.{s});\n",
+                        "{s}const _new_{s} = try alloc.dupe(u8, (try table.getString(\"{s}\")) orelse self.{s});\n",
                         .{ indent, field_name, field_name, field_name },
                     );
+                    // Free the OLD value now, but only if self._toml_applied
+                    // is *already* true (its value from before this call, not
+                    // yet touched — this function only sets it at the very
+                    // end): that's precisely when self.field is guaranteed to
+                    // already be a genuine dupe (established by an earlier
+                    // successful applyToml, or by clone(), both of which only
+                    // ever leave a struct with _toml_applied = true if every
+                    // string field is really heap-owned). On a fresh T{}
+                    // (_toml_applied still false), this correctly skips
+                    // freeing — the field could still be an untouched
+                    // @default literal, and freeing one would be undefined
+                    // behavior. This is what makes re-applying `applyToml` to
+                    // an already-populated struct safe, not just the first
+                    // call on a fresh instance.
+                    try self.ind();
+                    try self.print(
+                        "{s}if (self._toml_applied and self.{s}.len != 0) alloc.free(self.{s});\n",
+                        .{ indent, field_name, field_name },
+                    );
+                    try self.ind();
+                    try self.print("{s}self.{s} = _new_{s};\n", .{ indent, field_name, field_name });
                     // If a LATER field's statement fails, this dupe (already
                     // committed to self, which escapes even on error, unlike
                     // clone's local `result`) would otherwise be orphaned —
@@ -7616,7 +7635,9 @@ test "toml config: scalar fields call the expected accessors" {
     try testing.expect(has(s, "if (try table.getBool(\"enabled\")) |_v| self.enabled = _v;"));
     try testing.expect(has(s, "if (try table.getInt(\"base\")) |_v| self.base = std.math.cast(u16, _v) orelse return error.InvalidValue;"));
     try testing.expect(has(s, "if (try table.getFloat(\"gain\")) |_v| self.gain = @floatCast(_v);"));
-    try testing.expect(has(s, "self.label = try alloc.dupe(u8, (try table.getString(\"label\")) orelse self.label);"));
+    try testing.expect(has(s, "const _new_label = try alloc.dupe(u8, (try table.getString(\"label\")) orelse self.label);"));
+    try testing.expect(has(s, "if (self._toml_applied and self.label.len != 0) alloc.free(self.label);"));
+    try testing.expect(has(s, "self.label = _new_label;"));
 }
 
 test "toml config: enum field dispatches through the generated fromString helper" {
@@ -7704,7 +7725,7 @@ test "toml config: _toml_applied field is emitted and set only on full success" 
     try testing.expect(has(s, "_toml_applied: bool = false,"));
     // Must be the LAST statement in applyToml (after the field's own statement),
     // so a `try` failing above it never reaches this line.
-    const field_stmt = std.mem.indexOf(u8, s, "self.name = try alloc.dupe").?;
+    const field_stmt = std.mem.indexOf(u8, s, "const _new_name = try alloc.dupe").?;
     const flag_stmt = std.mem.indexOf(u8, s, "self._toml_applied = true;").?;
     try testing.expect(flag_stmt > field_stmt);
 }
@@ -7821,13 +7842,34 @@ test "toml config: applyToml frees a just-duped string field if a later field fa
     // The errdefer for `name` must appear right after its dupe statement,
     // before `num`'s statement — so it's registered (and can fire on num's
     // failure) regardless of declaration order relative to other fields.
-    const dupe_stmt = std.mem.indexOf(u8, s, "self.name = try alloc.dupe").?;
+    const dupe_stmt = std.mem.indexOf(u8, s, "const _new_name = try alloc.dupe").?;
     const errdefer_stmt = std.mem.indexOf(u8, s, "if (self.name.len != 0) {").?;
     const port_stmt = std.mem.indexOf(u8, s, "self.num = std.math.cast").?;
     try testing.expect(dupe_stmt < errdefer_stmt);
     try testing.expect(errdefer_stmt < port_stmt);
     try testing.expect(has(s, "alloc.free(self.name);"));
     try testing.expect(has(s, "self.name = \"\";"));
+}
+
+test "toml config: string re-application frees the previous allocation, without a use-after-free on the fallback read" {
+    var out = try testGenOpts(
+        \\struct Cfg { @default("x") string name; };
+    , "t", .{ .zig_generate_toml_config = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    // Scoped to applyToml specifically — deinit's own (correctly separate)
+    // "if (self._toml_applied and self.name.len != 0) alloc.free(...)" check
+    // appears earlier in the file and would otherwise be mistaken for this one.
+    const apply_fn_start = std.mem.indexOf(u8, out.items, "pub fn applyToml(self: *@This()").?;
+    const s = out.items[apply_fn_start..];
+    // Ordering matters: dupe into a temporary FIRST (from the still-valid
+    // current value, including the TOML-absent `orelse self.name` fallback),
+    // THEN free the old value, THEN assign — freeing before duping would make
+    // the `orelse self.name` fallback a use-after-free read.
+    const dupe_stmt = std.mem.indexOf(u8, s, "const _new_name = try alloc.dupe(u8, (try table.getString(\"name\")) orelse self.name);").?;
+    const free_stmt = std.mem.indexOf(u8, s, "if (self._toml_applied and self.name.len != 0) alloc.free(self.name);").?;
+    const assign_stmt = std.mem.indexOf(u8, s, "self.name = _new_name;").?;
+    try testing.expect(dupe_stmt < free_stmt);
+    try testing.expect(free_stmt < assign_stmt);
 }
 
 test "toml config: one unsupported field makes the whole body a single compileError (no unreachable-code statements after it)" {
