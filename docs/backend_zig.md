@@ -171,19 +171,57 @@ are each discarded (`_ = x;`) exactly when nothing else in the generated body wo
 them — Zig errors on both an unused parameter and a "pointless" discard of one that's genuinely
 used later, so this can't be unconditional in either direction.
 
-**Plain string fields are unconditionally duped, on every call, present-in-table or not** —
-using the field's current value as the fallback when the key is absent — so that after
+**Plain string fields are unconditionally duped, on every `applyToml` call, present-in-table or
+not** — using the field's current value as the fallback when the key is absent — so that after
 `applyToml` returns successfully, every string field is uniformly heap-owned rather than a mix
-of "still the literal default" and "allocated." That's what lets `deinit()`/`clone()` (also
-generated under this flag) safely free/dupe every non-empty string field the same way, without
-a per-field ownership flag. Two limitations are inherent to not having such a flag:
-- `deinit()` is only safe after `applyToml` **returns successfully** (or on an untouched `T{}`
-  that never called it) — not after a partial failure, since unreached fields are still
-  whatever literal the struct started with, and freeing one would be undefined behavior.
-- Calling `applyToml` a second time on an already-populated struct re-dupes every string field
-  without freeing the previous allocation (unlike sequences, which do free-before-replace,
-  since `._release` gives them a real ownership flag to key that off of). Construct a fresh
-  `T{}` per resolution rather than re-applying to the same instance.
+of "still the literal default" and "allocated." A plain `[]const u8` has no ownership bit of
+its own (unlike a sequence's `._release`), so every struct generated under this flag also gets
+a real `_toml_applied: bool = false` field, and `deinit`/`clone` check it directly instead of
+guessing:
+
+```zig
+pub const Cfg = struct {
+    name: []const u8 = "default",
+    _toml_applied: bool = false,   // true only once applyToml has fully succeeded
+
+    pub fn applyToml(self: *@This(), alloc: std.mem.Allocator, table: anytype) !void {
+        self.name = try alloc.dupe(u8, (try table.getString("name")) orelse self.name);
+        self._toml_applied = true;  // the function's own literal last statement
+    }
+
+    pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
+        if (self._toml_applied and self.name.len != 0) alloc.free(self.name);
+    }
+
+    pub fn clone(self: @This(), alloc: std.mem.Allocator) !@This() {
+        var result = self;
+        result._toml_applied = true;  // NOT copied from self — see below
+        result.name = if (self.name.len != 0) try alloc.dupe(u8, self.name) else self.name;
+        return result;
+    }
+};
+```
+
+- `applyToml` sets `_toml_applied = true` as its own literal last statement — reached only if
+  every field's statement above it succeeded (a `try` failing anywhere returns early and never
+  reaches it). So a bare, untouched `T{}` (flag defaults `false`) and a struct whose `applyToml`
+  call failed partway through are *both* safe to `deinit()`: the flag is `false` in both cases,
+  so cleanup is correctly skipped rather than freeing a literal (untouched case) or fields it
+  never reached (partial-failure case — those leak, but that's a rare-error-path leak, not
+  undefined behavior).
+- `clone` sets `result._toml_applied = true` **unconditionally, not inherited from `self`**.
+  Clone's string-copy statements dupe every non-empty field regardless of `self`'s own flag (a
+  dupe is always safe, whatever the source), so `result` ends up genuinely, fully owned by the
+  time `clone` returns — even when cloning an untouched `T{}` with a non-empty literal default.
+  If `result._toml_applied` were left as whatever `self` had (`var result = self;` shallow-copies
+  it), cloning an untouched `T{}` would produce a struct that owns real heap memory yet is
+  flagged as if it didn't, and `result.deinit()` would leak the clone's allocation.
+
+One limitation remains, inherent to not tracking ownership per-field: calling `applyToml` a
+*second* time on an already-populated struct re-dupes every string field without freeing the
+previous allocation first (unlike sequences, which do free-before-replace, keyed off their own
+`._release`). Construct a fresh `T{}` and call `applyToml` once per config resolution, rather
+than re-applying to the same instance.
 
 ### Union
 IDL unions map to a struct with a discriminant field `_d` and a Zig anonymous union `_u`:

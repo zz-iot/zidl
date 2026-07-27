@@ -3434,6 +3434,19 @@ const Generator = struct {
         try self.write("    pub fn clone(self: @This(), alloc: std.mem.Allocator) !@This() {\n");
         try self.ind();
         try self.write("        var result = self;\n");
+        if (self.opts.zig_generate_toml_config) {
+            // `var result = self;` above also shallow-copied `_toml_applied` —
+            // but the string-cloning statements below run unconditionally on
+            // every non-empty string field regardless of that flag, so
+            // `result`'s strings are always fresh, genuinely-owned dupes by
+            // the time this function returns, even if `self` itself was an
+            // untouched `T{}` (`_toml_applied = false`). Setting it `true`
+            // here (not copied from `self`) is what makes `result` actually
+            // consistent with its own content — otherwise `result.deinit()`
+            // would skip freeing those just-duped strings, leaking them.
+            try self.ind();
+            try self.write("        result._toml_applied = true;\n");
+        }
         for (s.members) |m| {
             if (!self.typeRefNeedsCleanup(m.type_ref)) continue;
             try self.emitFieldSeqCloneStmt(m.name, m.type_ref, "        ");
@@ -7613,6 +7626,22 @@ test "toml config: sequence field is reset to .{} immediately after freeing the 
     const alloc_stmt = std.mem.indexOf(u8, s, "const _buf = try alloc.alloc([*:0]const u8, _arr.len);").?;
     try testing.expect(free_stmt < reset_stmt);
     try testing.expect(reset_stmt < alloc_stmt);
+}
+
+test "toml config: clone sets _toml_applied unconditionally, not copied from self" {
+    var out = try testGenOpts(
+        \\struct Cfg { @default("default") string name; };
+    , "t", .{ .zig_generate_toml_config = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Must appear in clone(), set unconditionally (not gated on self's own
+    // flag) — otherwise cloning an untouched T{} (whose "default" literal
+    // gets duped by the clone's own string-copy statement regardless) would
+    // leave `result` with a genuinely-owned string but _toml_applied = false,
+    // and result.deinit() would then skip freeing it.
+    const clone_fn_start = std.mem.indexOf(u8, s, "pub fn clone(self: @This()").?;
+    const clone_fn_body = s[clone_fn_start..];
+    try testing.expect(has(clone_fn_body, "result._toml_applied = true;"));
 }
 
 test "toml config: one unsupported field makes the whole body a single compileError (no unreachable-code statements after it)" {
