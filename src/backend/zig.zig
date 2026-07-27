@@ -344,6 +344,19 @@ const Generator = struct {
             try self.ind();
             try self.print("    _base: {s} = .{{}},\n", .{base_zig});
         }
+        if (self.opts.zig_generate_toml_config) {
+            // Set true only by applyToml's own last statement — reached only
+            // if every field's statement above it succeeded. Lets deinit tell
+            // "never ran applyToml at all" (still just @default literals,
+            // some possibly non-empty — freeing them would be undefined
+            // behavior) apart from "applyToml completed," without a per-field
+            // flag. A struct whose applyToml call fails partway through never
+            // sets this, so deinit correctly skips string cleanup for it too —
+            // whatever fields *were* duped before the failure leak rather than
+            // being incorrectly freed (or, worse, double-freed/dangling).
+            try self.ind();
+            try self.write("    _toml_applied: bool = false,\n");
+        }
         for (s.members) |m| {
             try self.emitField(m.name, m.type_ref, m.dimensions, m.annotations.is_optional, m.annotations.default_value);
         }
@@ -3367,8 +3380,13 @@ const Generator = struct {
     fn emitFieldSeqDeinit(self: *Generator, field_name: []const u8, tr: ir.TypeRef, indent: []const u8) !void {
         switch (tr) {
             .string => |bound| if (bound == null) {
+                // Gated on _toml_applied, unlike the sequence case below: a
+                // string field has no ownership flag of its own, so without
+                // this, an untouched `T{}` (whose non-empty @default literals,
+                // e.g. "default", were never duped) would have its static
+                // storage passed to `alloc.free` here — undefined behavior.
                 try self.ind();
-                try self.print("{s}if (self.{s}.len != 0) alloc.free(self.{s});\n", .{ indent, field_name, field_name });
+                try self.print("{s}if (self._toml_applied and self.{s}.len != 0) alloc.free(self.{s});\n", .{ indent, field_name, field_name });
             },
             .sequence => |seq| {
                 // Anonymous extern struct field — inline the _release-guarded cleanup.
@@ -3619,6 +3637,12 @@ const Generator = struct {
             for (s.members) |m| {
                 try self.emitTypeRefApplyToml(s.name, m.name, m.type_ref, "        ");
             }
+            // Reached only if every statement above succeeded (any `try`
+            // failing returns early) — see the `_toml_applied` field's own
+            // doc comment in emitStruct for why this specifically has to be
+            // the *last* statement, not set unconditionally up front.
+            try self.ind();
+            try self.write("        self._toml_applied = true;\n");
         }
         try self.ind();
         try self.write("    }\n");
@@ -3819,6 +3843,13 @@ const Generator = struct {
         try self.print("{s}        }}\n", .{indent});
         try self.ind();
         try self.print("{s}    }}\n", .{indent});
+        // Reset immediately after freeing, before attempting the replacement —
+        // if the allocation/dupe below fails, self.field must not be left
+        // pointing at memory that was just freed above (a dangling _release =
+        // true field, causing a use-after-free/double-free on a later deinit
+        // or retry).
+        try self.ind();
+        try self.print("{s}    self.{s} = .{{}};\n", .{ indent, field_name });
         try self.ind();
         try self.print("{s}    const _buf = try alloc.alloc([*:0]const u8, _arr.len);\n", .{indent});
         try self.ind();
@@ -7543,6 +7574,45 @@ test "toml config: a struct with no members discards all three parameters" {
     try testing.expect(has(s, "_ = self;"));
     try testing.expect(has(s, "_ = alloc;"));
     try testing.expect(has(s, "_ = table;"));
+}
+
+test "toml config: _toml_applied field is emitted and set only on full success" {
+    var out = try testGenOpts(
+        \\struct Cfg { @default("") string name; };
+    , "t", .{ .zig_generate_toml_config = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "_toml_applied: bool = false,"));
+    // Must be the LAST statement in applyToml (after the field's own statement),
+    // so a `try` failing above it never reaches this line.
+    const field_stmt = std.mem.indexOf(u8, s, "self.name = try alloc.dupe").?;
+    const flag_stmt = std.mem.indexOf(u8, s, "self._toml_applied = true;").?;
+    try testing.expect(flag_stmt > field_stmt);
+}
+
+test "toml config: deinit only frees a string field when _toml_applied is true" {
+    var out = try testGenOpts(
+        \\struct Cfg { @default("default") string name; };
+    , "t", .{ .zig_generate_toml_config = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "if (self._toml_applied and self.name.len != 0) alloc.free(self.name);"));
+}
+
+test "toml config: sequence field is reset to .{} immediately after freeing the old buffer" {
+    var out = try testGenOpts(
+        \\typedef sequence<string> StringSeq;
+        \\struct Cfg { StringSeq items; };
+    , "t", .{ .zig_generate_toml_config = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // The reset must appear between the free-old-buffer block and the
+    // allocation of the replacement, so a failure allocating the replacement
+    // never leaves self.items pointing at freed memory.
+    const free_stmt = std.mem.indexOf(u8, s, "alloc.free(_ob[0..self.items._maximum]);").?;
+    const reset_stmt = std.mem.indexOf(u8, s, "self.items = .{};").?;
+    const alloc_stmt = std.mem.indexOf(u8, s, "const _buf = try alloc.alloc([*:0]const u8, _arr.len);").?;
+    try testing.expect(free_stmt < reset_stmt);
+    try testing.expect(reset_stmt < alloc_stmt);
 }
 
 test "toml config: one unsupported field makes the whole body a single compileError (no unreachable-code statements after it)" {
