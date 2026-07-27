@@ -171,6 +171,14 @@ are each discarded (`_ = x;`) exactly when nothing else in the generated body wo
 them — Zig errors on both an unused parameter and a "pointless" discard of one that's genuinely
 used later, so this can't be unconditional in either direction.
 
+**`struct Derived : Base` inheritance** (the embedded `_base` field) is transparent to all of
+this. `applyToml` always delegates to `self._base.applyToml(alloc, table)` first, passing the
+*same* table — inheritance is IS-A, so Base's fields are expected as peers of Derived's own in
+one flat table, not nested under a `[base]`-style key the way a genuine HAS-A struct-typed field
+would be. `deinit`/`clone`/the "does this struct need lifecycle helpers at all" check all recurse
+into the base exactly like they recurse into a nested struct field, so a `Derived` whose only
+heap-owning content lives in `Base` still correctly gets `deinit`/`clone` generated for itself.
+
 **Plain string fields are unconditionally duped, on every `applyToml` call, present-in-table or
 not** — using the field's current value as the fallback when the key is absent — so that after
 `applyToml` returns successfully, every string field is uniformly heap-owned rather than a mix

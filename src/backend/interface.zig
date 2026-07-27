@@ -155,6 +155,15 @@ pub const Options = struct {
     /// supported one's ordinary statement would otherwise be "unreachable code after
     /// @compileError," a separate hard error).
     ///
+    /// `struct Derived : Base` inheritance (the embedded `_base` field) is transparent to all
+    /// of this: `applyToml` always delegates to `self._base.applyToml(alloc, table)` first,
+    /// passing the *same* table (inheritance is IS-A — Base's fields are peers of Derived's own
+    /// in one flat table, not nested under a `[base]`-style key the way a genuine HAS-A
+    /// struct-typed field would be). `deinit`/`clone`/the "does this struct need lifecycle
+    /// helpers at all" check all recurse into the base the same way they recurse into a nested
+    /// struct field, so a `Derived` whose only heap-owning content lives in `Base` still gets
+    /// correct `deinit`/`clone` generated for itself.
+    ///
     /// **String field ownership.** Every plain (unbounded) string field is unconditionally
     /// duped via `alloc.dupe` on every `applyToml` call — whether or not the TOML key was
     /// present, using the field's *current* value as the fallback when absent — so that after

@@ -3352,6 +3352,10 @@ const Generator = struct {
     }
 
     fn structNeedsCleanup(self: *Generator, s: *const ir.Struct) bool {
+        if (s.base) |base| switch (base) {
+            .struct_ => |bs| if (self.structNeedsCleanup(bs)) return true,
+            else => {},
+        };
         for (s.members) |m| {
             if (self.typeRefNeedsCleanup(m.type_ref)) return true;
         }
@@ -3366,6 +3370,13 @@ const Generator = struct {
     fn emitStructDeinitFn(self: *Generator, s: *const ir.Struct) !void {
         try self.ind();
         try self.write("    pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {\n");
+        if (s.base) |base| switch (base) {
+            .struct_ => |bs| if (self.structNeedsCleanup(bs)) {
+                try self.ind();
+                try self.write("        self._base.deinit(alloc);\n");
+            },
+            else => {},
+        };
         for (s.members) |m| {
             if (!self.typeRefNeedsCleanup(m.type_ref)) continue;
             try self.emitFieldSeqDeinit(m.name, m.type_ref, "        ");
@@ -3456,6 +3467,18 @@ const Generator = struct {
             try self.ind();
             try self.write("        result._toml_applied = true;\n");
         }
+        if (s.base) |base| switch (base) {
+            .struct_ => |bs| if (self.structNeedsCleanup(bs)) {
+                // `var result = self;` above only shallow-copied _base — replace
+                // it with a real deep clone so freeing one of self/result later
+                // can't double-free the other's heap-owned base fields.
+                try self.ind();
+                try self.write("        result._base = try self._base.clone(alloc);\n");
+                try self.ind();
+                try self.write("        errdefer result._base.deinit(alloc);\n");
+            },
+            else => {},
+        };
         for (s.members) |m| {
             if (!self.typeRefNeedsCleanup(m.type_ref)) continue;
             try self.emitFieldSeqCloneStmt(m.name, m.type_ref, "        ");
@@ -3628,6 +3651,18 @@ const Generator = struct {
     ///     hard error — so per-field statements can't be interspersed with it;
     ///     `memberApplyTomlSupported` below must keep recognizing exactly the
     ///     same cases `emitTypeRefApplyToml`'s dispatch handles.
+    ///   - a `struct Derived : Base` field always delegates to
+    ///     `self._base.applyToml(alloc, table)` first, passing the *same*
+    ///     table rather than a nested sub-table — inheritance is an IS-A
+    ///     relationship, so Base's fields are expected as peers of Derived's
+    ///     own in one flat table, not nested under a `[base]`-style key
+    ///     (unlike a genuine HAS-A struct-typed field, which does get its own
+    ///     sub-table). This call is unconditional whenever a base exists,
+    ///     regardless of whether the base happens to need heap cleanup — even
+    ///     an all-scalar base still needs its own fields populated from TOML.
+    ///     Base support-checking isn't duplicated here: an unsupported field
+    ///     in the base already fails to compile when the base's own
+    ///     `applyToml` is generated, independently of this struct.
     fn emitStructApplyTomlFn(self: *Generator, s: *const ir.Struct) !void {
         try self.ind();
         try self.write("    pub fn applyToml(self: *@This(), alloc: std.mem.Allocator, table: anytype) !void {\n");
@@ -3640,11 +3675,14 @@ const Generator = struct {
             }
         }
 
+        const has_base_call = if (s.base) |base| base == .struct_ else false;
+
         // self/table are used by every per-member statement (assignment target,
-        // accessor receiver respectively) — nothing to discard for either one
-        // unless the body ends up empty (no members, or the single-compileError
-        // path, which references neither).
-        if (unsupported != null or s.members.len == 0) {
+        // accessor receiver respectively) and by the base delegate call below —
+        // nothing to discard for either one unless the body ends up truly empty
+        // (no members, no base, or the single-compileError path, none of which
+        // reference them).
+        if (unsupported != null or (s.members.len == 0 and !has_base_call)) {
             try self.ind();
             try self.write("        _ = self;\n");
             try self.ind();
@@ -3652,11 +3690,13 @@ const Generator = struct {
             try self.ind();
             try self.write("        _ = table;\n");
         } else {
-            var needs_alloc = false;
-            for (s.members) |*m| {
-                if (memberApplyTomlNeedsAlloc(m)) {
-                    needs_alloc = true;
-                    break;
+            var needs_alloc = has_base_call; // the base delegate call always passes alloc through
+            if (!needs_alloc) {
+                for (s.members) |*m| {
+                    if (memberApplyTomlNeedsAlloc(m)) {
+                        needs_alloc = true;
+                        break;
+                    }
                 }
             }
             if (!needs_alloc) {
@@ -3672,6 +3712,10 @@ const Generator = struct {
                 .{ s.name, m.name },
             );
         } else {
+            if (has_base_call) {
+                try self.ind();
+                try self.write("        try self._base.applyToml(alloc, table);\n");
+            }
             for (s.members) |m| {
                 try self.emitTypeRefApplyToml(s.name, m.name, m.type_ref, "        ");
             }
@@ -5165,6 +5209,10 @@ fn typeRefNeedsSeqDeinit(tr: ir.TypeRef) bool {
 }
 
 fn structNeedsSeqDeinit(s: *const ir.Struct) bool {
+    if (s.base) |base| switch (base) {
+        .struct_ => |bs| if (structNeedsSeqDeinit(bs)) return true,
+        else => {},
+    };
     for (s.members) |m| {
         if (typeRefNeedsSeqDeinit(m.type_ref)) return true;
     }
@@ -7733,6 +7781,26 @@ test "toml config: typedef-of-struct-with-string gets lifecycle helpers via the 
     try testing.expect(has(s, "self.wrapped.deinit(alloc);"));
     try testing.expect(has(s, "result.wrapped = try self.wrapped.clone(alloc);"));
     try testing.expect(has(s, "errdefer result.wrapped.deinit(alloc);"));
+}
+
+test "toml config: inherited base struct is populated, cleaned up, and cloned" {
+    var out = try testGenOpts(
+        \\struct Base { @default("base-default") string base_label; };
+        \\struct Derived : Base { @default(1) unsigned short extra; };
+    , "t", .{ .zig_generate_toml_config = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    const derived_start = std.mem.indexOf(u8, s, "pub const Derived").?;
+    const derived = s[derived_start..];
+    // applyToml: base delegate call must appear, using the SAME table (flat,
+    // not nested — inheritance is IS-A, unlike a HAS-A struct field).
+    try testing.expect(has(derived, "try self._base.applyToml(alloc, table);"));
+    // deinit/clone must recurse into the base too (previously: structNeedsCleanup
+    // only checked s.members, never s.base, so Derived got no lifecycle helpers
+    // at all despite Base owning a heap string).
+    try testing.expect(has(derived, "self._base.deinit(alloc);"));
+    try testing.expect(has(derived, "result._base = try self._base.clone(alloc);"));
+    try testing.expect(has(derived, "errdefer result._base.deinit(alloc);"));
 }
 
 test "toml config: a typedef with array dimensions is still rejected, not treated as a plain string" {
