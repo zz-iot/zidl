@@ -185,12 +185,16 @@ pub const Options = struct {
     ///     whatever `self` had, cloning an untouched `T{}` would silently produce a struct that
     ///     owns real heap memory yet is flagged as if it didn't — `result.deinit()` would then
     ///     leak that clone's allocation.
-    ///   - A `typedef` that ultimately resolves to a plain unbounded string (through any chain,
-    ///     as long as no typedef in it has array dimensions) is treated exactly like a direct
-    ///     string field for `deinit`/`clone` purposes too, not delegated to a `.deinit()`/
-    ///     `.clone()` a bare `[]const u8` alias doesn't have (that delegation is still correct,
-    ///     and unchanged, for a typedef that resolves to a `struct` or `sequence`, both of which
-    ///     do have generated lifecycle methods of their own).
+    ///   - A `typedef` that ultimately resolves (through any chain, as long as no typedef in it
+    ///     has array dimensions) to a plain unbounded string is treated exactly like a direct
+    ///     string field for `deinit`/`clone` purposes, not delegated to a `.deinit()`/`.clone()`
+    ///     a bare `[]const u8` alias doesn't have. A typedef resolving to a `struct` or
+    ///     `sequence` still delegates as before (those *do* have generated lifecycle methods).
+    ///     Both cases matter one level up too: whether the *enclosing* struct gets `deinit`/
+    ///     `clone` generated at all is decided by whether any field needs cleanup, and that
+    ///     check recurses through the same typedef chain either way — a `typedef SomeStruct
+    ///     Foo;` field where `SomeStruct` owns a string still correctly triggers lifecycle
+    ///     generation for the struct containing it, exactly as a direct `SomeStruct` field would.
     ///
     /// One limitation remains, inherent to not tracking ownership per-field: calling
     /// `applyToml` a *second* time on an already-populated struct re-dupes every string field

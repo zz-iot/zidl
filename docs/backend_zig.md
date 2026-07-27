@@ -229,7 +229,10 @@ pub const Cfg = struct {
   as no typedef in it has array dimensions) gets exactly this same direct free/dupe/errdefer
   treatment for `deinit`/`clone`, not a delegated `.deinit()`/`.clone()` call a bare `[]const u8`
   alias doesn't have. A typedef resolving to a `struct` or `sequence` still delegates as before,
-  since those *do* have their own generated lifecycle methods.
+  since those *do* have their own generated lifecycle methods — and, one level up, a struct with
+  a `typedef SomeStruct Foo;` field (`SomeStruct` itself owning a string) still correctly gets
+  `deinit`/`clone` generated for *itself*, exactly as if `Foo` were declared as `SomeStruct`
+  directly: the "does any field need cleanup" check recurses through the same typedef chain.
 
 One limitation remains, inherent to not tracking ownership per-field: calling `applyToml` a
 *second* time on an already-populated struct re-dupes every string field without freeing the

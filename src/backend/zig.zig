@@ -5185,15 +5185,23 @@ fn typedefTargetsPlainString(t: *const ir.Typedef) bool {
     };
 }
 
-/// Returns true for a direct unbounded-`string` field, a `typedef` (through any
-/// chain) that ultimately resolves to one, or a named struct that transitively
-/// contains one — the string-field analog of `typeRefNeedsSeqDeinit`, used only
-/// under `--zig-generate-toml-config` (see `Generator.typeRefNeedsCleanup`).
+/// Returns true for a direct unbounded-`string` field, a named struct that
+/// transitively contains one, or a `typedef` (through any chain) resolving to
+/// *either* of those — the string-field analog of `typeRefNeedsSeqDeinit`, used
+/// only under `--zig-generate-toml-config` (see `Generator.typeRefNeedsCleanup`).
+/// Recurses on the typedef's own target rather than delegating to
+/// `typedefTargetsPlainString` (which only recognizes the plain-string case,
+/// exactly right for its own narrow purpose of choosing inline-free/dupe vs.
+/// delegate-to-.deinit() code shape in the `emitFieldSeq*` generators, but
+/// wrong here: a `typedef SomeStruct Foo;` where `SomeStruct` itself owns an
+/// unbounded string needs cleanup too, via delegation, same as a direct
+/// `struct_` field — this function only answers "does it need cleanup at all,"
+/// not "how.")
 fn typeRefHasUnboundedString(tr: ir.TypeRef) bool {
     return switch (tr) {
         .string => |bound| bound == null,
         .named => |td| switch (td) {
-            .typedef => |t| typedefTargetsPlainString(t),
+            .typedef => |t| if (t.dimensions.len == 0) typeRefHasUnboundedString(t.type_ref) else false,
             .struct_ => |s| structHasUnboundedString(s),
             else => false,
         },
@@ -7709,6 +7717,22 @@ test "toml config: typedef-of-string field gets direct free/dupe handling, not a
     // Must NOT try to delegate to a .deinit()/.clone() a `[]const u8` alias doesn't have.
     try testing.expect(!has(s, "self.label.deinit(alloc)"));
     try testing.expect(!has(s, "self.label.clone(alloc)"));
+}
+
+test "toml config: typedef-of-struct-with-string gets lifecycle helpers via the existing delegate path" {
+    var out = try testGenOpts(
+        \\struct Inner { @default("x") string label; };
+        \\typedef Inner InnerAlias;
+        \\struct Outer { InnerAlias wrapped; };
+    , "t", .{ .zig_generate_toml_config = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Outer must get deinit/clone at all (previously: typeRefHasUnboundedString
+    // didn't recurse into a typedef's struct target, so structNeedsCleanup
+    // never saw this field and Outer got no lifecycle helpers whatsoever).
+    try testing.expect(has(s, "self.wrapped.deinit(alloc);"));
+    try testing.expect(has(s, "result.wrapped = try self.wrapped.clone(alloc);"));
+    try testing.expect(has(s, "errdefer result.wrapped.deinit(alloc);"));
 }
 
 test "toml config: a typedef with array dimensions is still rejected, not treated as a plain string" {
