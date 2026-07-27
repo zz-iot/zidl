@@ -33,6 +33,7 @@
 //!
 //!   --zig-generate-c-api           Emit pub export fn callconv(.c) wrappers for C free-function API (Zig backend)
 //!   --zig-idiomatic-enums          Generate lowercase snake_case enum tags (e.g. .durability_volatile) (Zig backend)
+//!   --zig-generate-toml-config     Emit applyToml(alloc, table: anytype) !void per struct (Zig backend)
 //!   --zig-pl-cdr                   Generate PL_CDR functions for @mutable types (Zig backend)
 //!   --zig-version <0.16.0|0.15.1>  Output compatibility target (Zig backend)
 //!
@@ -76,6 +77,7 @@ const Opts = struct {
     generate_zzdds_wrappers: bool = false,
     zig_generate_c_api: bool = false,
     zig_idiomatic_enums: bool = false,
+    zig_generate_toml_config: bool = false,
     cpp_generate_impl: bool = false,
     cpp_pmr_containers: bool = false,
     preprocess_timestamp_seconds: ?u64 = null,
@@ -242,6 +244,8 @@ pub fn main(init: std.process.Init) !void {
             opts.zig_generate_c_api = true;
         } else if (std.mem.eql(u8, arg, "--zig-idiomatic-enums")) {
             opts.zig_idiomatic_enums = true;
+        } else if (std.mem.eql(u8, arg, "--zig-generate-toml-config")) {
+            opts.zig_generate_toml_config = true;
         } else if (std.mem.eql(u8, arg, "--c-pragma-once")) {
             opts.pragma_once = true;
         } else if (std.mem.eql(u8, arg, "--c-extern-c")) {
@@ -597,6 +601,7 @@ fn processFile(
         .pl_cdr = opts.pl_cdr,
         .zig_generate_c_api = opts.zig_generate_c_api,
         .zig_idiomatic_enums = opts.zig_idiomatic_enums,
+        .zig_generate_toml_config = opts.zig_generate_toml_config,
         .generate_zzdds_wrappers = opts.generate_zzdds_wrappers,
         .zig_version = opts.zig_version,
         .cpp_generate_impl = opts.cpp_generate_impl,
@@ -698,6 +703,7 @@ fn printUsage(w: *Io.Writer) !void {
         \\  --java-package <pkg>           Package prefix, e.g. com.example (Java backend)
         \\
         \\  --zig-generate-c-api           Emit pub export fn callconv(.c) wrappers for C free-function API (Zig backend)
+        \\  --zig-generate-toml-config     Emit applyToml(alloc, table: anytype) !void per struct (Zig backend)
         \\  --zig-pl-cdr                   Generate PL_CDR functions for @mutable types (Zig backend)
         \\  --zig-version <0.16.0|0.15.1>  Output compatibility target (Zig backend)
         \\

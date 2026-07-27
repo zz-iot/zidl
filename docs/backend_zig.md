@@ -79,6 +79,15 @@ pub const MyStruct = struct {
     // @optional members:
     tag: ?i32 = null,
 
+    // Only if this struct (transitively) has a sequence field that may hold
+    // heap memory — independent of --no-typesupport, since these are lifecycle
+    // operations, not CDR/wire concerns:
+    pub fn deinit(self: *MyStruct, alloc: std.mem.Allocator) void { ... }
+    pub fn clone(self: MyStruct, alloc: std.mem.Allocator) !MyStruct { ... }
+
+    // Only with --zig-generate-toml-config — see §TOML config application below:
+    pub fn applyToml(self: *MyStruct, alloc: std.mem.Allocator, table: anytype) !void { ... }
+
     // CDR serialization (unless --no-typesupport):
     pub fn serialize(writer: anytype, value: *const MyStruct) !void { ... }
     pub fn deserialize(reader: anytype, alloc: std.mem.Allocator) !MyStruct { ... }
@@ -115,6 +124,137 @@ pub fn takeRaw(dr: DDS.DataReader) ?TakenSample;
 `.deinit()`. In zzdds, this adapter should wrap the hand-written DCPS runtime
 (`DataWriterImpl.writeRaw` / `DataReaderImpl.takeRaw`) rather than the C ABI
 exports from `--zig-generate-c-api`.
+
+### TOML config application (`--zig-generate-toml-config`)
+
+Emits `pub fn applyToml(self: *@This(), alloc: std.mem.Allocator, table: anytype) !void` on
+every struct. `table` is duck-typed via `anytype` — this backend has zero compile-time
+dependency on any concrete TOML parser or value-tree type. The contract `table` must satisfy:
+
+```zig
+pub fn getString(self: T, key: []const u8) SomeError!?[]const u8;
+pub fn getBool(self: T, key: []const u8) SomeError!?bool;
+pub fn getInt(self: T, key: []const u8) SomeError!?i64;
+pub fn getFloat(self: T, key: []const u8) SomeError!?f64;
+pub fn getTable(self: T, key: []const u8) SomeError!?T;       // same T, for nested-table recursion
+pub fn getStringArray(self: T, key: []const u8) SomeError!?[]const []const u8;
+// T{} must also be a valid, cheap, always-succeeding construction (see below).
+```
+
+Absent key → `null` (the field is left at whatever `@default`/zero-value the struct literal
+already set). Key present with the wrong type → an error (never silently treated as absent —
+a consumer supplying `table` decides what that error is; `zzdds`'s own implementation, for
+instance, is `src/config/toml.zig`, kept entirely outside `zidl` on purpose — see `zzdds`'s
+`docs/decisions.md` §Configuration for why the parser itself isn't shared `zidl` infrastructure).
+
+Supported field types: `boolean`, integers (bounds-checked via `std.math.cast(...) orelse
+return error.InvalidValue`), floats (`@floatCast`), `string` (unbounded only — `alloc.dupe`),
+enums (dispatches through that enum's own generated `_fromString` helper — cross-module enums
+get the same `qualNameToZig`-qualified reference an ordinary field-type reference would, e.g.
+`DDS.ReliabilityQosPolicyKind_fromString`, not a bare name), nested structs (recursive
+`.applyToml` call — **unconditional**, not gated on the key's presence: `try self.field.applyToml(alloc,
+(try table.getTable("field")) orelse @TypeOf(table){})`, so a nested struct's own string fields
+still get the ownership-establishing dupe pass described below even when the whole rest of
+`table` is empty), and `sequence<string>` (builds the same `{_buffer, _length, _maximum,
+_release}` shape `clone`/`deinit` already use, whether the field is an inline sequence or a
+named typedef of one; frees any buffer the field already owns first, so re-applying to an
+already-populated field doesn't leak the old one).
+
+Not supported: fixed-size arrays (including array *typedefs* — the dimensions can live on the
+typedef rather than the member referencing it, and that case is deliberately still rejected,
+not silently routed through the typedef's underlying scalar type), unions, bitmasks, bounded
+strings, and sequences of anything other than `string`. A struct with one such field gets a
+single `@compileError` naming it — and *only* that: `@compileError` makes everything textually
+after it in the same block "unreachable code" (a separate hard error), so an unsupported field
+can't have per-field statements for other members interspersed around it. `self`/`alloc`/`table`
+are each discarded (`_ = x;`) exactly when nothing else in the generated body would reference
+them — Zig errors on both an unused parameter and a "pointless" discard of one that's genuinely
+used later, so this can't be unconditional in either direction.
+
+**`struct Derived : Base` inheritance** (the embedded `_base` field) is transparent to all of
+this. `applyToml` always delegates to `self._base.applyToml(alloc, table)` first, passing the
+*same* table — inheritance is IS-A, so Base's fields are expected as peers of Derived's own in
+one flat table, not nested under a `[base]`-style key the way a genuine HAS-A struct-typed field
+would be. `deinit`/`clone`/the "does this struct need lifecycle helpers at all" check all recurse
+into the base exactly like they recurse into a nested struct field, so a `Derived` whose only
+heap-owning content lives in `Base` still correctly gets `deinit`/`clone` generated for itself.
+
+**Plain string fields are unconditionally duped, on every `applyToml` call, present-in-table or
+not** — using the field's current value as the fallback when the key is absent — so that after
+`applyToml` returns successfully, every string field is uniformly heap-owned rather than a mix
+of "still the literal default" and "allocated." A plain `[]const u8` has no ownership bit of
+its own (unlike a sequence's `._release`), so every struct generated under this flag also gets
+a real `_toml_applied: bool = false` field, and `deinit`/`clone` check it directly instead of
+guessing:
+
+```zig
+pub const Cfg = struct {
+    name: []const u8 = "default",
+    _toml_applied: bool = false,   // true only once applyToml has fully succeeded
+
+    pub fn applyToml(self: *@This(), alloc: std.mem.Allocator, table: anytype) !void {
+        // Dupe into a temporary FIRST, from the still-valid current value —
+        // the TOML-key-absent fallback (`orelse self.name`) reads that same
+        // current value, so freeing it before this dupe would be a
+        // use-after-free read. Only free the old buffer once the new dupe
+        // has succeeded, and only if it's a real allocation (`_toml_applied`).
+        const _new_name = try alloc.dupe(u8, (try table.getString("name")) orelse self.name);
+        if (self._toml_applied and self.name.len != 0) alloc.free(self.name);
+        self.name = _new_name;
+        errdefer {                          // frees THIS dupe if a later field fails
+            if (self.name.len != 0) {
+                alloc.free(self.name);
+                self.name = "";
+            }
+        }
+        self._toml_applied = true;  // the function's own literal last statement
+    }
+
+    pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
+        if (self._toml_applied and self.name.len != 0) alloc.free(self.name);
+    }
+
+    pub fn clone(self: @This(), alloc: std.mem.Allocator) !@This() {
+        var result = self;
+        result._toml_applied = true;  // NOT copied from self — see below
+        result.name = if (self.name.len != 0) try alloc.dupe(u8, self.name) else self.name;
+        return result;
+    }
+};
+```
+
+Calling `applyToml` a second time on an already-populated struct is safe: the free-before-replace
+above frees the previous allocation rather than leaking it, keyed off `_toml_applied` so an
+untouched literal default is never freed. This matches how sequence fields already
+free-before-replace, keyed off their own `._release`.
+
+- `applyToml` sets `_toml_applied = true` as its own literal last statement — reached only if
+  every field's statement above it succeeded (a `try` failing anywhere returns early and never
+  reaches it). So a bare, untouched `T{}` (flag defaults `false`) is safe to `deinit()`: cleanup
+  is correctly skipped rather than freeing a literal.
+- Each string field's dupe is immediately followed by its own `errdefer`, freeing and resetting
+  that field to `""` if a *later* field's statement fails — so a partially-failed `applyToml`
+  call doesn't leak the strings it already duped either. `self`'s remaining, unreached fields
+  are still their original literals either way (`_toml_applied` stays `false`), so a `deinit()`
+  call afterward is a correct no-op rather than double-freeing what the errdefers already
+  cleaned up. This generalizes: Zig fires *every* errdefer registered so far, not just the most
+  recent, when a function returns an error — so calling `deinit()` on a struct whose `applyToml`
+  call just failed is always safe, regardless of how many fields succeeded first.
+- `clone` sets `result._toml_applied = true` **unconditionally, not inherited from `self`**.
+  Clone's string-copy statements dupe every non-empty field regardless of `self`'s own flag (a
+  dupe is always safe, whatever the source), so `result` ends up genuinely, fully owned by the
+  time `clone` returns — even when cloning an untouched `T{}` with a non-empty literal default.
+  If `result._toml_applied` were left as whatever `self` had (`var result = self;` shallow-copies
+  it), cloning an untouched `T{}` would produce a struct that owns real heap memory yet is
+  flagged as if it didn't, and `result.deinit()` would leak the clone's allocation.
+- A `typedef` that ultimately resolves to a plain unbounded string (through any chain, as long
+  as no typedef in it has array dimensions) gets exactly this same direct free/dupe/errdefer
+  treatment for `deinit`/`clone`, not a delegated `.deinit()`/`.clone()` call a bare `[]const u8`
+  alias doesn't have. A typedef resolving to a `struct` or `sequence` still delegates as before,
+  since those *do* have their own generated lifecycle methods — and, one level up, a struct with
+  a `typedef SomeStruct Foo;` field (`SomeStruct` itself owning a string) still correctly gets
+  `deinit`/`clone` generated for *itself*, exactly as if `Foo` were declared as `SomeStruct`
+  directly: the "does any field need cleanup" check recurses through the same typedef chain.
 
 ### Union
 IDL unions map to a struct with a discriminant field `_d` and a Zig anonymous union `_u`:

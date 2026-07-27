@@ -131,6 +131,92 @@ pub const Options = struct {
     /// use the original IDL name as the canonical string representation so that
     /// config files and wire diagnostics remain language-agnostic.
     zig_idiomatic_enums: bool = false,
+    /// Zig backend only: emit `pub fn applyToml(self: *@This(), alloc: std.mem.Allocator,
+    /// table: anytype) !void` for every struct, overriding fields present in `table` and
+    /// re-duping absent ones from their current value (see the ownership note below).
+    /// `table` is duck-typed via `anytype` — zidl has no compile-time dependency on any
+    /// concrete TOML parser or value-tree type; the caller supplies any type `T` exposing:
+    ///   getString/getBool/getInt/getFloat/getStringArray(key: []const u8) -> SomeError!?U
+    ///   getTable(key: []const u8) -> SomeError!?T                    (same T, for recursion)
+    ///   T{}                                                          (a valid empty/default T)
+    /// (absent key = null, key present with the wrong type = an error — never silently
+    /// treated as absent). `T{}` must be a valid, cheap, always-succeeding construction —
+    /// generated code builds one whenever a nested struct's table key is itself absent, so
+    /// that struct still gets its own applyToml pass against a genuinely empty table (see
+    /// the ownership note below for why this matters even when there's nothing to apply).
+    ///
+    /// Supports: booleans, integers (bounds-checked via std.math.cast), floats, strings,
+    /// enums (via the enum's existing generated `_fromString` helper), nested structs
+    /// (recursively — always invoked, never conditional on the key's presence), and
+    /// `sequence<string>` fields. Fixed-size arrays, unions, bitmasks, bounded strings, and
+    /// sequences of anything other than `string` are not supported — the whole generated
+    /// function body becomes a single `@compileError` naming the field, rather than
+    /// generating a partially-correct function (an unsupported field standing alongside a
+    /// supported one's ordinary statement would otherwise be "unreachable code after
+    /// @compileError," a separate hard error).
+    ///
+    /// `struct Derived : Base` inheritance (the embedded `_base` field) is transparent to all
+    /// of this: `applyToml` always delegates to `self._base.applyToml(alloc, table)` first,
+    /// passing the *same* table (inheritance is IS-A — Base's fields are peers of Derived's own
+    /// in one flat table, not nested under a `[base]`-style key the way a genuine HAS-A
+    /// struct-typed field would be). `deinit`/`clone`/the "does this struct need lifecycle
+    /// helpers at all" check all recurse into the base the same way they recurse into a nested
+    /// struct field, so a `Derived` whose only heap-owning content lives in `Base` still gets
+    /// correct `deinit`/`clone` generated for itself.
+    ///
+    /// **String field ownership.** Every plain (unbounded) string field is unconditionally
+    /// duped via `alloc.dupe` on every `applyToml` call — whether or not the TOML key was
+    /// present, using the field's *current* value as the fallback when absent — so that after
+    /// `applyToml` returns successfully, every string field is uniformly heap-owned, never a
+    /// mix of "literal default" and "allocated." Since a plain `[]const u8` has no ownership
+    /// bit of its own (unlike a sequence's `._release`), each struct generated under this flag
+    /// also gets a real `_toml_applied: bool = false` field, so `deinit`/`clone` don't have to
+    /// *infer* whether that invariant holds — they can check it directly:
+    ///   - `applyToml` sets `self._toml_applied = true` as its own literal last statement —
+    ///     reached only if every field's statement above it succeeded (a `try` failing
+    ///     anywhere returns early and never reaches it).
+    ///   - `deinit` only frees a non-empty string field `if (self._toml_applied and ...)`. A
+    ///     bare, untouched `T{}` (flag defaults `false`) correctly skips cleanup — its fields
+    ///     are still whatever `@default` literal they started with, and freeing one would be
+    ///     undefined behavior.
+    ///   - Each string field's dupe statement in `applyToml` is immediately followed by its own
+    ///     `errdefer` (freeing and resetting that one field to `""`) — so if a *later* field's
+    ///     statement fails, every string `applyToml` already duped in this same call is cleaned
+    ///     up rather than leaked, and `self`'s remaining fields are left in a safe state
+    ///     (`_toml_applied` stays `false`, so `deinit` afterward is a correct no-op, not a
+    ///     double-free of what the errdefers already handled). This generalizes cleanly: Zig
+    ///     fires *every* errdefer registered so far (not just the most recently registered one)
+    ///     when a function returns an error, so calling `deinit` on a struct whose `applyToml`
+    ///     call just failed is fully safe — any field duped before the failure point already
+    ///     unwound itself, and fields never reached are untouched literals that `_toml_applied
+    ///     == false` correctly tells `deinit` to leave alone.
+    ///   - A string field's dupe is itself free-before-replace: the new value is duped into a
+    ///     temporary *first* (from the still-valid current value, since the TOML-key-absent
+    ///     fallback `orelse self.field` reads it), and only once that dupe succeeds is the old
+    ///     buffer freed — guarded by `_toml_applied` so an untouched literal default is never
+    ///     freed. This makes calling `applyToml` a second time on an already-populated struct
+    ///     safe: the previous allocation is freed, not leaked, matching how sequence fields
+    ///     already free-before-replace keyed off their own `._release`.
+    ///   - `clone` sets `result._toml_applied = true` unconditionally — deliberately NOT
+    ///     inherited from `self` via the `var result = self;` shallow copy. Clone's own
+    ///     string-copy statements dupe every non-empty field regardless of `self`'s flag (a
+    ///     dupe is safe no matter where the source came from), so `result` is always
+    ///     genuinely, fully owned by the time `clone` returns — even when cloning an untouched
+    ///     `T{}` with a non-empty literal default. If `result._toml_applied` were left as
+    ///     whatever `self` had, cloning an untouched `T{}` would silently produce a struct that
+    ///     owns real heap memory yet is flagged as if it didn't — `result.deinit()` would then
+    ///     leak that clone's allocation.
+    ///   - A `typedef` that ultimately resolves (through any chain, as long as no typedef in it
+    ///     has array dimensions) to a plain unbounded string is treated exactly like a direct
+    ///     string field for `deinit`/`clone` purposes, not delegated to a `.deinit()`/`.clone()`
+    ///     a bare `[]const u8` alias doesn't have. A typedef resolving to a `struct` or
+    ///     `sequence` still delegates as before (those *do* have generated lifecycle methods).
+    ///     Both cases matter one level up too: whether the *enclosing* struct gets `deinit`/
+    ///     `clone` generated at all is decided by whether any field needs cleanup, and that
+    ///     check recurses through the same typedef chain either way — a `typedef SomeStruct
+    ///     Foo;` field where `SomeStruct` owns a string still correctly triggers lifecycle
+    ///     generation for the struct containing it, exactly as a direct `SomeStruct` field would.
+    zig_generate_toml_config: bool = false,
     /// C++ backend: generate concrete Impl classes and listener bridges.
     /// Outputs ${stem}_impl.hpp and ${stem}_impl.cpp alongside the abstract interface header.
     cpp_generate_impl: bool = false,
