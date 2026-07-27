@@ -138,6 +138,7 @@ pub fn getInt(self: T, key: []const u8) SomeError!?i64;
 pub fn getFloat(self: T, key: []const u8) SomeError!?f64;
 pub fn getTable(self: T, key: []const u8) SomeError!?T;       // same T, for nested-table recursion
 pub fn getStringArray(self: T, key: []const u8) SomeError!?[]const []const u8;
+// T{} must also be a valid, cheap, always-succeeding construction (see below).
 ```
 
 Absent key → `null` (the field is left at whatever `@default`/zero-value the struct literal
@@ -151,18 +152,38 @@ return error.InvalidValue`), floats (`@floatCast`), `string` (unbounded only —
 enums (dispatches through that enum's own generated `_fromString` helper — cross-module enums
 get the same `qualNameToZig`-qualified reference an ordinary field-type reference would, e.g.
 `DDS.ReliabilityQosPolicyKind_fromString`, not a bare name), nested structs (recursive
-`.applyToml` call), and `sequence<string>` (builds the same `{_buffer, _length, _maximum,
+`.applyToml` call — **unconditional**, not gated on the key's presence: `try self.field.applyToml(alloc,
+(try table.getTable("field")) orelse @TypeOf(table){})`, so a nested struct's own string fields
+still get the ownership-establishing dupe pass described below even when the whole rest of
+`table` is empty), and `sequence<string>` (builds the same `{_buffer, _length, _maximum,
 _release}` shape `clone`/`deinit` already use, whether the field is an inline sequence or a
-named typedef of one).
+named typedef of one; frees any buffer the field already owns first, so re-applying to an
+already-populated field doesn't leak the old one).
 
-Not supported: fixed-size arrays, unions, bitmasks, bounded strings, and sequences of anything
-other than `string`. A struct with one such field gets a single `@compileError` naming it —
-and *only* that: `@compileError` makes everything textually after it in the same block
-"unreachable code" (a separate hard error), so an unsupported field can't have per-field
-statements for other members interspersed around it. `self`/`alloc`/`table` are each discarded
-(`_ = x;`) exactly when nothing else in the generated body would reference them — Zig errors on
-both an unused parameter and a "pointless" discard of one that's genuinely used later, so this
-can't be unconditional in either direction.
+Not supported: fixed-size arrays (including array *typedefs* — the dimensions can live on the
+typedef rather than the member referencing it, and that case is deliberately still rejected,
+not silently routed through the typedef's underlying scalar type), unions, bitmasks, bounded
+strings, and sequences of anything other than `string`. A struct with one such field gets a
+single `@compileError` naming it — and *only* that: `@compileError` makes everything textually
+after it in the same block "unreachable code" (a separate hard error), so an unsupported field
+can't have per-field statements for other members interspersed around it. `self`/`alloc`/`table`
+are each discarded (`_ = x;`) exactly when nothing else in the generated body would reference
+them — Zig errors on both an unused parameter and a "pointless" discard of one that's genuinely
+used later, so this can't be unconditional in either direction.
+
+**Plain string fields are unconditionally duped, on every call, present-in-table or not** —
+using the field's current value as the fallback when the key is absent — so that after
+`applyToml` returns successfully, every string field is uniformly heap-owned rather than a mix
+of "still the literal default" and "allocated." That's what lets `deinit()`/`clone()` (also
+generated under this flag) safely free/dupe every non-empty string field the same way, without
+a per-field ownership flag. Two limitations are inherent to not having such a flag:
+- `deinit()` is only safe after `applyToml` **returns successfully** (or on an untouched `T{}`
+  that never called it) — not after a partial failure, since unreached fields are still
+  whatever literal the struct started with, and freeing one would be undefined behavior.
+- Calling `applyToml` a second time on an already-populated struct re-dupes every string field
+  without freeing the previous allocation (unlike sequences, which do free-before-replace,
+  since `._release` gives them a real ownership flag to key that off of). Construct a fresh
+  `T{}` per resolution rather than re-applying to the same instance.
 
 ### Union
 IDL unions map to a struct with a discriminant field `_d` and a Zig anonymous union `_u`:

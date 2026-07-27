@@ -358,10 +358,11 @@ const Generator = struct {
         // --zig-pl-cdr is set (PL_CDR fns are part of the struct, not TypeSupport).
         if (!self.opts.no_typesupport or self.opts.pl_cdr) {
             try self.emitStructSerializeFns(s);
-        } else if (structNeedsSeqDeinit(s)) {
+        } else if (self.structNeedsCleanup(s)) {
             // deinit/clone are lifecycle operations, not CDR typesupport — a
-            // struct with heap-owning sequence fields needs them regardless of
-            // whether wire (de)serialization was also requested.
+            // struct with heap-owning sequence (or, under
+            // --zig-generate-toml-config, string) fields needs them regardless
+            // of whether wire (de)serialization was also requested.
             try self.write("\n");
             try self.emitStructDeinitFn(s);
             try self.write("\n");
@@ -379,7 +380,7 @@ const Generator = struct {
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and isZzddsTopicStruct(s)) {
             try self.emitStructTypedWrapper(s);
         }
-        if (self.opts.zig_generate_c_api and structNeedsSeqDeinit(s)) {
+        if (self.opts.zig_generate_c_api and self.structNeedsCleanup(s)) {
             try self.emitStructCApiFree(s);
         }
     }
@@ -2918,8 +2919,8 @@ const Generator = struct {
             try self.write("    }\n");
         }
 
-        // deinit + clone — only when the struct has sequence fields that may hold heap memory.
-        if (structNeedsSeqDeinit(s)) {
+        // deinit + clone — see typeRefNeedsCleanup/structNeedsCleanup.
+        if (self.structNeedsCleanup(s)) {
             try self.write("\n");
             try self.emitStructDeinitFn(s);
             try self.write("\n");
@@ -3325,17 +3326,35 @@ const Generator = struct {
         try self.write("    }\n");
     }
 
+    /// `typeRefNeedsSeqDeinit(tr) or (--zig-generate-toml-config and this type has
+    /// an unbounded string, directly or via a nested struct field)`. Plain strings
+    /// only need cleanup under that flag, because only `applyToml` (see
+    /// `emitTypeRefApplyToml`'s `.string` case) makes a `[]const u8` field
+    /// unconditionally heap-owned — every call unconditionally dupes, whether or
+    /// not the TOML key was present, specifically so this is always safe. Without
+    /// that flag, a `[]const u8` field could still be a static literal, which is
+    /// exactly why `typeRefNeedsSeqDeinit` itself never covers plain strings.
+    fn typeRefNeedsCleanup(self: *Generator, tr: ir.TypeRef) bool {
+        return typeRefNeedsSeqDeinit(tr) or (self.opts.zig_generate_toml_config and typeRefHasUnboundedString(tr));
+    }
+
+    fn structNeedsCleanup(self: *Generator, s: *const ir.Struct) bool {
+        for (s.members) |m| {
+            if (self.typeRefNeedsCleanup(m.type_ref)) return true;
+        }
+        return false;
+    }
+
     /// Emit `pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void` for
     /// structs whose sequence fields may have been heap-allocated by
-    /// `deserializeInto` (identified by `_release == true`).
-    /// String fields (`[]const u8`) are NOT freed here — the caller must manage
-    /// those manually, as there is no ownership flag to distinguish allocated
-    /// strings from static literals.
+    /// `deserializeInto` (identified by `_release == true`), or — under
+    /// `--zig-generate-toml-config` — whose string fields may have been
+    /// heap-allocated by `applyToml`. See `typeRefNeedsCleanup`.
     fn emitStructDeinitFn(self: *Generator, s: *const ir.Struct) !void {
         try self.ind();
         try self.write("    pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {\n");
         for (s.members) |m| {
-            if (!typeRefNeedsSeqDeinit(m.type_ref)) continue;
+            if (!self.typeRefNeedsCleanup(m.type_ref)) continue;
             try self.emitFieldSeqDeinit(m.name, m.type_ref, "        ");
         }
         try self.ind();
@@ -3343,9 +3362,14 @@ const Generator = struct {
     }
 
     /// Emit the cleanup snippet for a single struct field whose type is or
-    /// contains an unbounded sequence.
+    /// contains an unbounded sequence, or (under `--zig-generate-toml-config`)
+    /// an unbounded string.
     fn emitFieldSeqDeinit(self: *Generator, field_name: []const u8, tr: ir.TypeRef, indent: []const u8) !void {
         switch (tr) {
+            .string => |bound| if (bound == null) {
+                try self.ind();
+                try self.print("{s}if (self.{s}.len != 0) alloc.free(self.{s});\n", .{ indent, field_name, field_name });
+            },
             .sequence => |seq| {
                 // Anonymous extern struct field — inline the _release-guarded cleanup.
                 try self.ind();
@@ -3393,7 +3417,7 @@ const Generator = struct {
         try self.ind();
         try self.write("        var result = self;\n");
         for (s.members) |m| {
-            if (!typeRefNeedsSeqDeinit(m.type_ref)) continue;
+            if (!self.typeRefNeedsCleanup(m.type_ref)) continue;
             try self.emitFieldSeqCloneStmt(m.name, m.type_ref, "        ");
             try self.emitFieldSeqCloneErrdefer(m.name, m.type_ref, "        ");
         }
@@ -3406,6 +3430,16 @@ const Generator = struct {
     /// Emit the copy snippet for a single struct field (the `result.field = ...` part).
     fn emitFieldSeqCloneStmt(self: *Generator, field_name: []const u8, tr: ir.TypeRef, indent: []const u8) !void {
         switch (tr) {
+            // `var result = self;` above already shallow-copied the pointer —
+            // this replaces it with an independent copy so freeing one of
+            // self/result later can't double-free the other's buffer.
+            .string => |bound| if (bound == null) {
+                try self.ind();
+                try self.print(
+                    "{s}result.{s} = if (self.{s}.len != 0) try alloc.dupe(u8, self.{s}) else self.{s};\n",
+                    .{ indent, field_name, field_name, field_name, field_name },
+                );
+            },
             .sequence => |seq| {
                 const buf_elem = try self.seqBufElemZig(seq.element.*);
                 defer self.alloc.free(buf_elem);
@@ -3477,6 +3511,10 @@ const Generator = struct {
     /// statement so that failures in subsequent fields trigger this cleanup.
     fn emitFieldSeqCloneErrdefer(self: *Generator, field_name: []const u8, tr: ir.TypeRef, indent: []const u8) !void {
         switch (tr) {
+            .string => |bound| if (bound == null) {
+                try self.ind();
+                try self.print("{s}errdefer if (result.{s}.len != 0) alloc.free(result.{s});\n", .{ indent, field_name, field_name });
+            },
             .sequence => |seq| {
                 try self.ind();
                 try self.print("{s}errdefer {{\n", .{indent});
@@ -3607,9 +3645,18 @@ const Generator = struct {
     /// (e.g. a `StringSeq` typedef field resolves to its `sequence<string>`).
     /// Shared by `memberApplyTomlSupported` and `emitTypeRefApplyToml` so the
     /// two can't independently drift on what a typedef chain resolves to.
+    ///
+    /// Stops (without unwrapping further) at a typedef that itself declares
+    /// array dimensions (`typedef long V3[3];`) — the dimensions live on the
+    /// typedef, not on a member referencing it, so a member of type `V3` would
+    /// otherwise resolve straight through to `long` and be accepted as a plain
+    /// scalar, silently mis-generating an assignment to what's actually a `[3]i32`
+    /// array field. Leaving the result as `.named => .typedef` here means it
+    /// falls into the ordinary `else => unsupported` arm both callers already
+    /// have, the same as any other unsupported construct.
     fn resolveTomlTypeRef(tr_in: ir.TypeRef) ir.TypeRef {
         var tr = tr_in;
-        while (tr == .named and tr.named == .typedef) {
+        while (tr == .named and tr.named == .typedef and tr.named.typedef.dimensions.len == 0) {
             tr = tr.named.typedef.type_ref;
         }
         return tr;
@@ -3676,14 +3723,36 @@ const Generator = struct {
                 if (bound != null) {
                     try self.emitApplyTomlUnsupported(struct_name, field_name, indent);
                 } else {
+                    // Unconditionally dupes — even when the TOML key is absent,
+                    // duping the field's current (default-literal) value — so
+                    // the field is always heap-owned after this call returns,
+                    // never a mix of "literal" and "allocated" depending on
+                    // which keys happened to be present. That's what makes the
+                    // generated deinit/clone (typeRefNeedsCleanup) safe to free/
+                    // dupe every string field unconditionally, with no
+                    // per-field ownership flag needed.
                     try self.ind();
-                    try self.print("{s}if (try table.getString(\"{s}\")) |_v| self.{s} = try alloc.dupe(u8, _v);\n", .{ indent, field_name, field_name });
+                    try self.print(
+                        "{s}self.{s} = try alloc.dupe(u8, (try table.getString(\"{s}\")) orelse self.{s});\n",
+                        .{ indent, field_name, field_name, field_name },
+                    );
                 }
             },
             .named => |td| switch (td) {
                 .struct_ => {
+                    // Unconditional, not `if (try table.getTable(...)) |_t| ...`:
+                    // a nested struct must always run its own applyToml, even
+                    // against a fresh, empty `@TypeOf(table){}` when this key
+                    // is absent — otherwise, for a wholly empty root table,
+                    // NO nested struct's fields (e.g. a deeply-nested unbounded
+                    // string default) would ever get the unconditional-dupe
+                    // pass at all, breaking the invariant deinit/clone rely on
+                    // for anything more than one level deep.
                     try self.ind();
-                    try self.print("{s}if (try table.getTable(\"{s}\")) |_t| try self.{s}.applyToml(alloc, _t);\n", .{ indent, field_name, field_name });
+                    try self.print(
+                        "{s}try self.{s}.applyToml(alloc, (try table.getTable(\"{s}\")) orelse @TypeOf(table){{}});\n",
+                        .{ indent, field_name, field_name },
+                    );
                 },
                 .enum_ => {
                     // Use the same qualified-name mapping as ordinary field-type
@@ -3727,6 +3796,29 @@ const Generator = struct {
     fn emitStringSeqApplyToml(self: *Generator, field_name: []const u8, indent: []const u8) !void {
         try self.ind();
         try self.print("{s}if (try table.getStringArray(\"{s}\")) |_arr| {{\n", .{ indent, field_name });
+        // Free any buffer this field already owns before replacing it — inlined
+        // (matching emitFieldSeqDeinit's own sequence case) rather than
+        // delegating to a `.deinit()` call, since this field's declared type
+        // might be an anonymous inline sequence (no methods at all), not
+        // necessarily a named typedef like `StringSeq` that has one.
+        try self.ind();
+        try self.print("{s}    if (self.{s}._release) {{\n", .{ indent, field_name });
+        try self.ind();
+        try self.print("{s}        if (self.{s}._buffer) |_ob| {{\n", .{ indent, field_name });
+        try self.ind();
+        try self.print("{s}            for (_ob[0..self.{s}._length]) |_os| {{\n", .{ indent, field_name });
+        try self.ind();
+        try self.print("{s}                const _osl = std.mem.span(_os);\n", .{indent});
+        try self.ind();
+        try self.print("{s}                alloc.free(_osl.ptr[0.._osl.len + 1]);\n", .{indent});
+        try self.ind();
+        try self.print("{s}            }}\n", .{indent});
+        try self.ind();
+        try self.print("{s}            alloc.free(_ob[0..self.{s}._maximum]);\n", .{ indent, field_name });
+        try self.ind();
+        try self.print("{s}        }}\n", .{indent});
+        try self.ind();
+        try self.print("{s}    }}\n", .{indent});
         try self.ind();
         try self.print("{s}    const _buf = try alloc.alloc([*:0]const u8, _arr.len);\n", .{indent});
         try self.ind();
@@ -4988,6 +5080,36 @@ fn typeRefNeedsSeqDeinit(tr: ir.TypeRef) bool {
 fn structNeedsSeqDeinit(s: *const ir.Struct) bool {
     for (s.members) |m| {
         if (typeRefNeedsSeqDeinit(m.type_ref)) return true;
+    }
+    return false;
+}
+
+/// Returns true for a direct unbounded-`string` field, or a named struct that
+/// transitively contains one — the string-field analog of `typeRefNeedsSeqDeinit`,
+/// used only under `--zig-generate-toml-config` (see `Generator.typeRefNeedsCleanup`).
+/// Unlike sequences, a plain `[]const u8` typedef has no distinct generated type to
+/// delegate a `.deinit()`/`.clone()` call to, so — deliberately, unlike
+/// `typeRefNeedsSeqDeinit` — this does NOT recurse through `.typedef`: a
+/// `typedef string Foo;` field is not covered (the same "can't tell allocated
+/// from literal" limitation `typeRefNeedsSeqDeinit`'s own doc comment describes,
+/// just for a case `--zig-generate-toml-config` doesn't need to solve — no
+/// zzdds config struct typedefs a bare string). A named `struct_` field IS
+/// covered, since struct fields already safely delegate to their own
+/// `.deinit()`/`.clone()`, which under this flag frees/dupes their own strings.
+fn typeRefHasUnboundedString(tr: ir.TypeRef) bool {
+    return switch (tr) {
+        .string => |bound| bound == null,
+        .named => |td| switch (td) {
+            .struct_ => |s| structHasUnboundedString(s),
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn structHasUnboundedString(s: *const ir.Struct) bool {
+    for (s.members) |m| {
+        if (typeRefHasUnboundedString(m.type_ref)) return true;
     }
     return false;
 }
@@ -7344,7 +7466,7 @@ test "toml config: scalar fields call the expected accessors" {
     try testing.expect(has(s, "if (try table.getBool(\"enabled\")) |_v| self.enabled = _v;"));
     try testing.expect(has(s, "if (try table.getInt(\"base\")) |_v| self.base = std.math.cast(u16, _v) orelse return error.InvalidValue;"));
     try testing.expect(has(s, "if (try table.getFloat(\"gain\")) |_v| self.gain = @floatCast(_v);"));
-    try testing.expect(has(s, "if (try table.getString(\"label\")) |_v| self.label = try alloc.dupe(u8, _v);"));
+    try testing.expect(has(s, "self.label = try alloc.dupe(u8, (try table.getString(\"label\")) orelse self.label);"));
 }
 
 test "toml config: enum field dispatches through the generated fromString helper" {
@@ -7362,7 +7484,7 @@ test "toml config: nested struct field recurses via getTable + applyToml" {
         \\struct Outer { Inner inner; };
     , "t", .{ .zig_generate_toml_config = true, .no_typesupport = true, .no_typeobject_support = true });
     defer out.deinit(testing.allocator);
-    try testing.expect(has(out.items, "if (try table.getTable(\"inner\")) |_t| try self.inner.applyToml(alloc, _t);"));
+    try testing.expect(has(out.items, "try self.inner.applyToml(alloc, (try table.getTable(\"inner\")) orelse @TypeOf(table){});"));
 }
 
 test "toml config: sequence<string> field builds a released buffer from getStringArray" {

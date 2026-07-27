@@ -133,16 +133,47 @@ pub const Options = struct {
     zig_idiomatic_enums: bool = false,
     /// Zig backend only: emit `pub fn applyToml(self: *@This(), alloc: std.mem.Allocator,
     /// table: anytype) !void` for every struct, overriding fields present in `table` and
-    /// leaving absent ones at whatever default the struct literal already established.
+    /// re-duping absent ones from their current value (see the ownership note below).
     /// `table` is duck-typed via `anytype` — zidl has no compile-time dependency on any
-    /// concrete TOML parser or value-tree type; the caller supplies any type exposing
-    /// getString/getBool/getInt/getFloat/getTable/getStringArray(key: []const u8) ->
-    /// `!?T` (absent key = null, key present with the wrong type = an error).
+    /// concrete TOML parser or value-tree type; the caller supplies any type `T` exposing:
+    ///   getString/getBool/getInt/getFloat/getStringArray(key: []const u8) -> SomeError!?U
+    ///   getTable(key: []const u8) -> SomeError!?T                    (same T, for recursion)
+    ///   T{}                                                          (a valid empty/default T)
+    /// (absent key = null, key present with the wrong type = an error — never silently
+    /// treated as absent). `T{}` must be a valid, cheap, always-succeeding construction —
+    /// generated code builds one whenever a nested struct's table key is itself absent, so
+    /// that struct still gets its own applyToml pass against a genuinely empty table (see
+    /// the ownership note below for why this matters even when there's nothing to apply).
+    ///
     /// Supports: booleans, integers (bounds-checked via std.math.cast), floats, strings,
     /// enums (via the enum's existing generated `_fromString` helper), nested structs
-    /// (recursively), and `sequence<string>` fields. Fixed-size arrays, unions, bitmasks,
-    /// bounded strings, and sequences of anything other than `string` are not supported —
-    /// generated code `@compileError`s on those fields rather than silently mishandling them.
+    /// (recursively — always invoked, never conditional on the key's presence), and
+    /// `sequence<string>` fields. Fixed-size arrays, unions, bitmasks, bounded strings, and
+    /// sequences of anything other than `string` are not supported — the whole generated
+    /// function body becomes a single `@compileError` naming the field, rather than
+    /// generating a partially-correct function (an unsupported field standing alongside a
+    /// supported one's ordinary statement would otherwise be "unreachable code after
+    /// @compileError," a separate hard error).
+    ///
+    /// **String field ownership.** Every plain (unbounded) string field is unconditionally
+    /// duped via `alloc.dupe` on every call — whether or not the TOML key was present, using
+    /// the field's *current* value as the fallback when absent — so that after `applyToml`
+    /// returns successfully, every string field is uniformly heap-owned, never a mix of
+    /// "literal default" and "allocated." That's what makes `deinit()`/`clone()` (also
+    /// generated under this flag, extended to free/dupe plain string fields alongside their
+    /// existing sequence handling) safe to treat every non-empty string field the same way,
+    /// with no per-field ownership flag. Two limits fall out of this, inherent to not having
+    /// such a flag, not particular to any one consumer:
+    ///   - `deinit()` is only safe to call after applyToml **returns successfully** (or on an
+    ///     untouched `T{}` that never called applyToml at all). If applyToml returns an error
+    ///     partway through, fields after the failure point were never reached and are still
+    ///     whatever literal the struct started with — freeing them would be undefined
+    ///     behavior. Don't call `.deinit()` on a struct whose `applyToml` call failed.
+    ///   - Calling `applyToml` a second time on an already-populated struct re-dupes every
+    ///     string field without freeing the previous allocation first (unlike sequence
+    ///     fields, which do free their old buffer first, since they have a real `._release`
+    ///     ownership flag to key that off of). Construct a fresh `T{}` and call `applyToml`
+    ///     once per config resolution, rather than re-applying to the same instance.
     zig_generate_toml_config: bool = false,
     /// C++ backend: generate concrete Impl classes and listener bridges.
     /// Outputs ${stem}_impl.hpp and ${stem}_impl.cpp alongside the abstract interface header.
