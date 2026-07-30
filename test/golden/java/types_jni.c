@@ -27,12 +27,26 @@ static char *zidl_java_strdup(const char *s) {
 /* Listener JNI upcall support: a global ref to the registered Java
  * listener object, reachable from any native thread the callback
  * fires on (not just JVM-created ones) via a process-wide JavaVM*
- * cached in JNI_OnLoad. NOTE: replacing a previously-registered
- * listener (a second `set_listener` call on the same entity) leaks
- * the old global ref + ctx — there is no per-entity registry here to
- * find and release it. Low-impact in practice (listeners are normally
- * set once), but a real limitation. */
+ * cached in JNI_OnLoad. */
 typedef struct { jobject ref; } zidl_java_listener_ctx;
+/* Releases a listener context previously installed as a C listener
+ * struct's `listener_data` — frees the global ref to the Java listener
+ * object plus the ctx allocation itself. Called both when a `set_listener`
+ * call replaces (or clears, passing NULL) a previously-registered
+ * listener, and when `delete_<entity>`-shaped ops delete an entity that
+ * may still have one registered (queried via that entity's own
+ * `get_listener()` before the delete call, since the handle becomes
+ * invalid afterward) — see emitListenerParamPrep/emitJniBridgeOp's
+ * `delete_` handling. NULL-safe: harmless for an entity/slot that never
+ * had a listener installed. Not handled: `delete_contained_entities()`
+ * (no params — deletes an unspecified set of children at once, so there
+ * is no per-child handle here to query). */
+static void zidl_java_release_listener_ctx(JNIEnv *env, void *listener_data) {
+    if (listener_data == NULL) return;
+    zidl_java_listener_ctx *ctx = (zidl_java_listener_ctx *)listener_data;
+    (*env)->DeleteGlobalRef(env, ctx->ref);
+    free(ctx);
+}
 static JavaVM *zidl_java_vm = NULL;
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     (void)reserved;
