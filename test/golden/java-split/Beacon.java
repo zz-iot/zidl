@@ -91,5 +91,12 @@ public class Beacon implements java.io.Serializable {
             }
         }
     }
+
+    public static byte[] computeKeyHashFromCdr(byte[] _payload) {
+        java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(_payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        _buf.position(4);
+        Beacon _obj = deserializeFrom(_buf, 4);
+        return _obj.computeKeyHash();
+    }
 } // Beacon
 

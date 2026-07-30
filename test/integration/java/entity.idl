@@ -1,0 +1,19 @@
+// Minimal IDL exercising entity boxing/unboxing through the Java JNI bridge:
+// `create_widget` returns an entity (boxes a native handle into a fresh
+// `WidgetImpl`), `get_widget_value` takes one (unboxes it back to a native
+// handle) alongside plain scalar in/out.
+//
+// Module deliberately not named "Entity" (matching the file stem / top-level
+// Java wrapper class `Entity`) — a Java nested class can't share its
+// enclosing class's simple name (JLS), so `Entity.java`'s generated
+// `class Entity { static class Entity { ... } }` would fail to compile.
+module Widgets {
+    interface Widget {
+        long get_value();
+    };
+
+    interface Factory {
+        Widget create_widget(in long value);
+        long get_widget_value(in Widget w);
+    };
+};

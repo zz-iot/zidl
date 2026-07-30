@@ -1,4 +1,33 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+/// Directories containing `jni.h`/`jni_md.h` for the JDK backing `java_path`
+/// (the `java` executable's own path, e.g. from `b.findProgram`).
+const JniIncludeDirs = struct { base: []const u8, platform: []const u8 };
+
+/// Locates the JDK's JNI include directories by resolving `java_path` (which
+/// may be a `PATH`/`update-alternatives`-style symlink chain) back to a real
+/// `$JAVA_HOME/bin/java`, then checking `$JAVA_HOME/include/jni.h` exists.
+/// Returns null if it can't be found (e.g. a JRE-only install with no JNI
+/// headers) — callers should skip the JNI-dependent test, not fail the build.
+fn findJniIncludeDir(b: *std.Build, java_path: []const u8) ?JniIncludeDirs {
+    const io = b.graph.io;
+    const resolved = std.Io.Dir.realPathFileAbsoluteAlloc(io, java_path, b.allocator) catch
+        (b.allocator.dupeZ(u8, java_path) catch return null);
+    const bin_dir = std.fs.path.dirname(resolved) orelse return null;
+    const java_home = std.fs.path.dirname(bin_dir) orelse return null;
+    const base = std.fs.path.join(b.allocator, &.{ java_home, "include" }) catch return null;
+    const platform_name = switch (builtin.os.tag) {
+        .linux => "linux",
+        .macos => "darwin",
+        .windows => "win32",
+        else => return null,
+    };
+    const platform = std.fs.path.join(b.allocator, &.{ base, platform_name }) catch return null;
+    const jni_h = std.fs.path.join(b.allocator, &.{ base, "jni.h" }) catch return null;
+    std.Io.Dir.cwd().access(io, jni_h, .{}) catch return null;
+    return .{ .base = base, .platform = platform };
+}
 
 fn versionFromZon(comptime zon: []const u8) []const u8 {
     const needle = ".version = \"";
@@ -327,6 +356,74 @@ pub fn build(b: *std.Build) void {
             const run_java = b.addSystemCommand(&.{ java, "-cp", java_out, "Test" });
             run_java.step.dependOn(&compile_java.step);
             integ_step.dependOn(&run_java.step);
+
+            // Java *entity JNI bridge* integration test — compiles+links the
+            // generated `entity_jni.c` (from `--generate-interfaces`) against
+            // a hand-written native impl (test/integration/java/entity_native.c)
+            // and runs a real Java program through it. This is what catches
+            // JNI symbol/signature/marshaling bugs (wrong extern name, missing
+            // header include, entity box/unbox, typedef resolution, …) that
+            // the pure-data `Test.java` above never exercises, since it never
+            // touches `*Impl.java`/the JNI bridge at all.
+            const jni_include = findJniIncludeDir(b, java);
+            if (jni_include) |jni_inc| {
+                const gen_entity_c = b.addRunArtifact(exe);
+                gen_entity_c.addArgs(&.{ "-b", "c", "--generate-interfaces", "-o" });
+                const gen_entity_c_dir = gen_entity_c.addOutputDirectoryArg("integ-java-entity-c");
+                gen_entity_c.addFileArg(b.path("test/integration/java/entity.idl"));
+
+                const gen_entity_java = b.addRunArtifact(exe);
+                gen_entity_java.addArgs(&.{
+                    "-b",                    "java",
+                    "--generate-interfaces", "--java-jni-library",
+                    "entity_jni",            "-o",
+                });
+                const gen_entity_java_dir = gen_entity_java.addOutputDirectoryArg("integ-java-entity-java");
+                gen_entity_java.addFileArg(b.path("test/integration/java/entity.idl"));
+
+                const entity_jni_mod = b.createModule(.{
+                    .root_source_file = null,
+                    .target = target,
+                    .optimize = .Debug,
+                    .link_libc = true,
+                });
+                entity_jni_mod.addCSourceFile(.{
+                    .file = gen_entity_java_dir.path(b, "entity_jni.c"),
+                    .flags = &.{"-std=c99"},
+                });
+                entity_jni_mod.addCSourceFile(.{
+                    .file = b.path("test/integration/java/entity_native.c"),
+                    .flags = &.{"-std=c99"},
+                });
+                entity_jni_mod.addIncludePath(gen_entity_c_dir);
+                entity_jni_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+                entity_jni_mod.addIncludePath(.{ .cwd_relative = jni_inc.base });
+                entity_jni_mod.addIncludePath(.{ .cwd_relative = jni_inc.platform });
+                const entity_jni_lib = b.addLibrary(.{
+                    .name = "entity_jni",
+                    .linkage = .dynamic,
+                    .root_module = entity_jni_mod,
+                });
+
+                const compile_entity_java = b.addSystemCommand(&.{ javac, "-d", "build-tmp/integ-java-entity" });
+                compile_entity_java.addArgs(&.{"test/integration/java/EntityTest.java"});
+                // The generated .java files live in a fresh per-run output
+                // directory (a `LazyPath`) — pass each as its own file arg so
+                // Zig's build graph also picks up the dependency on the run
+                // step that generates them.
+                for (&[_][]const u8{ "Entity.java", "FactoryImpl.java", "WidgetImpl.java" }) |f| {
+                    compile_entity_java.addFileArg(gen_entity_java_dir.path(b, f));
+                }
+
+                const run_entity_java = b.addSystemCommand(&.{ java, "-cp", "build-tmp/integ-java-entity" });
+                run_entity_java.addPrefixedDirectoryArg("-Djava.library.path=", entity_jni_lib.getEmittedBinDirectory());
+                run_entity_java.addArg("EntityTest");
+                run_entity_java.step.dependOn(&compile_entity_java.step);
+                run_entity_java.step.dependOn(&entity_jni_lib.step);
+                integ_step.dependOn(&run_entity_java.step);
+            } else {
+                std.log.warn("jni.h not found under the detected JAVA_HOME — skipping Java entity JNI bridge integration test", .{});
+            }
         } else {
             std.log.warn("javac/java not found — skipping Java integration test", .{});
         }

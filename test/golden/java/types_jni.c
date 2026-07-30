@@ -3,86 +3,315 @@
 #include <jni.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
+#include <stdlib.h>
+#include "types.h"
+
+/* Unboxes a generated entity `*Impl` object's native handle via its
+ * `private final long ptr_` field. NULL-safe. */
+static void *zidl_java_unbox(JNIEnv *env, jobject obj) {
+    if (obj == NULL) return NULL;
+    jclass cls = (*env)->GetObjectClass(env, obj);
+    jfieldID fid = (*env)->GetFieldID(env, cls, "ptr_", "J");
+    return (void *)(intptr_t)(*env)->GetLongField(env, obj, fid);
+}
+
+/* Portable strdup — plain `strdup` is POSIX, not C99/MSVC. */
+static char *zidl_java_strdup(const char *s) {
+    size_t n = strlen(s) + 1;
+    char *p = malloc(n);
+    if (p) memcpy(p, s, n);
+    return p;
+}
+
+/* Listener JNI upcall support: a global ref to the registered Java
+ * listener object, reachable from any native thread the callback
+ * fires on (not just JVM-created ones) via a process-wide JavaVM*
+ * cached in JNI_OnLoad. NOTE: replacing a previously-registered
+ * listener (a second `set_listener` call on the same entity) leaks
+ * the old global ref + ctx — there is no per-entity registry here to
+ * find and release it. Low-impact in practice (listeners are normally
+ * set once), but a real limitation. */
+typedef struct { jobject ref; } zidl_java_listener_ctx;
+static JavaVM *zidl_java_vm = NULL;
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
+    (void)reserved;
+    zidl_java_vm = vm;
+    return JNI_VERSION_1_6;
+}
+static JNIEnv *zidl_java_get_env(void) {
+    JNIEnv *env = NULL;
+    if (zidl_java_vm == NULL) return NULL;
+    if ((*zidl_java_vm)->GetEnv(zidl_java_vm, (void **)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
+        (*zidl_java_vm)->AttachCurrentThreadAsDaemon(zidl_java_vm, (void **)&env, NULL);
+    }
+    return env;
+}
+
+static jobject zidl_java_box_Greeter(JNIEnv *env, void *handle);
+static jobject zidl_java_box_AdvancedGreeter(JNIEnv *env, void *handle);
+
+static void *zidl_java_unbox_as_Greeter(JNIEnv *env, jobject obj);
+
+static void *zidl_java_unbox_as_Greeter(JNIEnv *env, jobject obj) {
+    if (obj == NULL) return NULL;
+    void *raw = zidl_java_unbox(env, obj);
+    { static jclass _k0 = NULL;
+       if (_k0 == NULL) { jclass _l = (*env)->FindClass(env, "AdvancedGreeterImpl"); _k0 = (jclass)(*env)->NewGlobalRef(env, _l); (*env)->DeleteLocalRef(env, _l); }
+       if ((*env)->IsInstanceOf(env, obj, _k0)) {
+           void *_v0 = raw;
+           _v0 = (void *)AdvancedGreeter_as_Greeter(_v0);
+           return _v0;
+       } }
+    return raw;
+}
+
+/* QoS/status struct marshaling (Java data types <-> C ABI structs). */
+static void Point_from_java(JNIEnv *env, jobject obj, Point *out);
+static void Point_fill_java(JNIEnv *env, const Point *in, jobject obj);
+static void Sample_from_java(JNIEnv *env, jobject obj, Sample *out);
+static void Sample_fill_java(JNIEnv *env, const Sample *in, jobject obj);
+static void Frame_from_java(JNIEnv *env, jobject obj, Frame *out);
+static void Frame_fill_java(JNIEnv *env, const Frame *in, jobject obj);
+static void Beacon_from_java(JNIEnv *env, jobject obj, Beacon *out);
+static void Beacon_fill_java(JNIEnv *env, const Beacon *in, jobject obj);
+
+static void Point_from_java(JNIEnv *env, jobject obj, Point *out) {
+    jclass cls = (*env)->GetObjectClass(env, obj);
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_x", "()I"); out->x = (*env)->CallIntMethod(env, obj, mid); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_y", "()I"); out->y = (*env)->CallIntMethod(env, obj, mid); }
+}
+
+static void Point_fill_java(JNIEnv *env, const Point *in, jobject obj) {
+    jclass cls = (*env)->GetObjectClass(env, obj);
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "set_x", "(I)V"); (*env)->CallIntMethod(env, obj, mid, in->x); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "set_y", "(I)V"); (*env)->CallIntMethod(env, obj, mid, in->y); }
+}
+
+static void Sample_from_java(JNIEnv *env, jobject obj, Sample *out) {
+    jclass cls = (*env)->GetObjectClass(env, obj);
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_id", "()I"); out->id = (*env)->CallIntMethod(env, obj, mid); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_b", "()Z"); out->b = (*env)->CallBooleanMethod(env, obj, mid); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_u8_val", "()B"); out->u8_val = (*env)->CallByteMethod(env, obj, mid); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_s16_val", "()S"); out->s16_val = (*env)->CallShortMethod(env, obj, mid); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_u16_val", "()S"); out->u16_val = (*env)->CallShortMethod(env, obj, mid); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_s32_val", "()I"); out->s32_val = (*env)->CallIntMethod(env, obj, mid); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_u32_val", "()I"); out->u32_val = (*env)->CallIntMethod(env, obj, mid); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_s64_val", "()J"); out->s64_val = (*env)->CallLongMethod(env, obj, mid); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_u64_val", "()J"); out->u64_val = (*env)->CallLongMethod(env, obj, mid); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_f32_val", "()F"); out->f32_val = (*env)->CallFloatMethod(env, obj, mid); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_f64_val", "()D"); out->f64_val = (*env)->CallDoubleMethod(env, obj, mid); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_str", "()Ljava/lang/String;");
+       jstring _s = (jstring)(*env)->CallObjectMethod(env, obj, mid);
+       const char *_cs = (*env)->GetStringUTFChars(env, _s, NULL);
+       out->str = zidl_java_strdup(_cs);
+       (*env)->ReleaseStringUTFChars(env, _s, _cs); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_bstr", "()Ljava/lang/String;");
+       jstring _s = (jstring)(*env)->CallObjectMethod(env, obj, mid);
+       const char *_cs = (*env)->GetStringUTFChars(env, _s, NULL);
+       out->bstr = zidl_java_strdup(_cs);
+       (*env)->ReleaseStringUTFChars(env, _s, _cs); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_nums", "()Ljava/util/List;");
+       jobject _l = (*env)->CallObjectMethod(env, obj, mid);
+       jclass _lc = (*env)->GetObjectClass(env, _l);
+       jmethodID _sz = (*env)->GetMethodID(env, _lc, "size", "()I");
+       jmethodID _get = (*env)->GetMethodID(env, _lc, "get", "(I)Ljava/lang/Object;");
+       int32_t _n = (*env)->CallIntMethod(env, _l, _sz);
+       out->nums._buffer = _n > 0 ? malloc(_n * sizeof(*out->nums._buffer)) : NULL;
+       out->nums._length = _n; out->nums._maximum = _n; out->nums._release = _n > 0;
+       for (int32_t _i = 0; _i < _n; _i++) {
+           jobject _box = (*env)->CallObjectMethod(env, _l, _get, _i);
+           jclass _bc = (*env)->GetObjectClass(env, _box);
+           jmethodID _uv = (*env)->GetMethodID(env, _bc, "intValue", "()I");
+           out->nums._buffer[_i] = (*env)->CallIntMethod(env, _box, _uv);
+       } }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_arr", "()[I");
+       jintArray _a = (jintArray)(*env)->CallObjectMethod(env, obj, mid);
+       (*env)->GetIntArrayRegion(env, _a, 0, 3, out->arr); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_clr", "()LTypes$Color;");
+       jobject _e = (*env)->CallObjectMethod(env, obj, mid);
+       jclass _ecls = (*env)->GetObjectClass(env, _e);
+       jmethodID _gv = (*env)->GetMethodID(env, _ecls, "getValue", "()I");
+       out->clr = (*env)->CallIntMethod(env, _e, _gv); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_nested", "()LTypes$Point;");
+       jobject _m = (*env)->CallObjectMethod(env, obj, mid);
+       Point_from_java(env, _m, &out->nested); }
+}
+
+static void Sample_fill_java(JNIEnv *env, const Sample *in, jobject obj) {
+    jclass cls = (*env)->GetObjectClass(env, obj);
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "set_id", "(I)V"); (*env)->CallIntMethod(env, obj, mid, in->id); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "set_b", "(Z)V"); (*env)->CallBooleanMethod(env, obj, mid, in->b); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "set_u8_val", "(B)V"); (*env)->CallByteMethod(env, obj, mid, in->u8_val); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "set_s16_val", "(S)V"); (*env)->CallShortMethod(env, obj, mid, in->s16_val); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "set_u16_val", "(S)V"); (*env)->CallShortMethod(env, obj, mid, in->u16_val); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "set_s32_val", "(I)V"); (*env)->CallIntMethod(env, obj, mid, in->s32_val); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "set_u32_val", "(I)V"); (*env)->CallIntMethod(env, obj, mid, in->u32_val); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "set_s64_val", "(J)V"); (*env)->CallLongMethod(env, obj, mid, in->s64_val); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "set_u64_val", "(J)V"); (*env)->CallLongMethod(env, obj, mid, in->u64_val); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "set_f32_val", "(F)V"); (*env)->CallFloatMethod(env, obj, mid, in->f32_val); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "set_f64_val", "(D)V"); (*env)->CallDoubleMethod(env, obj, mid, in->f64_val); }
+    { jstring _s = (*env)->NewStringUTF(env, in->str ? in->str : "");
+       jmethodID mid = (*env)->GetMethodID(env, cls, "set_str", "(Ljava/lang/String;)V");
+       (*env)->CallVoidMethod(env, obj, mid, _s); }
+    { jstring _s = (*env)->NewStringUTF(env, in->bstr ? in->bstr : "");
+       jmethodID mid = (*env)->GetMethodID(env, cls, "set_bstr", "(Ljava/lang/String;)V");
+       (*env)->CallVoidMethod(env, obj, mid, _s); }
+    { jclass _lc = (*env)->FindClass(env, "java/util/ArrayList");
+       jmethodID _ctor = (*env)->GetMethodID(env, _lc, "<init>", "()V");
+       jobject _l = (*env)->NewObject(env, _lc, _ctor);
+       jmethodID _add = (*env)->GetMethodID(env, _lc, "add", "(Ljava/lang/Object;)Z");
+       jclass _bc = (*env)->FindClass(env, "java/lang/Integer");
+       jmethodID _vo = (*env)->GetStaticMethodID(env, _bc, "valueOf", "(I)Ljava/lang/Integer;");
+       for (int32_t _i = 0; _i < in->nums._length; _i++) {
+           jobject _box = (*env)->CallStaticObjectMethod(env, _bc, _vo, (jint)in->nums._buffer[_i]);
+           (*env)->CallBooleanMethod(env, _l, _add, _box);
+       }
+       jmethodID mid = (*env)->GetMethodID(env, cls, "set_nums", "(Ljava/util/List;)V");
+       (*env)->CallVoidMethod(env, obj, mid, _l); }
+    { jintArray _a = (*env)->NewIntArray(env, 3);
+       (*env)->SetIntArrayRegion(env, _a, 0, 3, in->arr);
+       jmethodID mid = (*env)->GetMethodID(env, cls, "set_arr", "([I)V");
+       (*env)->CallVoidMethod(env, obj, mid, _a); }
+    { jclass _ecls = (*env)->FindClass(env, "Types$Color");
+       jmethodID _vo = (*env)->GetStaticMethodID(env, _ecls, "valueOf", "(I)LTypes$Color;");
+       jobject _e = (*env)->CallStaticObjectMethod(env, _ecls, _vo, (jint)in->clr);
+       jmethodID mid = (*env)->GetMethodID(env, cls, "set_clr", "(LTypes$Color;)V");
+       (*env)->CallVoidMethod(env, obj, mid, _e); }
+    { jclass _mc = (*env)->FindClass(env, "Types$Point");
+       jmethodID _ctor = (*env)->GetMethodID(env, _mc, "<init>", "()V");
+       jobject _m = (*env)->NewObject(env, _mc, _ctor);
+       Point_fill_java(env, &in->nested, _m);
+       jmethodID mid = (*env)->GetMethodID(env, cls, "set_nested", "(LTypes$Point;)V");
+       (*env)->CallVoidMethod(env, obj, mid, _m); }
+}
+
+static void Frame_from_java(JNIEnv *env, jobject obj, Frame *out) {
+    jclass cls = (*env)->GetObjectClass(env, obj);
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_seq_num", "()I"); out->seq_num = (*env)->CallIntMethod(env, obj, mid); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_topic", "()Ljava/lang/String;");
+       jstring _s = (jstring)(*env)->CallObjectMethod(env, obj, mid);
+       const char *_cs = (*env)->GetStringUTFChars(env, _s, NULL);
+       out->topic = zidl_java_strdup(_cs);
+       (*env)->ReleaseStringUTFChars(env, _s, _cs); }
+}
+
+static void Frame_fill_java(JNIEnv *env, const Frame *in, jobject obj) {
+    jclass cls = (*env)->GetObjectClass(env, obj);
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "set_seq_num", "(I)V"); (*env)->CallIntMethod(env, obj, mid, in->seq_num); }
+    { jstring _s = (*env)->NewStringUTF(env, in->topic ? in->topic : "");
+       jmethodID mid = (*env)->GetMethodID(env, cls, "set_topic", "(Ljava/lang/String;)V");
+       (*env)->CallVoidMethod(env, obj, mid, _s); }
+}
+
+static void Beacon_from_java(JNIEnv *env, jobject obj, Beacon *out) {
+    jclass cls = (*env)->GetObjectClass(env, obj);
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_id", "()I"); out->id = (*env)->CallIntMethod(env, obj, mid); }
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "get_payload", "()Ljava/lang/String;");
+       jstring _s = (jstring)(*env)->CallObjectMethod(env, obj, mid);
+       const char *_cs = (*env)->GetStringUTFChars(env, _s, NULL);
+       out->payload = zidl_java_strdup(_cs);
+       (*env)->ReleaseStringUTFChars(env, _s, _cs); }
+}
+
+static void Beacon_fill_java(JNIEnv *env, const Beacon *in, jobject obj) {
+    jclass cls = (*env)->GetObjectClass(env, obj);
+    { jmethodID mid = (*env)->GetMethodID(env, cls, "set_id", "(I)V"); (*env)->CallIntMethod(env, obj, mid, in->id); }
+    { jstring _s = (*env)->NewStringUTF(env, in->payload ? in->payload : "");
+       jmethodID mid = (*env)->GetMethodID(env, cls, "set_payload", "(Ljava/lang/String;)V");
+       (*env)->CallVoidMethod(env, obj, mid, _s); }
+}
 
 /* ── interface Greeter ── */
 
-/* Zig DDS runtime exports (provided at link time). */
-extern const char * zidl_Greeter_greet(void *ptr, const char * name);
-extern void zidl_Greeter_reset(void *ptr);
-extern int32_t zidl_Greeter_get_count(void *ptr);
-extern void zidl_Greeter_deinit(void *ptr);
+static jobject zidl_java_box_Greeter(JNIEnv *env, void *handle) {
+    static jclass cls = NULL;
+    static jmethodID ctor = NULL;
+    if (handle == NULL) return NULL;
+    if (cls == NULL) {
+        jclass local = (*env)->FindClass(env, "GreeterImpl");
+        if (local == NULL) return NULL;
+        cls = (jclass)(*env)->NewGlobalRef(env, local);
+        (*env)->DeleteLocalRef(env, local);
+        ctor = (*env)->GetMethodID(env, cls, "<init>", "(J)V");
+    }
+    return (*env)->NewObject(env, cls, ctor, (jlong)(intptr_t)handle);
+}
+
 
 /* JNI bridge for GreeterImpl */
 JNIEXPORT jstring JNICALL Java_GreeterImpl_n_1greet(
     JNIEnv *env, jobject self, jlong ptr, jstring name)
 {
-    (void)env; (void)self;
-    return (jstring)zidl_Greeter_greet((void *)(intptr_t)ptr, (const char *)name);
+    (void)self;
+    const char *_cs_name = name != NULL ? (*env)->GetStringUTFChars(env, name, NULL) : NULL;
+    const char *_rets = (const char *)Greeter_greet((void *)(intptr_t)ptr, _cs_name);
+    if (name != NULL) (*env)->ReleaseStringUTFChars(env, name, _cs_name);
+    return _rets != NULL ? (*env)->NewStringUTF(env, _rets) : NULL;
 }
 
 JNIEXPORT void JNICALL Java_GreeterImpl_n_1reset(
     JNIEnv *env, jobject self, jlong ptr)
 {
-    (void)env; (void)self;
-    zidl_Greeter_reset((void *)(intptr_t)ptr);
+    (void)self;
+    Greeter_reset((void *)(intptr_t)ptr);
 }
 
 JNIEXPORT jint JNICALL Java_GreeterImpl_n_1get_1count(
     JNIEnv *env, jobject self, jlong ptr)
 {
     (void)env; (void)self;
-    return (jint)zidl_Greeter_get_count((void *)(intptr_t)ptr);
-}
-
-JNIEXPORT void JNICALL Java_GreeterImpl_deinit(
-    JNIEnv *env, jobject self, jlong ptr)
-{
-    (void)env; (void)self;
-    zidl_Greeter_deinit((void *)(intptr_t)ptr);
+    return (jint)Greeter_get_count((void *)(intptr_t)ptr);
 }
 
 /* ── interface AdvancedGreeter ── */
 
-/* Zig DDS runtime exports (provided at link time). */
-extern const char * zidl_AdvancedGreeter_greet(void *ptr, const char * name);
-extern void zidl_AdvancedGreeter_reset(void *ptr);
-extern void zidl_AdvancedGreeter_greetAdvanced(void *ptr, const char * name);
-extern int32_t zidl_AdvancedGreeter_get_count(void *ptr);
-extern void zidl_AdvancedGreeter_deinit(void *ptr);
+static jobject zidl_java_box_AdvancedGreeter(JNIEnv *env, void *handle) {
+    static jclass cls = NULL;
+    static jmethodID ctor = NULL;
+    if (handle == NULL) return NULL;
+    if (cls == NULL) {
+        jclass local = (*env)->FindClass(env, "AdvancedGreeterImpl");
+        if (local == NULL) return NULL;
+        cls = (jclass)(*env)->NewGlobalRef(env, local);
+        (*env)->DeleteLocalRef(env, local);
+        ctor = (*env)->GetMethodID(env, cls, "<init>", "(J)V");
+    }
+    return (*env)->NewObject(env, cls, ctor, (jlong)(intptr_t)handle);
+}
+
 
 /* JNI bridge for AdvancedGreeterImpl */
 JNIEXPORT jstring JNICALL Java_AdvancedGreeterImpl_n_1greet(
     JNIEnv *env, jobject self, jlong ptr, jstring name)
 {
-    (void)env; (void)self;
-    return (jstring)zidl_AdvancedGreeter_greet((void *)(intptr_t)ptr, (const char *)name);
+    (void)self;
+    const char *_cs_name = name != NULL ? (*env)->GetStringUTFChars(env, name, NULL) : NULL;
+    const char *_rets = (const char *)AdvancedGreeter_greet((void *)(intptr_t)ptr, _cs_name);
+    if (name != NULL) (*env)->ReleaseStringUTFChars(env, name, _cs_name);
+    return _rets != NULL ? (*env)->NewStringUTF(env, _rets) : NULL;
 }
 
 JNIEXPORT void JNICALL Java_AdvancedGreeterImpl_n_1reset(
     JNIEnv *env, jobject self, jlong ptr)
 {
-    (void)env; (void)self;
-    zidl_AdvancedGreeter_reset((void *)(intptr_t)ptr);
+    (void)self;
+    AdvancedGreeter_reset((void *)(intptr_t)ptr);
 }
 
 JNIEXPORT void JNICALL Java_AdvancedGreeterImpl_n_1greetAdvanced(
     JNIEnv *env, jobject self, jlong ptr, jstring name)
 {
-    (void)env; (void)self;
-    zidl_AdvancedGreeter_greetAdvanced((void *)(intptr_t)ptr, (const char *)name);
+    (void)self;
+    const char *_cs_name = name != NULL ? (*env)->GetStringUTFChars(env, name, NULL) : NULL;
+    AdvancedGreeter_greetAdvanced((void *)(intptr_t)ptr, _cs_name);
+    if (name != NULL) (*env)->ReleaseStringUTFChars(env, name, _cs_name);
 }
 
 JNIEXPORT jint JNICALL Java_AdvancedGreeterImpl_n_1get_1count(
     JNIEnv *env, jobject self, jlong ptr)
 {
     (void)env; (void)self;
-    return (jint)zidl_AdvancedGreeter_get_count((void *)(intptr_t)ptr);
-}
-
-JNIEXPORT void JNICALL Java_AdvancedGreeterImpl_deinit(
-    JNIEnv *env, jobject self, jlong ptr)
-{
-    (void)env; (void)self;
-    zidl_AdvancedGreeter_deinit((void *)(intptr_t)ptr);
+    return (jint)AdvancedGreeter_get_count((void *)(intptr_t)ptr);
 }
 
