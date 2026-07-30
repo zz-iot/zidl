@@ -2868,9 +2868,22 @@ fn generateZzddsWrapperFiles(
     for (topics.items) |s| {
         const c_name = try interface.prefixedCNameFromQualified(alloc, s.qualified_name, opts.type_prefix);
         defer alloc.free(c_name);
-        const stem_class = try stemToClassName(alloc, opts.input_stem);
-        defer alloc.free(stem_class);
-        const type_java = try javaQualifiedName(alloc, opts, stem_class, s.qualified_name);
+        // In single-file mode every type is a nested static class inside the
+        // single `<StemClass>.java`, so referencing one from another
+        // top-level file needs the `<StemClass>.` qualifier (`javaQualifiedName`).
+        // In split-files mode (`generateSplitFiles`) each type is instead its
+        // own standalone top-level class in its own `<Type>.java` — nesting
+        // it under a `<StemClass>.` prefix that was never generated would
+        // reference a container that doesn't exist and fail to compile.
+        const type_java = if (opts.split_files) blk: {
+            const raw = try qualNameToJavaStatic(alloc, s.qualified_name);
+            defer alloc.free(raw);
+            break :blk try prefixJavaLastSegment(alloc, raw, opts.type_prefix);
+        } else blk: {
+            const stem_class = try stemToClassName(alloc, opts.input_stem);
+            defer alloc.free(stem_class);
+            break :blk try javaQualifiedName(alloc, opts, stem_class, s.qualified_name);
+        };
         defer alloc.free(type_java);
         const writer_iface = try javaQualifiedName(alloc, opts, zzdds_dcps_stem_class, "DDS::DataWriter");
         defer alloc.free(writer_iface);
@@ -4058,16 +4071,13 @@ const JniBridgeGenerator = struct {
     /// and `listener_data` to a heap `zidl_java_listener_ctx` holding a
     /// global ref to the Java listener object.
     ///
-    /// `release_old_c` is the enclosing entity's own `get_listener()` return
-    /// type (its own listener struct C type), when this op replaces/clears
-    /// that entity's *own* listener (`set_listener`-shaped: doesn't return a
-    /// new entity) and that getter exists — `null` for a `create_*`-shaped op
-    /// installing a listener on a brand-new entity, which can't have had an
-    /// old one. When non-null, the previously-registered context (if any) is
-    /// queried and released before installing the new one — covers both
-    /// replacement and clearing (`{name} == NULL`), matching what the C API
-    /// itself does (install `NULL`/no-op function pointers either way).
-    fn emitListenerParamPrep(self: *JniBridgeGenerator, p: *const ir.Parameter, self_c: []const u8, release_old_c: ?[]const u8) !void {
+    /// Releasing whatever listener this replaces is *not* this function's
+    /// job — see `emitJniBridgeOp`'s `pending_releases`: capturing the old
+    /// value must happen here, before the new one overwrites it, but freeing
+    /// it must wait until after the real C call reports success, so a
+    /// rejected replacement doesn't leave the entity's *actual* (unchanged)
+    /// listener pointing at freed memory.
+    fn emitListenerParamPrep(self: *JniBridgeGenerator, p: *const ir.Parameter) !void {
         const iface = resolveToNamedDecl(p.type_ref).interface;
         const pc = try self.typeRefToC(p.type_ref);
         defer self.alloc.free(pc);
@@ -4077,13 +4087,6 @@ const JniBridgeGenerator = struct {
         var attrs = std.ArrayListUnmanaged(ir.Attribute).empty;
         defer attrs.deinit(self.alloc);
         try self.collectMembers(iface, &ops, &attrs);
-
-        if (release_old_c) |lc| {
-            try self.print(
-                "    {{ {[lc]s} _old_{[name]s} = {[sc]s}_get_listener((void *)(intptr_t)ptr); zidl_java_release_listener_ctx(env, _old_{[name]s}.listener_data); }}\n",
-                .{ .lc = lc, .sc = self_c, .name = p.name },
-            );
-        }
 
         try self.print(
             "    {[pc]s} _c_{[name]s}; const {[pc]s} *_p_{[name]s} = NULL;\n" ++
@@ -4130,6 +4133,24 @@ const JniBridgeGenerator = struct {
 
         const ret_is_entity = if (op.return_type) |rt| classifyTypeRef(rt) == .entity else false;
 
+        // Names of `_old_<param>` locals captured below (a listener struct
+        // read from `<Entity>_get_listener()` *before* this op's real call
+        // either replaces or invalidates it) that must be released — but
+        // only after that call reports success (see the post-call block).
+        // Capturing early and freeing late (rather than freeing immediately,
+        // as an earlier version of this generator did) matters because a
+        // rejected `set_listener`/`delete_*` call leaves the entity's actual
+        // listener unchanged: freeing eagerly would leave that live,
+        // unchanged listener pointing at freed memory the next time it
+        // fires, a use-after-free found via review rather than by any test
+        // here (no dcps.idl op currently modeled in this backend's own test
+        // suite actually fails `set_listener`/`delete_*` at runtime).
+        var pending_releases = std.ArrayListUnmanaged([]const u8).empty;
+        defer {
+            for (pending_releases.items) |n| self.alloc.free(n);
+            pending_releases.deinit(self.alloc);
+        }
+
         // Prep: unbox entity params; marshal `value_struct` params — `in`
         // builds a (possibly NULL, if the Java caller passed null for "use
         // default") native struct from the Java object; `out`/`inout` just
@@ -4148,8 +4169,17 @@ const JniBridgeGenerator = struct {
                     // listener worth releasing — a `create_*` op's listener
                     // param is being installed on a brand-new entity that
                     // can't have had one already.
-                    const release_old_c = if (ret_is_entity) null else self_get_listener_c;
-                    try self.emitListenerParamPrep(&p, c_name, release_old_c);
+                    if (!ret_is_entity) {
+                        if (self_get_listener_c) |lc| {
+                            const var_name = try std.fmt.allocPrint(self.alloc, "_old_{s}", .{p.name});
+                            try pending_releases.append(self.alloc, var_name);
+                            try self.print(
+                                "    {[lc]s} {[vn]s} = {[sc]s}_get_listener((void *)(intptr_t)ptr);\n",
+                                .{ .lc = lc, .vn = var_name, .sc = c_name },
+                            );
+                        }
+                    }
+                    try self.emitListenerParamPrep(&p);
                 },
                 .string => try self.print(
                     "    const char *_cs_{[name]s} = {[name]s} != NULL ? (*env)->GetStringUTFChars(env, {[name]s}, NULL) : NULL;\n",
@@ -4182,11 +4212,14 @@ const JniBridgeGenerator = struct {
         // otherwise leak that listener's native context forever — nothing
         // else in this generator's output ever inspects a live entity's own
         // stored `listener_data` once it isn't being explicitly replaced via
-        // `set_listener`. Query and release it here, before the entity (and
-        // its `listener_data` pointer) becomes invalid. Matched by op name
-        // prefix since delete ops aren't otherwise distinguished in the IR;
-        // `delete_contained_entities()` (no params) isn't covered — there's
-        // no per-child handle here to query.
+        // `set_listener`. Capture it here, before the entity (and its
+        // `listener_data` pointer) potentially becomes invalid — actually
+        // freeing it waits for the post-call success check below, same
+        // reasoning as the `set_listener` case above (a rejected delete
+        // leaves the entity, and its listener, alive and unchanged). Matched
+        // by op name prefix since delete ops aren't otherwise distinguished
+        // in the IR; `delete_contained_entities()` (no params) isn't covered
+        // — there's no per-child handle here to query.
         if (std.mem.startsWith(u8, op.name, "delete_")) {
             for (op.params) |p| {
                 if (classifyTypeRef(p.type_ref) != .entity) continue;
@@ -4204,9 +4237,11 @@ const JniBridgeGenerator = struct {
                 defer self.alloc.free(listener_c);
                 const target_c = try self.typeRefToC(p.type_ref);
                 defer self.alloc.free(target_c);
+                const var_name = try std.fmt.allocPrint(self.alloc, "_old_{s}", .{p.name});
+                try pending_releases.append(self.alloc, var_name);
                 try self.print(
-                    "    {{ {[lc]s} _old_{[name]s} = {[tc]s}_get_listener(_n_{[name]s}); zidl_java_release_listener_ctx(env, _old_{[name]s}.listener_data); }}\n",
-                    .{ .lc = listener_c, .tc = target_c, .name = p.name },
+                    "    {[lc]s} {[vn]s} = {[tc]s}_get_listener(_n_{[name]s});\n",
+                    .{ .lc = listener_c, .vn = var_name, .tc = target_c, .name = p.name },
                 );
             }
         }
@@ -4252,6 +4287,26 @@ const JniBridgeGenerator = struct {
             }
         }
         try self.write(");\n");
+
+        // Free whatever `_old_<param>` listener contexts were captured above
+        // (`set_listener`/`delete_<entity>` prep, earlier in this function),
+        // now that the real call's outcome is known. `0` is `RETCODE_OK` —
+        // this generator already assumes a dcps.idl-shaped `ReturnCode_t`
+        // elsewhere (e.g. the `delete_` name-prefix match above); a return
+        // type this can't check success against (void, an entity, a string —
+        // none of which a real `set_listener`/`delete_*` op actually has)
+        // falls back to releasing unconditionally, since there's no signal
+        // to gate on either way.
+        if (pending_releases.items.len > 0) {
+            const success_var: ?[]const u8 = if (op.return_type != null and !ret_is_entity and !ret_is_string) "_ret" else null;
+            for (pending_releases.items) |vn| {
+                if (success_var) |sv| {
+                    try self.print("    if ({[sv]s} == 0) zidl_java_release_listener_ctx(env, {[vn]s}.listener_data);\n", .{ .sv = sv, .vn = vn });
+                } else {
+                    try self.print("    zidl_java_release_listener_ctx(env, {[vn]s}.listener_data);\n", .{ .vn = vn });
+                }
+            }
+        }
 
         // Release any jstring params converted to a native `const char *`
         // above — GetStringUTFChars must be paired with a Release before the
@@ -6068,11 +6123,19 @@ test "java: set_listener releases the previously-registered listener context" {
 
     // The release helper itself must be emitted once in the preamble.
     try testing.expect(std.mem.indexOf(u8, s, "static void zidl_java_release_listener_ctx(") != null);
-    // `set_listener` must query and release whatever was previously
-    // installed on `self` *before* building the new context — since it
-    // replaces (or, if `l == NULL`, clears) Widget's own listener.
-    try testing.expect(std.mem.indexOf(u8, s, "Widget_get_listener((void *)(intptr_t)ptr)") != null);
-    try testing.expect(std.mem.indexOf(u8, s, "zidl_java_release_listener_ctx(env, _old_l.listener_data);") != null);
+    // `set_listener` must query whatever was previously installed on `self`
+    // (since it replaces, or if `l == NULL` clears, Widget's own listener)
+    // *before* the real call — capturing it is safe (just a getter) even if
+    // the call goes on to fail — but must only actually *free* it after
+    // confirming the call succeeded (`_ret == 0`), never unconditionally:
+    // a rejected replacement leaves Widget's actual listener unchanged, and
+    // freeing it anyway would leave that live listener pointing at freed
+    // memory.
+    const capture_idx = std.mem.indexOf(u8, s, "Widget_get_listener((void *)(intptr_t)ptr)").?;
+    const call_idx = std.mem.indexOf(u8, s, "Widget_set_listener((void *)(intptr_t)ptr").?;
+    const release_idx = std.mem.indexOf(u8, s, "if (_ret == 0) zidl_java_release_listener_ctx(env, _old_l.listener_data);").?;
+    try testing.expect(capture_idx < call_idx);
+    try testing.expect(call_idx < release_idx);
 }
 
 test "java: create_* listener param does not release a nonexistent old listener" {
@@ -6124,13 +6187,16 @@ test "java: delete_<entity> releases the deleted entity's own listener context" 
     const s = out.items;
 
     // `delete_child` must query the *Child*'s own listener (via its
-    // get_listener) — not Parent's — and release it before Parent_delete_child
-    // makes the handle invalid.
-    try testing.expect(std.mem.indexOf(u8, s, "Child_get_listener(_n_c)") != null);
-    try testing.expect(std.mem.indexOf(u8, s, "zidl_java_release_listener_ctx(env, _old_c.listener_data);") != null);
-    const release_idx = std.mem.indexOf(u8, s, "zidl_java_release_listener_ctx(env, _old_c.listener_data);").?;
+    // get_listener, not Parent's) *before* the delete call — while the
+    // handle is still valid — but only actually free it *after* confirming
+    // the delete succeeded (`_ret == 0`): a rejected delete leaves Child
+    // alive with its listener unchanged, and freeing it anyway would leave
+    // that live listener pointing at freed memory.
+    const capture_idx = std.mem.indexOf(u8, s, "Child_get_listener(_n_c)").?;
     const delete_call_idx = std.mem.indexOf(u8, s, "Parent_delete_child((void *)(intptr_t)ptr").?;
-    try testing.expect(release_idx < delete_call_idx);
+    const release_idx = std.mem.indexOf(u8, s, "if (_ret == 0) zidl_java_release_listener_ctx(env, _old_c.listener_data);").?;
+    try testing.expect(capture_idx < delete_call_idx);
+    try testing.expect(delete_call_idx < release_idx);
 }
 
 test "java: split mode with --generate-zzdds-wrappers still emits typed wrappers" {
@@ -6165,6 +6231,13 @@ test "java: split mode with --generate-zzdds-wrappers still emits typed wrappers
     const ts_content = try tmp.dir.readFileAlloc(io, "FooTypeSupport.java", alloc, .unlimited);
     defer alloc.free(ts_content);
     try testing.expect(std.mem.indexOf(u8, ts_content, "class FooTypeSupport") != null);
+
+    // In split mode, `Foo` is its own standalone top-level class in
+    // `Foo.java` — there is no `Sensor` (input-stem-derived) container
+    // class generated at all for it to be nested under. A reference to
+    // `Sensor.Foo.class` would fail to compile against split-mode output.
+    try testing.expect(std.mem.indexOf(u8, ts_content, "Foo.class") != null);
+    try testing.expect(std.mem.indexOf(u8, ts_content, "Sensor.Foo") == null);
 }
 
 test "java type_prefix: class name uses prefix" {
