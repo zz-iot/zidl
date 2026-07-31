@@ -2934,9 +2934,7 @@ fn generateZzddsWrapperFiles(
         // it under a `<StemClass>.` prefix that was never generated would
         // reference a container that doesn't exist and fail to compile.
         const type_java = if (opts.split_files) blk: {
-            const raw = try qualNameToJavaStatic(alloc, s.qualified_name);
-            defer alloc.free(raw);
-            break :blk try prefixJavaLastSegment(alloc, raw, opts.type_prefix);
+            break :blk try splitFileJavaClassName(alloc, s.qualified_name, opts.type_prefix);
         } else blk: {
             const stem_class = try stemToClassName(alloc, opts.input_stem);
             defer alloc.free(stem_class);
@@ -5775,6 +5773,23 @@ fn prefixJavaLastSegment(alloc: std.mem.Allocator, java_name: []const u8, prefix
     return std.fmt.allocPrint(alloc, "{s}{s}", .{ prefix, java_name });
 }
 
+/// Split-files mode's own class name for `qualified_name` (e.g.
+/// `"A::B::Foo"`) — just the last segment, prefixed. Unlike single-file mode
+/// (where every type nests as a static class inside one `<StemClass>.java`,
+/// so referencing one needs its full module-dotted path), split mode emits
+/// each type as its own *standalone top-level* `<Type>.java` regardless of
+/// which IDL module it was declared in (see `generateSplitFiles`'s
+/// `type_name = ir.typeDeclName(td)` — always the bare simple name). A
+/// dotted module-qualified reference like `A.B.Foo` would point at a
+/// container class that was never generated and fail to compile.
+fn splitFileJavaClassName(alloc: std.mem.Allocator, qualified_name: []const u8, prefix: []const u8) ![]u8 {
+    const simple = if (std.mem.lastIndexOf(u8, qualified_name, "::")) |sep|
+        qualified_name[sep + 2 ..]
+    else
+        qualified_name;
+    return std.fmt.allocPrint(alloc, "{s}{s}", .{ prefix, simple });
+}
+
 fn qualNameToJavaStatic(alloc: std.mem.Allocator, qname: []const u8) ![]u8 {
     var out = try alloc.alloc(u8, qname.len);
     var out_i: usize = 0;
@@ -6920,6 +6935,48 @@ test "java: split mode with --generate-zzdds-wrappers still emits typed wrappers
     // `Sensor.Foo.class` would fail to compile against split-mode output.
     try testing.expect(std.mem.indexOf(u8, ts_content, "Foo.class") != null);
     try testing.expect(std.mem.indexOf(u8, ts_content, "Sensor.Foo") == null);
+}
+
+test "java: split mode with --generate-zzdds-wrappers strips module path for a nested-module topic" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc,
+        \\module A {
+        \\    module B {
+        \\        @final struct Foo { @key unsigned long id; };
+        \\    };
+        \\};
+    );
+    defer ir_spec.deinit();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const out_dir = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer alloc.free(out_dir);
+
+    const opts = interface.Options{
+        .input_stem = "sensor",
+        .split_files = true,
+        .generate_zzdds_wrappers = true,
+        .output_dir = out_dir,
+    };
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try generateSplitFiles(alloc, io, &ir_spec, opts);
+
+    // `A::B::Foo` still generates as standalone top-level `Foo.java` (module
+    // nesting isn't reflected in split-mode filenames/classes at all — see
+    // `generateSplitFiles`'s `type_name = ir.typeDeclName(td)`) — only the
+    // *wrapper* trio's own filenames are module-flattened (`A_B_Foo...`, via
+    // `prefixedCNameFromQualified`'s C-style naming). The wrapper content
+    // must reference bare `Foo`, not `A.B.Foo`.
+    const writer_content = try tmp.dir.readFileAlloc(io, "A_B_FooDataWriter.java", alloc, .unlimited);
+    defer alloc.free(writer_content);
+    try testing.expect(std.mem.indexOf(u8, writer_content, "class A_B_FooDataWriter") != null);
+    try testing.expect(std.mem.indexOf(u8, writer_content, "A.B.Foo") == null);
+
+    const ts_content = try tmp.dir.readFileAlloc(io, "A_B_FooTypeSupport.java", alloc, .unlimited);
+    defer alloc.free(ts_content);
+    try testing.expect(std.mem.indexOf(u8, ts_content, "Foo.class") != null);
+    try testing.expect(std.mem.indexOf(u8, ts_content, "A.B.Foo") == null);
 }
 
 test "java: cross-file interface base and struct field resolve to declaring file's stem class" {
