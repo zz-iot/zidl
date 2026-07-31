@@ -110,6 +110,22 @@ pub const Options = struct {
     /// Emit typed zzdds topic wrappers for keyed, non-mutable topic structs.
     /// Zig uses a consuming-build `dds` adapter; C/C++ call zzdds C ABI helpers.
     generate_zzdds_wrappers: bool = false,
+    /// Java backend only: which Java package an imported module's own
+    /// generated output lives in, when it differs from this invocation's own
+    /// `java_package` — e.g. `"DDS=".len == 0` (empty package) tells this
+    /// invocation that `import "dcps.idl";`'s `DDS` module was itself
+    /// compiled with no `--java-package`, even though *this* file is using
+    /// one. Each entry is a raw `"<ModuleName>=<package>"` string (parsed by
+    /// the Java backend); an empty string after `=` means the default
+    /// (unnamed) package. A module not listed here is assumed to share this
+    /// invocation's own `java_package` — the common case when both files are
+    /// compiled the same way, so this flag is only needed when they aren't.
+    /// zidl has no other way to learn this: an import only carries the
+    /// declaring file's *stem* (see `ir.Spec.import_stems`, derived
+    /// automatically), never the separate, independent compile invocation's
+    /// own package, which isn't recorded anywhere the importing invocation
+    /// can see.
+    java_import_packages: []const []const u8 = &.{},
     /// Zig backend only: generated source compatibility target. zidl itself may
     /// run on a newer Zig toolchain while emitting code for MicroZig-era Zig.
     zig_version: ZigVersion = .@"0.16.0",

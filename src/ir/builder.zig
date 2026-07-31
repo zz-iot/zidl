@@ -43,7 +43,7 @@ pub fn build(
     global_scope: *const Scope,
     imports: []const []const u8,
 ) anyerror!ir.Spec {
-    return buildImpl(backing_alloc, ast_spec, global_scope, imports, &.{});
+    return buildImpl(backing_alloc, ast_spec, global_scope, imports, &.{}, &.{}, false);
 }
 
 /// An imported file's own AST + scope, needed to fill in the *real* member
@@ -61,14 +61,32 @@ pub const ImportedUnit = struct {
 /// empty skeletons) for symbols declared in `imported_units`.  Use this when
 /// the caller needs to look through an imported type's members — e.g. a
 /// `@callback interface` inheriting cross-module.
+///
+/// `import_stems`, if non-empty, is parallel to `imports`: the file stem that
+/// actually declared each imported module (see `ir.Spec.import_stems`).
+/// Pass `&.{}` if the caller doesn't track this (it becomes `Spec.import_stems
+/// = &.{}`, same as `build()`).
+///
+/// `fill_entity_bases`, when true, skips the usual reset (see
+/// `resetNonCallbackInterfaces`'s doc below) that otherwise leaves a
+/// cross-module *entity* interface base with only an empty Pass-1 skeleton
+/// (no real `.operations`/`.attributes`) — pass true only for a backend that
+/// actually needs a cross-module entity base's real member list (currently:
+/// the Java backend, which flattens inherited ops/attrs into `*Impl.java`
+/// via each generator's own `collectMembers`, the same mechanism `@callback`
+/// interfaces already relied on this fill for). Defaults to false, preserving
+/// the reset for every other backend exactly as before — see the reset's own
+/// doc comment for why they can't currently handle real content here.
 pub fn buildWithImportedUnits(
     backing_alloc: std.mem.Allocator,
     ast_spec: *const ast.Specification,
     global_scope: *const Scope,
     imports: []const []const u8,
     imported_units: []const ImportedUnit,
+    import_stems: []const []const u8,
+    fill_entity_bases: bool,
 ) anyerror!ir.Spec {
-    return buildImpl(backing_alloc, ast_spec, global_scope, imports, imported_units);
+    return buildImpl(backing_alloc, ast_spec, global_scope, imports, imported_units, import_stems, fill_entity_bases);
 }
 
 fn buildImpl(
@@ -77,6 +95,8 @@ fn buildImpl(
     global_scope: *const Scope,
     imports: []const []const u8,
     imported_units: []const ImportedUnit,
+    import_stems: []const []const u8,
+    fill_entity_bases: bool,
 ) anyerror!ir.Spec {
     var spec_arena = std.heap.ArenaAllocator.init(backing_alloc);
     errdefer spec_arena.deinit();
@@ -121,7 +141,7 @@ fn buildImpl(
         // declared directly in the main file are unaffected — this only
         // touches nodes built from `iu`'s own AST, before the main file's own
         // Pass 2 runs.
-        b.resetNonCallbackInterfaces(iu.scope, "");
+        if (!fill_entity_bases) b.resetNonCallbackInterfaces(iu.scope, "");
     }
 
     // Pass 2 — fill the main file's own skeletons from its AST in source order.
@@ -136,12 +156,17 @@ fn buildImpl(
     for (imports) |name| {
         try import_names.append(alloc, try alloc.dupe(u8, name));
     }
+    var import_stems_owned: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (import_stems) |stem| {
+        try import_stems_owned.append(alloc, try alloc.dupe(u8, stem));
+    }
 
     return .{
         .arena = spec_arena,
         .items = try top_items.toOwnedSlice(alloc),
         .warnings = try b.warnings.toOwnedSlice(alloc),
         .imports = try import_names.toOwnedSlice(alloc),
+        .import_stems = try import_stems_owned.toOwnedSlice(alloc),
     };
 }
 
@@ -1523,6 +1548,8 @@ fn testBuildWithImport(base_source: []const u8, derived_source: []const u8) !ir.
         derived_az.global_scope,
         &.{},
         &.{.{ .ast_spec = &base_spec, .scope = base_az.global_scope }},
+        &.{},
+        false,
     );
 }
 

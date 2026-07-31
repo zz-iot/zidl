@@ -400,6 +400,19 @@ pub const Spec = struct {
     /// (e.g. `"DDS"`), not the file path.  Backends use this list to emit
     /// `@import` / `#include` lines rather than re-generating the imported types.
     imports: []const []const u8 = &.{},
+    /// Parallel to `imports`: the file stem (no directory, no `.idl`
+    /// extension — e.g. `"dcps"` for `import "dcps.idl";`) of the file that
+    /// actually declared each imported module. Populated automatically from
+    /// the real resolved import path (see `main.zig`'s Phase 2b), not a
+    /// naming convention — unlike the module name itself, which a backend
+    /// cannot otherwise recover (nothing else records which file declared a
+    /// given cross-file `TypeDecl`). The Java backend uses this to qualify a
+    /// cross-file type reference under the *declaring* file's stem class
+    /// (e.g. `Dcps.DDS.DataWriter`, not `Zzdds.DDS.DataWriter`) — other
+    /// backends don't need it, since their namespace/qualified-name output
+    /// already matches the IDL module path regardless of which file declared
+    /// a type.
+    import_stems: []const []const u8 = &.{},
 
     pub fn deinit(self: *Spec) void {
         self.arena.deinit();

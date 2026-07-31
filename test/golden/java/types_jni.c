@@ -3,13 +3,20 @@
 #include <jni.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include <string.h>
 #include <stdlib.h>
 #include "types.h"
 
+/* Listener JNI upcall support: a global ref to the registered Java
+ * listener object, reachable from any native thread the callback
+ * fires on (not just JVM-created ones) via a process-wide JavaVM*
+ * cached in JNI_OnLoad. */
+typedef struct { jobject ref; } zidl_java_listener_ctx;
+
 /* Unboxes a generated entity `*Impl` object's native handle via its
  * `private final long ptr_` field. NULL-safe. */
-static void *zidl_java_unbox(JNIEnv *env, jobject obj) {
+void *zidl_java_unbox(JNIEnv *env, jobject obj) {
     if (obj == NULL) return NULL;
     jclass cls = (*env)->GetObjectClass(env, obj);
     jfieldID fid = (*env)->GetFieldID(env, cls, "ptr_", "J");
@@ -17,18 +24,13 @@ static void *zidl_java_unbox(JNIEnv *env, jobject obj) {
 }
 
 /* Portable strdup — plain `strdup` is POSIX, not C99/MSVC. */
-static char *zidl_java_strdup(const char *s) {
+char *zidl_java_strdup(const char *s) {
     size_t n = strlen(s) + 1;
     char *p = malloc(n);
     if (p) memcpy(p, s, n);
     return p;
 }
 
-/* Listener JNI upcall support: a global ref to the registered Java
- * listener object, reachable from any native thread the callback
- * fires on (not just JVM-created ones) via a process-wide JavaVM*
- * cached in JNI_OnLoad. */
-typedef struct { jobject ref; } zidl_java_listener_ctx;
 /* Releases a listener context previously installed as a C listener
  * struct's `listener_data` — frees the global ref to the Java listener
  * object plus the ctx allocation itself. Called both when a `set_listener`
@@ -41,7 +43,7 @@ typedef struct { jobject ref; } zidl_java_listener_ctx;
  * had a listener installed. Not handled: `delete_contained_entities()`
  * (no params — deletes an unspecified set of children at once, so there
  * is no per-child handle here to query). */
-static void zidl_java_release_listener_ctx(JNIEnv *env, void *listener_data) {
+void zidl_java_release_listener_ctx(JNIEnv *env, void *listener_data) {
     if (listener_data == NULL) return;
     zidl_java_listener_ctx *ctx = (zidl_java_listener_ctx *)listener_data;
     (*env)->DeleteGlobalRef(env, ctx->ref);
@@ -53,7 +55,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     zidl_java_vm = vm;
     return JNI_VERSION_1_6;
 }
-static JNIEnv *zidl_java_get_env(void) {
+JNIEnv *zidl_java_get_env(void) {
     JNIEnv *env = NULL;
     if (zidl_java_vm == NULL) return NULL;
     if ((*zidl_java_vm)->GetEnv(zidl_java_vm, (void **)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
@@ -62,8 +64,8 @@ static JNIEnv *zidl_java_get_env(void) {
     return env;
 }
 
-static jobject zidl_java_box_Greeter(JNIEnv *env, void *handle);
-static jobject zidl_java_box_AdvancedGreeter(JNIEnv *env, void *handle);
+jobject zidl_java_box_Greeter(JNIEnv *env, void *handle);
+jobject zidl_java_box_AdvancedGreeter(JNIEnv *env, void *handle);
 
 static void *zidl_java_unbox_as_Greeter(JNIEnv *env, jobject obj);
 
@@ -81,28 +83,28 @@ static void *zidl_java_unbox_as_Greeter(JNIEnv *env, jobject obj) {
 }
 
 /* QoS/status struct marshaling (Java data types <-> C ABI structs). */
-static void Point_from_java(JNIEnv *env, jobject obj, Point *out);
-static void Point_fill_java(JNIEnv *env, const Point *in, jobject obj);
-static void Sample_from_java(JNIEnv *env, jobject obj, Sample *out);
-static void Sample_fill_java(JNIEnv *env, const Sample *in, jobject obj);
-static void Frame_from_java(JNIEnv *env, jobject obj, Frame *out);
-static void Frame_fill_java(JNIEnv *env, const Frame *in, jobject obj);
-static void Beacon_from_java(JNIEnv *env, jobject obj, Beacon *out);
-static void Beacon_fill_java(JNIEnv *env, const Beacon *in, jobject obj);
+void Point_from_java(JNIEnv *env, jobject obj, Point *out);
+void Point_fill_java(JNIEnv *env, const Point *in, jobject obj);
+void Sample_from_java(JNIEnv *env, jobject obj, Sample *out);
+void Sample_fill_java(JNIEnv *env, const Sample *in, jobject obj);
+void Frame_from_java(JNIEnv *env, jobject obj, Frame *out);
+void Frame_fill_java(JNIEnv *env, const Frame *in, jobject obj);
+void Beacon_from_java(JNIEnv *env, jobject obj, Beacon *out);
+void Beacon_fill_java(JNIEnv *env, const Beacon *in, jobject obj);
 
-static void Point_from_java(JNIEnv *env, jobject obj, Point *out) {
+void Point_from_java(JNIEnv *env, jobject obj, Point *out) {
     jclass cls = (*env)->GetObjectClass(env, obj);
     { jmethodID mid = (*env)->GetMethodID(env, cls, "get_x", "()I"); out->x = (*env)->CallIntMethod(env, obj, mid); }
     { jmethodID mid = (*env)->GetMethodID(env, cls, "get_y", "()I"); out->y = (*env)->CallIntMethod(env, obj, mid); }
 }
 
-static void Point_fill_java(JNIEnv *env, const Point *in, jobject obj) {
+void Point_fill_java(JNIEnv *env, const Point *in, jobject obj) {
     jclass cls = (*env)->GetObjectClass(env, obj);
     { jmethodID mid = (*env)->GetMethodID(env, cls, "set_x", "(I)V"); (*env)->CallIntMethod(env, obj, mid, in->x); }
     { jmethodID mid = (*env)->GetMethodID(env, cls, "set_y", "(I)V"); (*env)->CallIntMethod(env, obj, mid, in->y); }
 }
 
-static void Sample_from_java(JNIEnv *env, jobject obj, Sample *out) {
+void Sample_from_java(JNIEnv *env, jobject obj, Sample *out) {
     jclass cls = (*env)->GetObjectClass(env, obj);
     { jmethodID mid = (*env)->GetMethodID(env, cls, "get_id", "()I"); out->id = (*env)->CallIntMethod(env, obj, mid); }
     { jmethodID mid = (*env)->GetMethodID(env, cls, "get_b", "()Z"); out->b = (*env)->CallBooleanMethod(env, obj, mid); }
@@ -152,7 +154,7 @@ static void Sample_from_java(JNIEnv *env, jobject obj, Sample *out) {
        Point_from_java(env, _m, &out->nested); }
 }
 
-static void Sample_fill_java(JNIEnv *env, const Sample *in, jobject obj) {
+void Sample_fill_java(JNIEnv *env, const Sample *in, jobject obj) {
     jclass cls = (*env)->GetObjectClass(env, obj);
     { jmethodID mid = (*env)->GetMethodID(env, cls, "set_id", "(I)V"); (*env)->CallIntMethod(env, obj, mid, in->id); }
     { jmethodID mid = (*env)->GetMethodID(env, cls, "set_b", "(Z)V"); (*env)->CallBooleanMethod(env, obj, mid, in->b); }
@@ -200,7 +202,7 @@ static void Sample_fill_java(JNIEnv *env, const Sample *in, jobject obj) {
        (*env)->CallVoidMethod(env, obj, mid, _m); }
 }
 
-static void Frame_from_java(JNIEnv *env, jobject obj, Frame *out) {
+void Frame_from_java(JNIEnv *env, jobject obj, Frame *out) {
     jclass cls = (*env)->GetObjectClass(env, obj);
     { jmethodID mid = (*env)->GetMethodID(env, cls, "get_seq_num", "()I"); out->seq_num = (*env)->CallIntMethod(env, obj, mid); }
     { jmethodID mid = (*env)->GetMethodID(env, cls, "get_topic", "()Ljava/lang/String;");
@@ -210,7 +212,7 @@ static void Frame_from_java(JNIEnv *env, jobject obj, Frame *out) {
        (*env)->ReleaseStringUTFChars(env, _s, _cs); }
 }
 
-static void Frame_fill_java(JNIEnv *env, const Frame *in, jobject obj) {
+void Frame_fill_java(JNIEnv *env, const Frame *in, jobject obj) {
     jclass cls = (*env)->GetObjectClass(env, obj);
     { jmethodID mid = (*env)->GetMethodID(env, cls, "set_seq_num", "(I)V"); (*env)->CallIntMethod(env, obj, mid, in->seq_num); }
     { jstring _s = (*env)->NewStringUTF(env, in->topic ? in->topic : "");
@@ -218,7 +220,7 @@ static void Frame_fill_java(JNIEnv *env, const Frame *in, jobject obj) {
        (*env)->CallVoidMethod(env, obj, mid, _s); }
 }
 
-static void Beacon_from_java(JNIEnv *env, jobject obj, Beacon *out) {
+void Beacon_from_java(JNIEnv *env, jobject obj, Beacon *out) {
     jclass cls = (*env)->GetObjectClass(env, obj);
     { jmethodID mid = (*env)->GetMethodID(env, cls, "get_id", "()I"); out->id = (*env)->CallIntMethod(env, obj, mid); }
     { jmethodID mid = (*env)->GetMethodID(env, cls, "get_payload", "()Ljava/lang/String;");
@@ -228,7 +230,7 @@ static void Beacon_from_java(JNIEnv *env, jobject obj, Beacon *out) {
        (*env)->ReleaseStringUTFChars(env, _s, _cs); }
 }
 
-static void Beacon_fill_java(JNIEnv *env, const Beacon *in, jobject obj) {
+void Beacon_fill_java(JNIEnv *env, const Beacon *in, jobject obj) {
     jclass cls = (*env)->GetObjectClass(env, obj);
     { jmethodID mid = (*env)->GetMethodID(env, cls, "set_id", "(I)V"); (*env)->CallIntMethod(env, obj, mid, in->id); }
     { jstring _s = (*env)->NewStringUTF(env, in->payload ? in->payload : "");
@@ -238,7 +240,7 @@ static void Beacon_fill_java(JNIEnv *env, const Beacon *in, jobject obj) {
 
 /* ── interface Greeter ── */
 
-static jobject zidl_java_box_Greeter(JNIEnv *env, void *handle) {
+jobject zidl_java_box_Greeter(JNIEnv *env, void *handle) {
     static jclass cls = NULL;
     static jmethodID ctor = NULL;
     if (handle == NULL) return NULL;
@@ -280,7 +282,7 @@ JNIEXPORT jint JNICALL Java_GreeterImpl_n_1get_1count(
 
 /* ── interface AdvancedGreeter ── */
 
-static jobject zidl_java_box_AdvancedGreeter(JNIEnv *env, void *handle) {
+jobject zidl_java_box_AdvancedGreeter(JNIEnv *env, void *handle) {
     static jclass cls = NULL;
     static jmethodID ctor = NULL;
     if (handle == NULL) return NULL;

@@ -101,7 +101,7 @@ pub const JavaBackend = struct {
             for (ifaces.items) |iface| {
                 var impl_buf = std.ArrayList(u8).empty;
                 defer impl_buf.deinit(self.alloc);
-                try generateImplFile(self.alloc, iface, class_name, opts, &impl_buf);
+                try generateImplFile(self.alloc, spec, iface, class_name, opts, &impl_buf);
                 const impl_filename = try std.fmt.allocPrint(self.alloc, "{s}{s}Impl.java", .{ opts.type_prefix, iface.name });
                 defer self.alloc.free(impl_filename);
                 try writeOutputFile(self.alloc, io, opts, impl_filename, impl_buf.items);
@@ -135,7 +135,9 @@ pub fn generateFile(
     opts: interface.Options,
     out: *std.ArrayList(u8),
 ) !void {
-    var gen = Generator{ .alloc = alloc, .opts = opts, .out = out };
+    var cross_file = try CrossFileResolver.build(alloc, spec, opts);
+    defer cross_file.deinit(alloc);
+    var gen = Generator{ .alloc = alloc, .opts = opts, .out = out, .cross_file = cross_file };
     try gen.emitFile(spec);
 }
 
@@ -152,6 +154,9 @@ const Generator = struct {
     /// (split mode). Removes the `static` qualifier from type declarations and
     /// adjusts the CDR helper visibility to public.
     top_level: bool = false,
+    /// See `CrossFileResolver`. Default-empty: every type reference resolves
+    /// as local to the current file, today's behavior.
+    cross_file: CrossFileResolver = .{},
 
     // ── Low-level output helpers ──────────────────────────────────────────────
 
@@ -2686,7 +2691,31 @@ const Generator = struct {
     }
 
     /// Convert `Foo::Bar::Baz` → `Foo.Bar.Baz`.
+    /// Convert `Foo::Bar::Baz` → `Foo.Bar.Baz` (or `<Prefix>Baz` if
+    /// `opts.type_prefix` is set). If `qname`'s top-level module is a
+    /// cross-file import (see `CrossFileResolver`), qualifies the result
+    /// under the *declaring* file's stem class and Java package instead of
+    /// this file's own — reuses the same conversion by prepending the
+    /// resolved stem class as an extra leading module segment before
+    /// delegating to `qualNameToJavaLocal`.
     fn qualNameToJava(self: *Generator, qname: []const u8) ![]u8 {
+        if (self.cross_file.lookup(qname)) |entry| {
+            const prefixed_qname = try std.fmt.allocPrint(self.alloc, "{s}::{s}", .{ entry.stem_class, qname });
+            defer self.alloc.free(prefixed_qname);
+            const local = try self.qualNameToJavaLocal(prefixed_qname);
+            // Same package as this file's own output (the common case, and
+            // always true when neither file uses --java-package at all) —
+            // no qualification needed, same as any other same-package Java
+            // reference. Only a genuinely different package needs the
+            // explicit prefix.
+            if (entry.package.len == 0 or std.mem.eql(u8, entry.package, self.opts.java_package)) return local;
+            defer self.alloc.free(local);
+            return std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ entry.package, local });
+        }
+        return self.qualNameToJavaLocal(qname);
+    }
+
+    fn qualNameToJavaLocal(self: *Generator, qname: []const u8) ![]u8 {
         const pfx = self.opts.type_prefix;
         if (pfx.len == 0) {
             // Fast path: no prefix — original behaviour.
@@ -2846,6 +2875,35 @@ fn javaQualifiedName(alloc: std.mem.Allocator, opts: interface.Options, stem_cla
     return std.fmt.allocPrint(alloc, "{s}.{s}", .{ stem_class, prefixed });
 }
 
+/// Like `CrossFileResolver.lookup`, but for `generateZzddsWrapperFiles`'s
+/// hardcoded references to dcps.idl's `DDS::DataWriter`/`DDS::DataReader` —
+/// these aren't real cross-file IR references (a `--generate-zzdds-wrappers`
+/// leaf file like `binding_smoke.idl` never itself `import "dcps.idl";`, it
+/// only has a topic struct; there's no `ir.Spec.imports` entry for
+/// `CrossFileResolver` to resolve against). The caller opts in to a
+/// non-default-package `Dcps` the same way cross-file references do, via
+/// `--java-import-package DDS=<pkg>`.
+fn zzddsDcpsJavaPackage(opts: interface.Options) ?[]const u8 {
+    for (opts.java_import_packages) |mapping| {
+        const eq = std.mem.indexOf(u8, mapping, "=") orelse continue;
+        if (std.mem.eql(u8, mapping[0..eq], "DDS")) return mapping[eq + 1 ..];
+    }
+    return null;
+}
+
+/// `javaQualifiedName(alloc, opts, zzdds_dcps_stem_class, qualified_name)`,
+/// additionally prefixed with `--java-import-package DDS=<pkg>`'s package
+/// when given (see `zzddsDcpsJavaPackage`) — needed once `Dcps` no longer
+/// lives in the caller's own package.
+fn zzddsDcpsQualifiedName(alloc: std.mem.Allocator, opts: interface.Options, qualified_name: []const u8) ![]u8 {
+    const local = try javaQualifiedName(alloc, opts, zzdds_dcps_stem_class, qualified_name);
+    defer alloc.free(local);
+    if (zzddsDcpsJavaPackage(opts)) |pkg| {
+        return std.fmt.allocPrint(alloc, "{s}.{s}", .{ pkg, local });
+    }
+    return alloc.dupe(u8, local);
+}
+
 fn collectZzddsTopicStructsJava(alloc: std.mem.Allocator, items: []const ir.ModuleItem, out: *std.ArrayListUnmanaged(*const ir.Struct)) !void {
     var all = std.ArrayListUnmanaged(*const ir.Struct).empty;
     defer all.deinit(alloc);
@@ -2885,9 +2943,9 @@ fn generateZzddsWrapperFiles(
             break :blk try javaQualifiedName(alloc, opts, stem_class, s.qualified_name);
         };
         defer alloc.free(type_java);
-        const writer_iface = try javaQualifiedName(alloc, opts, zzdds_dcps_stem_class, "DDS::DataWriter");
+        const writer_iface = try zzddsDcpsQualifiedName(alloc, opts, "DDS::DataWriter");
         defer alloc.free(writer_iface);
-        const reader_iface = try javaQualifiedName(alloc, opts, zzdds_dcps_stem_class, "DDS::DataReader");
+        const reader_iface = try zzddsDcpsQualifiedName(alloc, opts, "DDS::DataReader");
         defer alloc.free(reader_iface);
 
         var buf = std.ArrayList(u8).empty;
@@ -3068,6 +3126,61 @@ fn stemToClassName(alloc: std.mem.Allocator, stem: []const u8) ![]u8 {
     return out;
 }
 
+/// Resolves where an *imported* module's own generated Java output lives —
+/// which stem-derived outer class (e.g. `"Dcps"` for `import "dcps.idl";`,
+/// from `ir.Spec.import_stems`) and which Java package (this file's own
+/// `opts.java_package` unless overridden per-module via
+/// `--java-import-package`, see `interface.Options.java_import_packages`) —
+/// so a cross-file type reference (e.g. `DDS::DataWriter` in a file that
+/// imports dcps.idl) resolves to `Dcps.DDS.DataWriter`, not this file's own
+/// stem class. Built once per generation pass via `build`; every Java
+/// generator struct carries one (default-empty, so any caller that doesn't
+/// populate it — most unit tests, anything with no imports — gets today's
+/// behavior: every reference treated as local to the current file).
+const CrossFileResolver = struct {
+    const Entry = struct {
+        module: []const u8,
+        stem_class: []const u8,
+        package: []const u8,
+    };
+    entries: []const Entry = &.{},
+
+    fn build(alloc: std.mem.Allocator, spec: *const ir.Spec, opts: interface.Options) !CrossFileResolver {
+        var entries: std.ArrayListUnmanaged(Entry) = .empty;
+        for (spec.imports, 0..) |module, i| {
+            const stem = if (i < spec.import_stems.len) spec.import_stems[i] else module;
+            const stem_class = try stemToClassName(alloc, stem);
+            var package = opts.java_package;
+            for (opts.java_import_packages) |mapping| {
+                const eq = std.mem.indexOf(u8, mapping, "=") orelse continue;
+                if (std.mem.eql(u8, mapping[0..eq], module)) {
+                    package = mapping[eq + 1 ..];
+                    break;
+                }
+            }
+            try entries.append(alloc, .{ .module = module, .stem_class = stem_class, .package = package });
+        }
+        return .{ .entries = try entries.toOwnedSlice(alloc) };
+    }
+
+    fn deinit(self: *CrossFileResolver, alloc: std.mem.Allocator) void {
+        for (self.entries) |e| alloc.free(e.stem_class);
+        alloc.free(self.entries);
+        self.entries = &.{};
+    }
+
+    /// `qualified_name` is e.g. `"DDS::DataWriter"`. Returns the entry
+    /// matching its top-level module, or `null` if it's not a cross-file
+    /// reference (declared in the current file — resolve it the usual way).
+    fn lookup(self: CrossFileResolver, qualified_name: []const u8) ?Entry {
+        const top = if (std.mem.indexOf(u8, qualified_name, "::")) |i| qualified_name[0..i] else qualified_name;
+        for (self.entries) |e| {
+            if (std.mem.eql(u8, e.module, top)) return e;
+        }
+        return null;
+    }
+};
+
 fn baseToJavaType(b: ast.BaseTypeSpec) []const u8 {
     return switch (b) {
         .float => "float",
@@ -3192,6 +3305,32 @@ fn collectInterfaces(
 /// includes `target` — i.e. a value of `iface` can always be widened to
 /// `target`. Used to find every entity interface a Java caller might pass
 /// where `target`'s box is expected (see `emitUnboxAsDispatcher`).
+/// Finds which interface in `iface`'s own hierarchy (itself, or a base,
+/// searched depth-first: `iface` first, then each base in declaration
+/// order) directly declares an operation named `op_name` — as opposed to
+/// `collectMembers`'s flattened `ops` list, which has every inherited op
+/// but no way to tell which interface originally declared any given one.
+/// Needed because the real C ABI only re-exports an inherited op under a
+/// *same-file* derived interface's own name (e.g. `DDS_Topic_enable` exists
+/// even though `enable` is declared on `Entity`) — a *cross-file* derived
+/// interface's own generated header does not (confirmed empirically: a
+/// `zzdds::DomainParticipant : DDS::DomainParticipant` only gets its own new
+/// ops plus a `zzdds_DomainParticipant_as_DDS_DomainParticipant` conversion
+/// function, never `zzdds_DomainParticipant_enable`) — so a cross-file
+/// inherited op must be called as `{declaring_c_name}_{op}` on a `self`
+/// pointer converted to the declaring interface's own type first, not
+/// `{iface_c_name}_{op}` on the raw handle. See `emitJniBridgeOp`.
+fn findDeclaringInterface(iface: *const ir.Interface, op_name: []const u8) ?*const ir.Interface {
+    for (iface.operations) |o| {
+        if (std.mem.eql(u8, o.name, op_name)) return iface;
+    }
+    for (iface.bases) |base| {
+        if (base != .interface) continue;
+        if (findDeclaringInterface(base.interface, op_name)) |found| return found;
+    }
+    return null;
+}
+
 fn interfaceHasBaseTransitively(iface: *const ir.Interface, target: *const ir.Interface) bool {
     for (iface.bases) |base| {
         if (base != .interface) continue;
@@ -3235,17 +3374,21 @@ fn findConversionPath(
 /// `opts.generate_interfaces` is true.
 pub fn generateImplFile(
     alloc: std.mem.Allocator,
+    spec: *const ir.Spec,
     iface: *const ir.Interface,
     stem_class: []const u8,
     opts: interface.Options,
     out: *std.ArrayList(u8),
 ) !void {
+    var cross_file = try CrossFileResolver.build(alloc, spec, opts);
+    defer cross_file.deinit(alloc);
     var gen = ImplFileGenerator{
         .alloc = alloc,
         .iface = iface,
         .stem_class = stem_class,
         .opts = opts,
         .out = out,
+        .cross_file = cross_file,
     };
     try gen.emit();
 }
@@ -3276,6 +3419,9 @@ const ImplFileGenerator = struct {
     stem_class: []const u8,
     opts: interface.Options,
     out: *std.ArrayList(u8),
+    /// See `CrossFileResolver`. Default-empty: every type reference resolves
+    /// as local to the current file, today's behavior.
+    cross_file: CrossFileResolver = .{},
 
     fn write(self: *ImplFileGenerator, s: []const u8) !void {
         try self.out.appendSlice(self.alloc, s);
@@ -3434,13 +3580,34 @@ const ImplFileGenerator = struct {
         }
     }
 
+    /// Build `<stem_class>.<JavaQualified.Name>` for a name declared in the
+    /// current file — or, if `qualified_name`'s top-level module is a
+    /// cross-file import (see `CrossFileResolver`), qualify it under the
+    /// *declaring* file's stem class instead (e.g. `DDS::Foo` → `Dcps.DDS.Foo`
+    /// when the current file `import`s dcps.idl, not a bare `DDS.Foo` — there
+    /// is no top-level `DDS` package/class). The declaring file's Java
+    /// package is prepended too, but only when it actually differs from this
+    /// file's own — same-package Java references need no qualification, and
+    /// forcing one on every cross-file reference would be merely verbose in
+    /// the common case where both files share a package (or neither uses
+    /// one).
+    fn qualifiedJavaPath(self: *ImplFileGenerator, qualified_name: []const u8) ![]u8 {
+        const raw = try qualNameToJavaStatic(self.alloc, qualified_name);
+        defer self.alloc.free(raw);
+        const prefixed = try prefixJavaLastSegment(self.alloc, raw, self.opts.type_prefix);
+        defer self.alloc.free(prefixed);
+        if (self.cross_file.lookup(qualified_name)) |entry| {
+            if (entry.package.len == 0 or std.mem.eql(u8, entry.package, self.opts.java_package)) {
+                return std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ entry.stem_class, prefixed });
+            }
+            return std.fmt.allocPrint(self.alloc, "{s}.{s}.{s}", .{ entry.package, entry.stem_class, prefixed });
+        }
+        return std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ self.stem_class, prefixed });
+    }
+
     /// Build `<stem_class>.<JavaQualified.Interface>` (e.g. `Calc.Foo` or `Calc.DDS_Foo`).
     fn javaIfacePath(self: *ImplFileGenerator, iface: *const ir.Interface) ![]u8 {
-        const java_qname = try qualNameToJavaStatic(self.alloc, iface.qualified_name);
-        defer self.alloc.free(java_qname);
-        const prefixed = try prefixJavaLastSegment(self.alloc, java_qname, self.opts.type_prefix);
-        defer self.alloc.free(prefixed);
-        return std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ self.stem_class, prefixed });
+        return self.qualifiedJavaPath(iface.qualified_name);
     }
 
     fn typeRefToJava(self: *ImplFileGenerator, tr: ir.TypeRef) anyerror![]u8 {
@@ -3451,17 +3618,7 @@ const ImplFileGenerator = struct {
                 // see the Java data backend's `Generator.typeRefToJava`); resolve
                 // through to whatever the chain ultimately names.
                 .typedef => |t| self.typeRefToJava(t.type_ref),
-                else => blk: {
-                    // Module-qualified names resolve *inside* the top-level
-                    // `<stem_class>` wrapper class (see `javaIfacePath`, which
-                    // this mirrors) — e.g. `DDS::Foo` → `Dcps.DDS.Foo`, not a
-                    // bare `DDS.Foo` (there is no top-level `DDS` package/class).
-                    const raw = try qualNameToJavaStatic(self.alloc, ir.typeDeclQualifiedName(td));
-                    defer self.alloc.free(raw);
-                    const prefixed = try prefixJavaLastSegment(self.alloc, raw, self.opts.type_prefix);
-                    defer self.alloc.free(prefixed);
-                    break :blk std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ self.stem_class, prefixed });
-                },
+                else => self.qualifiedJavaPath(ir.typeDeclQualifiedName(td)),
             },
             .string, .wstring => self.alloc.dupe(u8, "String"),
             .sequence => |seq| blk: {
@@ -3627,6 +3784,10 @@ const JniBridgeGenerator = struct {
     /// *other* interface whose (transitive) bases include X — see
     /// `emitUnboxAsDispatcher`.
     all_entity_ifaces: []const *const ir.Interface = &.{},
+    /// See `CrossFileResolver`. Set once at the top of `emitSource`.
+    /// Default-empty: every type reference resolves as local to the current
+    /// file, today's behavior.
+    cross_file: CrossFileResolver = .{},
 
     fn write(self: *JniBridgeGenerator, s: []const u8) !void {
         try self.out.appendSlice(self.alloc, s);
@@ -3639,6 +3800,8 @@ const JniBridgeGenerator = struct {
     }
 
     fn emitSource(self: *JniBridgeGenerator, spec: *const ir.Spec) !void {
+        self.cross_file = try CrossFileResolver.build(self.alloc, spec, self.opts);
+        defer self.cross_file.deinit(self.alloc);
         try self.print(
             "/* Generated by zidl from {s}.idl — DO NOT EDIT */\n\n",
             .{self.opts.input_stem},
@@ -3646,6 +3809,7 @@ const JniBridgeGenerator = struct {
         try self.write("#include <jni.h>\n");
         try self.write("#include <stdint.h>\n");
         try self.write("#include <stddef.h>\n");
+        try self.write("#include <stdbool.h>\n");
         try self.write("#include <string.h>\n");
         try self.write("#include <stdlib.h>\n");
         // Pulls in the real zzdds/zidl C ABI (opaque entity typedefs, QoS/status
@@ -3654,64 +3818,95 @@ const JniBridgeGenerator = struct {
         try self.print("#include \"{s}.h\"\n\n", .{self.opts.input_stem});
 
         try self.write(
-            "/* Unboxes a generated entity `*Impl` object's native handle via its\n" ++
-                " * `private final long ptr_` field. NULL-safe. */\n" ++
-                "static void *zidl_java_unbox(JNIEnv *env, jobject obj) {\n" ++
-                "    if (obj == NULL) return NULL;\n" ++
-                "    jclass cls = (*env)->GetObjectClass(env, obj);\n" ++
-                "    jfieldID fid = (*env)->GetFieldID(env, cls, \"ptr_\", \"J\");\n" ++
-                "    return (void *)(intptr_t)(*env)->GetLongField(env, obj, fid);\n" ++
-                "}\n\n" ++
-                "/* Portable strdup — plain `strdup` is POSIX, not C99/MSVC. */\n" ++
-                "static char *zidl_java_strdup(const char *s) {\n" ++
-                "    size_t n = strlen(s) + 1;\n" ++
-                "    char *p = malloc(n);\n" ++
-                "    if (p) memcpy(p, s, n);\n" ++
-                "    return p;\n" ++
-                "}\n\n" ++
-                "/* Listener JNI upcall support: a global ref to the registered Java\n" ++
+            "/* Listener JNI upcall support: a global ref to the registered Java\n" ++
                 " * listener object, reachable from any native thread the callback\n" ++
                 " * fires on (not just JVM-created ones) via a process-wide JavaVM*\n" ++
                 " * cached in JNI_OnLoad. */\n" ++
-                "typedef struct { jobject ref; } zidl_java_listener_ctx;\n" ++
-                "/* Releases a listener context previously installed as a C listener\n" ++
-                " * struct's `listener_data` — frees the global ref to the Java listener\n" ++
-                " * object plus the ctx allocation itself. Called both when a `set_listener`\n" ++
-                " * call replaces (or clears, passing NULL) a previously-registered\n" ++
-                " * listener, and when `delete_<entity>`-shaped ops delete an entity that\n" ++
-                " * may still have one registered (queried via that entity's own\n" ++
-                " * `get_listener()` before the delete call, since the handle becomes\n" ++
-                " * invalid afterward) — see emitListenerParamPrep/emitJniBridgeOp's\n" ++
-                " * `delete_` handling. NULL-safe: harmless for an entity/slot that never\n" ++
-                " * had a listener installed. Not handled: `delete_contained_entities()`\n" ++
-                " * (no params — deletes an unspecified set of children at once, so there\n" ++
-                " * is no per-child handle here to query). */\n" ++
-                "static void zidl_java_release_listener_ctx(JNIEnv *env, void *listener_data) {\n" ++
-                "    if (listener_data == NULL) return;\n" ++
-                "    zidl_java_listener_ctx *ctx = (zidl_java_listener_ctx *)listener_data;\n" ++
-                "    (*env)->DeleteGlobalRef(env, ctx->ref);\n" ++
-                "    free(ctx);\n" ++
-                "}\n" ++
-                "static JavaVM *zidl_java_vm = NULL;\n" ++
-                "JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {\n" ++
-                "    (void)reserved;\n" ++
-                "    zidl_java_vm = vm;\n" ++
-                "    return JNI_VERSION_1_6;\n" ++
-                "}\n" ++
-                "static JNIEnv *zidl_java_get_env(void) {\n" ++
-                "    JNIEnv *env = NULL;\n" ++
-                "    if (zidl_java_vm == NULL) return NULL;\n" ++
-                "    if ((*zidl_java_vm)->GetEnv(zidl_java_vm, (void **)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {\n" ++
-                "        (*zidl_java_vm)->AttachCurrentThreadAsDaemon(zidl_java_vm, (void **)&env, NULL);\n" ++
-                "    }\n" ++
-                "    return env;\n" ++
-                "}\n\n",
+                "typedef struct { jobject ref; } zidl_java_listener_ctx;\n\n",
         );
+
+        // A shared JNI bridge runtime (entity unboxing, JavaVM*/JNIEnv*
+        // access, listener-ctx release, JNI_OnLoad) is only valid ONCE per
+        // linked shared library — a second `JNI_OnLoad` (or a second
+        // `static JavaVM *` that never gets set) in a cross-file-importing
+        // module's own `_jni.c` would either collide at link time or leave
+        // that file's copy permanently NULL. So only the base module (the
+        // one other `_jni.c` files import, never imports anything itself)
+        // defines these with external linkage; an importing module instead
+        // `extern`-declares them, relying on the base module's `_jni.c`
+        // being compiled into the same shared library — the same
+        // same-link-unit assumption the cross-file box helper/struct
+        // marshaling/trampoline declarations below already rely on.
+        const owns_common_runtime = spec.imports.len == 0;
+        if (owns_common_runtime) {
+            try self.write(
+                "/* Unboxes a generated entity `*Impl` object's native handle via its\n" ++
+                    " * `private final long ptr_` field. NULL-safe. */\n" ++
+                    "void *zidl_java_unbox(JNIEnv *env, jobject obj) {\n" ++
+                    "    if (obj == NULL) return NULL;\n" ++
+                    "    jclass cls = (*env)->GetObjectClass(env, obj);\n" ++
+                    "    jfieldID fid = (*env)->GetFieldID(env, cls, \"ptr_\", \"J\");\n" ++
+                    "    return (void *)(intptr_t)(*env)->GetLongField(env, obj, fid);\n" ++
+                    "}\n\n" ++
+                    "/* Portable strdup — plain `strdup` is POSIX, not C99/MSVC. */\n" ++
+                    "char *zidl_java_strdup(const char *s) {\n" ++
+                    "    size_t n = strlen(s) + 1;\n" ++
+                    "    char *p = malloc(n);\n" ++
+                    "    if (p) memcpy(p, s, n);\n" ++
+                    "    return p;\n" ++
+                    "}\n\n" ++
+                    "/* Releases a listener context previously installed as a C listener\n" ++
+                    " * struct's `listener_data` — frees the global ref to the Java listener\n" ++
+                    " * object plus the ctx allocation itself. Called both when a `set_listener`\n" ++
+                    " * call replaces (or clears, passing NULL) a previously-registered\n" ++
+                    " * listener, and when `delete_<entity>`-shaped ops delete an entity that\n" ++
+                    " * may still have one registered (queried via that entity's own\n" ++
+                    " * `get_listener()` before the delete call, since the handle becomes\n" ++
+                    " * invalid afterward) — see emitListenerParamPrep/emitJniBridgeOp's\n" ++
+                    " * `delete_` handling. NULL-safe: harmless for an entity/slot that never\n" ++
+                    " * had a listener installed. Not handled: `delete_contained_entities()`\n" ++
+                    " * (no params — deletes an unspecified set of children at once, so there\n" ++
+                    " * is no per-child handle here to query). */\n" ++
+                    "void zidl_java_release_listener_ctx(JNIEnv *env, void *listener_data) {\n" ++
+                    "    if (listener_data == NULL) return;\n" ++
+                    "    zidl_java_listener_ctx *ctx = (zidl_java_listener_ctx *)listener_data;\n" ++
+                    "    (*env)->DeleteGlobalRef(env, ctx->ref);\n" ++
+                    "    free(ctx);\n" ++
+                    "}\n" ++
+                    "static JavaVM *zidl_java_vm = NULL;\n" ++
+                    "JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {\n" ++
+                    "    (void)reserved;\n" ++
+                    "    zidl_java_vm = vm;\n" ++
+                    "    return JNI_VERSION_1_6;\n" ++
+                    "}\n" ++
+                    "JNIEnv *zidl_java_get_env(void) {\n" ++
+                    "    JNIEnv *env = NULL;\n" ++
+                    "    if (zidl_java_vm == NULL) return NULL;\n" ++
+                    "    if ((*zidl_java_vm)->GetEnv(zidl_java_vm, (void **)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {\n" ++
+                    "        (*zidl_java_vm)->AttachCurrentThreadAsDaemon(zidl_java_vm, (void **)&env, NULL);\n" ++
+                    "    }\n" ++
+                    "    return env;\n" ++
+                    "}\n\n",
+            );
+        } else {
+            try self.write(
+                "/* Cross-file: the base module's own generated `_jni.c` (linked into\n" ++
+                    " * the same shared library) already defines these — see the\n" ++
+                    " * definitions this mirrors, above. */\n" ++
+                    "extern void *zidl_java_unbox(JNIEnv *env, jobject obj);\n" ++
+                    "extern char *zidl_java_strdup(const char *s);\n" ++
+                    "extern void zidl_java_release_listener_ctx(JNIEnv *env, void *listener_data);\n" ++
+                    "extern JNIEnv *zidl_java_get_env(void);\n\n",
+            );
+        }
 
         // Forward-declare every entity's box helper up front, so a call site
         // anywhere in the file can box a handle before that entity's own
         // bridge section (which defines the helper) is reached — IDL
-        // declaration order doesn't guarantee defs precede uses.
+        // declaration order doesn't guarantee defs precede uses. Non-static
+        // (external linkage): a *different* file's JNI bridge that imports
+        // this one and references one of these types needs to call it too —
+        // see the cross-file `extern` declarations below.
         var ifaces = std.ArrayListUnmanaged(*const ir.Interface).empty;
         defer ifaces.deinit(self.alloc);
         try collectInterfaces(self.alloc, spec.items, &ifaces);
@@ -3722,22 +3917,83 @@ const JniBridgeGenerator = struct {
             try entity_ifaces.append(self.alloc, iface);
             const c_name = try interface.prefixedCNameFromQualified(self.alloc, iface.qualified_name, self.opts.type_prefix);
             defer self.alloc.free(c_name);
-            try self.print("static jobject zidl_java_box_{s}(JNIEnv *env, void *handle);\n", .{c_name});
+            try self.print("jobject zidl_java_box_{s}(JNIEnv *env, void *handle);\n", .{c_name});
         }
         self.all_entity_ifaces = entity_ifaces.items;
         try self.write("\n");
+
+        // Cross-file references (e.g. `create_participant_ex` taking/returning
+        // `DDS::DomainParticipant`/`DDS::DomainParticipantQos`/
+        // `DDS::DomainParticipantListener` from a file that imports dcps.idl):
+        // dcps.idl's own JNI bridge (a *separate* translation unit, linked
+        // into the same shared library) already defines the box helper /
+        // struct marshaling / listener trampoline functions these need — as
+        // plain (non-`static`) external symbols, per the forward-declares
+        // above and their equivalents in `StructMarshalGenerator.emitSource`/
+        // `emitTrampoline`. This file only needs `extern`-style forward
+        // declarations for the specific ones it actually references, not a
+        // duplicate definition (which would either diverge from or,
+        // depending on staticness, conflict at link time with the original).
+        var cross_refs = CrossFileReferences{};
+        defer cross_refs.deinit(self.alloc);
+        // Scans every local interface, not just entity ones: a *listener*
+        // interface's own (possibly inherited) callback ops need the same
+        // box-helper/struct-marshaling/trampoline extern declarations for
+        // their cross-file param types (e.g. `DataWriterListenerEx`'s
+        // inherited `on_offered_deadline_missed(in DataWriter the_writer,
+        // ...)` needs `zidl_java_box_DDS_DataWriter`).
+        try self.collectCrossFileReferences(ifaces.items, &cross_refs);
+        if (cross_refs.entities.items.len > 0 or cross_refs.structs.items.len > 0 or cross_refs.listeners.items.len > 0) {
+            for (cross_refs.entities.items) |iface| {
+                const c_name = try interface.prefixedCNameFromQualified(self.alloc, iface.qualified_name, self.opts.type_prefix);
+                defer self.alloc.free(c_name);
+                try self.print("extern jobject zidl_java_box_{s}(JNIEnv *env, void *handle);\n", .{c_name});
+            }
+            for (cross_refs.structs.items) |td| {
+                const c_name = try interface.prefixedCNameFromQualified(self.alloc, ir.typeDeclQualifiedName(td), self.opts.type_prefix);
+                defer self.alloc.free(c_name);
+                try self.print(
+                    "extern void {[c]s}_from_java(JNIEnv *env, jobject obj, {[c]s} *out);\n" ++
+                        "extern void {[c]s}_fill_java(JNIEnv *env, const {[c]s} *in, jobject obj);\n",
+                    .{ .c = c_name },
+                );
+            }
+            for (cross_refs.listeners.items) |iface| {
+                try self.emitTrampolineExternDecls(iface);
+            }
+            try self.write("\n");
+        }
 
         // Entity-widening unbox dispatchers (`zidl_java_unbox_as_<TargetC>`)
         // — needed whenever a Java caller may pass a *more derived* concrete
         // entity where a base interface param is declared (e.g. a `Topic`
         // object where `TopicDescription` is declared, as in
-        // `create_datareader`). The C ABI boxes each interface *view* of an
-        // entity separately (see zzdds/docs/language-bindings.md's "uniform
-        // heap-boxing"; confirmed empirically — passing a raw `DDS_Topic`
-        // box where `DDS_TopicDescription` is expected reads garbage and
-        // crashes), so this can't just reinterpret the pointer; it must call
-        // the matching `<Derived>_as_<Target>` conversion dcps.h provides.
-        for (entity_ifaces.items) |target| {
+        // `create_datareader`; or, cross-file, a `zzdds::Topic` object where
+        // `DDS::Topic` is declared, as in the real ABI's `delete_topic`).
+        // The C ABI boxes each interface *view* of an entity separately (see
+        // zzdds/docs/language-bindings.md's "uniform heap-boxing"; confirmed
+        // empirically — passing a raw `DDS_Topic` box where
+        // `DDS_TopicDescription` is expected reads garbage and crashes), so
+        // this can't just reinterpret the pointer; it must call the matching
+        // `<Derived>_as_<Target>` conversion the real C ABI provides.
+        //
+        // `target` ranges over every LOCAL entity plus every (possibly
+        // cross-file) base any local entity has — not just `entity_ifaces`
+        // itself — since a cross-file base's own generated output has no
+        // idea this file's derived types exist at all, so it can't provide
+        // this dispatcher for us the way it does for `zidl_java_box_<C>`
+        // (see the cross-file `extern` declarations above): this file must
+        // define its own, kept `static` (unlike those) precisely because a
+        // *different* file deriving from the same cross-file base would
+        // need a different dispatcher body (checking against *its own*
+        // derived types) — a non-`static`, identically-named symbol would
+        // collide with that file's own definition at link time.
+        var widening_targets = std.ArrayListUnmanaged(*const ir.Interface).empty;
+        defer widening_targets.deinit(self.alloc);
+        try widening_targets.appendSlice(self.alloc, entity_ifaces.items);
+        for (entity_ifaces.items) |candidate| try self.collectBasesTransitively(candidate, &widening_targets);
+
+        for (widening_targets.items) |target| {
             var derived = std.ArrayListUnmanaged(*const ir.Interface).empty;
             defer derived.deinit(self.alloc);
             for (entity_ifaces.items) |candidate| {
@@ -3750,7 +4006,7 @@ const JniBridgeGenerator = struct {
             try self.print("static void *zidl_java_unbox_as_{s}(JNIEnv *env, jobject obj);\n", .{target_c});
         }
         try self.write("\n");
-        for (entity_ifaces.items) |target| {
+        for (widening_targets.items) |target| {
             var derived = std.ArrayListUnmanaged(*const ir.Interface).empty;
             defer derived.deinit(self.alloc);
             for (entity_ifaces.items) |candidate| {
@@ -3767,7 +4023,7 @@ const JniBridgeGenerator = struct {
         const stem_class = try stemToClassName(self.alloc, self.opts.input_stem);
         defer self.alloc.free(stem_class);
         self.stem_class = stem_class;
-        var struct_gen = StructMarshalGenerator{ .alloc = self.alloc, .opts = self.opts, .out = self.out, .stem_class = stem_class };
+        var struct_gen = StructMarshalGenerator{ .alloc = self.alloc, .opts = self.opts, .out = self.out, .stem_class = stem_class, .cross_file = self.cross_file };
         try struct_gen.emitSource(spec);
 
         try self.emitItems(spec.items);
@@ -3799,7 +4055,7 @@ const JniBridgeGenerator = struct {
 
         const is_callback = interface.isCallbackInterface(iface);
         if (!is_callback) {
-            try self.emitBoxHelper(iface.name, c_name);
+            try self.emitBoxHelper(iface, c_name);
         } else {
             try self.emitListenerTrampolines(iface);
         }
@@ -3835,6 +4091,13 @@ const JniBridgeGenerator = struct {
         // one — passed to `emitJniBridgeOp` so a `set_listener`-shaped op
         // (see there) can release whatever listener context was previously
         // installed on `self` before installing (or clearing) a new one.
+        // `get_listener` itself can *also* be inherited from a cross-file
+        // base independently of whichever op is currently being generated
+        // (see `resolveCallTarget`), so its own call target is resolved
+        // once here too, rather than assuming `{c_name}_get_listener` — the
+        // `create_participant_ex`-style ordinary-op fix alone doesn't cover
+        // this call, which lives in `emitJniBridgeOp`'s prep/post handling
+        // of a *different* op's `.callback` param.
         const self_get_listener_c: ?[]u8 = blk: {
             for (ops.items) |o| {
                 if (!std.mem.eql(u8, o.name, "get_listener")) continue;
@@ -3843,6 +4106,11 @@ const JniBridgeGenerator = struct {
             break :blk null;
         };
         defer if (self_get_listener_c) |s| self.alloc.free(s);
+        const self_get_listener_target: ?CallTarget = if (self_get_listener_c != null)
+            try self.resolveCallTarget(iface, c_name, "get_listener")
+        else
+            null;
+        defer if (self_get_listener_target) |t| t.deinit(self.alloc);
 
         // Callback (listener) interfaces get no "Java calls native" bridge
         // for their own ops/attrs at all — those are the callback methods
@@ -3851,7 +4119,7 @@ const JniBridgeGenerator = struct {
         if (!is_callback) {
             for (ops.items) |op| {
                 if (!opIsJniSupported(&op)) continue;
-                try self.emitJniBridgeOp(c_name, jni_class_prefix, &op, self_get_listener_c);
+                try self.emitJniBridgeOp(iface, c_name, jni_class_prefix, &op, self_get_listener_c, self_get_listener_target);
             }
             for (attrs.items) |attr| {
                 if (!attrIsJniSupported(&attr)) continue;
@@ -3883,6 +4151,25 @@ const JniBridgeGenerator = struct {
     /// classes rather than `target` itself — converts it via the matching
     /// `<Derived>_as_<Target>` C ABI function. Falls back to the raw handle
     /// unconverted if `obj` is some other/unknown runtime type.
+    /// Appends every base of `iface` (recursively, including cross-file
+    /// ones), deduped against what's already in `out`. Used to widen the
+    /// entity-widening dispatcher's target set beyond `entity_ifaces` itself
+    /// — see the `emitSource` call site.
+    fn collectBasesTransitively(self: *JniBridgeGenerator, iface: *const ir.Interface, out: *std.ArrayListUnmanaged(*const ir.Interface)) !void {
+        for (iface.bases) |base| {
+            if (base != .interface) continue;
+            var already = false;
+            for (out.items) |existing| {
+                if (existing == base.interface) {
+                    already = true;
+                    break;
+                }
+            }
+            if (!already) try out.append(self.alloc, base.interface);
+            try self.collectBasesTransitively(base.interface, out);
+        }
+    }
+
     fn emitUnboxAsDispatcher(self: *JniBridgeGenerator, target: *const ir.Interface, derived: []const *const ir.Interface) !void {
         const target_c = try interface.prefixedCNameFromQualified(self.alloc, target.qualified_name, self.opts.type_prefix);
         defer self.alloc.free(target_c);
@@ -3893,7 +4180,7 @@ const JniBridgeGenerator = struct {
             .{target_c},
         );
         for (derived, 0..) |d, i| {
-            const dbin = try self.implBinaryClassName(d.name);
+            const dbin = try self.implBinaryClassName(d);
             defer self.alloc.free(dbin);
 
             // dcps.h's `<X>_as_<Y>` conversions only exist for *direct*
@@ -3935,11 +4222,11 @@ const JniBridgeGenerator = struct {
     /// the resolved `jclass`/`jmethodID` in function-local statics (benign
     /// race: `FindClass`/`GetMethodID` are idempotent, so a redundant lookup
     /// from a concurrent first call is harmless).
-    fn emitBoxHelper(self: *JniBridgeGenerator, iface_name: []const u8, c_name: []const u8) !void {
-        const bin_class = try self.implBinaryClassName(iface_name);
+    fn emitBoxHelper(self: *JniBridgeGenerator, iface: *const ir.Interface, c_name: []const u8) !void {
+        const bin_class = try self.implBinaryClassName(iface);
         defer self.alloc.free(bin_class);
         try self.print(
-            "static jobject zidl_java_box_{s}(JNIEnv *env, void *handle) {{\n" ++
+            "jobject zidl_java_box_{s}(JNIEnv *env, void *handle) {{\n" ++
                 "    static jclass cls = NULL;\n" ++
                 "    static jmethodID ctor = NULL;\n" ++
                 "    if (handle == NULL) return NULL;\n" ++
@@ -3956,18 +4243,143 @@ const JniBridgeGenerator = struct {
         );
     }
 
-    /// JNI binary class name (slash-separated) for the concrete `*Impl` class
-    /// implementing IDL `interface <iface_name>`, e.g. `"com/example/DDS_TopicImpl"`.
-    fn implBinaryClassName(self: *JniBridgeGenerator, iface_name: []const u8) ![]u8 {
-        if (self.opts.java_package.len == 0) {
-            return std.fmt.allocPrint(self.alloc, "{s}{s}Impl", .{ self.opts.type_prefix, iface_name });
+    /// Distinct cross-file types referenced (as a param, return, or attr
+    /// type — anywhere `emitJniBridgeOp`/`emitListenerParamPrep` would need
+    /// their marshaling machinery) across every local entity interface's
+    /// flattened ops/attrs. See `collectCrossFileReferences`.
+    const CrossFileReferences = struct {
+        entities: std.ArrayListUnmanaged(*const ir.Interface) = .empty,
+        structs: std.ArrayListUnmanaged(ir.TypeDecl) = .empty,
+        listeners: std.ArrayListUnmanaged(*const ir.Interface) = .empty,
+
+        fn deinit(self: *CrossFileReferences, alloc: std.mem.Allocator) void {
+            self.entities.deinit(alloc);
+            self.structs.deinit(alloc);
+            self.listeners.deinit(alloc);
         }
-        const pkg_path = try self.alloc.dupe(u8, self.opts.java_package);
+    };
+
+    /// Walks every op/attr (including inherited, via `collectMembers`) of
+    /// every interface in `local_entity_ifaces` — both param and
+    /// return/attr types — bucketing each distinct cross-file (not itself in
+    /// `local_entity_ifaces`) entity/struct/listener reference found. See the
+    /// `emitSource` call site for why these need `extern` forward
+    /// declarations: dcps.idl's own (now non-`static`) box helper / struct
+    /// marshaling / listener trampoline definitions are a *separate*
+    /// translation unit this file doesn't otherwise see a declaration for.
+    fn collectCrossFileReferences(
+        self: *JniBridgeGenerator,
+        local_entity_ifaces: []const *const ir.Interface,
+        out: *CrossFileReferences,
+    ) !void {
+        const isLocalIface = struct {
+            fn call(ifaces: []const *const ir.Interface, target: *const ir.Interface) bool {
+                for (ifaces) |i| if (i == target) return true;
+                return false;
+            }
+        }.call;
+        for (local_entity_ifaces) |iface| {
+            var ops = std.ArrayListUnmanaged(ir.Operation).empty;
+            defer ops.deinit(self.alloc);
+            var attrs = std.ArrayListUnmanaged(ir.Attribute).empty;
+            defer attrs.deinit(self.alloc);
+            try self.collectMembers(iface, &ops, &attrs);
+
+            var candidates = std.ArrayListUnmanaged(ir.TypeRef).empty;
+            defer candidates.deinit(self.alloc);
+            for (ops.items) |op| {
+                if (op.return_type) |rt| try candidates.append(self.alloc, rt);
+                for (op.params) |p| try candidates.append(self.alloc, p.type_ref);
+            }
+            for (attrs.items) |attr| try candidates.append(self.alloc, attr.type_ref);
+
+            for (candidates.items) |tr| {
+                switch (classifyTypeRef(tr)) {
+                    .entity => {
+                        const target = resolveToNamedDecl(tr).interface;
+                        if (isLocalIface(local_entity_ifaces, target)) continue;
+                        if (isLocalIface(out.entities.items, target)) continue;
+                        try out.entities.append(self.alloc, target);
+                    },
+                    .callback => {
+                        const target = resolveToNamedDecl(tr).interface;
+                        if (isLocalIface(local_entity_ifaces, target)) continue; // never true (callbacks aren't entities), kept for symmetry
+                        if (self.cross_file.lookup(target.qualified_name) == null) continue;
+                        if (isLocalIface(out.listeners.items, target)) continue;
+                        try out.listeners.append(self.alloc, target);
+                    },
+                    .value_struct => {
+                        // `.value_struct` also covers a bare `sequence`/
+                        // `fixed_pt`/`map` type ref, or a typedef chain that
+                        // bottoms out at one (e.g. `typedef sequence<string>
+                        // StringSeq;`) — those have no named decl to resolve
+                        // to and never get real JNI marshaling generated for
+                        // them anyway (see
+                        // `paramIsSupportedValueStruct`/`opIsJniSupported`),
+                        // so skip via the non-panicking resolver.
+                        const td = tryResolveToNamedDecl(tr) orelse continue;
+                        if (self.cross_file.lookup(ir.typeDeclQualifiedName(td)) == null) continue;
+                        var already = false;
+                        for (out.structs.items) |existing| {
+                            if (std.mem.eql(u8, ir.typeDeclQualifiedName(existing), ir.typeDeclQualifiedName(td))) {
+                                already = true;
+                                break;
+                            }
+                        }
+                        if (!already) try out.structs.append(self.alloc, td);
+                    },
+                    else => {},
+                }
+            }
+        }
+    }
+
+    /// `extern`-declares every `zidl_java_cb_<ListenerC>_<op>` trampoline
+    /// function `iface` (a cross-file `@callback` interface) has — matching
+    /// `emitTrampoline`'s real signature exactly, since `emitListenerParamPrep`
+    /// assigns these directly into a C listener struct's function-pointer
+    /// fields (a mismatched signature would be undefined behavior, not just
+    /// a link error).
+    fn emitTrampolineExternDecls(self: *JniBridgeGenerator, iface: *const ir.Interface) !void {
+        var ops = std.ArrayListUnmanaged(ir.Operation).empty;
+        defer ops.deinit(self.alloc);
+        var attrs = std.ArrayListUnmanaged(ir.Attribute).empty;
+        defer attrs.deinit(self.alloc);
+        try self.collectMembers(iface, &ops, &attrs);
+        const listener_c = try interface.prefixedCNameFromQualified(self.alloc, iface.qualified_name, self.opts.type_prefix);
+        defer self.alloc.free(listener_c);
+        for (ops.items) |op| {
+            try self.print("extern void zidl_java_cb_{[lc]s}_{[op]s}(", .{ .lc = listener_c, .op = op.name });
+            for (op.params) |p| {
+                const pc = try self.paramTypeC(p);
+                defer self.alloc.free(pc);
+                try self.print("{s} {s}, ", .{ pc, p.name });
+            }
+            try self.write("void *listener_data);\n");
+        }
+    }
+
+    /// JNI binary class name (slash-separated) for the concrete `*Impl` class
+    /// implementing IDL `interface iface`, e.g. `"com/example/DDS_TopicImpl"`.
+    /// If `iface` is a cross-file import (see `CrossFileResolver`), uses the
+    /// *declaring* file's Java package instead of this file's own — e.g. a
+    /// `DDS::DomainParticipant` referenced from a file that imports dcps.idl
+    /// resolves against dcps.idl's own package, not the current file's.
+    /// (Entity `*Impl` classes are always flat/unqualified by stem class —
+    /// unlike data types and interface *types*, they were never nested under
+    /// one, so no `CrossFileResolver.Entry.stem_class` is needed here.)
+    fn implBinaryClassName(self: *JniBridgeGenerator, iface: *const ir.Interface) ![]u8 {
+        const entry = self.cross_file.lookup(iface.qualified_name);
+        const package = if (entry) |e| e.package else self.opts.java_package;
+        if (package.len == 0) {
+            return std.fmt.allocPrint(self.alloc, "{s}{s}Impl", .{ self.opts.type_prefix, iface.name });
+        }
+        const pkg_path = try self.alloc.dupe(u8, package);
         defer self.alloc.free(pkg_path);
         for (pkg_path) |*ch| if (ch.* == '.') {
             ch.* = '/';
         };
-        return std.fmt.allocPrint(self.alloc, "{s}/{s}{s}Impl", .{ pkg_path, self.opts.type_prefix, iface_name });
+        return std.fmt.allocPrint(self.alloc, "{s}/{s}{s}Impl", .{ pkg_path, self.opts.type_prefix, iface.name });
     }
 
     /// Emits one `zidl_java_cb_<ListenerCName>_<op>` native trampoline per
@@ -3996,7 +4408,7 @@ const JniBridgeGenerator = struct {
     /// zzdds.idl's `on_reliable_reader_ready(in InstanceHandle_t, in
     /// boolean)` — two scalars, no entity at all).
     fn emitTrampoline(self: *JniBridgeGenerator, listener_c: []const u8, op: *const ir.Operation) !void {
-        try self.print("static void zidl_java_cb_{[lc]s}_{[op]s}(", .{ .lc = listener_c, .op = op.name });
+        try self.print("void zidl_java_cb_{[lc]s}_{[op]s}(", .{ .lc = listener_c, .op = op.name });
         for (op.params, 0..) |p, i| {
             if (i > 0) try self.write(", ");
             const pc = try self.paramTypeC(p);
@@ -4018,7 +4430,7 @@ const JniBridgeGenerator = struct {
                 .entity => {
                     const ec = try self.typeRefToC(p.type_ref);
                     defer self.alloc.free(ec);
-                    const ebin = try dataTypeBinaryClassName(self.alloc, self.opts, self.stem_class, ir.typeDeclQualifiedName(resolveToNamedDecl(p.type_ref)));
+                    const ebin = try dataTypeBinaryClassName(self.alloc, self.opts, self.stem_class, self.cross_file, ir.typeDeclQualifiedName(resolveToNamedDecl(p.type_ref)));
                     defer self.alloc.free(ebin);
                     try self.print("    jobject _a{d} = zidl_java_box_{s}(env, p{d});\n", .{ i, ec, i });
                     const _d0 = try std.fmt.allocPrint(self.alloc, "L{s};", .{ebin});
@@ -4028,7 +4440,7 @@ const JniBridgeGenerator = struct {
                 .value_struct => {
                     const sc = try self.typeRefToC(p.type_ref);
                     defer self.alloc.free(sc);
-                    const sbin = try dataTypeBinaryClassName(self.alloc, self.opts, self.stem_class, ir.typeDeclQualifiedName(resolveToNamedDecl(p.type_ref)));
+                    const sbin = try dataTypeBinaryClassName(self.alloc, self.opts, self.stem_class, self.cross_file, ir.typeDeclQualifiedName(resolveToNamedDecl(p.type_ref)));
                     defer self.alloc.free(sbin);
                     try self.print(
                         "    jclass _c{[i]d} = (*env)->FindClass(env, \"{[sbin]s}\");\n" ++
@@ -4110,12 +4522,81 @@ const JniBridgeGenerator = struct {
         );
     }
 
+    const CallTarget = struct {
+        c_name: []const u8,
+        c_name_owned: ?[]u8,
+        self_expr: []const u8,
+        self_expr_owned: ?[]u8,
+
+        fn deinit(self: CallTarget, alloc: std.mem.Allocator) void {
+            if (self.c_name_owned) |n| alloc.free(n);
+            if (self.self_expr_owned) |n| alloc.free(n);
+        }
+    };
+
+    /// Resolves the C symbol name and `self` expression to call `op_name`
+    /// on `iface`'s handle (available in the generated JNI function as the
+    /// raw `(void *)(intptr_t)ptr`) — same-file case (the common one):
+    /// `default_c_name` on the raw handle, unchanged. Cross-file inherited
+    /// case: the *declaring* interface's own C name, on `self` converted to
+    /// that type first via whatever chain of `<X>_as_<Y>` conversions
+    /// `findConversionPath` finds. See `findDeclaringInterface`'s doc for
+    /// why same-file inheritance doesn't need this (the real C ABI already
+    /// re-exports the op under `iface`'s own name) but cross-file
+    /// inheritance does — used both for the op actually being bridged
+    /// (`emitJniBridgeOp`) and for a `set_listener`-shaped op's own
+    /// `get_listener` call (`emitListenerParamPrep`'s callers), since that
+    /// can *also* be inherited cross-file independently of whichever op is
+    /// currently being generated.
+    fn resolveCallTarget(self: *JniBridgeGenerator, iface: *const ir.Interface, default_c_name: []const u8, op_name: []const u8) !CallTarget {
+        const not_needed = CallTarget{
+            .c_name = default_c_name,
+            .c_name_owned = null,
+            .self_expr = "(void *)(intptr_t)ptr",
+            .self_expr_owned = null,
+        };
+        const decl_iface = findDeclaringInterface(iface, op_name) orelse return not_needed;
+        if (decl_iface == iface or self.cross_file.lookup(decl_iface.qualified_name) == null) return not_needed;
+
+        const decl_c_name = try interface.prefixedCNameFromQualified(self.alloc, decl_iface.qualified_name, self.opts.type_prefix);
+        errdefer self.alloc.free(decl_c_name);
+
+        var path = std.ArrayListUnmanaged(*const ir.Interface).empty;
+        defer path.deinit(self.alloc);
+        _ = try findConversionPath(self.alloc, iface, decl_iface, &path);
+
+        var expr = std.ArrayListUnmanaged(u8).empty;
+        defer expr.deinit(self.alloc);
+        try expr.appendSlice(self.alloc, "(void *)(intptr_t)ptr");
+        var from = iface;
+        for (path.items) |to| {
+            const from_c = try interface.prefixedCNameFromQualified(self.alloc, from.qualified_name, self.opts.type_prefix);
+            defer self.alloc.free(from_c);
+            const to_c = try interface.prefixedCNameFromQualified(self.alloc, to.qualified_name, self.opts.type_prefix);
+            defer self.alloc.free(to_c);
+            const wrapped = try std.fmt.allocPrint(self.alloc, "{s}_as_{s}({s})", .{ from_c, to_c, expr.items });
+            expr.clearRetainingCapacity();
+            try expr.appendSlice(self.alloc, wrapped);
+            self.alloc.free(wrapped);
+            from = to;
+        }
+        const self_expr_owned = try expr.toOwnedSlice(self.alloc);
+        return .{
+            .c_name = decl_c_name,
+            .c_name_owned = decl_c_name,
+            .self_expr = self_expr_owned,
+            .self_expr_owned = self_expr_owned,
+        };
+    }
+
     fn emitJniBridgeOp(
         self: *JniBridgeGenerator,
+        iface: *const ir.Interface,
         c_name: []const u8,
         jni_class_prefix: []const u8,
         op: *const ir.Operation,
         self_get_listener_c: ?[]const u8,
+        self_get_listener_target: ?CallTarget,
     ) !void {
         const jni_ret = if (op.return_type) |rt| jniType(rt) else "void";
         const native_name = try std.fmt.allocPrint(self.alloc, "n_{s}", .{op.name});
@@ -4131,20 +4612,62 @@ const JniBridgeGenerator = struct {
         }
         try self.write(")\n{\n    (void)self;\n");
 
+        // `op` may be inherited from a *cross-file* base rather than
+        // declared directly on `iface` (or a same-file base) — see
+        // `resolveCallTarget`'s doc for why that specifically needs a `self`
+        // conversion + a different C symbol.
+        const call_target = try self.resolveCallTarget(iface, c_name, op.name);
+        defer call_target.deinit(self.alloc);
+        const call_c_name = call_target.c_name;
+        const self_expr = call_target.self_expr;
+
         const ret_is_entity = if (op.return_type) |rt| classifyTypeRef(rt) == .entity else false;
+        const ret_c_name: ?[]u8 = if (ret_is_entity) try self.typeRefToC(op.return_type.?) else null;
+        defer if (ret_c_name) |n| self.alloc.free(n);
+
+        // `.callback` params needing a post-call listener_data readback —
+        // see the post-call block below for why a *readback* (comparing
+        // what `get_listener()` now reports against what we built) rather
+        // than trusting the return code: it's the only way to correctly
+        // handle both directions of failure —
+        //   (a) the call fails outright and the newly-built context here is
+        //       never installed anywhere, leaking its native context *and*
+        //       JNI global ref forever unless we free it ourselves, and
+        //   (b) (self-replace only) the call is rejected and the entity's
+        //       real, still-live listener is unchanged: freeing the *old*
+        //       context unconditionally (e.g. on any return-code-based
+        //       "looks like it worked" heuristic) would leave that live
+        //       listener pointing at freed memory the next time it fires.
+        // Both are real bugs found via review, not by any test in this
+        // backend's own suite — no dcps.idl op modeled here actually fails
+        // `set_listener`/an entity-creating op at runtime.
+        const ListenerParam = struct { name: []const u8, listener_c: []const u8 };
+        var self_listener_params = std.ArrayListUnmanaged(ListenerParam).empty;
+        defer {
+            for (self_listener_params.items) |lp| {
+                self.alloc.free(lp.name);
+                self.alloc.free(lp.listener_c);
+            }
+            self_listener_params.deinit(self.alloc);
+        }
+        var created_listener_params = std.ArrayListUnmanaged(ListenerParam).empty;
+        defer {
+            for (created_listener_params.items) |lp| {
+                self.alloc.free(lp.name);
+                self.alloc.free(lp.listener_c);
+            }
+            created_listener_params.deinit(self.alloc);
+        }
 
         // Names of `_old_<param>` locals captured below (a listener struct
         // read from `<Entity>_get_listener()` *before* this op's real call
         // either replaces or invalidates it) that must be released — but
         // only after that call reports success (see the post-call block).
-        // Capturing early and freeing late (rather than freeing immediately,
-        // as an earlier version of this generator did) matters because a
-        // rejected `set_listener`/`delete_*` call leaves the entity's actual
-        // listener unchanged: freeing eagerly would leave that live,
-        // unchanged listener pointing at freed memory the next time it
-        // fires, a use-after-free found via review rather than by any test
-        // here (no dcps.idl op currently modeled in this backend's own test
-        // suite actually fails `set_listener`/`delete_*` at runtime).
+        // Used only by the `delete_` case: unlike `set_listener`/create ops
+        // (handled via `self_listener_params`/`created_listener_params`
+        // above), a deleted entity's handle is invalid afterward, so there
+        // is no live entity left to read back from — the return code is the
+        // only signal available.
         var pending_releases = std.ArrayListUnmanaged([]const u8).empty;
         defer {
             for (pending_releases.items) |n| self.alloc.free(n);
@@ -4164,19 +4687,44 @@ const JniBridgeGenerator = struct {
                     try self.print("    void *_n_{s} = {s}(env, {s});\n", .{ p.name, unbox_fn, p.name });
                 },
                 .callback => {
-                    // Only a self-referential `set_listener`-style op (one
-                    // that doesn't return an entity) can have an "old"
-                    // listener worth releasing — a `create_*` op's listener
-                    // param is being installed on a brand-new entity that
-                    // can't have had one already.
+                    // A self-referential `set_listener`-style op (one that
+                    // doesn't return an entity) may have an "old" listener
+                    // worth releasing on success — capture it now, before
+                    // the call either replaces or (if rejected) leaves it
+                    // untouched. A `create_*` op's listener param is being
+                    // installed on a brand-new entity that can't have had
+                    // one already, so there's nothing to capture — only the
+                    // "did installation actually happen" check applies,
+                    // deferred to post-call since it needs `_h`.
                     if (!ret_is_entity) {
                         if (self_get_listener_c) |lc| {
-                            const var_name = try std.fmt.allocPrint(self.alloc, "_old_{s}", .{p.name});
-                            try pending_releases.append(self.alloc, var_name);
+                            const glt = self_get_listener_target.?;
                             try self.print(
-                                "    {[lc]s} {[vn]s} = {[sc]s}_get_listener((void *)(intptr_t)ptr);\n",
-                                .{ .lc = lc, .vn = var_name, .sc = c_name },
+                                "    {[lc]s} _old_{[name]s} = {[sc]s}_get_listener({[se]s});\n",
+                                .{ .lc = lc, .name = p.name, .sc = glt.c_name, .se = glt.self_expr },
                             );
+                            try self_listener_params.append(self.alloc, .{
+                                .name = try self.alloc.dupe(u8, p.name),
+                                .listener_c = try self.alloc.dupe(u8, lc),
+                            });
+                        }
+                    } else {
+                        const target = resolveToNamedDecl(op.return_type.?).interface;
+                        var t_ops = std.ArrayListUnmanaged(ir.Operation).empty;
+                        defer t_ops.deinit(self.alloc);
+                        var t_attrs = std.ArrayListUnmanaged(ir.Attribute).empty;
+                        defer t_attrs.deinit(self.alloc);
+                        try self.collectMembers(target, &t_ops, &t_attrs);
+                        const get_listener_op = for (t_ops.items) |o| {
+                            if (std.mem.eql(u8, o.name, "get_listener")) break o;
+                        } else null;
+                        if (get_listener_op) |glo| {
+                            if (glo.return_type) |lrt| {
+                                try created_listener_params.append(self.alloc, .{
+                                    .name = try self.alloc.dupe(u8, p.name),
+                                    .listener_c = try self.typeRefToC(lrt),
+                                });
+                            }
                         }
                     }
                     try self.emitListenerParamPrep(&p);
@@ -4246,8 +4794,6 @@ const JniBridgeGenerator = struct {
             }
         }
 
-        const ret_c_name: ?[]u8 = if (ret_is_entity) try self.typeRefToC(op.return_type.?) else null;
-        defer if (ret_c_name) |n| self.alloc.free(n);
         const ret_is_string = if (op.return_type) |rt| classifyTypeRef(rt) == .string else false;
 
         // Non-entity, non-void returns are captured in `_ret` rather than
@@ -4262,13 +4808,13 @@ const JniBridgeGenerator = struct {
         // *param* used to be) and converted via `NewStringUTF` at the return
         // below.
         if (ret_is_entity) {
-            try self.print("    void *_h = (void *){s}_{s}((void *)(intptr_t)ptr", .{ c_name, op.name });
+            try self.print("    void *_h = (void *){s}_{s}({s}", .{ call_c_name, op.name, self_expr });
         } else if (ret_is_string) {
-            try self.print("    const char *_rets = (const char *){s}_{s}((void *)(intptr_t)ptr", .{ c_name, op.name });
+            try self.print("    const char *_rets = (const char *){s}_{s}({s}", .{ call_c_name, op.name, self_expr });
         } else if (op.return_type != null) {
-            try self.print("    {s} _ret = ({s}){s}_{s}((void *)(intptr_t)ptr", .{ jni_ret, jni_ret, c_name, op.name });
+            try self.print("    {s} _ret = ({s}){s}_{s}({s}", .{ jni_ret, jni_ret, call_c_name, op.name, self_expr });
         } else {
-            try self.print("    {s}_{s}((void *)(intptr_t)ptr", .{ c_name, op.name });
+            try self.print("    {s}_{s}({s}", .{ call_c_name, op.name, self_expr });
         }
         for (op.params) |p| {
             switch (classifyTypeRef(p.type_ref)) {
@@ -4288,24 +4834,52 @@ const JniBridgeGenerator = struct {
         }
         try self.write(");\n");
 
-        // Free whatever `_old_<param>` listener contexts were captured above
-        // (`set_listener`/`delete_<entity>` prep, earlier in this function),
-        // now that the real call's outcome is known. `0` is `RETCODE_OK` —
-        // this generator already assumes a dcps.idl-shaped `ReturnCode_t`
-        // elsewhere (e.g. the `delete_` name-prefix match above); a return
-        // type this can't check success against (void, an entity, a string —
-        // none of which a real `set_listener`/`delete_*` op actually has)
-        // falls back to releasing unconditionally, since there's no signal
-        // to gate on either way.
-        if (pending_releases.items.len > 0) {
-            const success_var: ?[]const u8 = if (op.return_type != null and !ret_is_entity and !ret_is_string) "_ret" else null;
-            for (pending_releases.items) |vn| {
-                if (success_var) |sv| {
-                    try self.print("    if ({[sv]s} == 0) zidl_java_release_listener_ctx(env, {[vn]s}.listener_data);\n", .{ .sv = sv, .vn = vn });
-                } else {
-                    try self.print("    zidl_java_release_listener_ctx(env, {[vn]s}.listener_data);\n", .{ .vn = vn });
-                }
-            }
+        // Free whatever `_old_<param>` listener contexts `delete_<entity>`
+        // prep (above) captured before deleting the entity, now that the
+        // delete call's outcome is known. `0` is `RETCODE_OK` — this
+        // generator already assumes a dcps.idl-shaped `ReturnCode_t` for
+        // `delete_*` ops (see the name-prefix match above); the deleted
+        // entity's handle is invalid after the call either way, so unlike
+        // `set_listener`/create ops (below) there is no live entity left to
+        // read back from — the return code is the only signal available.
+        for (pending_releases.items) |vn| {
+            try self.print("    if (_ret == 0) zidl_java_release_listener_ctx(env, {[vn]s}.listener_data);\n", .{ .vn = vn });
+        }
+
+        // `set_listener`-shaped ops: the entity is still alive and its
+        // handle still valid either way, so read its *actual* current
+        // listener back and compare — this correctly frees whichever
+        // context (old or newly-built) is *not* the one now installed,
+        // regardless of what the return code says, and regardless of
+        // whether `{name}` was NULL (a clear request) or a real listener.
+        for (self_listener_params.items) |lp| {
+            const glt = self_get_listener_target.?;
+            try self.print(
+                "    {{ {[lc]s} _now_{[name]s} = {[sc]s}_get_listener({[se]s});\n" ++
+                    "       if (_p_{[name]s} != NULL) {{\n" ++
+                    "           if (_now_{[name]s}.listener_data == _c_{[name]s}.listener_data) zidl_java_release_listener_ctx(env, _old_{[name]s}.listener_data);\n" ++
+                    "           else zidl_java_release_listener_ctx(env, _c_{[name]s}.listener_data);\n" ++
+                    "       }} else if (_now_{[name]s}.listener_data == NULL) {{\n" ++
+                    "           zidl_java_release_listener_ctx(env, _old_{[name]s}.listener_data);\n" ++
+                    "       }} }}\n",
+                .{ .lc = lp.listener_c, .name = lp.name, .sc = glt.c_name, .se = glt.self_expr },
+            );
+        }
+
+        // `create_*`-shaped ops: the new entity has no "old" listener to
+        // worry about, only whether ours actually got installed — a failed
+        // create still returns *some* boxable handle in this ABI convention
+        // (a "nil" sentinel entity, not literal NULL — see zzdds's
+        // `nil.zig`), so checking `_h == NULL` would never catch this;
+        // reading the new entity's own listener back and comparing does.
+        for (created_listener_params.items) |lp| {
+            try self.print(
+                "    if (_p_{[name]s} != NULL) {{\n" ++
+                    "        {[lc]s} _now_{[name]s} = {[rc]s}_get_listener(_h);\n" ++
+                    "        if (_now_{[name]s}.listener_data != _c_{[name]s}.listener_data) zidl_java_release_listener_ctx(env, _c_{[name]s}.listener_data);\n" ++
+                    "    }}\n",
+                .{ .lc = lp.listener_c, .name = lp.name, .rc = ret_c_name.? },
+            );
         }
 
         // Release any jstring params converted to a native `const char *`
@@ -4664,6 +5238,23 @@ fn resolveToNamedDecl(tr: ir.TypeRef) ir.TypeDecl {
     };
 }
 
+/// Like `resolveToNamedDecl`, but returns `null` instead of `unreachable`
+/// when the typedef chain bottoms out at a bare `sequence`/`fixed_pt`/`map`
+/// (e.g. `typedef sequence<string> StringSeq;`) rather than an actual named
+/// struct/enum/etc decl — those classify as `.value_struct` too (see
+/// `classifyTypeDecl`) but have no `TypeDecl` to resolve to. Callers that
+/// only reach here for a `.value_struct`-classified type ref (which can
+/// legitimately be one of these) should use this, not `resolveToNamedDecl`.
+fn tryResolveToNamedDecl(tr: ir.TypeRef) ?ir.TypeDecl {
+    return switch (tr) {
+        .named => |td| switch (td) {
+            .typedef => |t| tryResolveToNamedDecl(t.type_ref),
+            else => td,
+        },
+        else => null,
+    };
+}
+
 /// `Get`/`Set`/`Call` JNI accessor name fragment for a Java primitive, e.g.
 /// `Int` in `GetIntField`/`CallIntMethod`/`GetIntArrayRegion`.
 fn jniAccessorName(b: ast.BaseTypeSpec) []const u8 {
@@ -4683,7 +5274,7 @@ fn jniAccessorName(b: ast.BaseTypeSpec) []const u8 {
 /// JVM type descriptor for `tr` (as it appears in a Java data-type field —
 /// struct/enum, not an interface/entity), e.g. `I`, `Ljava/lang/String;`,
 /// `Ljava/util/List;` (raw — generics don't appear in descriptors).
-fn javaFieldDescriptor(alloc: std.mem.Allocator, opts: interface.Options, stem_class: []const u8, tr: ir.TypeRef) ![]u8 {
+fn javaFieldDescriptor(alloc: std.mem.Allocator, opts: interface.Options, stem_class: []const u8, cross_file: CrossFileResolver, tr: ir.TypeRef) ![]u8 {
     return switch (tr) {
         .base => |b| alloc.dupe(u8, &[_]u8{jniTypeDescriptorChar(b)}),
         .string, .wstring => alloc.dupe(u8, "Ljava/lang/String;"),
@@ -4692,9 +5283,9 @@ fn javaFieldDescriptor(alloc: std.mem.Allocator, opts: interface.Options, stem_c
             // Typedefs are transparent in Java (see `typeRefToJava`/`jniType`)
             // — a `typedef long InstanceHandle_t` field is a plain `int`
             // (`I`), not a reference type, even though it's a `.named` node.
-            .typedef => |t| javaFieldDescriptor(alloc, opts, stem_class, t.type_ref),
+            .typedef => |t| javaFieldDescriptor(alloc, opts, stem_class, cross_file, t.type_ref),
             else => blk: {
-                const bin = try dataTypeBinaryClassName(alloc, opts, stem_class, ir.typeDeclQualifiedName(td));
+                const bin = try dataTypeBinaryClassName(alloc, opts, stem_class, cross_file, ir.typeDeclQualifiedName(td));
                 defer alloc.free(bin);
                 break :blk std.fmt.allocPrint(alloc, "L{s};", .{bin});
             },
@@ -4723,14 +5314,23 @@ fn jniTypeDescriptorChar(b: ast.BaseTypeSpec) u8 {
 /// `--java-package`). This is the `$`-nested *internal* form `FindClass`/
 /// method descriptors require — distinct from `qualNameToJavaStatic`'s
 /// dotted *source-level* name, which only works inside the same file.
-fn dataTypeBinaryClassName(alloc: std.mem.Allocator, opts: interface.Options, stem_class: []const u8, qualified_name: []const u8) ![]u8 {
+///
+/// If `qualified_name`'s top-level module is a cross-file import (see
+/// `CrossFileResolver`), uses the *declaring* file's stem class and Java
+/// package instead of `stem_class`/`opts.java_package` — e.g. `DDS::TopicQos`
+/// referenced from a file that imports dcps.idl resolves against dcps.idl's
+/// own stem class/package, not the current file's.
+fn dataTypeBinaryClassName(alloc: std.mem.Allocator, opts: interface.Options, stem_class: []const u8, cross_file: CrossFileResolver, qualified_name: []const u8) ![]u8 {
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(alloc);
-    if (opts.java_package.len > 0) {
-        for (opts.java_package) |ch| try buf.append(alloc, if (ch == '.') '/' else ch);
+    const entry = cross_file.lookup(qualified_name);
+    const eff_package = if (entry) |e| e.package else opts.java_package;
+    const eff_stem_class = if (entry) |e| e.stem_class else stem_class;
+    if (eff_package.len > 0) {
+        for (eff_package) |ch| try buf.append(alloc, if (ch == '.') '/' else ch);
         try buf.append(alloc, '/');
     }
-    try buf.appendSlice(alloc, stem_class);
+    try buf.appendSlice(alloc, eff_stem_class);
     try buf.append(alloc, '$');
     var i: usize = 0;
     while (i < qualified_name.len) {
@@ -4763,6 +5363,9 @@ const StructMarshalGenerator = struct {
     opts: interface.Options,
     out: *std.ArrayList(u8),
     stem_class: []const u8,
+    /// See `CrossFileResolver`. Default-empty: every type reference resolves
+    /// as local to the current file, today's behavior.
+    cross_file: CrossFileResolver = .{},
 
     fn write(self: *StructMarshalGenerator, s: []const u8) !void {
         try self.out.appendSlice(self.alloc, s);
@@ -4779,11 +5382,11 @@ const StructMarshalGenerator = struct {
     }
 
     fn binClass(self: *StructMarshalGenerator, qualified_name: []const u8) ![]u8 {
-        return dataTypeBinaryClassName(self.alloc, self.opts, self.stem_class, qualified_name);
+        return dataTypeBinaryClassName(self.alloc, self.opts, self.stem_class, self.cross_file, qualified_name);
     }
 
     fn descriptor(self: *StructMarshalGenerator, tr: ir.TypeRef) ![]u8 {
-        return javaFieldDescriptor(self.alloc, self.opts, self.stem_class, tr);
+        return javaFieldDescriptor(self.alloc, self.opts, self.stem_class, self.cross_file, tr);
     }
 
     fn emitSource(self: *StructMarshalGenerator, spec: *const ir.Spec) !void {
@@ -4797,8 +5400,8 @@ const StructMarshalGenerator = struct {
             const c_name = try self.cName(s.qualified_name);
             defer self.alloc.free(c_name);
             try self.print(
-                "static void {s}_from_java(JNIEnv *env, jobject obj, {s} *out);\n" ++
-                    "static void {s}_fill_java(JNIEnv *env, const {s} *in, jobject obj);\n",
+                "void {s}_from_java(JNIEnv *env, jobject obj, {s} *out);\n" ++
+                    "void {s}_fill_java(JNIEnv *env, const {s} *in, jobject obj);\n",
                 .{ c_name, c_name, c_name, c_name },
             );
         }
@@ -4810,12 +5413,12 @@ const StructMarshalGenerator = struct {
         const c_name = try self.cName(s.qualified_name);
         defer self.alloc.free(c_name);
 
-        try self.print("static void {s}_from_java(JNIEnv *env, jobject obj, {s} *out) {{\n", .{ c_name, c_name });
+        try self.print("void {s}_from_java(JNIEnv *env, jobject obj, {s} *out) {{\n", .{ c_name, c_name });
         try self.write("    jclass cls = (*env)->GetObjectClass(env, obj);\n");
         for (s.members) |m| try self.emitMemberFromJava(&m);
         try self.write("}\n\n");
 
-        try self.print("static void {s}_fill_java(JNIEnv *env, const {s} *in, jobject obj) {{\n", .{ c_name, c_name });
+        try self.print("void {s}_fill_java(JNIEnv *env, const {s} *in, jobject obj) {{\n", .{ c_name, c_name });
         try self.write("    jclass cls = (*env)->GetObjectClass(env, obj);\n");
         for (s.members) |m| try self.emitMemberFillJava(&m);
         try self.write("}\n\n");
@@ -5137,7 +5740,17 @@ fn jniType(tr: ir.TypeRef) []const u8 {
 /// C type for Java-exported IDL primitive (used in extern declarations for JNI bridge).
 fn baseToCJava(b: ast.BaseTypeSpec) []const u8 {
     return switch (b) {
-        .boolean => "uint8_t",
+        // Matches the C backend's own `boolean` → `bool` mapping (see
+        // c.zig) — needed for exact type match, not just same-size
+        // compatibility: a listener trampoline gets assigned directly into
+        // a real C ABI listener struct's function-pointer field (e.g.
+        // `on_reliable_reader_ready(DDS_InstanceHandle_t, bool, void*)`),
+        // and C requires function *pointer* types to match exactly, unlike
+        // a plain struct-field assignment (which allows the implicit
+        // conversion a `uint8_t`-typed trampoline param would need here) —
+        // this mismatch was otherwise invisible because most `boolean`
+        // fields are QoS struct members, not trampoline params.
+        .boolean => "bool",
         .char => "char",
         .wchar => "uint16_t",
         .octet, .uint8 => "uint8_t",
@@ -5281,6 +5894,9 @@ pub fn generateSplitFiles(
     const class_name = try stemToClassName(alloc, opts.input_stem);
     defer alloc.free(class_name);
 
+    var cross_file = try CrossFileResolver.build(alloc, spec, opts);
+    defer cross_file.deinit(alloc);
+
     // Generate CdrUtils file.
     if (!opts.no_typesupport) {
         var utils_content = std.ArrayList(u8).empty;
@@ -5305,7 +5921,7 @@ pub fn generateSplitFiles(
         var content = std.ArrayList(u8).empty;
         defer content.deinit(alloc);
 
-        var gen = Generator{ .alloc = alloc, .opts = opts, .out = &content, .top_level = true };
+        var gen = Generator{ .alloc = alloc, .opts = opts, .out = &content, .top_level = true, .cross_file = cross_file };
 
         // File header.
         try gen.print("// Generated by zidl from {s}.idl — DO NOT EDIT\n", .{opts.input_stem});
@@ -5348,7 +5964,7 @@ pub fn generateSplitFiles(
         for (ifaces.items) |iface| {
             var impl_buf = std.ArrayList(u8).empty;
             defer impl_buf.deinit(alloc);
-            try generateImplFile(alloc, iface, class_name, opts, &impl_buf);
+            try generateImplFile(alloc, spec, iface, class_name, opts, &impl_buf);
             const impl_filename = try std.fmt.allocPrint(alloc, "{s}Impl.java", .{iface.name});
             defer alloc.free(impl_filename);
             try writeOutputFile(alloc, io, opts, impl_filename, impl_buf.items);
@@ -5979,6 +6595,53 @@ fn buildIrSpec(alloc: std.mem.Allocator, idl: []const u8) !ir.Spec {
     return ir.build(alloc, &spec, az.global_scope, &.{});
 }
 
+/// Like `buildIrSpec`, but `derived_source` gets `base_source` preloaded as
+/// an imported scope first (two independent Analyzers, mirroring main.zig's
+/// real `import "file.idl";` pipeline — see `ir.builder`'s own
+/// `testBuildWithImport`, which this mirrors at the Java-backend level).
+/// `base_module_name` is the top-level IDL module `base_source` declares
+/// (e.g. `"DDS"`); `base_stem` is the file stem the real pipeline would
+/// derive from its (hypothetical) filename (e.g. `"dcps"` for
+/// `import "dcps.idl";`) — both would normally come from real import
+/// resolution (main.zig's Phase 2b), supplied directly here since a test has
+/// no real files to resolve.
+fn buildIrSpecWithImport(
+    alloc: std.mem.Allocator,
+    base_source: []const u8,
+    base_module_name: []const u8,
+    base_stem: []const u8,
+    derived_source: []const u8,
+) !ir.Spec {
+    var base_ast_arena = std.heap.ArenaAllocator.init(alloc);
+    defer base_ast_arena.deinit();
+    var base_p = parser_mod.Parser.init(base_source, base_ast_arena.allocator());
+    const base_spec = try base_p.parseSpecification();
+
+    var base_az = try semantic_mod.Analyzer.init(alloc);
+    defer base_az.deinit();
+    try base_az.analyze(&base_spec);
+
+    var derived_ast_arena = std.heap.ArenaAllocator.init(alloc);
+    defer derived_ast_arena.deinit();
+    var derived_p = parser_mod.Parser.init(derived_source, derived_ast_arena.allocator());
+    const derived_spec = try derived_p.parseSpecification();
+
+    var derived_az = try semantic_mod.Analyzer.init(alloc);
+    defer derived_az.deinit();
+    try derived_az.preloadScope(base_az.global_scope);
+    try derived_az.analyze(&derived_spec);
+
+    return ir.buildWithImportedUnits(
+        alloc,
+        &derived_spec,
+        derived_az.global_scope,
+        &.{base_module_name},
+        &.{.{ .ast_spec = &base_spec, .scope = base_az.global_scope }},
+        &.{base_stem},
+        true, // matches main.zig's real pipeline: Java always fills cross-module entity bases.
+    );
+}
+
 test "java: union basic fields" {
     const alloc = testing.allocator;
     try testGen(alloc,
@@ -6025,7 +6688,7 @@ test "java: FooImpl file basic structure" {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
     const opts = interface.Options{ .input_stem = "calc", .jni_library = "zidl_dds_jni" };
-    try generateImplFile(alloc, ifaces.items[0], stem_class, opts, &out);
+    try generateImplFile(alloc, &ir_spec, ifaces.items[0], stem_class, opts, &out);
     const s = out.items;
 
     try testing.expect(std.mem.indexOf(u8, s, "public class CalcImpl implements Calc.Calc {") != null);
@@ -6061,7 +6724,7 @@ test "java: FooImpl file with package" {
         .java_package = "com.example",
         .jni_library = "mylib",
     };
-    try generateImplFile(alloc, ifaces.items[0], stem_class, opts, &out);
+    try generateImplFile(alloc, &ir_spec, ifaces.items[0], stem_class, opts, &out);
     const s = out.items;
 
     try testing.expect(std.mem.indexOf(u8, s, "package com.example;") != null);
@@ -6122,23 +6785,32 @@ test "java: set_listener releases the previously-registered listener context" {
     const s = out.items;
 
     // The release helper itself must be emitted once in the preamble.
-    try testing.expect(std.mem.indexOf(u8, s, "static void zidl_java_release_listener_ctx(") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "void zidl_java_release_listener_ctx(") != null);
+
     // `set_listener` must query whatever was previously installed on `self`
-    // (since it replaces, or if `l == NULL` clears, Widget's own listener)
     // *before* the real call — capturing it is safe (just a getter) even if
-    // the call goes on to fail — but must only actually *free* it after
-    // confirming the call succeeded (`_ret == 0`), never unconditionally:
-    // a rejected replacement leaves Widget's actual listener unchanged, and
-    // freeing it anyway would leave that live listener pointing at freed
-    // memory.
+    // the call goes on to fail.
     const capture_idx = std.mem.indexOf(u8, s, "Widget_get_listener((void *)(intptr_t)ptr)").?;
     const call_idx = std.mem.indexOf(u8, s, "Widget_set_listener((void *)(intptr_t)ptr").?;
-    const release_idx = std.mem.indexOf(u8, s, "if (_ret == 0) zidl_java_release_listener_ctx(env, _old_l.listener_data);").?;
     try testing.expect(capture_idx < call_idx);
-    try testing.expect(call_idx < release_idx);
+
+    // After the call, it must read Widget's *actual current* listener back
+    // (a second `Widget_get_listener` call, after the `set_listener` call)
+    // and compare against what was just built — never infer the outcome
+    // from the return code alone. This correctly frees whichever context
+    // (the old one, if replacement succeeded; the newly-built one, if it
+    // didn't) is *not* the one actually live — a rejected replacement
+    // leaves Widget's real listener unchanged, so freeing the old context
+    // unconditionally would leave that live listener pointing at freed
+    // memory; and a failed call still leaves the newly-built context
+    // referenced by nothing at all unless it's freed here.
+    const readback_idx = std.mem.lastIndexOf(u8, s, "Widget_get_listener((void *)(intptr_t)ptr)").?;
+    try testing.expect(readback_idx > call_idx);
+    try testing.expect(std.mem.indexOf(u8, s, "zidl_java_release_listener_ctx(env, _old_l.listener_data)") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "zidl_java_release_listener_ctx(env, _c_l.listener_data)") != null);
 }
 
-test "java: create_* listener param does not release a nonexistent old listener" {
+test "java: create_* listener param has no old-listener capture, but does verify installation" {
     const alloc = testing.allocator;
     var ir_spec = try buildIrSpec(alloc,
         \\interface FooListener { void on_event(); };
@@ -6160,9 +6832,19 @@ test "java: create_* listener param does not release a nonexistent old listener"
 
     // A brand-new Child can't already have a listener registered — its
     // creator (Parent, whose own get_listener doesn't exist here) must not
-    // emit a release-old call at all for `create_child`'s listener param.
+    // query *Parent's* listener at all for `create_child`'s listener param.
     try testing.expect(std.mem.indexOf(u8, s, "Java_ParentImpl_n_1create_1child") != null);
     try testing.expect(std.mem.indexOf(u8, s, "Parent_get_listener") == null);
+
+    // But it must still verify the newly-built context actually got
+    // installed on the *new* Child entity (via Child's own get_listener,
+    // called on `_h` — the just-created handle, before it's boxed) —
+    // otherwise a failed `create_child` (this ABI convention returns some
+    // boxable "nil" sentinel entity on failure, never literal NULL, so
+    // `_h == NULL` could never be used to detect this) leaks the context
+    // forever.
+    try testing.expect(std.mem.indexOf(u8, s, "Child_get_listener(_h)") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "zidl_java_release_listener_ctx(env, _c_l.listener_data)") != null);
 }
 
 test "java: delete_<entity> releases the deleted entity's own listener context" {
@@ -6238,6 +6920,186 @@ test "java: split mode with --generate-zzdds-wrappers still emits typed wrappers
     // `Sensor.Foo.class` would fail to compile against split-mode output.
     try testing.expect(std.mem.indexOf(u8, ts_content, "Foo.class") != null);
     try testing.expect(std.mem.indexOf(u8, ts_content, "Sensor.Foo") == null);
+}
+
+test "java: cross-file interface base and struct field resolve to declaring file's stem class" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpecWithImport(
+        alloc,
+        \\module DDS {
+        \\    struct DomainId_t { long value; };
+        \\    interface Entity { long get_qos(); };
+        \\};
+    ,
+        "DDS",
+        "dcps",
+        \\import "dcps.idl";
+        \\module ext {
+        \\    interface Widget : DDS::Entity {
+        \\        DDS::DomainId_t get_domain();
+        \\    };
+        \\};
+        ,
+    );
+    defer ir_spec.deinit();
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    const opts = interface.Options{ .input_stem = "ext" };
+    try generateFile(alloc, &ir_spec, opts, &out);
+    const s = out.items;
+
+    // Widget's base interface (DDS::Entity, declared in dcps.idl) must
+    // resolve to `Dcps.DDS.Entity` — the *declaring* file's stem class —
+    // not `Ext.DDS.Entity` (there is no `DDS` nested under `Ext`, since
+    // `Ext.java` never declares that module at all).
+    try testing.expect(std.mem.indexOf(u8, s, "extends Dcps.DDS.Entity") != null);
+    // The struct field type (DDS::DomainId_t, also cross-file) in
+    // `get_domain()`'s return type must resolve the same way.
+    try testing.expect(std.mem.indexOf(u8, s, "Dcps.DDS.DomainId_t get_domain()") != null);
+}
+
+test "java: --java-import-package qualifies a cross-file reference in a different package" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpecWithImport(
+        alloc,
+        \\module DDS {
+        \\    interface Entity { long get_qos(); };
+        \\};
+    ,
+        "DDS",
+        "dcps",
+        \\import "dcps.idl";
+        \\module ext {
+        \\    interface Widget : DDS::Entity {};
+        \\};
+        ,
+    );
+    defer ir_spec.deinit();
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    const opts = interface.Options{
+        .input_stem = "ext",
+        .java_package = "io.zzdds.ext",
+        .java_import_packages = &.{"DDS=io.zzdds.dcps"},
+    };
+    try generateFile(alloc, &ir_spec, opts, &out);
+    const s = out.items;
+
+    // Different package from this file's own (`io.zzdds.ext`) — must be
+    // fully qualified, not just `Dcps.DDS.Entity` (which would resolve
+    // *inside* io.zzdds.ext, a package that never declares `Dcps` at all).
+    try testing.expect(std.mem.indexOf(u8, s, "extends io.zzdds.dcps.Dcps.DDS.Entity") != null);
+}
+
+test "java: cross-file entity return type gets an extern box-helper declaration" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpecWithImport(
+        alloc,
+        \\module DDS {
+        \\    interface DomainParticipant { long get_qos(); };
+        \\};
+    ,
+        "DDS",
+        "dcps",
+        \\import "dcps.idl";
+        \\module ext {
+        \\    interface DomainParticipantFactory {
+        \\        DDS::DomainParticipant create_participant_ex();
+        \\    };
+        \\};
+        ,
+    );
+    defer ir_spec.deinit();
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    const opts = interface.Options{ .input_stem = "ext" };
+    try generateJniSource(alloc, &ir_spec, opts, &out);
+    const s = out.items;
+
+    // dcps.idl's own JNI bridge (a *separate* translation unit, not part of
+    // this output at all) defines `zidl_java_box_DDS_DomainParticipant` —
+    // as a plain (non-`static`) external symbol, once linked into the same
+    // shared library. This file must NOT redefine it (duplicate symbol at
+    // link time) — just `extern`-declare it, to box the handle
+    // `create_participant_ex` returns.
+    try testing.expect(std.mem.indexOf(u8, s, "extern jobject zidl_java_box_DDS_DomainParticipant(JNIEnv *env, void *handle);") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "jobject zidl_java_box_DDS_DomainParticipant(JNIEnv *env, void *handle) {") == null);
+    try testing.expect(std.mem.indexOf(u8, s, "void *_h = (void *)ext_DomainParticipantFactory_create_participant_ex") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "return zidl_java_box_DDS_DomainParticipant(env, _h);") != null);
+}
+
+test "java: cross-file value_struct param gets extern marshaling declarations, not a duplicate" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpecWithImport(
+        alloc,
+        \\module DDS {
+        \\    struct DomainParticipantQos { long value; };
+        \\    interface DomainParticipant { long get_qos(); };
+        \\};
+    ,
+        "DDS",
+        "dcps",
+        \\import "dcps.idl";
+        \\module ext {
+        \\    interface DomainParticipantFactory {
+        \\        DDS::DomainParticipant create_participant_ex(in DDS::DomainParticipantQos qos);
+        \\    };
+        \\};
+        ,
+    );
+    defer ir_spec.deinit();
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    const opts = interface.Options{ .input_stem = "ext" };
+    try generateJniSource(alloc, &ir_spec, opts, &out);
+    const s = out.items;
+
+    try testing.expect(std.mem.indexOf(u8, s, "extern void DDS_DomainParticipantQos_from_java(JNIEnv *env, jobject obj, DDS_DomainParticipantQos *out);") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "extern void DDS_DomainParticipantQos_fill_java(JNIEnv *env, const DDS_DomainParticipantQos *in, jobject obj);") != null);
+    // Must not also define it locally — dcps.idl's own JNI bridge already
+    // does, as a non-static (linkable) symbol; a duplicate definition here
+    // would collide with it at link time.
+    try testing.expect(std.mem.indexOf(u8, s, "void DDS_DomainParticipantQos_from_java(JNIEnv *env, jobject obj, DDS_DomainParticipantQos *out) {") == null);
+    // The actual call site must still use it correctly.
+    try testing.expect(std.mem.indexOf(u8, s, "DDS_DomainParticipantQos_from_java(env, qos, &_c_qos);") != null);
+}
+
+test "java: cross-file listener param gets extern trampoline declarations, not duplicates" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpecWithImport(
+        alloc,
+        \\module DDS {
+        \\    interface FooListener { void on_event(); };
+        \\    interface DomainParticipant { long get_qos(); };
+        \\};
+    ,
+        "DDS",
+        "dcps",
+        \\import "dcps.idl";
+        \\module ext {
+        \\    interface DomainParticipantFactory {
+        \\        DDS::DomainParticipant create_participant_ex(in DDS::FooListener l);
+        \\    };
+        \\};
+        ,
+    );
+    defer ir_spec.deinit();
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    const opts = interface.Options{ .input_stem = "ext" };
+    try generateJniSource(alloc, &ir_spec, opts, &out);
+    const s = out.items;
+
+    try testing.expect(std.mem.indexOf(u8, s, "extern void zidl_java_cb_DDS_FooListener_on_event(void *listener_data);") != null);
+    // Must not also define it — dcps.idl's own JNI bridge does, non-static.
+    try testing.expect(std.mem.indexOf(u8, s, "void zidl_java_cb_DDS_FooListener_on_event(void *listener_data) {") == null);
+    // The listener struct's callback slot must still be wired to it.
+    try testing.expect(std.mem.indexOf(u8, s, "_c_l.on_event = zidl_java_cb_DDS_FooListener_on_event;") != null);
 }
 
 test "java type_prefix: class name uses prefix" {
