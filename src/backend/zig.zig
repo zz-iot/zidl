@@ -1729,6 +1729,11 @@ const Generator = struct {
             if (op.params.len > 0) try self.write(", ");
             try self.write("?*anyopaque) callconv(.c) void = null,\n");
         }
+        // Trailing (see c.zig's emitListenerStruct — must stay in sync, same
+        // field, same position; this struct is ABI-compatible with the C one
+        // and zzdds core itself stores/passes this exact Zig type).
+        try self.ind();
+        try self.write("    release_listener_data: ?*const fn (?*anyopaque) callconv(.c) void = null,\n");
         try self.ind();
         try self.print("}}; // {s}{s}\n\n", .{ pfx, iface_name });
     }

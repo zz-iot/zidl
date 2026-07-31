@@ -1029,6 +1029,19 @@ const Generator = struct {
         try self.print("typedef struct {s} {{\n", .{c_name});
         try self.write("    void *listener_data;\n");
         for (ops.items) |op| try self.emitListenerCallbackField(&op);
+        // Trailing (not right after listener_data — some backends build these
+        // via positional aggregate init, e.g. C++'s `{this, &s_op1, ...}`; a
+        // field inserted mid-struct would silently shift every subsequent
+        // positional initializer). Optional: null for callers (C/C++/Zig)
+        // that manage listener_data's lifetime themselves. A binding that
+        // needs an explicit teardown hook (e.g. Java/JNI releasing a global
+        // ref) sets this to a function that frees whatever listener_data
+        // points to; the core calls it exactly once, right before the old
+        // listener value is overwritten or the owning entity is destroyed —
+        // covering explicit set_listener() replacement/clearing *and*
+        // delete_contained_entities()'s per-child teardown, since the latter
+        // already funnels through each child's own destructor.
+        try self.write("    void (*release_listener_data)(void *listener_data);\n");
         try self.print("}} {s};\n\n", .{c_name});
     }
 

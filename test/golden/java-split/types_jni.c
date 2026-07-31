@@ -33,16 +33,12 @@ char *zidl_java_strdup(const char *s) {
 
 /* Releases a listener context previously installed as a C listener
  * struct's `listener_data` — frees the global ref to the Java listener
- * object plus the ctx allocation itself. Called both when a `set_listener`
- * call replaces (or clears, passing NULL) a previously-registered
- * listener, and when `delete_<entity>`-shaped ops delete an entity that
- * may still have one registered (queried via that entity's own
- * `get_listener()` before the delete call, since the handle becomes
- * invalid afterward) — see emitListenerParamPrep/emitJniBridgeOp's
- * `delete_` handling. NULL-safe: harmless for an entity/slot that never
- * had a listener installed. Not handled: `delete_contained_entities()`
- * (no params — deletes an unspecified set of children at once, so there
- * is no per-child handle here to query). */
+ * object plus the ctx allocation itself. NULL-safe: harmless for an
+ * entity/slot that never had a listener installed. Called by
+ * `zidl_java_release_listener_data` below (the hook zzdds's own core
+ * calls generically) and directly by `emitJniBridgeOp`'s
+ * `created_listener_params` handling for a `create_*` call whose
+ * listener never actually got installed anywhere. */
 void zidl_java_release_listener_ctx(JNIEnv *env, void *listener_data) {
     if (listener_data == NULL) return;
     zidl_java_listener_ctx *ctx = (zidl_java_listener_ctx *)listener_data;
@@ -62,6 +58,21 @@ JNIEnv *zidl_java_get_env(void) {
         (*zidl_java_vm)->AttachCurrentThreadAsDaemon(zidl_java_vm, (void **)&env, NULL);
     }
     return env;
+}
+/* Generic `release_listener_data` hook (see the field's own doc
+ * comment on the generated listener struct): zzdds's core calls this
+ * directly, with no JNIEnv of its own to hand us, exactly once — the
+ * moment a listener is replaced/cleared via `set_listener`, or when
+ * its owning entity is destroyed, whether individually or as part of
+ * `delete_contained_entities()`'s per-child teardown (that already
+ * funnels through each child's own destructor, which calls this same
+ * hook) — so this is the *only* place a Java listener's native
+ * context is released for any of those cases; nothing else in this
+ * generator's own output does anymore. */
+void zidl_java_release_listener_data(void *listener_data) {
+    JNIEnv *env = zidl_java_get_env();
+    if (env == NULL) return;
+    zidl_java_release_listener_ctx(env, listener_data);
 }
 
 jobject zidl_java_box_Greeter(JNIEnv *env, void *handle);
