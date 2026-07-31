@@ -90,10 +90,31 @@ interface implementations.
 - Keyed structs emit `serializeKey`, `deserializeKey`, `deserializeKeyInto`, and
   `computeKeyHash`; MD5 uses `java.security.MessageDigest`.
 - JNI bridge: when `--generate-interfaces`, emits a `*Impl.java` class with
-  `System.loadLibrary(jni_library)`.
+  `System.loadLibrary(jni_library)` plus a real native `<stem>_jni.c` bridge —
+  entity params/returns are boxed/unboxed via `GetLongField`/`NewObject`
+  against each `*Impl`'s `long ptr_` field (with multi-hop `_as_<Base>`
+  widening for entity interface views), `string`/`wstring` params and returns
+  go through `GetStringUTFChars`/`NewStringUTF` (not a raw `jstring` cast),
+  QoS/status structs are marshaled field-by-field to/from the matching C
+  struct (`StructMarshalGenerator`, reusing the CDR emitter's field-shape
+  dispatch), and listener callbacks get a generated native trampoline per
+  `on_xxx` method (resolves a `JNIEnv*` for zzdds's own network threads via
+  a cached `JavaVM*`, boxes entity + status args, `CallVoidMethod`s into a
+  JNI global ref on the registered Java listener). Ops/attrs touching a type
+  this backend can't yet marshal (a bare `sequence<T>` param not inside a
+  struct) generate a Java stub throwing `UnsupportedOperationException`
+  instead of a native call.
+- `--generate-zzdds-wrappers`: per `@topic`-annotated struct, emits a typed
+  `<Type>DataWriter`/`<Type>DataReader` Java class (`write`/`take`/`read`)
+  over the type's own inline `serialize`/`deserialize`/`computeKeyHash`, plus
+  a `computeKeyHashFromCdr(byte[])` static helper mirroring the C backend's
+  `Foo_compute_key_hash_from_cdr`.
 - Package annotation: `package com.example;` header per file.
 
-**Tests:** 68.
+**Tests:** 71 (`src/backend/java.zig`) plus a compiled-and-linked entity JNI
+integration test (`test/integration/java/`, run via `zig build
+integration-test`) that exercises real entity box/unbox against a
+hand-written native backing — not just golden-output text comparison.
 
 ---
 

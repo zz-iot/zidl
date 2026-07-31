@@ -30,6 +30,7 @@
 //!
 //!   --java-jni-library <name>      System.loadLibrary() name for JNI impls (Java backend)
 //!   --java-package <pkg>           Package prefix, e.g. com.example (Java backend)
+//!   --java-import-package <Mod>=<pkg>  Java package of an imported module's own output, if not this file's own --java-package (Java backend, repeatable)
 //!
 //!   --zig-generate-c-api           Emit pub export fn callconv(.c) wrappers for C free-function API (Zig backend)
 //!   --zig-idiomatic-enums          Generate lowercase snake_case enum tags (e.g. .durability_volatile) (Zig backend)
@@ -75,6 +76,7 @@ const Opts = struct {
     cpp_namespace: []const u8 = "",
     pl_cdr: bool = false,
     generate_zzdds_wrappers: bool = false,
+    java_import_packages: std.ArrayListUnmanaged([]const u8) = .empty,
     zig_generate_c_api: bool = false,
     zig_idiomatic_enums: bool = false,
     zig_generate_toml_config: bool = false,
@@ -232,6 +234,14 @@ pub fn main(init: std.process.Init) !void {
                 std.process.exit(1);
             }
             opts.java_package = args[i];
+        } else if (std.mem.eql(u8, arg, "--java-import-package")) {
+            i += 1;
+            if (i >= args.len) {
+                try stderr.print("error: --java-import-package requires an argument\n", .{});
+                try stderr.flush();
+                std.process.exit(1);
+            }
+            try opts.java_import_packages.append(arena, args[i]);
         } else if (std.mem.eql(u8, arg, "--split-files")) {
             opts.split_files = true;
         } else if (std.mem.eql(u8, arg, "--single-file")) {
@@ -428,6 +438,11 @@ fn processFile(
     // zidl.ir.ImportedUnit / buildWithImportedUnits.
     var imported_ast_specs: std.ArrayListUnmanaged(*const zidl.ast.Specification) = .empty;
     var import_module_names: std.ArrayListUnmanaged([]const u8) = .empty;
+    // Parallel to import_module_names: the file stem that actually declared
+    // each module (see ir.Spec.import_stems) — the Java backend needs this
+    // to qualify a cross-file type reference under the *declaring* file's
+    // stem class, not the current file's.
+    var import_module_stems: std.ArrayListUnmanaged([]const u8) = .empty;
     var seen_import_modules = std.StringHashMapUnmanaged(void).empty;
 
     for (ast_spec.definitions) |*adef| {
@@ -513,7 +528,14 @@ fn processFile(
         try imported_ast_specs.append(ialloc, sub_ast_copy);
         try imported_analyzers.append(ialloc, sub_az);
 
-        // Collect unique top-level module names from the imported scope.
+        // Collect unique top-level module names from the imported scope,
+        // alongside the file stem that actually declared them (the same
+        // stem convention as `opts.input_stem` below: the literal import
+        // path as written, e.g. `"dcps.idl"` → `"dcps"` — not the resolved
+        // absolute path, so it matches what `zidl -o ... dcps.idl` would
+        // itself produce as that file's own `input_stem` when compiled
+        // standalone).
+        const this_import_stem = std.fs.path.stem(import_path);
         var sym_it = sub_az.global_scope.symbols.iterator();
         while (sym_it.next()) |entry| {
             const sym = entry.value_ptr.*;
@@ -521,6 +543,7 @@ fn processFile(
             const gop = try seen_import_modules.getOrPut(ialloc, sym.name);
             if (!gop.found_existing) {
                 try import_module_names.append(ialloc, try ialloc.dupe(u8, sym.name));
+                try import_module_stems.append(ialloc, try ialloc.dupe(u8, this_import_stem));
             }
         }
     }
@@ -555,12 +578,20 @@ fn processFile(
     for (imported_ast_specs.items, imported_analyzers.items) |iu_ast, iu_az| {
         try imported_units.append(ialloc, .{ .ast_spec = iu_ast, .scope = iu_az.global_scope });
     }
+    // Only the Java backend's generators (ImplFileGenerator/JniBridgeGenerator
+    // collectMembers) walk a cross-module *entity* interface base's real
+    // member list — see `buildWithImportedUnits`'s `fill_entity_bases` doc.
+    // Every other backend keeps the existing reset (its own per-backend
+    // mechanism was never built to handle real content here).
+    const fill_entity_bases = std.mem.eql(u8, opts.backend, "java");
     var ir_spec = try zidl.ir.buildWithImportedUnits(
         alloc,
         &ast_spec,
         analyzer.global_scope,
         import_module_names.items,
         imported_units.items,
+        import_module_stems.items,
+        fill_entity_bases,
     );
     defer ir_spec.deinit();
 
@@ -603,6 +634,7 @@ fn processFile(
         .zig_idiomatic_enums = opts.zig_idiomatic_enums,
         .zig_generate_toml_config = opts.zig_generate_toml_config,
         .generate_zzdds_wrappers = opts.generate_zzdds_wrappers,
+        .java_import_packages = opts.java_import_packages.items,
         .zig_version = opts.zig_version,
         .cpp_generate_impl = opts.cpp_generate_impl,
         .cpp_pmr_containers = opts.cpp_pmr_containers,
@@ -701,6 +733,7 @@ fn printUsage(w: *Io.Writer) !void {
         \\
         \\  --java-jni-library <name>      System.loadLibrary() name for JNI impls (Java backend)
         \\  --java-package <pkg>           Package prefix, e.g. com.example (Java backend)
+        \\  --java-import-package <Mod>=<pkg>  Java package of an imported module's own output, if not this file's own --java-package (Java backend, repeatable)
         \\
         \\  --zig-generate-c-api           Emit pub export fn callconv(.c) wrappers for C free-function API (Zig backend)
         \\  --zig-generate-toml-config     Emit applyToml(alloc, table: anytype) !void per struct (Zig backend)
