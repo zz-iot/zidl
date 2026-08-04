@@ -176,6 +176,32 @@ const Generator = struct {
         while (i < self.depth) : (i += 1) try self.write("    ");
     }
 
+    /// Emit the CDR alignment call preceding a base-type field/discriminant
+    /// read or write. For 8-byte-natural-size types (`baseCdrIsWide`), the
+    /// correct alignment differs between XCDR1 (natural, 8) and XCDR2
+    /// (capped, 4), so the generated Java conditionalizes on the ambient
+    /// `_xcdrVersion` variable at runtime. All other types align identically
+    /// under both versions -- kept as the pre-existing fixed-literal call
+    /// (and omitted entirely when alignment is 1, matching prior behavior).
+    /// `extra` is an additional literal prefix (block-nesting indentation
+    /// text, as used throughout `emitSerializeForTypeRef`/`emitSkipForTypeRef`
+    /// and friends) written before the alignment call; pass `""` for call
+    /// sites that only use `self.ind()`-based indentation instead. Emits
+    /// inline text only (no trailing newline); the caller appends the
+    /// actual read/write expression immediately after.
+    fn writeAlignCall(self: *Generator, b: ast.BaseTypeSpec, extra: []const u8) !void {
+        if (baseCdrIsWide(b)) {
+            try self.print("{s}_cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); ", .{extra});
+            return;
+        }
+        const align_v = baseCdrAlign(b);
+        if (align_v > 1) {
+            try self.print("{s}_cdrAlign(_buf, _cdrBase, {d}); ", .{ extra, align_v });
+        } else {
+            try self.print("{s}", .{extra});
+        }
+    }
+
     // ── Top-level file emission ───────────────────────────────────────────────
 
     fn emitFile(self: *Generator, spec: *const ir.Spec) !void {
@@ -304,6 +330,31 @@ const Generator = struct {
         try self.write("    try { return java.security.MessageDigest.getInstance(\"MD5\").digest(_key); }\n");
         try self.ind();
         try self.write("    catch (java.security.NoSuchAlgorithmException _e) { throw new IllegalStateException(_e); }\n");
+        try self.ind();
+        try self.write("}\n\n");
+        try self.emitCdrDetectXcdrHelper();
+    }
+
+    /// Parses a received sample's own 4-byte CDR encapsulation header to
+    /// determine whether it's XCDR1 or XCDR2, rather than assuming one --
+    /// mirrors zidl_cdr.c's zidl_cdr_reader_init, which does the same from
+    /// the encapsulation id (only the two little-endian ids zzdds/zidl
+    /// actually produce are recognized here: CDR1_LE=0x0001, CDR2_LE=0x0007;
+    /// big-endian and PL_CDR/delimited-CDR2 aren't in scope). This is what
+    /// lets a single generated deserializeFrom/skip/take() correctly handle
+    /// samples from a peer that chose either representation, instead of
+    /// hardcoding one (the bug this whole xcdr_version threading fixes).
+    fn emitCdrDetectXcdrHelper(self: *Generator) !void {
+        try self.ind();
+        try self.write("private static int _cdrDetectXcdr(byte[] _payload) {\n");
+        try self.ind();
+        try self.write("    int _id = ((_payload[0] & 0xFF) << 8) | (_payload[1] & 0xFF);\n");
+        try self.ind();
+        try self.write("    if (_id == 0x0001) return 1;\n");
+        try self.ind();
+        try self.write("    if (_id == 0x0007) return 2;\n");
+        try self.ind();
+        try self.write("    throw new IllegalArgumentException(\"zidl: unsupported CDR encapsulation id 0x\" + Integer.toHexString(_id));\n");
         try self.ind();
         try self.write("}\n\n");
     }
@@ -535,7 +586,7 @@ const Generator = struct {
         // ── serialize ────────────────────────────────────────────────────────
         try self.write("\n");
         try self.ind();
-        try self.write("public void serialize(java.nio.ByteBuffer _buf, int _cdrBase) {\n");
+        try self.write("public void serialize(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {\n");
         self.depth += 1;
         try self.ind();
         try self.write("_buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
@@ -668,7 +719,9 @@ const Generator = struct {
         } else {
             if (appendable) {
                 try self.ind();
-                try self.write("_cdrAlign(_buf, _cdrBase, 4); int _dhPos = _buf.position(); _buf.putInt(0);\n");
+                try self.write("int _dhPos = 0;\n");
+                try self.ind();
+                try self.write("if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _dhPos = _buf.position(); _buf.putInt(0); }\n");
             }
             // Write discriminant
             if (disc_is_enum) {
@@ -680,13 +733,8 @@ const Generator = struct {
             } else {
                 switch (u.discriminant) {
                     .base => |b| {
-                        const align_v = baseCdrAlign(b);
-                        if (align_v > 1) {
-                            try self.ind();
-                            try self.print("_cdrAlign(_buf, _cdrBase, {d}); ", .{align_v});
-                        } else {
-                            try self.ind();
-                        }
+                        try self.ind();
+                        try self.writeAlignCall(b, "");
                         switch (b) {
                             .octet, .int8, .uint8 => try self.write("_buf.put((byte)_discriminator);\n"),
                             .short, .int16, .unsigned_short, .uint16 => try self.write("_buf.putShort((short)_discriminator);\n"),
@@ -775,7 +823,7 @@ const Generator = struct {
             }
             if (appendable) {
                 try self.ind();
-                try self.write("int _dhEnd = _buf.position(); _buf.putInt(_dhPos, _dhEnd - _dhPos - 4);\n");
+                try self.write("if (_xcdrVersion == 2) { int _dhEnd = _buf.position(); _buf.putInt(_dhPos, _dhEnd - _dhPos - 4); }\n");
             }
         }
         self.depth -= 1;
@@ -785,7 +833,7 @@ const Generator = struct {
         // ── deserializeFrom ──────────────────────────────────────────────────
         try self.write("\n");
         try self.ind();
-        try self.print("public static {s}{s} deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase) {{\n", .{ pfx, u.name });
+        try self.print("public static {s}{s} deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {{\n", .{ pfx, u.name });
         self.depth += 1;
         try self.ind();
         try self.write("_buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
@@ -889,7 +937,7 @@ const Generator = struct {
         } else {
             if (appendable) {
                 try self.ind();
-                try self.write("_cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); // skip DHEADER\n");
+                try self.write("if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); } // skip DHEADER\n");
             }
             // Read discriminant
             if (disc_is_enum) {
@@ -903,15 +951,10 @@ const Generator = struct {
             } else {
                 switch (u.discriminant) {
                     .base => |b| {
-                        const align_v = baseCdrAlign(b);
                         const read_expr = baseCdrReadExpr(b);
-                        if (align_v > 1) {
-                            try self.ind();
-                            try self.print("_cdrAlign(_buf, _cdrBase, {d}); _out._discriminator = {s};\n", .{ align_v, read_expr });
-                        } else {
-                            try self.ind();
-                            try self.print("_out._discriminator = {s};\n", .{read_expr});
-                        }
+                        try self.ind();
+                        try self.writeAlignCall(b, "");
+                        try self.print("_out._discriminator = {s};\n", .{read_expr});
                     },
                     else => {
                         try self.ind();
@@ -1184,7 +1227,7 @@ const Generator = struct {
         if (!self.opts.no_typesupport and total > 0) {
             try self.write("\n");
             try self.ind();
-            try self.write("public void serialize(java.nio.ByteBuffer _buf, int _cdrBase) {\n");
+            try self.write("public void serialize(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {\n");
             self.depth += 1;
             try self.ind();
             try self.write("_buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
@@ -1204,7 +1247,7 @@ const Generator = struct {
 
             try self.write("\n");
             try self.ind();
-            try self.print("public static {s}{s} deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase) {{\n", .{ pfx, bs.name });
+            try self.print("public static {s}{s} deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {{\n", .{ pfx, bs.name });
             self.depth += 1;
             try self.ind();
             try self.write("_buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
@@ -1481,7 +1524,7 @@ const Generator = struct {
         // serialize
         try self.write("\n");
         try self.ind();
-        try self.write("public void serialize(java.nio.ByteBuffer _buf, int _cdrBase) {\n");
+        try self.write("public void serialize(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {\n");
         try self.ind();
         try self.write("    _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
 
@@ -1544,16 +1587,16 @@ const Generator = struct {
         } else {
             if (appendable) {
                 try self.ind();
-                try self.write("    _cdrAlign(_buf, _cdrBase, 4);\n");
+                try self.write("    int _dhPos = 0;\n");
                 try self.ind();
-                try self.write("    int _dhPos = _buf.position(); _buf.putInt(0);\n");
+                try self.write("    if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _dhPos = _buf.position(); _buf.putInt(0); }\n");
             }
 
             if (s.base) |base| {
                 const qname = try self.qualNameToJava(ir.typeDeclQualifiedName(base));
                 defer self.alloc.free(qname);
                 try self.ind();
-                try self.print("    super.serialize(_buf, _cdrBase);\n", .{});
+                try self.print("    super.serialize(_buf, _cdrBase, _xcdrVersion);\n", .{});
             }
 
             for (s.members) |m| {
@@ -1579,7 +1622,7 @@ const Generator = struct {
 
             if (appendable) {
                 try self.ind();
-                try self.write("    _buf.putInt(_dhPos, _buf.position() - _dhPos - 4);\n");
+                try self.write("    if (_xcdrVersion == 2) { _buf.putInt(_dhPos, _buf.position() - _dhPos - 4); }\n");
             }
         }
         try self.ind();
@@ -1588,7 +1631,7 @@ const Generator = struct {
         // deserializeFrom
         try self.write("\n");
         try self.ind();
-        try self.print("public static {s}{s} deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase) {{\n", .{ self.opts.type_prefix, s.name });
+        try self.print("public static {s}{s} deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {{\n", .{ self.opts.type_prefix, s.name });
         try self.ind();
         try self.write("    _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
         try self.ind();
@@ -1634,7 +1677,7 @@ const Generator = struct {
         } else {
             if (appendable) {
                 try self.ind();
-                try self.write("    _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); // skip DHEADER\n");
+                try self.write("    if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); } // skip DHEADER\n");
             }
 
             for (s.members) |m| {
@@ -1671,7 +1714,7 @@ const Generator = struct {
         // skip
         try self.write("\n");
         try self.ind();
-        try self.write("public static void skip(java.nio.ByteBuffer _buf, int _cdrBase) {\n");
+        try self.write("public static void skip(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {\n");
         try self.ind();
         try self.write("    _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
         if (mutable) {
@@ -1680,16 +1723,34 @@ const Generator = struct {
             try self.ind();
             try self.write("    _buf.position(_end);\n");
         } else if (appendable) {
+            // XCDR2 has a real DHEADER to trust for a length-based skip; XCDR1
+            // has none, so it must fall back to the exact @final per-member
+            // skip logic below (no shortcut available).
             try self.ind();
-            try self.write("    _cdrAlign(_buf, _cdrBase, 4); int _end = _buf.position() + 4 + _buf.getInt();\n");
+            try self.write("    if (_xcdrVersion == 2) {\n");
             try self.ind();
-            try self.write("    _buf.position(_end);\n");
+            try self.write("        _cdrAlign(_buf, _cdrBase, 4); int _end = _buf.position() + 4 + _buf.getInt();\n");
+            try self.ind();
+            try self.write("        _buf.position(_end);\n");
+            try self.ind();
+            try self.write("    } else {\n");
+            if (s.base) |base| {
+                const qname = try self.qualNameToJava(ir.typeDeclQualifiedName(base));
+                defer self.alloc.free(qname);
+                try self.ind();
+                try self.print("        {s}.skip(_buf, _cdrBase, _xcdrVersion);\n", .{qname});
+            }
+            for (s.members) |m| {
+                try self.emitMemberSkip(m, "        ");
+            }
+            try self.ind();
+            try self.write("    }\n");
         } else {
             if (s.base) |base| {
                 const qname = try self.qualNameToJava(ir.typeDeclQualifiedName(base));
                 defer self.alloc.free(qname);
                 try self.ind();
-                try self.print("    {s}.skip(_buf, _cdrBase);\n", .{qname});
+                try self.print("    {s}.skip(_buf, _cdrBase, _xcdrVersion);\n", .{qname});
             }
             for (s.members) |m| {
                 try self.emitMemberSkip(m, "    ");
@@ -1702,11 +1763,11 @@ const Generator = struct {
         if (has_key) {
             try self.write("\n");
             try self.ind();
-            try self.write("protected void serializeKeyFields(java.nio.ByteBuffer _buf, int _cdrBase) {\n");
+            try self.write("protected void serializeKeyFields(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {\n");
             if (s.base) |base| {
                 if (typeDeclHasKeyJava(base)) {
                     try self.ind();
-                    try self.write("    super.serializeKeyFields(_buf, _cdrBase);\n");
+                    try self.write("    super.serializeKeyFields(_buf, _cdrBase, _xcdrVersion);\n");
                 }
             }
             for (s.members) |m| {
@@ -1718,31 +1779,33 @@ const Generator = struct {
 
             try self.write("\n");
             try self.ind();
-            try self.write("public void serializeKey(java.nio.ByteBuffer _buf, int _cdrBase) {\n");
+            try self.write("public void serializeKey(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {\n");
             try self.ind();
             try self.write("    _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
             if (appendable) {
                 try self.ind();
-                try self.write("    _cdrAlign(_buf, _cdrBase, 4); int _dhPos = _buf.position(); _buf.putInt(0);\n");
+                try self.write("    int _dhPos = 0;\n");
+                try self.ind();
+                try self.write("    if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _dhPos = _buf.position(); _buf.putInt(0); }\n");
             }
             try self.ind();
-            try self.write("    serializeKeyFields(_buf, _cdrBase);\n");
+            try self.write("    serializeKeyFields(_buf, _cdrBase, _xcdrVersion);\n");
             if (appendable) {
                 try self.ind();
-                try self.write("    _buf.putInt(_dhPos, _buf.position() - _dhPos - 4);\n");
+                try self.write("    if (_xcdrVersion == 2) { _buf.putInt(_dhPos, _buf.position() - _dhPos - 4); }\n");
             }
             try self.ind();
             try self.write("}\n");
 
             try self.write("\n");
             try self.ind();
-            try self.print("public static {s}{s} deserializeKey(java.nio.ByteBuffer _buf, int _cdrBase) {{\n", .{ self.opts.type_prefix, s.name });
+            try self.print("public static {s}{s} deserializeKey(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {{\n", .{ self.opts.type_prefix, s.name });
             try self.ind();
             try self.write("    _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
             try self.ind();
             try self.print("    {s}{s} _out = new {s}{s}();\n", .{ self.opts.type_prefix, s.name, self.opts.type_prefix, s.name });
             try self.ind();
-            try self.write("    deserializeKeyInto(_out, _buf, _cdrBase);\n");
+            try self.write("    deserializeKeyInto(_out, _buf, _cdrBase, _xcdrVersion);\n");
             try self.ind();
             try self.write("    return _out;\n");
             try self.ind();
@@ -1750,7 +1813,7 @@ const Generator = struct {
 
             try self.write("\n");
             try self.ind();
-            try self.print("protected static void deserializeKeyInto({s}{s} _out, java.nio.ByteBuffer _buf, int _cdrBase) {{\n", .{ self.opts.type_prefix, s.name });
+            try self.print("protected static void deserializeKeyInto({s}{s} _out, java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {{\n", .{ self.opts.type_prefix, s.name });
             if (mutable) {
                 try self.ind();
                 try self.write("    _cdrAlign(_buf, _cdrBase, 4); int _emEnd = _buf.position() + _buf.getInt();\n");
@@ -1778,42 +1841,64 @@ const Generator = struct {
                 try self.ind();
                 try self.write("    }\n");
             } else {
+                // XCDR2 has a real DHEADER to bound the key-only payload;
+                // XCDR1 has none, so (like skip() above) it must fall back to
+                // the exact @final key-read logic -- including the
+                // leading-@key-member ordering constraint, which applies
+                // just as much to an @appendable type read as XCDR1 CDR1 as
+                // it does to a genuinely @final type.
                 if (appendable) {
                     try self.ind();
-                    try self.write("    _cdrAlign(_buf, _cdrBase, 4); int _keyEnd = _buf.position() + 4 + _buf.getInt();\n");
+                    try self.write("    int _keyEnd = 0;\n");
+                    try self.ind();
+                    try self.write("    if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _keyEnd = _buf.position() + 4 + _buf.getInt(); }\n");
                 }
                 if (s.base) |base| {
                     const qname = try self.qualNameToJava(ir.typeDeclQualifiedName(base));
                     defer self.alloc.free(qname);
                     if (typeDeclHasKeyJava(base)) {
                         try self.ind();
-                        try self.print("    {s}.deserializeKeyInto(_out, _buf, _cdrBase);\n", .{qname});
+                        try self.print("    {s}.deserializeKeyInto(_out, _buf, _cdrBase, _xcdrVersion);\n", .{qname});
                     } else {
                         try self.ind();
-                        try self.print("    {s}.skip(_buf, _cdrBase);\n", .{qname});
+                        try self.print("    {s}.skip(_buf, _cdrBase, _xcdrVersion);\n", .{qname});
                     }
                 }
-                // @final: key-only payload — read key members, no skips.
-                // Throw if a non-key member precedes a key member; full-payload
-                // callers would silently read wrong bytes.
-                if (!appendable) {
+                // Key-only payload — read key members, no skips. Throw if a
+                // non-key member precedes a key member; full-payload callers
+                // would silently read wrong bytes. Applies whenever there's
+                // no DHEADER to bound the read: @final always (unconditional
+                // -- final types never have a DHEADER, regardless of
+                // _xcdrVersion), @appendable only under XCDR1 (runtime-gated,
+                // since the same generated deserializeKeyInto handles both
+                // XCDR1 and XCDR2 calls for an appendable type).
+                const check_indent = if (appendable) "        " else "    ";
+                if (appendable) {
+                    try self.ind();
+                    try self.write("    if (_xcdrVersion != 2) {\n");
+                }
+                {
                     var saw_non_key = false;
                     for (s.members) |m| {
                         if (m.annotations.is_key) {
                             if (saw_non_key) {
                                 try self.ind();
                                 try self.print(
-                                    "    throw new UnsupportedOperationException(\"zidl: @final struct '{s}' has non-leading @key member '{s}'; \" +\n",
-                                    .{ s.name, m.name },
+                                    "{s}throw new UnsupportedOperationException(\"zidl: @{s} struct '{s}' has non-leading @key member '{s}'; \" +\n",
+                                    .{ check_indent, if (appendable) "appendable" else "final", s.name, m.name },
                                 );
                                 try self.ind();
-                                try self.write("        \"move all @key members before non-key members, or use @appendable\");\n");
+                                try self.print("{s}    \"move all @key members before non-key members, or use XCDR2\");\n", .{check_indent});
                                 break;
                             }
                         } else {
                             saw_non_key = true;
                         }
                     }
+                }
+                if (appendable) {
+                    try self.ind();
+                    try self.write("    }\n");
                 }
                 for (s.members) |m| {
                     if (m.annotations.is_key) {
@@ -1822,7 +1907,7 @@ const Generator = struct {
                 }
                 if (appendable) {
                     try self.ind();
-                    try self.write("    _buf.position(_keyEnd);\n");
+                    try self.write("    if (_xcdrVersion == 2) { _buf.position(_keyEnd); }\n");
                 }
             }
             try self.ind();
@@ -1840,7 +1925,14 @@ const Generator = struct {
             try self.ind();
             try self.write("        try {\n");
             try self.ind();
-            try self.write("            serializeKeyFields(_buf, 0);\n");
+            // Fixed XCDR1, not whatever this instance would negotiate on the
+            // wire -- matches the C backend's {c_name}_compute_key_hash
+            // (c.zig: "XCDR1: reserve_dheader_maybe is a no-op, so key bytes
+            // are written without a DHEADER regardless of extensibility").
+            // The key hash is a representation-independent identifier: two
+            // entities that chose different wire representations for the
+            // same instance must still compute the same hash.
+            try self.write("            serializeKeyFields(_buf, 0, 1);\n");
             try self.ind();
             try self.write("            return _cdrComputeKeyHash(_buf);\n");
             try self.ind();
@@ -1854,11 +1946,12 @@ const Generator = struct {
             try self.ind();
             try self.write("}\n");
 
-            // Reader-side key hash from a raw wire payload (4-byte XCDR2 LE
-            // encap header + serialized sample) — mirrors the C backend's
-            // `_compute_key_hash_from_cdr`. Used by the zzdds Java runtime's
-            // TypeSupport registration to derive instance handles for
-            // incoming samples without a companion native implementation
+            // Reader-side key hash from a raw wire payload (4-byte encap
+            // header + serialized sample, XCDR1 or XCDR2 -- detected from the
+            // header itself via _cdrDetectXcdr, not assumed) — mirrors the C
+            // backend's `_compute_key_hash_from_cdr`. Used by the zzdds Java
+            // runtime's TypeSupport registration to derive instance handles
+            // for incoming samples without a companion native implementation
             // (see `--generate-zzdds-wrappers`).
             try self.write("\n");
             try self.ind();
@@ -1866,9 +1959,11 @@ const Generator = struct {
             try self.ind();
             try self.write("    java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(_payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
             try self.ind();
+            try self.write("    int _xcdrVersion = _cdrDetectXcdr(_payload);\n");
+            try self.ind();
             try self.write("    _buf.position(4);\n");
             try self.ind();
-            try self.print("    {s}{s} _obj = deserializeFrom(_buf, 4);\n", .{ self.opts.type_prefix, s.name });
+            try self.print("    {s}{s} _obj = deserializeFrom(_buf, 4, _xcdrVersion);\n", .{ self.opts.type_prefix, s.name });
             try self.ind();
             try self.write("    return _obj.computeKeyHash();\n");
             try self.ind();
@@ -2009,13 +2104,8 @@ const Generator = struct {
     fn emitSkipForTypeRef(self: *Generator, tr: ir.TypeRef, extra: []const u8) anyerror!void {
         switch (tr) {
             .base => |b| {
-                const align_v = baseCdrAlign(b);
                 try self.ind();
-                if (align_v > 1) {
-                    try self.print("{s}_cdrAlign(_buf, _cdrBase, {d}); ", .{ extra, align_v });
-                } else {
-                    try self.print("{s}", .{extra});
-                }
+                try self.writeAlignCall(b, extra);
                 switch (b) {
                     .boolean, .char, .octet, .int8, .uint8 => try self.write("_buf.get();\n"),
                     .short, .int16, .unsigned_short, .uint16, .wchar => try self.write("_buf.getShort();\n"),
@@ -2077,13 +2167,13 @@ const Generator = struct {
                     const qname = try self.qualNameToJava(ir.typeDeclQualifiedName(td));
                     defer self.alloc.free(qname);
                     try self.ind();
-                    try self.print("{s}{s}.skip(_buf, _cdrBase);\n", .{ extra, qname });
+                    try self.print("{s}{s}.skip(_buf, _cdrBase, _xcdrVersion);\n", .{ extra, qname });
                 },
                 .union_, .bitset => {
                     const qname = try self.qualNameToJava(ir.typeDeclQualifiedName(td));
                     defer self.alloc.free(qname);
                     try self.ind();
-                    try self.print("{s}{s}.deserializeFrom(_buf, _cdrBase);\n", .{ extra, qname });
+                    try self.print("{s}{s}.deserializeFrom(_buf, _cdrBase, _xcdrVersion);\n", .{ extra, qname });
                 },
                 else => {
                     try self.ind();
@@ -2105,13 +2195,8 @@ const Generator = struct {
     ) anyerror!void {
         switch (tr) {
             .base => |b| {
-                const align_v = baseCdrAlign(b);
                 try self.ind();
-                if (align_v > 1) {
-                    try self.print("{s}_cdrAlign(_buf, _cdrBase, {d}); ", .{ extra, align_v });
-                } else {
-                    try self.print("{s}", .{extra});
-                }
+                try self.writeAlignCall(b, extra);
                 switch (b) {
                     .boolean => try self.print("_buf.put((byte)({s} ? 1 : 0));\n", .{access}),
                     .char => try self.print("_buf.put((byte){s});\n", .{access}),
@@ -2178,16 +2263,16 @@ const Generator = struct {
                 },
                 .union_ => {
                     try self.ind();
-                    try self.print("{s}{s}.serialize(_buf, _cdrBase);\n", .{ extra, access });
+                    try self.print("{s}{s}.serialize(_buf, _cdrBase, _xcdrVersion);\n", .{ extra, access });
                 },
                 .bitset => {
                     try self.ind();
-                    try self.print("{s}{s}.serialize(_buf, _cdrBase);\n", .{ extra, access });
+                    try self.print("{s}{s}.serialize(_buf, _cdrBase, _xcdrVersion);\n", .{ extra, access });
                 },
                 else => {
                     // struct, exception, native, interface — call .serialize()
                     try self.ind();
-                    try self.print("{s}{s}.serialize(_buf, _cdrBase);\n", .{ extra, access });
+                    try self.print("{s}{s}.serialize(_buf, _cdrBase, _xcdrVersion);\n", .{ extra, access });
                 },
             },
             .fixed_pt => |fp| {
@@ -2221,17 +2306,10 @@ const Generator = struct {
     ) anyerror!void {
         switch (tr) {
             .base => |b| {
-                const align_v = baseCdrAlign(b);
                 const read_expr = baseCdrReadExpr(b);
                 try self.ind();
-                if (align_v > 1) {
-                    try self.print(
-                        "{s}_cdrAlign(_buf, _cdrBase, {d}); {s} = {s};\n",
-                        .{ extra, align_v, out_expr, read_expr },
-                    );
-                } else {
-                    try self.print("{s}{s} = {s};\n", .{ extra, out_expr, read_expr });
-                }
+                try self.writeAlignCall(b, extra);
+                try self.print("{s} = {s};\n", .{ out_expr, read_expr });
             },
             .string, .wstring => {
                 try self.ind();
@@ -2305,7 +2383,7 @@ const Generator = struct {
                     defer self.alloc.free(qname);
                     try self.ind();
                     try self.print(
-                        "{s}{s} = {s}.deserializeFrom(_buf, _cdrBase);\n",
+                        "{s}{s} = {s}.deserializeFrom(_buf, _cdrBase, _xcdrVersion);\n",
                         .{ extra, out_expr, qname },
                     );
                 },
@@ -2313,7 +2391,7 @@ const Generator = struct {
                     const qname = try self.qualNameToJava(bs.qualified_name);
                     defer self.alloc.free(qname);
                     try self.ind();
-                    try self.print("{s}{s} = {s}.deserializeFrom(_buf, _cdrBase);\n", .{ extra, out_expr, qname });
+                    try self.print("{s}{s} = {s}.deserializeFrom(_buf, _cdrBase, _xcdrVersion);\n", .{ extra, out_expr, qname });
                 },
                 else => {
                     // struct, exception, native, interface
@@ -2321,7 +2399,7 @@ const Generator = struct {
                     defer self.alloc.free(qname);
                     try self.ind();
                     try self.print(
-                        "{s}{s} = {s}.deserializeFrom(_buf, _cdrBase);\n",
+                        "{s}{s} = {s}.deserializeFrom(_buf, _cdrBase, _xcdrVersion);\n",
                         .{ extra, out_expr, qname },
                     );
                 },
@@ -2375,17 +2453,10 @@ const Generator = struct {
     ) anyerror!void {
         switch (elem_tr) {
             .base => |b| {
-                const align_v = baseCdrAlign(b);
                 const read_expr = baseCdrReadExpr(b);
                 try self.ind();
-                if (align_v > 1) {
-                    try self.print(
-                        "{s}_cdrAlign(_buf, _cdrBase, {d}); {s}.add({s});\n",
-                        .{ extra, align_v, seq_expr, read_expr },
-                    );
-                } else {
-                    try self.print("{s}{s}.add({s});\n", .{ extra, seq_expr, read_expr });
-                }
+                try self.writeAlignCall(b, extra);
+                try self.print("{s}.add({s});\n", .{ seq_expr, read_expr });
             },
             .string, .wstring => {
                 try self.ind();
@@ -2413,7 +2484,7 @@ const Generator = struct {
                     defer self.alloc.free(qname);
                     try self.ind();
                     try self.print(
-                        "{s}{s}.add({s}.deserializeFrom(_buf, _cdrBase));\n",
+                        "{s}{s}.add({s}.deserializeFrom(_buf, _cdrBase, _xcdrVersion));\n",
                         .{ extra, seq_expr, qname },
                     );
                 },
@@ -3013,17 +3084,26 @@ fn emitZzddsDataWriterFile(
     try emitZzddsPackageHeader(opts, out, alloc);
     const s = try std.fmt.allocPrint(alloc,
         \\public final class {[c]s}DataWriter {{
+        \\    /** Plain CDR1 (no DHEADER on @appendable types) -- the default,
+        \\     * matching zig/c/cpp {[c]s} ports. */
+        \\    public static final int XCDR1 = 1;
+        \\    /** XCDR2 (DHEADER on @appendable types). */
+        \\    public static final int XCDR2 = 2;
+        \\
         \\    private final {[wi]s} writer;
+        \\    private final int xcdrVersion;
         \\
-        \\    public {[c]s}DataWriter({[wi]s} writer) {{ this.writer = writer; }}
+        \\    public {[c]s}DataWriter({[wi]s} writer) {{ this(writer, XCDR1); }}
+        \\    public {[c]s}DataWriter({[wi]s} writer, int xcdrVersion) {{ this.writer = writer; this.xcdrVersion = xcdrVersion; }}
         \\
-        \\    private static byte[] toPayload({[t]s} value, boolean keyOnly) {{
+        \\    private byte[] toPayload({[t]s} value, boolean keyOnly) {{
         \\        int _cap = 256;
         \\        while (true) {{
         \\            java.nio.ByteBuffer _buf = java.nio.ByteBuffer.allocate(_cap).order(java.nio.ByteOrder.LITTLE_ENDIAN);
         \\            try {{
-        \\                _buf.put((byte)0x00); _buf.put((byte)0x07); _buf.put((byte)0x00); _buf.put((byte)0x00);
-        \\                if (keyOnly) value.serializeKey(_buf, 4); else value.serialize(_buf, 4);
+        \\                if (xcdrVersion == XCDR1) {{ _buf.put((byte)0x00); _buf.put((byte)0x01); _buf.put((byte)0x00); _buf.put((byte)0x00); }}
+        \\                else {{ _buf.put((byte)0x00); _buf.put((byte)0x07); _buf.put((byte)0x00); _buf.put((byte)0x00); }}
+        \\                if (keyOnly) value.serializeKey(_buf, 4, xcdrVersion); else value.serialize(_buf, 4, xcdrVersion);
         \\                byte[] _out = new byte[_buf.position()];
         \\                _buf.rewind(); _buf.get(_out);
         \\                return _out;
@@ -3077,11 +3157,22 @@ fn emitZzddsDataReaderFile(
         \\        }}
         \\    }}
         \\
+        \\    /** Determines XCDR1 vs XCDR2 from the payload's own 4-byte CDR
+        \\     * encapsulation header (id bytes: CDR1_LE=0x0001, CDR2_LE=0x0007)
+        \\     * instead of assuming one -- a peer may choose either. */
+        \\    private static int xcdrVersionOf(byte[] payload) {{
+        \\        int _id = ((payload[0] & 0xFF) << 8) | (payload[1] & 0xFF);
+        \\        if (_id == 0x0001) return 1;
+        \\        if (_id == 0x0007) return 2;
+        \\        throw new IllegalArgumentException("zidl: unsupported CDR encapsulation id 0x" + Integer.toHexString(_id));
+        \\    }}
+        \\
         \\    private static Sample fromPayload(byte[] payload, long[] handleOut, boolean[] validOut) {{
         \\        if (payload == null) return null;
         \\        java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        \\        int _xcdrVersion = xcdrVersionOf(payload);
         \\        _buf.position(4);
-        \\        {[t]s} _data = validOut[0] ? {[t]s}.deserializeFrom(_buf, 4) : {[t]s}.deserializeKey(_buf, 4);
+        \\        {[t]s} _data = validOut[0] ? {[t]s}.deserializeFrom(_buf, 4, _xcdrVersion) : {[t]s}.deserializeKey(_buf, 4, _xcdrVersion);
         \\        return new Sample(_data, handleOut[0], validOut[0]);
         \\    }}
         \\
@@ -3216,6 +3307,17 @@ fn baseCdrAlign(b: ast.BaseTypeSpec) u8 {
         .short, .int16, .unsigned_short, .uint16, .wchar => 2,
         // XCDR2: long long / double capped at 4
         .long, .int32, .unsigned_long, .uint32, .long_long, .int64, .unsigned_long_long, .uint64, .float, .double, .long_double, .any, .object, .value_base => 4,
+    };
+}
+
+/// True for 8-byte-natural-size base types, where XCDR1 (natural alignment,
+/// 8) and XCDR2 (capped alignment, 4) actually differ. All other types
+/// align identically under both versions, so `baseCdrAlign`'s fixed value
+/// is correct for them regardless of `_xcdrVersion`.
+fn baseCdrIsWide(b: ast.BaseTypeSpec) bool {
+    return switch (b) {
+        .long_long, .int64, .unsigned_long_long, .uint64, .double, .long_double => true,
+        else => false,
     };
 }
 
@@ -5768,6 +5870,15 @@ fn generateCdrUtils(
     try gen.write("        try { return java.security.MessageDigest.getInstance(\"MD5\").digest(_key); }\n");
     try gen.write("        catch (java.security.NoSuchAlgorithmException _e) { throw new IllegalStateException(_e); }\n");
     try gen.write("    }\n");
+    // See emitCdrDetectXcdrHelper's doc comment (single-file mode) for why
+    // this exists: parses a received sample's own encapsulation header
+    // instead of assuming XCDR1 or XCDR2.
+    try gen.write("    public static int _cdrDetectXcdr(byte[] _payload) {\n");
+    try gen.write("        int _id = ((_payload[0] & 0xFF) << 8) | (_payload[1] & 0xFF);\n");
+    try gen.write("        if (_id == 0x0001) return 1;\n");
+    try gen.write("        if (_id == 0x0007) return 2;\n");
+    try gen.write("        throw new IllegalArgumentException(\"zidl: unsupported CDR encapsulation id 0x\" + Integer.toHexString(_id));\n");
+    try gen.write("    }\n");
     try gen.write("}\n");
 }
 
@@ -6155,13 +6266,13 @@ test "java: bitset cdr byte" {
     // 4 total bits → serialize as byte
     try testGen(alloc,
         \\bitset BS { bitfield<3> a; bitfield<1> b; };
-    , "test", "public void serialize(java.nio.ByteBuffer _buf, int _cdrBase)");
+    , "test", "public void serialize(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion)");
     try testGen(alloc,
         \\bitset BS { bitfield<3> a; bitfield<1> b; };
     , "test", "_buf.put((byte)(_value & 0xFF));");
     try testGen(alloc,
         \\bitset BS { bitfield<3> a; bitfield<1> b; };
-    , "test", "public static BS deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase)");
+    , "test", "public static BS deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion)");
     try testGen(alloc,
         \\bitset BS { bitfield<3> a; bitfield<1> b; };
     , "test", "_out._value = (_buf.get() & 0xFF);");
@@ -6187,11 +6298,11 @@ test "java: bitset member in struct" {
     try testGen(alloc,
         \\bitset BS { bitfield<3> a; bitfield<1> b; };
         \\struct S { BS bs; };
-    , "test", "this.bs.serialize(_buf, _cdrBase);");
+    , "test", "this.bs.serialize(_buf, _cdrBase, _xcdrVersion);");
     try testGen(alloc,
         \\bitset BS { bitfield<3> a; bitfield<1> b; };
         \\struct S { BS bs; };
-    , "test", "_out.bs = BS.deserializeFrom(_buf, _cdrBase);");
+    , "test", "_out.bs = BS.deserializeFrom(_buf, _cdrBase, _xcdrVersion);");
 }
 
 test "java: bitset padding field" {
@@ -6321,13 +6432,13 @@ test "java: CDR primitive serialize" {
     const alloc = testing.allocator;
     try testGen(alloc,
         \\struct Point { long x; long y; };
-    , "test", "public void serialize(java.nio.ByteBuffer _buf, int _cdrBase) {");
+    , "test", "public void serialize(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {");
     try testGen(alloc,
         \\struct Point { long x; long y; };
     , "test", "_cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.x)");
     try testGen(alloc,
         \\struct Point { long x; long y; };
-    , "test", "public static Point deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase) {");
+    , "test", "public static Point deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {");
     try testGen(alloc,
         \\struct Point { long x; long y; };
     , "test", "_cdrAlign(_buf, _cdrBase, 4); _out.x = _buf.getInt();");
@@ -6358,15 +6469,179 @@ test "java: CDR sequence serialize" {
 
 test "java: CDR appendable DHEADER" {
     const alloc = testing.allocator;
+    // XCDR2 path (guarded by _xcdrVersion == 2 at runtime, not compiled out --
+    // see the "XCDR1 write" / "XCDR2 write" tests below for the runtime split).
     try testGen(alloc,
         \\@appendable struct S { long x; };
+    , "test", "if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _dhPos = _buf.position(); _buf.putInt(0); }");
+    try testGen(alloc,
+        \\@appendable struct S { long x; };
+    , "test", "if (_xcdrVersion == 2) { _buf.putInt(_dhPos, _buf.position() - _dhPos - 4); }");
+    try testGen(alloc,
+        \\@appendable struct S { long x; };
+    , "test", "if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); } // skip DHEADER");
+}
+
+// ── XCDR1/XCDR2 regression coverage ──────────────────────────────────────────
+//
+// The tests above cover the DHEADER conditional in isolation (a `long`-only
+// appendable struct, so the write-side alignment for `x` stays the ordinary
+// literal-4 call). These cover the pieces that don't show up there: a wide
+// (8-byte) field combined with `@appendable`, the write-side encapsulation
+// header/constructor selection, read-side auto-detection, `@mutable` staying
+// unconditional, and the `skip()`/`deserializeKeyInto()` XCDR1 fallback that
+// was a structural rewrite, not just a signature change.
+
+test "java: appendable struct with a wide field gets conditional 8-byte alignment" {
+    const alloc = testing.allocator;
+    try testGen(alloc,
+        \\@appendable struct W { double d; };
+    , "test", "_cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _buf.putDouble(this.d);");
+    try testGen(alloc,
+        \\@appendable struct W { double d; };
+    , "test", "_cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _out.d = _buf.getDouble();");
+    // Still appendable: DHEADER guard present too, independent of the field width.
+    try testGen(alloc,
+        \\@appendable struct W { double d; };
+    , "test", "if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _dhPos = _buf.position(); _buf.putInt(0); }");
+}
+
+test "java: --generate-zzdds-wrappers DataWriter selects XCDR1/XCDR2 encapsulation header and keeps a 1-arg constructor" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc,
+        \\@appendable struct Foo { @key unsigned long id; };
+    );
+    defer ir_spec.deinit();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const out_dir = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer alloc.free(out_dir);
+
+    const opts = interface.Options{
+        .input_stem = "sensor",
+        .split_files = true,
+        .generate_zzdds_wrappers = true,
+        .output_dir = out_dir,
+    };
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try generateSplitFiles(alloc, io, &ir_spec, opts);
+
+    const writer_content = try tmp.dir.readFileAlloc(io, "FooDataWriter.java", alloc, .unlimited);
+    defer alloc.free(writer_content);
+
+    // Default (no-arg-xcdr) constructor overload must still compile against
+    // existing 1-arg call sites (e.g. zzdds's own JavaSmoke.java) -- and must
+    // default to XCDR1, matching zig/c/cpp's default for @appendable types.
+    try testing.expect(std.mem.indexOf(u8, writer_content, "public FooDataWriter(") != null);
+    try testing.expect(std.mem.indexOf(u8, writer_content, "this(writer, XCDR1);") != null);
+    try testing.expect(std.mem.indexOf(u8, writer_content, "public static final int XCDR1 = 1;") != null);
+    try testing.expect(std.mem.indexOf(u8, writer_content, "public static final int XCDR2 = 2;") != null);
+
+    // Both encapsulation headers must be selectable at write time, not just
+    // one hardcoded choice.
+    try testing.expect(std.mem.indexOf(u8, writer_content, "_buf.put((byte)0x01)") != null);
+    try testing.expect(std.mem.indexOf(u8, writer_content, "_buf.put((byte)0x07)") != null);
+    try testing.expect(std.mem.indexOf(u8, writer_content, "value.serialize(_buf, 4, xcdrVersion)") != null);
+}
+
+test "java: --generate-zzdds-wrappers DataReader auto-detects xcdr version from the received payload" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc,
+        \\@appendable struct Foo { @key unsigned long id; };
+    );
+    defer ir_spec.deinit();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const out_dir = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer alloc.free(out_dir);
+
+    const opts = interface.Options{
+        .input_stem = "sensor",
+        .split_files = true,
+        .generate_zzdds_wrappers = true,
+        .output_dir = out_dir,
+    };
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try generateSplitFiles(alloc, io, &ir_spec, opts);
+
+    const reader_content = try tmp.dir.readFileAlloc(io, "FooDataReader.java", alloc, .unlimited);
+    defer alloc.free(reader_content);
+
+    // Must parse the actual received header (id bytes 0x0001/0x0007), not
+    // assume one -- this is the read-side half of the original bug (Java
+    // used to always do `_buf.position(4)` with no idea what it just skipped).
+    try testing.expect(std.mem.indexOf(u8, reader_content, "xcdrVersionOf(byte[] payload)") != null);
+    try testing.expect(std.mem.indexOf(u8, reader_content, "if (_id == 0x0001) return 1;") != null);
+    try testing.expect(std.mem.indexOf(u8, reader_content, "if (_id == 0x0007) return 2;") != null);
+    try testing.expect(std.mem.indexOf(u8, reader_content, "int _xcdrVersion = xcdrVersionOf(payload);") != null);
+    try testing.expect(std.mem.indexOf(u8, reader_content, "Foo.deserializeFrom(_buf, 4, _xcdrVersion)") != null);
+}
+
+test "java: mutable struct DHEADER stays unconditional regardless of _xcdrVersion" {
+    const alloc = testing.allocator;
+    // @mutable always requires XCDR2 framing per spec -- the DHEADER
+    // reserve/patch must NOT be gated on _xcdrVersion the way @appendable's
+    // is, even though the surrounding method now takes the parameter (for
+    // call-site compatibility with every other data type).
+    try testGen(alloc,
+        \\@mutable struct M { long x; };
     , "test", "int _dhPos = _buf.position(); _buf.putInt(0);");
     try testGen(alloc,
-        \\@appendable struct S { long x; };
+        \\@mutable struct M { long x; };
     , "test", "_buf.putInt(_dhPos, _buf.position() - _dhPos - 4);");
+    const alloc2 = testing.allocator;
+    var ast_arena = std.heap.ArenaAllocator.init(alloc2);
+    defer ast_arena.deinit();
+    var p = parser_mod.Parser.init(
+        \\@mutable struct M { long x; };
+    , ast_arena.allocator());
+    const spec = try p.parseSpecification();
+    var az = try semantic_mod.Analyzer.init(alloc2);
+    defer az.deinit();
+    try az.analyze(&spec);
+    var ir_spec = try ir.build(alloc2, &spec, az.global_scope, &.{});
+    defer ir_spec.deinit();
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc2);
+    const opts = interface.Options{ .input_stem = "test" };
+    try generateFile(alloc2, &ir_spec, opts, &out);
+    // The DHEADER reserve line must not be preceded by an _xcdrVersion guard.
+    try testing.expect(std.mem.indexOf(u8, out.items, "if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); int _dhPos") == null);
+}
+
+test "java: appendable struct under XCDR1 falls back to per-member skip and enforces leading-@key order" {
+    const alloc = testing.allocator;
+    // skip(): no DHEADER length to trust under XCDR1, so it must fall back
+    // to reading (and discarding) each member individually -- this was a
+    // structural rewrite (skip() didn't even loop `s.members` in the
+    // appendable branch before this fix), not just a signature change.
     try testGen(alloc,
-        \\@appendable struct S { long x; };
-    , "test", "_cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); // skip DHEADER");
+        \\@appendable struct S { long a; string b; };
+    , "test", "public static void skip(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {");
+    try testGen(alloc,
+        \\@appendable struct S { long a; string b; };
+    , "test", "if (_xcdrVersion == 2) {\n");
+    // The XCDR1 (else) branch drains the same fields skip() would for an
+    // equivalent @final struct: read-and-discard `a` then `b`, in order.
+    try testGen(alloc,
+        \\@appendable struct S { long a; string b; };
+    , "test", "} else {");
+    try testGen(alloc,
+        \\@appendable struct S { long a; string b; };
+    , "test", "_cdrReadString(_buf, _cdrBase);\n");
+
+    // deserializeKeyInto(): same reasoning applies to key-only payloads, and
+    // the "@key members must be leading" constraint (previously enforced
+    // only for @final) must now also apply when an @appendable type is read
+    // as XCDR1, since there's equally no DHEADER to bound the read.
+    try testGen(alloc,
+        \\@appendable struct S { long a; @key long b; };
+    , "test", "if (_xcdrVersion != 2) {");
+    try testGen(alloc,
+        \\@appendable struct S { long a; @key long b; };
+    , "test", "throw new UnsupportedOperationException(\"zidl: @appendable struct 'S' has non-leading @key member 'b'; \" +");
 }
 
 test "java: CDR @key serializeKey" {
@@ -6382,7 +6657,7 @@ test "java: CDR @key serializeKey" {
         \\    @key long id;
         \\    string name;
         \\};
-    , "test", "public void serializeKey(java.nio.ByteBuffer _buf, int _cdrBase) {");
+    , "test", "public void serializeKey(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {");
     // serializeKey should serialize the @key field
     try testGen(alloc,
         \\struct Topic {
@@ -6555,14 +6830,14 @@ test "java: union CDR serialize emitted" {
     const alloc = testing.allocator;
     try testGen(alloc,
         \\union Var switch (long) { case 0: long i; case 1: double d; };
-    , "var", "public void serialize(java.nio.ByteBuffer _buf, int _cdrBase)");
+    , "var", "public void serialize(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion)");
 }
 
 test "java: union CDR deserializeFrom emitted" {
     const alloc = testing.allocator;
     try testGen(alloc,
         \\union Var switch (long) { case 0: long i; case 1: double d; };
-    , "var", "public static Var deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase)");
+    , "var", "public static Var deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion)");
 }
 
 test "java: union CDR switch on discriminant" {
