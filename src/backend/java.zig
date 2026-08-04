@@ -1239,7 +1239,7 @@ const Generator = struct {
             } else if (total <= 32) {
                 try self.write("_cdrAlign(_buf, _cdrBase, 4); _buf.putInt(_value);\n");
             } else {
-                try self.write("_cdrAlign(_buf, _cdrBase, 4); _buf.putLong(_value);\n");
+                try self.write("_cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _buf.putLong(_value);\n");
             }
             self.depth -= 1;
             try self.ind();
@@ -1261,7 +1261,7 @@ const Generator = struct {
             } else if (total <= 32) {
                 try self.write("_cdrAlign(_buf, _cdrBase, 4); _out._value = _buf.getInt();\n");
             } else {
-                try self.write("_cdrAlign(_buf, _cdrBase, 4); _out._value = _buf.getLong();\n");
+                try self.write("_cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _out._value = _buf.getLong();\n");
             }
             try self.ind();
             try self.write("return _out;\n");
@@ -6287,6 +6287,20 @@ test "java: bitset cdr int" {
     try testGen(alloc,
         \\bitset Cfg { bitfield<16> lo; bitfield<16> hi; };
     , "test", "_cdrAlign(_buf, _cdrBase, 4); _out._value = _buf.getInt();");
+}
+
+test "java: bitset cdr long gets conditional 8-byte alignment" {
+    const alloc = testing.allocator;
+    // 32+16 = 48 bits → serialize as long; alignment must follow xcdrVersion
+    // like the wide-primitive-field case (natural 8-byte under XCDR1,
+    // capped 4-byte under XCDR2), not the hardcoded 4-byte alignment every
+    // other bitset width uses.
+    try testGen(alloc,
+        \\bitset Wide { bitfield<32> lo; bitfield<16> hi; };
+    , "test", "_cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _buf.putLong(_value);");
+    try testGen(alloc,
+        \\bitset Wide { bitfield<32> lo; bitfield<16> hi; };
+    , "test", "_cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _out._value = _buf.getLong();");
 }
 
 test "java: bitset member in struct" {
