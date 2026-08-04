@@ -31,52 +31,61 @@ public class Beacon implements java.io.Serializable {
 
     public static final boolean HAS_KEY = true;
 
-    public void serialize(java.nio.ByteBuffer _buf, int _cdrBase) {
+    public void serialize(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
         _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
-        _cdrAlign(_buf, _cdrBase, 4);
-        int _dhPos = _buf.position(); _buf.putInt(0);
+        int _dhPos = 0;
+        if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _dhPos = _buf.position(); _buf.putInt(0); }
         _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.id);
         _cdrWriteString(_buf, _cdrBase, this.payload);
-        _buf.putInt(_dhPos, _buf.position() - _dhPos - 4);
+        if (_xcdrVersion == 2) { _buf.putInt(_dhPos, _buf.position() - _dhPos - 4); }
     }
 
-    public static Beacon deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase) {
+    public static Beacon deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
         _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
         Beacon _out = new Beacon();
-        _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); // skip DHEADER
+        if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); } // skip DHEADER
         _cdrAlign(_buf, _cdrBase, 4); _out.id = _buf.getInt();
         _out.payload = _cdrReadString(_buf, _cdrBase);
         return _out;
     }
 
-    public static void skip(java.nio.ByteBuffer _buf, int _cdrBase) {
+    public static void skip(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
         _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
-        _cdrAlign(_buf, _cdrBase, 4); int _end = _buf.position() + 4 + _buf.getInt();
-        _buf.position(_end);
+        if (_xcdrVersion == 2) {
+            _cdrAlign(_buf, _cdrBase, 4); int _end = _buf.position() + 4 + _buf.getInt();
+            _buf.position(_end);
+        } else {
+            _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
+            _cdrReadString(_buf, _cdrBase);
+        }
     }
 
-    protected void serializeKeyFields(java.nio.ByteBuffer _buf, int _cdrBase) {
+    protected void serializeKeyFields(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
         _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.id);
     }
 
-    public void serializeKey(java.nio.ByteBuffer _buf, int _cdrBase) {
+    public void serializeKey(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
         _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
-        _cdrAlign(_buf, _cdrBase, 4); int _dhPos = _buf.position(); _buf.putInt(0);
-        serializeKeyFields(_buf, _cdrBase);
-        _buf.putInt(_dhPos, _buf.position() - _dhPos - 4);
+        int _dhPos = 0;
+        if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _dhPos = _buf.position(); _buf.putInt(0); }
+        serializeKeyFields(_buf, _cdrBase, _xcdrVersion);
+        if (_xcdrVersion == 2) { _buf.putInt(_dhPos, _buf.position() - _dhPos - 4); }
     }
 
-    public static Beacon deserializeKey(java.nio.ByteBuffer _buf, int _cdrBase) {
+    public static Beacon deserializeKey(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
         _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
         Beacon _out = new Beacon();
-        deserializeKeyInto(_out, _buf, _cdrBase);
+        deserializeKeyInto(_out, _buf, _cdrBase, _xcdrVersion);
         return _out;
     }
 
-    protected static void deserializeKeyInto(Beacon _out, java.nio.ByteBuffer _buf, int _cdrBase) {
-        _cdrAlign(_buf, _cdrBase, 4); int _keyEnd = _buf.position() + 4 + _buf.getInt();
+    protected static void deserializeKeyInto(Beacon _out, java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
+        int _keyEnd = 0;
+        if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _keyEnd = _buf.position() + 4 + _buf.getInt(); }
+        if (_xcdrVersion != 2) {
+        }
         _cdrAlign(_buf, _cdrBase, 4); _out.id = _buf.getInt();
-        _buf.position(_keyEnd);
+        if (_xcdrVersion == 2) { _buf.position(_keyEnd); }
     }
 
     public byte[] computeKeyHash() {
@@ -84,7 +93,7 @@ public class Beacon implements java.io.Serializable {
         while (true) {
             java.nio.ByteBuffer _buf = java.nio.ByteBuffer.allocate(_cap).order(java.nio.ByteOrder.BIG_ENDIAN);
             try {
-                serializeKeyFields(_buf, 0);
+                serializeKeyFields(_buf, 0, 1);
                 return _cdrComputeKeyHash(_buf);
             } catch (java.nio.BufferOverflowException _e) {
                 _cap *= 2;
@@ -94,8 +103,9 @@ public class Beacon implements java.io.Serializable {
 
     public static byte[] computeKeyHashFromCdr(byte[] _payload) {
         java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(_payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        int _xcdrVersion = _cdrDetectXcdr(_payload);
         _buf.position(4);
-        Beacon _obj = deserializeFrom(_buf, 4);
+        Beacon _obj = deserializeFrom(_buf, 4, _xcdrVersion);
         return _obj.computeKeyHash();
     }
 } // Beacon

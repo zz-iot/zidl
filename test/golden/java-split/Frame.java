@@ -31,28 +31,33 @@ public class Frame implements java.io.Serializable {
 
     public static final boolean HAS_KEY = false;
 
-    public void serialize(java.nio.ByteBuffer _buf, int _cdrBase) {
+    public void serialize(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
         _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
-        _cdrAlign(_buf, _cdrBase, 4);
-        int _dhPos = _buf.position(); _buf.putInt(0);
+        int _dhPos = 0;
+        if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _dhPos = _buf.position(); _buf.putInt(0); }
         _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.seq_num);
         _cdrWriteString(_buf, _cdrBase, this.topic);
-        _buf.putInt(_dhPos, _buf.position() - _dhPos - 4);
+        if (_xcdrVersion == 2) { _buf.putInt(_dhPos, _buf.position() - _dhPos - 4); }
     }
 
-    public static Frame deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase) {
+    public static Frame deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
         _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
         Frame _out = new Frame();
-        _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); // skip DHEADER
+        if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); } // skip DHEADER
         _cdrAlign(_buf, _cdrBase, 4); _out.seq_num = _buf.getInt();
         _out.topic = _cdrReadString(_buf, _cdrBase);
         return _out;
     }
 
-    public static void skip(java.nio.ByteBuffer _buf, int _cdrBase) {
+    public static void skip(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
         _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
-        _cdrAlign(_buf, _cdrBase, 4); int _end = _buf.position() + 4 + _buf.getInt();
-        _buf.position(_end);
+        if (_xcdrVersion == 2) {
+            _cdrAlign(_buf, _cdrBase, 4); int _end = _buf.position() + 4 + _buf.getInt();
+            _buf.position(_end);
+        } else {
+            _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
+            _cdrReadString(_buf, _cdrBase);
+        }
     }
 } // Frame
 

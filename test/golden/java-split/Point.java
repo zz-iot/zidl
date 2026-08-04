@@ -31,13 +31,13 @@ public class Point implements java.io.Serializable {
 
     public static final boolean HAS_KEY = false;
 
-    public void serialize(java.nio.ByteBuffer _buf, int _cdrBase) {
+    public void serialize(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
         _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
         _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.x);
         _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.y);
     }
 
-    public static Point deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase) {
+    public static Point deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
         _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
         Point _out = new Point();
         _cdrAlign(_buf, _cdrBase, 4); _out.x = _buf.getInt();
@@ -45,7 +45,7 @@ public class Point implements java.io.Serializable {
         return _out;
     }
 
-    public static void skip(java.nio.ByteBuffer _buf, int _cdrBase) {
+    public static void skip(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
         _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
         _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
         _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();

@@ -56,6 +56,13 @@ public class Types {
         catch (java.security.NoSuchAlgorithmException _e) { throw new IllegalStateException(_e); }
     }
 
+    private static int _cdrDetectXcdr(byte[] _payload) {
+        int _id = ((_payload[0] & 0xFF) << 8) | (_payload[1] & 0xFF);
+        if (_id == 0x0001) return 1;
+        if (_id == 0x0007) return 2;
+        throw new IllegalArgumentException("zidl: unsupported CDR encapsulation id 0x" + Integer.toHexString(_id));
+    }
+
     public enum Color {
         RED(0),
         GREEN(1),
@@ -99,13 +106,13 @@ public class Types {
 
         public static final boolean HAS_KEY = false;
 
-        public void serialize(java.nio.ByteBuffer _buf, int _cdrBase) {
+        public void serialize(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
             _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.x);
             _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.y);
         }
 
-        public static Point deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase) {
+        public static Point deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
             Point _out = new Point();
             _cdrAlign(_buf, _cdrBase, 4); _out.x = _buf.getInt();
@@ -113,7 +120,7 @@ public class Types {
             return _out;
         }
 
-        public static void skip(java.nio.ByteBuffer _buf, int _cdrBase) {
+        public static void skip(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
             _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
             _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
@@ -237,7 +244,7 @@ public class Types {
 
         public static final boolean HAS_KEY = true;
 
-        public void serialize(java.nio.ByteBuffer _buf, int _cdrBase) {
+        public void serialize(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
             _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.id);
             _buf.put((byte)(this.b ? 1 : 0));
@@ -246,10 +253,10 @@ public class Types {
             _cdrAlign(_buf, _cdrBase, 2); _buf.putShort(this.u16_val);
             _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.s32_val);
             _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.u32_val);
-            _cdrAlign(_buf, _cdrBase, 4); _buf.putLong(this.s64_val);
-            _cdrAlign(_buf, _cdrBase, 4); _buf.putLong(this.u64_val);
+            _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _buf.putLong(this.s64_val);
+            _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _buf.putLong(this.u64_val);
             _cdrAlign(_buf, _cdrBase, 4); _buf.putFloat(this.f32_val);
-            _cdrAlign(_buf, _cdrBase, 4); _buf.putDouble(this.f64_val);
+            _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _buf.putDouble(this.f64_val);
             _cdrWriteString(_buf, _cdrBase, this.str);
             _cdrWriteString(_buf, _cdrBase, this.bstr);
             _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.nums.size());
@@ -260,10 +267,10 @@ public class Types {
                 _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.arr[_d0]);
             }
             _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.clr.getValue());
-            this.nested.serialize(_buf, _cdrBase);
+            this.nested.serialize(_buf, _cdrBase, _xcdrVersion);
         }
 
-        public static Sample deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase) {
+        public static Sample deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
             Sample _out = new Sample();
             _cdrAlign(_buf, _cdrBase, 4); _out.id = _buf.getInt();
@@ -273,10 +280,10 @@ public class Types {
             _cdrAlign(_buf, _cdrBase, 2); _out.u16_val = _buf.getShort();
             _cdrAlign(_buf, _cdrBase, 4); _out.s32_val = _buf.getInt();
             _cdrAlign(_buf, _cdrBase, 4); _out.u32_val = _buf.getInt();
-            _cdrAlign(_buf, _cdrBase, 4); _out.s64_val = _buf.getLong();
-            _cdrAlign(_buf, _cdrBase, 4); _out.u64_val = _buf.getLong();
+            _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _out.s64_val = _buf.getLong();
+            _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _out.u64_val = _buf.getLong();
             _cdrAlign(_buf, _cdrBase, 4); _out.f32_val = _buf.getFloat();
-            _cdrAlign(_buf, _cdrBase, 4); _out.f64_val = _buf.getDouble();
+            _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _out.f64_val = _buf.getDouble();
             _out.str = _cdrReadString(_buf, _cdrBase);
             _out.bstr = _cdrReadString(_buf, _cdrBase);
             _cdrAlign(_buf, _cdrBase, 4); int _n__out_nums = _buf.getInt();
@@ -288,11 +295,11 @@ public class Types {
                 _cdrAlign(_buf, _cdrBase, 4); _out.arr[_d0] = _buf.getInt();
             }
             _cdrAlign(_buf, _cdrBase, 4); _out.clr = Color.valueOf(_buf.getInt());
-            _out.nested = Point.deserializeFrom(_buf, _cdrBase);
+            _out.nested = Point.deserializeFrom(_buf, _cdrBase, _xcdrVersion);
             return _out;
         }
 
-        public static void skip(java.nio.ByteBuffer _buf, int _cdrBase) {
+        public static void skip(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
             _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
             _buf.get();
@@ -301,10 +308,10 @@ public class Types {
             _cdrAlign(_buf, _cdrBase, 2); _buf.getShort();
             _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
             _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
-            _cdrAlign(_buf, _cdrBase, 4); _buf.getLong();
-            _cdrAlign(_buf, _cdrBase, 4); _buf.getLong();
+            _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _buf.getLong();
+            _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _buf.getLong();
             _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
-            _cdrAlign(_buf, _cdrBase, 4); _buf.getLong();
+            _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _buf.getLong();
             _cdrReadString(_buf, _cdrBase);
             _cdrReadString(_buf, _cdrBase);
             { _cdrAlign(_buf, _cdrBase, 4); int _n = _buf.getInt();
@@ -316,26 +323,26 @@ public class Types {
                 _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
             }
             _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
-            Point.skip(_buf, _cdrBase);
+            Point.skip(_buf, _cdrBase, _xcdrVersion);
         }
 
-        protected void serializeKeyFields(java.nio.ByteBuffer _buf, int _cdrBase) {
+        protected void serializeKeyFields(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.id);
         }
 
-        public void serializeKey(java.nio.ByteBuffer _buf, int _cdrBase) {
+        public void serializeKey(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
-            serializeKeyFields(_buf, _cdrBase);
+            serializeKeyFields(_buf, _cdrBase, _xcdrVersion);
         }
 
-        public static Sample deserializeKey(java.nio.ByteBuffer _buf, int _cdrBase) {
+        public static Sample deserializeKey(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
             Sample _out = new Sample();
-            deserializeKeyInto(_out, _buf, _cdrBase);
+            deserializeKeyInto(_out, _buf, _cdrBase, _xcdrVersion);
             return _out;
         }
 
-        protected static void deserializeKeyInto(Sample _out, java.nio.ByteBuffer _buf, int _cdrBase) {
+        protected static void deserializeKeyInto(Sample _out, java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _cdrAlign(_buf, _cdrBase, 4); _out.id = _buf.getInt();
         }
 
@@ -344,7 +351,7 @@ public class Types {
             while (true) {
                 java.nio.ByteBuffer _buf = java.nio.ByteBuffer.allocate(_cap).order(java.nio.ByteOrder.BIG_ENDIAN);
                 try {
-                    serializeKeyFields(_buf, 0);
+                    serializeKeyFields(_buf, 0, 1);
                     return _cdrComputeKeyHash(_buf);
                 } catch (java.nio.BufferOverflowException _e) {
                     _cap *= 2;
@@ -354,8 +361,9 @@ public class Types {
 
         public static byte[] computeKeyHashFromCdr(byte[] _payload) {
             java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(_payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            int _xcdrVersion = _cdrDetectXcdr(_payload);
             _buf.position(4);
-            Sample _obj = deserializeFrom(_buf, 4);
+            Sample _obj = deserializeFrom(_buf, 4, _xcdrVersion);
             return _obj.computeKeyHash();
         }
     } // Sample
@@ -387,28 +395,33 @@ public class Types {
 
         public static final boolean HAS_KEY = false;
 
-        public void serialize(java.nio.ByteBuffer _buf, int _cdrBase) {
+        public void serialize(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
-            _cdrAlign(_buf, _cdrBase, 4);
-            int _dhPos = _buf.position(); _buf.putInt(0);
+            int _dhPos = 0;
+            if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _dhPos = _buf.position(); _buf.putInt(0); }
             _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.seq_num);
             _cdrWriteString(_buf, _cdrBase, this.topic);
-            _buf.putInt(_dhPos, _buf.position() - _dhPos - 4);
+            if (_xcdrVersion == 2) { _buf.putInt(_dhPos, _buf.position() - _dhPos - 4); }
         }
 
-        public static Frame deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase) {
+        public static Frame deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
             Frame _out = new Frame();
-            _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); // skip DHEADER
+            if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); } // skip DHEADER
             _cdrAlign(_buf, _cdrBase, 4); _out.seq_num = _buf.getInt();
             _out.topic = _cdrReadString(_buf, _cdrBase);
             return _out;
         }
 
-        public static void skip(java.nio.ByteBuffer _buf, int _cdrBase) {
+        public static void skip(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
-            _cdrAlign(_buf, _cdrBase, 4); int _end = _buf.position() + 4 + _buf.getInt();
-            _buf.position(_end);
+            if (_xcdrVersion == 2) {
+                _cdrAlign(_buf, _cdrBase, 4); int _end = _buf.position() + 4 + _buf.getInt();
+                _buf.position(_end);
+            } else {
+                _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
+                _cdrReadString(_buf, _cdrBase);
+            }
         }
     } // Frame
 
@@ -439,52 +452,61 @@ public class Types {
 
         public static final boolean HAS_KEY = true;
 
-        public void serialize(java.nio.ByteBuffer _buf, int _cdrBase) {
+        public void serialize(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
-            _cdrAlign(_buf, _cdrBase, 4);
-            int _dhPos = _buf.position(); _buf.putInt(0);
+            int _dhPos = 0;
+            if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _dhPos = _buf.position(); _buf.putInt(0); }
             _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.id);
             _cdrWriteString(_buf, _cdrBase, this.payload);
-            _buf.putInt(_dhPos, _buf.position() - _dhPos - 4);
+            if (_xcdrVersion == 2) { _buf.putInt(_dhPos, _buf.position() - _dhPos - 4); }
         }
 
-        public static Beacon deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase) {
+        public static Beacon deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
             Beacon _out = new Beacon();
-            _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); // skip DHEADER
+            if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); } // skip DHEADER
             _cdrAlign(_buf, _cdrBase, 4); _out.id = _buf.getInt();
             _out.payload = _cdrReadString(_buf, _cdrBase);
             return _out;
         }
 
-        public static void skip(java.nio.ByteBuffer _buf, int _cdrBase) {
+        public static void skip(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
-            _cdrAlign(_buf, _cdrBase, 4); int _end = _buf.position() + 4 + _buf.getInt();
-            _buf.position(_end);
+            if (_xcdrVersion == 2) {
+                _cdrAlign(_buf, _cdrBase, 4); int _end = _buf.position() + 4 + _buf.getInt();
+                _buf.position(_end);
+            } else {
+                _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
+                _cdrReadString(_buf, _cdrBase);
+            }
         }
 
-        protected void serializeKeyFields(java.nio.ByteBuffer _buf, int _cdrBase) {
+        protected void serializeKeyFields(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.id);
         }
 
-        public void serializeKey(java.nio.ByteBuffer _buf, int _cdrBase) {
+        public void serializeKey(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
-            _cdrAlign(_buf, _cdrBase, 4); int _dhPos = _buf.position(); _buf.putInt(0);
-            serializeKeyFields(_buf, _cdrBase);
-            _buf.putInt(_dhPos, _buf.position() - _dhPos - 4);
+            int _dhPos = 0;
+            if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _dhPos = _buf.position(); _buf.putInt(0); }
+            serializeKeyFields(_buf, _cdrBase, _xcdrVersion);
+            if (_xcdrVersion == 2) { _buf.putInt(_dhPos, _buf.position() - _dhPos - 4); }
         }
 
-        public static Beacon deserializeKey(java.nio.ByteBuffer _buf, int _cdrBase) {
+        public static Beacon deserializeKey(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
             Beacon _out = new Beacon();
-            deserializeKeyInto(_out, _buf, _cdrBase);
+            deserializeKeyInto(_out, _buf, _cdrBase, _xcdrVersion);
             return _out;
         }
 
-        protected static void deserializeKeyInto(Beacon _out, java.nio.ByteBuffer _buf, int _cdrBase) {
-            _cdrAlign(_buf, _cdrBase, 4); int _keyEnd = _buf.position() + 4 + _buf.getInt();
+        protected static void deserializeKeyInto(Beacon _out, java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
+            int _keyEnd = 0;
+            if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _keyEnd = _buf.position() + 4 + _buf.getInt(); }
+            if (_xcdrVersion != 2) {
+            }
             _cdrAlign(_buf, _cdrBase, 4); _out.id = _buf.getInt();
-            _buf.position(_keyEnd);
+            if (_xcdrVersion == 2) { _buf.position(_keyEnd); }
         }
 
         public byte[] computeKeyHash() {
@@ -492,7 +514,7 @@ public class Types {
             while (true) {
                 java.nio.ByteBuffer _buf = java.nio.ByteBuffer.allocate(_cap).order(java.nio.ByteOrder.BIG_ENDIAN);
                 try {
-                    serializeKeyFields(_buf, 0);
+                    serializeKeyFields(_buf, 0, 1);
                     return _cdrComputeKeyHash(_buf);
                 } catch (java.nio.BufferOverflowException _e) {
                     _cap *= 2;
@@ -502,8 +524,9 @@ public class Types {
 
         public static byte[] computeKeyHashFromCdr(byte[] _payload) {
             java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(_payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            int _xcdrVersion = _cdrDetectXcdr(_payload);
             _buf.position(4);
-            Beacon _obj = deserializeFrom(_buf, 4);
+            Beacon _obj = deserializeFrom(_buf, 4, _xcdrVersion);
             return _obj.computeKeyHash();
         }
     } // Beacon
