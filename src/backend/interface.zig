@@ -245,6 +245,49 @@ pub const Options = struct {
     /// type of every sequence/string/wstring field, a source/ABI break for any
     /// consumer code that names std::vector<T>/std::string directly.
     cpp_pmr_containers: bool = false,
+    /// C++ backend, `--cpp-generate-impl` only: override which concrete class
+    /// `entityImplName()` returns for a given interface, at every site that
+    /// would otherwise name it -- `_getOrCreate` construction/return sites
+    /// *and* the `dynamic_cast<...>(...)` parameter-adaptation lambdas (both
+    /// route through the same function, so one override covers both
+    /// automatically). Each entry is a raw `"<InterfaceQualifiedName>=<Class>"`
+    /// string, e.g. `"DDS::DataWriter=::zzdds::DataWriterImpl"` — the
+    /// interface name must match `ir.Interface.qualified_name` exactly (the
+    /// same `Mod::Name` form used everywhere else, e.g. entity type names in
+    /// generated code); the class must already be a complete, constructible
+    /// type implementing the interface (this flag does not generate or
+    /// validate it — see `cpp_impl_includes` for making it visible).
+    ///
+    /// Exists because `--cpp-generate-impl` runs once per IDL file, with no
+    /// visibility into any other file's generation: a vendor extension IDL
+    /// (e.g. zzdds's `zzdds.idl`) that declares `interface DataWriter :
+    /// DDS::DataWriter { ... }` gets its own, *separately generated*
+    /// `zzdds::DataWriterImpl`, but the base `dcps.idl`'s own generation has
+    /// no way to know that class exists — it always constructs/casts against
+    /// its own mechanically-named `DDS::DataWriterImpl`. This flag is a
+    /// blind, unvalidated redirect for exactly that case: it does not parse
+    /// or even look at whatever IDL file the override class comes from.
+    cpp_impl_overrides: []const []const u8 = &.{},
+    /// C++ backend, `--cpp-generate-impl` only: extra `#include "..."` lines
+    /// emitted at the top of the generated `_impl.cpp`, so a class named in
+    /// `cpp_impl_overrides` is actually visible. Repeatable; each entry is a
+    /// bare header name/path passed through verbatim into `#include "..."`.
+    cpp_impl_includes: []const []const u8 = &.{},
+    /// C backend only: suppress emitting `{Type}_free()` (both prototype and
+    /// body) for structs that need it. For a standalone C consumer compiling
+    /// this generation's output into its own binary, `_free` is exactly what
+    /// they want — the default. It becomes a problem only when the *same*
+    /// struct's C-ABI free function is already exported from elsewhere the
+    /// consumer also links against (e.g. zzdds compiling its own
+    /// `dcps.idl`-generated `dcps_cdr.c` directly into `libzzdds.so`, which
+    /// already exports `{Type}_free` for these exact structs via the
+    /// Zig-native `--zig-generate-c-api` path — compiling both in is a
+    /// duplicate-symbol link error, confirmed directly, not theorized: 25 of
+    /// them across `dcps.idl`+`zzdds.idl`'s QoS/status/config structs).
+    /// Serialize/deserialize/skip/default/key functions are unaffected —
+    /// only `--zig-generate-c-api` exports `_free`, nothing else exports the
+    /// others, so there's nothing to collide with there.
+    c_no_free: bool = false,
 };
 
 /// Map an imported IDL module name to the generated C/C++ include stem.
@@ -506,6 +549,86 @@ fn collectBaseChain(
             else => {},
         }
     }
+}
+
+/// For every concrete (non-callback, not-itself-based-by-anything-else — see
+/// `entity_base_ifaces`) interface anywhere in `items`, record it against
+/// every ancestor's qualified name in its base chain (transitively).
+///
+/// Needed because a base interface can have multiple *sibling* concrete
+/// implementations that don't inherit from each other: e.g. dcps.idl's
+/// `TopicDescription` is implemented independently by `Topic`,
+/// `ContentFilteredTopic`, and `MultiTopic` — `ContentFilteredTopicImpl` does
+/// NOT inherit from `TopicDescriptionImpl` in the generated C++, they're
+/// siblings both implementing `::DDS::TopicDescription`. A parameter typed as
+/// the base (e.g. `create_datareader`'s `a_topic: TopicDescription`) can
+/// legitimately receive any of them at runtime, so the C++ backend's entity-
+/// parameter `dynamic_cast` adaptation needs to try every one, not just the
+/// base's own mechanical `<Iface>Impl` name — see `emitAdaptedParams`'s
+/// `entity_in` case in cpp.zig, the sole consumer of this.
+pub fn collectBaseImplementors(
+    alloc: std.mem.Allocator,
+    items: []const ir.ModuleItem,
+    entity_base_ifaces: *const std.StringHashMapUnmanaged(void),
+    result: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged(*const ir.Interface)),
+) anyerror!void {
+    for (items) |item| {
+        switch (item) {
+            .module => |m| try collectBaseImplementors(alloc, m.items, entity_base_ifaces, result),
+            .type_decl => |td| switch (td) {
+                .interface => |iface| {
+                    if (!isCallbackInterface(iface) and !entity_base_ifaces.contains(iface.qualified_name)) {
+                        try recordBaseChainImplementor(alloc, iface, iface, result);
+                    }
+                },
+                else => {},
+            },
+            else => {},
+        }
+    }
+}
+
+/// Walk `iface`'s base chain transitively, recording `leaf` (the original
+/// concrete interface `collectBaseImplementors` started from) against every
+/// ancestor reached. Mirrors `collectBaseChain`'s traversal; dedups so a
+/// diamond-shaped base chain (reaching the same ancestor via two paths)
+/// doesn't record `leaf` against it twice.
+fn recordBaseChainImplementor(
+    alloc: std.mem.Allocator,
+    leaf: *const ir.Interface,
+    iface: *const ir.Interface,
+    result: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged(*const ir.Interface)),
+) anyerror!void {
+    for (iface.bases) |base| {
+        switch (base) {
+            .interface => |b| if (!isCallbackInterface(b)) {
+                const gop = try result.getOrPut(alloc, b.qualified_name);
+                if (!gop.found_existing) gop.value_ptr.* = .empty;
+                var already = false;
+                for (gop.value_ptr.items) |existing| {
+                    if (existing == leaf) {
+                        already = true;
+                        break;
+                    }
+                }
+                if (!already) try gop.value_ptr.append(alloc, leaf);
+                try recordBaseChainImplementor(alloc, leaf, b, result);
+            },
+            else => {},
+        }
+    }
+}
+
+/// Frees every `ArrayListUnmanaged` value in a map populated by
+/// `collectBaseImplementors`, then the map itself. `StringHashMapUnmanaged`'s
+/// own `deinit` only frees its bucket storage, not per-value allocations.
+pub fn deinitBaseImplementors(
+    alloc: std.mem.Allocator,
+    map: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged(*const ir.Interface)),
+) void {
+    var it = map.valueIterator();
+    while (it.next()) |list| list.deinit(alloc);
+    map.deinit(alloc);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

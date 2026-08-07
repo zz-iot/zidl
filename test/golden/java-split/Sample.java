@@ -243,5 +243,29 @@ public class Sample implements java.io.Serializable {
         Sample _obj = deserializeFrom(_buf, 4, _xcdrVersion);
         return _obj.computeKeyHash();
     }
+
+    public static Object getFieldFromCdr(byte[] _payload, String _field) {
+        java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(_payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        int _xcdrVersion = _cdrDetectXcdr(_payload);
+        _buf.position(4);
+        Sample _obj = deserializeFrom(_buf, 4, _xcdrVersion);
+        switch (_field) {
+            case "id": return (long) _obj.id;
+            case "b": return (_obj.b ? 1L : 0L);
+            case "u8_val": return (long) _obj.u8_val;
+            case "s16_val": return (long) _obj.s16_val;
+            case "u16_val": return (long) _obj.u16_val;
+            case "s32_val": return (long) _obj.s32_val;
+            case "u32_val": return (long) _obj.u32_val;
+            case "s64_val": return (long) _obj.s64_val;
+            case "u64_val": return (long) _obj.u64_val;
+            case "f32_val": return (double) _obj.f32_val;
+            case "f64_val": return (double) _obj.f64_val;
+            case "str": return _obj.str;
+            case "bstr": return _obj.bstr;
+            case "clr": return (long) _obj.clr.getValue();
+            default: return null;
+        }
+    }
 } // Sample
 

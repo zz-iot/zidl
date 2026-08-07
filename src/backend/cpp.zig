@@ -416,11 +416,22 @@ const Generator = struct {
         try self.print("{s}{s}int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
-        if (has_key) {
+        // Keyless structs still get these prototypes when wrappers were
+        // requested -- see the matching `else if` in the CDR generator's
+        // struct-fns emission, which emits trivial (constant-zero-hash)
+        // bodies for them.
+        if (has_key or (self.opts.generate_zzdds_wrappers and isZzddsTopicStructCpp(s))) {
             try self.print("{s}{s}int {s}_serialize_key(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
             try self.print("{s}{s}int {s}_deserialize_key(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
             try self.print("{s}{s}int {s}_compute_key_hash(const {s} *_v, uint8_t _hash[16]);\n", .{ em, sp, c_name, cpp_qname });
             try self.print("{s}{s}int {s}_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);\n", .{ em, sp, c_name });
+        }
+        // Unlike _compute_key_hash_from_cdr above (generic C types only, so
+        // it's emitted whenever has_key), this one's signature depends on
+        // zzdds_c.h's zzdds_filter_value -- only emit it when that header is
+        // actually included (--generate-zzdds-wrappers).
+        if (self.opts.generate_zzdds_wrappers and isZzddsTopicStructCpp(s)) {
+            try self.print("{s}{s}bool {s}_get_field_from_cdr(const uint8_t *_payload, size_t _payload_len, const char *_field, size_t _field_len, zzdds_filter_value *_out, uint8_t *_scratch, size_t _scratch_len);\n", .{ em, sp, c_name });
         }
         try self.write("\n");
     }
@@ -816,14 +827,22 @@ const Generator = struct {
         try self.write(" {\npublic:\n");
         try self.print("    virtual ~{s}() = default;\n", .{iface.name});
 
-        // Emit native_handle() on leaf (non-base) entity interfaces so callers
-        // can retrieve the underlying C handle without a static_cast to Impl.
-        // Skipped for: callback/listener interfaces, top-level (non-module) interfaces,
-        // and interfaces that appear as bases in another non-callback interface
-        // (which would create a return-type conflict in derived Impl classes).
+        // Emit native_handle() on every entity interface that owns its own handle,
+        // so callers can retrieve the underlying C handle without a static_cast
+        // to Impl. Skipped for: callback/listener interfaces, top-level
+        // (non-module) interfaces, interfaces that appear as bases in another
+        // non-callback interface (which would create a return-type conflict in
+        // derived Impl classes -- see ifaceOwnsNativeHandle), and interfaces
+        // that already inherit a compatible one from a qualifying ancestor
+        // (checked first -- see nativeHandleBaseFor -- since declaring a fresh
+        // one here too would create two same-named virtuals with incompatible,
+        // non-covariant return types, a hard compile error).
         if (self.opts.generate_interfaces and !isCallbackIface(iface)) {
             const in_module = std.mem.indexOfScalar(u8, iface.qualified_name, ':') != null;
-            if (in_module and iface.bases.len == 0 and !self.entity_base_ifaces.contains(iface.qualified_name)) {
+            if (in_module and
+                ifaceOwnsNativeHandle(&self.entity_base_ifaces, iface) and
+                (try nativeHandleBaseFor(&self.entity_base_ifaces, iface)) == null)
+            {
                 const c_type = try self.prefixedCName(iface.qualified_name);
                 defer self.alloc.free(c_type);
                 try self.print("    virtual {s} native_handle() const noexcept = 0;\n", .{c_type});
@@ -1198,6 +1217,29 @@ fn wstringTypeName(opts: interface.Options) []const u8 {
 
 fn mapTypeName(opts: interface.Options) []const u8 {
     return if (opts.cpp_pmr_containers) "std::pmr::map" else "std::map";
+}
+
+/// How `emitGetFieldFromCdr` treats one struct member -- mirrors c.zig's
+/// `CFilterFieldKind`/`classifyFilterFieldKindC` (see there for the full
+/// rationale); duplicated rather than shared since the two backends'
+/// generators are separate types with no common base.
+const CppFilterFieldKind = enum { skip, int_like, float_like, string_like };
+
+fn classifyFilterFieldKindCpp(tr: ir.TypeRef) CppFilterFieldKind {
+    return switch (tr) {
+        .base => |b| switch (b) {
+            .boolean, .octet, .uint8, .char, .wchar, .int8, .short, .int16, .long, .int32, .long_long, .int64, .unsigned_short, .uint16, .unsigned_long, .uint32, .unsigned_long_long, .uint64 => .int_like,
+            .float, .double, .long_double => .float_like,
+            .any, .object, .value_base => .skip,
+        },
+        .string => .string_like,
+        .wstring, .sequence, .map, .fixed_pt => .skip,
+        .named => |td| switch (td) {
+            .enum_ => .int_like,
+            .typedef => |t| classifyFilterFieldKindCpp(t.type_ref),
+            .struct_, .union_, .bitset, .bitmask, .exception, .native, .interface => .skip,
+        },
+    };
 }
 
 fn baseToCppType(b: ast.BaseTypeSpec) []const u8 {
@@ -1841,13 +1883,117 @@ const CdrGenerator = struct {
             }
             try self.printI("return {s}_compute_key_hash(_v, _hash);\n", .{c_name});
             try self.write("}\n\n");
+        } else if (self.opts.generate_zzdds_wrappers and isZzddsTopicStructCpp(s)) {
+            // Keyless topic type but --generate-zzdds-wrappers was requested:
+            // emit trivial key functions -- see the matching `else if` in
+            // c.zig's emitStructFns for the full rationale (DDS 1.4 2.2.2.1:
+            // a keyless Topic is exactly one instance regardless of content).
+            try self.print("int {s}_serialize_key(ZidlCdrWriter *_w, const {s} *_v) {{\n", .{ c_name, cpp_qname });
+            try self.writeI("(void)_v;\n");
+            if (appendable) {
+                try self.writeI("size_t _dh;\n");
+                try self.writeI("int _rc = zidl_cdr_reserve_dheader_maybe(_w, &_dh);\n");
+                try self.writeI("if (_rc) return _rc;\n");
+                try self.writeI("zidl_cdr_patch_dheader_maybe(_w, _dh);\n");
+            }
+            try self.writeI("return ZIDL_CDR_OK;\n");
+            try self.write("}\n\n");
+
+            try self.print("int {s}_deserialize_key(ZidlCdrReader *_r, {s} *_v) {{\n", .{ c_name, cpp_qname });
+            try self.writeI("(void)_v;\n");
+            if (appendable) {
+                try self.writeI("if (_r->xcdr_version == ZIDL_XCDR2) {\n");
+                self.indent_depth += 1;
+                try self.writeI("uint32_t _size;\n");
+                try self.writeI("int _rc = zidl_cdr_read_dheader(_r, &_size);\n");
+                try self.writeI("if (_rc) return _rc;\n");
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            }
+            try self.writeI("return ZIDL_CDR_OK;\n");
+            try self.write("}\n\n");
+
+            try self.print("int {s}_compute_key_hash(const {s} *_v, uint8_t _hash[16]) {{\n", .{ c_name, cpp_qname });
+            try self.writeI("(void)_v;\n");
+            try self.writeI("memset(_hash, 0, 16);\n");
+            try self.writeI("return ZIDL_CDR_OK;\n");
+            try self.write("}\n\n");
+
+            try self.print("int {s}_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {{\n", .{c_name});
+            try self.writeI("(void)_payload;\n");
+            try self.writeI("(void)_len;\n");
+            try self.writeI("memset(_hash, 0, 16);\n");
+            try self.writeI("return ZIDL_CDR_OK;\n");
+            try self.write("}\n\n");
         }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and isZzddsTopicStructCpp(s)) {
             try self.emitStructZzddsWrappers(s, c_name, cpp_qname);
         }
     }
 
+    /// Emit `{c_name}_get_field_from_cdr` -- a free function using the flat
+    /// C-ABI name (`c_name`), NOT namespace-scoped like the rest of this
+    /// struct's `--generate-zzdds-wrappers` output, since it's passed
+    /// directly to `zzdds_register_type_support` as a plain function
+    /// pointer. See c.zig's `emitGetFieldFromCdr` for the full rationale
+    /// (full deserialize rather than a partial parse, `_scratch`'s
+    /// dangling-pointer-avoidance contract) -- identical here except C++'s
+    /// `_v` needs no manual free (its `std::string`/vector members clean
+    /// themselves up via RAII when `_v` goes out of scope, unlike C's
+    /// malloc'd `char *`/`_buffer` fields).
+    fn emitGetFieldFromCdr(self: *CdrGenerator, s: *const ir.Struct, c_name: []const u8, cpp_qname: []const u8) !void {
+        try self.print("bool {s}_get_field_from_cdr(const uint8_t *_payload, size_t _payload_len, const char *_field, size_t _field_len, zzdds_filter_value *_out, uint8_t *_scratch, size_t _scratch_len) {{\n", .{c_name});
+        try self.writeI("ZidlCdrReader _r_data;\n");
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r_data, _payload, _payload_len);\n");
+        try self.writeI("if (_rc) return false;\n");
+        try self.writeI("ZidlCdrReader *_r = &_r_data;\n");
+        try self.printI("{s} _v;\n", .{cpp_qname});
+        try self.printI("_rc = {s}_deserialize(_r, &_v);\n", .{c_name});
+        try self.writeI("if (_rc) return false;\n");
+        try self.writeI("bool _matched = false;\n");
+        var first = true;
+        for (s.members) |m| {
+            if (m.dimensions.len > 0) continue; // array member: not a simple filterable field
+            const kind = classifyFilterFieldKindCpp(m.type_ref);
+            if (kind == .skip) continue;
+            try self.printI("{s} (_field_len == sizeof(\"{s}\") - 1 && memcmp(_field, \"{s}\", _field_len) == 0) {{\n", .{ if (first) "if" else "} else if", m.name, m.name });
+            first = false;
+            self.indent_depth += 1;
+            switch (kind) {
+                .skip => unreachable,
+                .int_like => {
+                    try self.writeI("_out->kind = 0;\n");
+                    try self.printI("_out->i = static_cast<int64_t>(_v.{s});\n", .{m.name});
+                    try self.writeI("_matched = true;\n");
+                },
+                .float_like => {
+                    try self.writeI("_out->kind = 1;\n");
+                    try self.printI("_out->f = static_cast<double>(_v.{s});\n", .{m.name});
+                    try self.writeI("_matched = true;\n");
+                },
+                .string_like => {
+                    try self.printI("size_t _s_len = _v.{s}.size();\n", .{m.name});
+                    try self.writeI("if (_s_len <= _scratch_len) {\n");
+                    self.indent_depth += 1;
+                    try self.printI("memcpy(_scratch, _v.{s}.data(), _s_len);\n", .{m.name});
+                    try self.writeI("_out->kind = 2;\n");
+                    try self.writeI("_out->s_ptr = _scratch;\n");
+                    try self.writeI("_out->s_len = _s_len;\n");
+                    try self.writeI("_matched = true;\n");
+                    self.indent_depth -= 1;
+                    try self.writeI("}\n");
+                },
+            }
+            self.indent_depth -= 1;
+        }
+        if (!first) try self.writeI("}\n");
+        try self.writeI("return _matched;\n");
+        try self.write("}\n\n");
+    }
+
     fn emitStructZzddsWrappers(self: *CdrGenerator, s: *const ir.Struct, c_name: []const u8, cpp_qname: []const u8) !void {
+        try self.emitGetFieldFromCdr(s, c_name, cpp_qname);
+
         const class_name = s.name;
         const ns = moduleNsOf(s.qualified_name, s.name);
 
@@ -1860,7 +2006,7 @@ const CdrGenerator = struct {
 
         try self.print("int {s}TypeSupport::register_type(DDS_DomainParticipant participant, const char *type_name) {{\n", .{class_name});
         // A1: fallback type_name uses IDL-scoped name (e.g. "ovidds::Frame")
-        try self.printI("return zzdds_register_type_support_c(participant, type_name ? type_name : \"{s}\", {s}_compute_key_hash_from_cdr);\n", .{ s.qualified_name, c_name });
+        try self.printI("return zzdds_register_type_support(participant, type_name ? type_name : \"{s}\", {s}_compute_key_hash_from_cdr, {s}_get_field_from_cdr);\n", .{ s.qualified_name, c_name, c_name });
         try self.write("}\n\n");
 
         try self.print("static int {s}_write_kind(DDS_DataWriter writer, int xcdr_version, zzdds_write_kind kind, const {s}& value, bool key_only, DDS_InstanceHandle_t handle) {{\n", .{ class_name, cpp_qname });
@@ -3101,6 +3247,7 @@ pub fn generateConcreteImpl(
     var gen = ConcreteImplGenerator{ .alloc = alloc, .opts = opts, .hdr = hdr_out, .src = src_out };
     defer gen.entity_base_ifaces.deinit(alloc);
     defer gen.wrapped_entities.deinit(alloc);
+    defer interface.deinitBaseImplementors(alloc, &gen.base_implementors);
     try gen.emit(spec);
 }
 
@@ -3117,6 +3264,15 @@ const ConcreteImplGenerator = struct {
     /// Entity interfaces NOT in this set skip _getOrCreate's declaration and
     /// definition entirely.
     wrapped_entities: std.StringHashMapUnmanaged(void) = .{},
+    /// Maps a base interface's qualified name to every OTHER concrete
+    /// (sibling) interface that also implements it, transitively through its
+    /// own base chain — see `interface.collectBaseImplementors`'s doc
+    /// comment. Used by `emitAdaptedParams`'s `entity_in` case to emit a
+    /// cascading `dynamic_cast` when a parameter's declared interface has
+    /// more than one possible concrete runtime implementation (e.g.
+    /// `TopicDescription`, implemented separately by `TopicDescriptionImpl`,
+    /// `ContentFilteredTopicImpl`, and `MultiTopicImpl`).
+    base_implementors: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(*const ir.Interface)) = .{},
 
     fn hdrWrite(self: *ConcreteImplGenerator, s: []const u8) !void {
         try self.hdr.appendSlice(self.alloc, s);
@@ -3152,6 +3308,7 @@ const ConcreteImplGenerator = struct {
         if (spec.imports.len != 0) try self.hdrWrite("\n");
 
         try interface.collectEntityBaseNames(self.alloc, spec.items, &self.entity_base_ifaces);
+        try interface.collectBaseImplementors(self.alloc, spec.items, &self.entity_base_ifaces, &self.base_implementors);
 
         // Pre-scan: discover which entity interfaces are ever wrapped via
         // _getOrCreate (op return, attribute, sequence element, listener
@@ -3202,6 +3359,14 @@ const ConcreteImplGenerator = struct {
             "// Generated by zidl from {s}.idl \u{2014} DO NOT EDIT\n#include \"{s}_impl.hpp\"\n",
             .{ self.opts.input_stem, self.opts.input_stem },
         );
+        // --cpp-impl-include: extra includes so any --cpp-impl-override
+        // class is visible in this file. Emitted unconditionally when given,
+        // regardless of whether the pre-scan below found a matching
+        // override actually in use -- cheap, and simpler than threading
+        // "was this include actually needed" through the pre-scan result.
+        for (self.opts.cpp_impl_includes) |header| {
+            try self.srcPrint("#include \"{s}\"\n", .{header});
+        }
         // <mutex>/<unordered_map>/zidl_allocator_pmr.hpp back _getOrCreate's identity
         // cache and allocator-aware construction, emitted only when the pre-scan above
         // found at least one interface that actually needs it — skip the includes
@@ -3332,16 +3497,19 @@ const ConcreteImplGenerator = struct {
                 .{ iface.name, c_name },
             );
         }
+        // Check for a qualifying ancestor FIRST, not iface's own eligibility:
+        // an interface can be both "not excluded" (own-eligible) AND have an
+        // ancestor that already declares a compatible native_handle() (e.g.
+        // zzdds::DomainParticipantFactory : DDS::DomainParticipantFactory --
+        // both are individually eligible, but the derived one must inherit
+        // and convert, not redeclare its own with a different return type,
+        // which would create two same-named virtuals with incompatible,
+        // non-covariant return types -- a hard compile error).
         // Use 'override' only when the abstract interface declares native_handle().
         // Other concrete Impl classes still expose native_handle() for adapter code,
         // unless a base interface already declares a conflicting native_handle()
         // with a different C handle return type.
-        if (self.ifaceDeclaresNativeHandle(iface)) {
-            try self.hdrPrint(
-                "    {s} native_handle() const noexcept override {{ return ptr_; }}\n\n",
-                .{c_name},
-            );
-        } else if (try self.nativeHandleBase(iface)) |base_iface| {
+        if (try self.nativeHandleBase(iface)) |base_iface| {
             const base_c = try cNameOf(self.alloc, base_iface.qualified_name);
             defer self.alloc.free(base_c);
             const handle_expr = try self.handleExprForOwner(iface, base_iface, "ptr_");
@@ -3349,6 +3517,11 @@ const ConcreteImplGenerator = struct {
             try self.hdrPrint(
                 "    {s} native_handle() const noexcept override {{ return {s}; }}\n\n",
                 .{ base_c, handle_expr },
+            );
+        } else if (self.ifaceDeclaresNativeHandle(iface)) {
+            try self.hdrPrint(
+                "    {s} native_handle() const noexcept override {{ return ptr_; }}\n\n",
+                .{c_name},
             );
         } else {
             try self.hdrPrint(
@@ -3717,9 +3890,17 @@ const ConcreteImplGenerator = struct {
                 .entity_in => {
                     const ct = try self.typeRefToCType(p.type_ref);
                     defer self.alloc.free(ct);
+                    // use_virtual requires iface to own its OWN fresh
+                    // native_handle() (return type == ct exactly) -- not just
+                    // "not excluded". An interface that instead inherits and
+                    // converts from a qualifying ancestor (nativeHandleBase
+                    // non-null, e.g. zzdds::X : DDS::X) has a native_handle()
+                    // returning the ANCESTOR's type, not ct, so it must still
+                    // go through the dynamic_cast + zidl_concrete_handle path.
                     const use_virtual = switch (p.type_ref) {
                         .named => |td| switch (td) {
-                            .interface => |iface| self.ifaceDeclaresNativeHandle(iface),
+                            .interface => |iface| self.ifaceDeclaresNativeHandle(iface) and
+                                (try self.nativeHandleBase(iface)) == null,
                             else => false,
                         },
                         else => false,
@@ -3732,17 +3913,81 @@ const ConcreteImplGenerator = struct {
                     } else {
                         const impl_name = try self.entityImplName(p.type_ref);
                         defer self.alloc.free(impl_name);
-                        const iface_name = switch (p.type_ref) {
+                        const target_iface: ?*const ir.Interface = switch (p.type_ref) {
                             .named => |td| switch (td) {
-                                .interface => |iface| iface.qualified_name,
-                                else => ct,
+                                .interface => |iface| iface,
+                                else => null,
                             },
-                            else => ct,
+                            else => null,
                         };
+                        const iface_name = if (target_iface) |ti| ti.qualified_name else ct;
+
+                        // Sibling interfaces that also implement iface_name
+                        // (see base_implementors's doc comment) -- e.g.
+                        // TopicDescription is implemented independently by
+                        // TopicDescriptionImpl, ContentFilteredTopicImpl, and
+                        // MultiTopicImpl, none of which inherit from each
+                        // other. A single dynamic_cast against impl_name
+                        // alone would wrongly reject a ContentFilteredTopic
+                        // passed where a TopicDescription is expected.
+                        const ExtraCandidate = struct { impl_name: []const u8, cast_expr: []const u8 };
+                        var extra_impls: std.ArrayListUnmanaged(ExtraCandidate) = .empty;
+                        defer {
+                            for (extra_impls.items) |e| {
+                                self.alloc.free(e.impl_name);
+                                self.alloc.free(e.cast_expr);
+                            }
+                            extra_impls.deinit(self.alloc);
+                        }
+                        if (target_iface) |ti| {
+                            if (self.base_implementors.get(ti.qualified_name)) |implementors| {
+                                for (implementors.items) |impl_iface| {
+                                    const extra_name = try self.entityImplName(.{ .named = .{ .interface = @constCast(impl_iface) } });
+                                    var dup = std.mem.eql(u8, extra_name, impl_name);
+                                    if (!dup) for (extra_impls.items) |existing| {
+                                        if (std.mem.eql(u8, existing.impl_name, extra_name)) {
+                                            dup = true;
+                                            break;
+                                        }
+                                    };
+                                    if (dup) {
+                                        self.alloc.free(extra_name);
+                                        continue;
+                                    }
+                                    // Real upcast through the C-ABI's own
+                                    // generated `X_as_Y` conversion (same
+                                    // mechanism this function already uses
+                                    // for inherited-method dispatch below) --
+                                    // NOT a reinterpret_cast: e.g.
+                                    // DDS_ContentFilteredTopic and
+                                    // DDS_TopicDescription are boxed with
+                                    // different vtables for the very same
+                                    // underlying entity, so treating one
+                                    // handle as the other without going
+                                    // through DDS_ContentFilteredTopic_as_
+                                    // DDS_TopicDescription silently breaks
+                                    // whatever the receiving C-ABI call does
+                                    // with the (mis-vtabled) handle.
+                                    const cast_expr = try self.handleExprForOwner(impl_iface, ti, "zidl_concrete_handle(*_impl)");
+                                    try extra_impls.append(self.alloc, .{ .impl_name = extra_name, .cast_expr = cast_expr });
+                                }
+                            }
+                        }
+
                         try self.srcWrite("/* zidl: entity parameter adaptation uses dynamic_cast and requires RTTI. */");
                         try self.srcPrint(
-                            "([](const auto& _p) -> {s} {{ if (!_p) return nullptr; if (auto* _impl = dynamic_cast<{s}*>(_p.get())) return zidl_concrete_handle(*_impl); throw std::invalid_argument(\"zidl: incompatible entity implementation for {s}\"); }})({s})",
-                            .{ ct, impl_name, iface_name, p.name },
+                            "([](const auto& _p) -> {s} {{ if (!_p) return nullptr; if (auto* _impl = dynamic_cast<{s}*>(_p.get())) return zidl_concrete_handle(*_impl); ",
+                            .{ ct, impl_name },
+                        );
+                        for (extra_impls.items) |e| {
+                            try self.srcPrint(
+                                "if (auto* _impl = dynamic_cast<{s}*>(_p.get())) return {s}; ",
+                                .{ e.impl_name, e.cast_expr },
+                            );
+                        }
+                        try self.srcPrint(
+                            "throw std::invalid_argument(\"zidl: incompatible entity implementation for {s}\"); }})({s})",
+                            .{ iface_name, p.name },
                         );
                     }
                 },
@@ -4294,11 +4539,34 @@ const ConcreteImplGenerator = struct {
     fn entityImplName(self: *ConcreteImplGenerator, tr: ir.TypeRef) ![]u8 {
         return switch (tr) {
             .named => |td| switch (td) {
-                .interface => |iface| std.fmt.allocPrint(self.alloc, "::{s}Impl", .{iface.qualified_name}),
+                .interface => |iface| {
+                    if (self.cppImplOverride(iface.qualified_name)) |override_class| {
+                        return self.alloc.dupe(u8, override_class);
+                    }
+                    return std.fmt.allocPrint(self.alloc, "::{s}Impl", .{iface.qualified_name});
+                },
                 else => self.alloc.dupe(u8, "EntityImpl"),
             },
             else => self.alloc.dupe(u8, "EntityImpl"),
         };
+    }
+
+    /// `--cpp-impl-override <Interface>=<Class>` lookup: returns `<Class>`
+    /// (unparsed, as given on the command line -- e.g. `::zzdds::DataWriterImpl`,
+    /// caller-supplied qualification, not re-derived) when `qualified_name`
+    /// matches `<Interface>` exactly, else null. Every call site that would
+    /// otherwise name the mechanical default impl class -- construction
+    /// (`_getOrCreate`) and parameter-adaptation `dynamic_cast` alike --
+    /// routes through `entityImplName`, so one override covers both without
+    /// needing a separate fallback/dual-cast at the adaptation sites: nothing
+    /// constructs the default class anymore once it's overridden, so nothing
+    /// needs to `dynamic_cast` against it either.
+    fn cppImplOverride(self: *ConcreteImplGenerator, qualified_name: []const u8) ?[]const u8 {
+        for (self.opts.cpp_impl_overrides) |entry| {
+            const eq = std.mem.indexOf(u8, entry, "=") orelse continue;
+            if (std.mem.eql(u8, entry[0..eq], qualified_name)) return entry[eq + 1 ..];
+        }
+        return null;
     }
 
     /// Record that `tr` (an entity interface type) is wrapped via
@@ -4315,34 +4583,16 @@ const ConcreteImplGenerator = struct {
         }
     }
 
+    // Thin wrappers so ConcreteImplGenerator's existing call sites don't need
+    // to thread `&self.entity_base_ifaces` through by hand -- see
+    // ifaceOwnsNativeHandle/nativeHandleBaseFor (below) for the real logic,
+    // shared with Generator's abstract-header emission.
     fn ifaceDeclaresNativeHandle(self: *ConcreteImplGenerator, iface: *const ir.Interface) bool {
-        return !isCallbackIface(iface) and
-            std.mem.indexOfScalar(u8, iface.qualified_name, ':') != null and
-            iface.bases.len == 0 and
-            !self.entity_base_ifaces.contains(iface.qualified_name);
+        return ifaceOwnsNativeHandle(&self.entity_base_ifaces, iface);
     }
 
     fn nativeHandleBase(self: *ConcreteImplGenerator, iface: *const ir.Interface) !?*const ir.Interface {
-        var found: ?*const ir.Interface = null;
-        for (iface.bases) |base| {
-            if (base != .interface) continue;
-            const base_iface = base.interface;
-            const candidate = if (self.ifaceDeclaresNativeHandle(base_iface) or
-                importedLeafBaseDeclaresNativeHandle(iface, base_iface))
-                base_iface
-            else
-                try self.nativeHandleBase(base_iface);
-            if (candidate) |decl_iface| {
-                if (found) |existing| {
-                    if (!std.mem.eql(u8, existing.qualified_name, decl_iface.qualified_name)) {
-                        return error.MultipleNativeHandleBases;
-                    }
-                } else {
-                    found = decl_iface;
-                }
-            }
-        }
-        return found;
+        return nativeHandleBaseFor(&self.entity_base_ifaces, iface);
     }
 
     fn handleExprForOwner(
@@ -4744,18 +4994,77 @@ fn interfaceContains(iface: *const ir.Interface, target: *const ir.Interface) bo
     return false;
 }
 
+// An interface "owns" its own native_handle() unless it's a shared
+// structural mixin used as a base by some other interface (entity_base_ifaces)
+// -- e.g. Entity/TopicDescription/Condition, or ReadCondition (excluded so
+// QueryCondition can own its own, more specific DDS_QueryCondition handle
+// instead of inheriting ReadCondition's). bases.len is NOT the right test
+// here: nearly every real entity (Topic, DataWriter, DomainParticipant, ...)
+// has bases.len >= 1 purely because that's how IDL expresses "is-a Entity",
+// which has nothing to do with whether it should own its own handle.
+//
+// Standalone (not a method) so both `Generator` (abstract header) and
+// `ConcreteImplGenerator` (impl classes) can share the exact same decision --
+// they must agree, or the header would declare one shape and the impl would
+// try to satisfy a different one.
+fn ifaceOwnsNativeHandle(entity_base_ifaces: *const std.StringHashMapUnmanaged(void), iface: *const ir.Interface) bool {
+    return !isCallbackIface(iface) and
+        std.mem.indexOfScalar(u8, iface.qualified_name, ':') != null and
+        !entity_base_ifaces.contains(iface.qualified_name);
+}
+
+// Walks iface's bases looking for an ancestor that already owns a compatible
+// native_handle() (directly, or transitively via its own qualifying
+// ancestor), so iface can inherit-and-convert instead of declaring its own.
+// Must be checked BEFORE `ifaceOwnsNativeHandle(iface)` itself: an interface
+// can be simultaneously "not excluded" (so it WOULD own one on its own) and
+// have an ancestor that already provides one (e.g.
+// zzdds::DomainParticipantFactory : DDS::DomainParticipantFactory) -- in that
+// case it must inherit and convert, not redeclare its own with a different,
+// non-covariant return type (a hard C++ compile error: two same-named
+// virtuals with incompatible return types).
+fn nativeHandleBaseFor(entity_base_ifaces: *const std.StringHashMapUnmanaged(void), iface: *const ir.Interface) !?*const ir.Interface {
+    var found: ?*const ir.Interface = null;
+    for (iface.bases) |base| {
+        if (base != .interface) continue;
+        const base_iface = base.interface;
+        const candidate = if (ifaceOwnsNativeHandle(entity_base_ifaces, base_iface) or
+            importedLeafBaseDeclaresNativeHandle(iface, base_iface))
+            base_iface
+        else
+            try nativeHandleBaseFor(entity_base_ifaces, base_iface);
+        if (candidate) |decl_iface| {
+            if (found) |existing| {
+                if (!std.mem.eql(u8, existing.qualified_name, decl_iface.qualified_name)) {
+                    return error.MultipleNativeHandleBases;
+                }
+            } else {
+                found = decl_iface;
+            }
+        }
+    }
+    return found;
+}
+
 fn importedLeafBaseDeclaresNativeHandle(
     derived: *const ir.Interface,
     base: *const ir.Interface,
 ) bool {
-    // The abstract header emits native_handle() for leaf entity interfaces in
-    // their own module.  When an extension interface in a different root module
-    // inherits such a leaf, nativeHandleBase must still see the imported base's
-    // virtual handle even though the base is not part of the current module's
-    // entity_base_ifaces scan.
+    // The abstract header emits native_handle() for entity interfaces that own
+    // their own handle in their own module (see ifaceDeclaresNativeHandle).
+    // When an extension interface in a different root module inherits such an
+    // interface (e.g. zzdds::Topic : DDS::Topic), nativeHandleBase must still
+    // see the imported base's virtual handle even though the base is not part
+    // of the current module's entity_base_ifaces scan.
+    //
+    // This trusts "different root module" alone as a proxy for "base owns its
+    // own handle in its home file" -- there's no cross-file entity_base_ifaces
+    // registry in this architecture to check directly. Safe for the real
+    // dcps.idl/zzdds.idl pair (verified); if this assumption were ever wrong
+    // for some future IDL, the failure mode is a loud C++ compile error
+    // (mismatched `override`), not silent wrong behavior.
     return !isCallbackIface(base) and
         std.mem.indexOfScalar(u8, base.qualified_name, ':') != null and
-        base.bases.len == 0 and
         !std.mem.eql(u8, rootModuleName(derived.qualified_name), rootModuleName(base.qualified_name));
 }
 
@@ -5185,8 +5494,11 @@ fn structHasKeyCpp(s: *const ir.Struct) bool {
     return false;
 }
 
+/// See isZzddsTopicStruct in zig.zig for why keyless structs are included --
+/// DDS 1.4 2.2.2.1 treats a keyless Topic as first-class ("restricted to a
+/// single instance"), so this only excludes what genuinely can't be a topic.
 fn isZzddsTopicStructCpp(s: *const ir.Struct) bool {
-    return structHasKeyCpp(s) and !s.annotations.is_nested and s.annotations.extensibility != .mutable;
+    return !s.annotations.is_nested and s.annotations.extensibility != .mutable;
 }
 
 fn itemsHaveZzddsTopicStructCpp(items: []const ir.ModuleItem) bool {
@@ -5805,9 +6117,70 @@ test "cpp_backend: zzdds wrappers suppressed when no_typesupport" {
     try testing.expect(!has(s, "TopicDataWriter"));
 }
 
+test "cpp_backend: get_field_from_cdr generated for int/float/string members, skips nested" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Inner { long z; };" ++
+            "@appendable struct Topic { @key long x; double y; string<16> color; Inner nested; sequence<long> seq; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "bool Topic_get_field_from_cdr(const uint8_t *_payload, size_t _payload_len, const char *_field, size_t _field_len, zzdds_filter_value *_out, uint8_t *_scratch, size_t _scratch_len) {"));
+    try testing.expect(has(s, "::Topic _v;"));
+    try testing.expect(has(s, "_rc = Topic_deserialize(_r, &_v);"));
+    // int-like member
+    try testing.expect(has(s, "if (_field_len == sizeof(\"x\") - 1 && memcmp(_field, \"x\", _field_len) == 0) {"));
+    try testing.expect(has(s, "_out->kind = 0;"));
+    try testing.expect(has(s, "_out->i = static_cast<int64_t>(_v.x);"));
+    // float-like member
+    try testing.expect(has(s, "} else if (_field_len == sizeof(\"y\") - 1 && memcmp(_field, \"y\", _field_len) == 0) {"));
+    try testing.expect(has(s, "_out->kind = 1;"));
+    try testing.expect(has(s, "_out->f = static_cast<double>(_v.y);"));
+    // string-like member: scratch-buffer copy via std::string's .data()/.size(),
+    // not returning a pointer into _v (which is about to go out of scope)
+    try testing.expect(has(s, "} else if (_field_len == sizeof(\"color\") - 1 && memcmp(_field, \"color\", _field_len) == 0) {"));
+    try testing.expect(has(s, "size_t _s_len = _v.color.size();"));
+    try testing.expect(has(s, "if (_s_len <= _scratch_len) {"));
+    try testing.expect(has(s, "memcpy(_scratch, _v.color.data(), _s_len);"));
+    try testing.expect(has(s, "_out->s_ptr = _scratch;"));
+    // nested struct / sequence members are not filterable -- skipped entirely
+    try testing.expect(!has(s, "\"nested\""));
+    try testing.expect(!has(s, "\"seq\""));
+    // TypeSupport::register_type wires the new function in
+    try testing.expect(has(s, "zzdds_register_type_support(participant, type_name ? type_name : \"Topic\", Topic_compute_key_hash_from_cdr, Topic_get_field_from_cdr);"));
+}
+
+test "cpp_backend: get_field_from_cdr with no filterable members always returns false" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key sequence<long> seq; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "bool Topic_get_field_from_cdr("));
+    try testing.expect(has(s, "bool _matched = false;"));
+    try testing.expect(!has(s, "_matched = true;"));
+    try testing.expect(has(s, "return _matched;"));
+}
+
+test "cpp_backend: get_field_from_cdr prototype declared in header when zzdds wrappers enabled" {
+    var h = try testGenOpts(
+        "@appendable struct Topic { @key long id; string<16> name; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "bool Topic_get_field_from_cdr(const uint8_t *_payload, size_t _payload_len, const char *_field, size_t _field_len, zzdds_filter_value *_out, uint8_t *_scratch, size_t _scratch_len);"));
+}
+
 test "cpp_backend: zzdds_c omitted when no qualifying topic struct" {
+    // A plain top-level keyless struct now qualifies (see the next test) --
+    // what's genuinely disqualified is @nested (any key or not) and
+    // @mutable.
     var out = try testGenOpts(
-        "struct Plain { long id; }; @nested struct NestedKey { @key long id; }; @mutable struct MutableKey { @key long id; };",
+        "@nested struct NestedPlain { long id; }; @nested struct NestedKey { @key long id; }; @mutable struct MutableKey { @key long id; };",
         "plain",
         .{ .generate_zzdds_wrappers = true },
     );
@@ -5815,6 +6188,21 @@ test "cpp_backend: zzdds_c omitted when no qualifying topic struct" {
     const s = out.items;
     try testing.expect(!has(s, "zzdds_c.h"));
     try testing.expect(!has(s, "DataWriter"));
+}
+
+test "cpp_backend: zzdds wrappers still emitted for a keyless top-level struct" {
+    // DDS 1.4 2.2.2.1: a keyless Topic is a legitimate single-instance
+    // Topic, not a corner case -- it must still get a DataWriter/DataReader.
+    var out = try testGenOpts(
+        "struct NoKey { long x; long y; };",
+        "nokey",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "zzdds_c.h"));
+    try testing.expect(has(s, "NoKeyDataWriter"));
+    try testing.expect(has(s, "NoKeyDataReader"));
 }
 
 test "cpp_backend: zzdds wrapper declarations for keyed topic" {
@@ -6892,7 +7280,7 @@ test "cpp_backend cdr: A1+A2 — namespaced struct uses IDL-scoped type name and
 
 test "cpp_backend cdr: zzdds_c omitted when no qualifying topic struct" {
     var out = try testGenCdrOpts(
-        "struct Plain { long id; }; @nested struct NestedKey { @key long id; }; @mutable struct MutableKey { @key long id; };",
+        "@nested struct NestedPlain { long id; }; @nested struct NestedKey { @key long id; }; @mutable struct MutableKey { @key long id; };",
         "plain",
         .{ .generate_zzdds_wrappers = true },
     );
@@ -7127,6 +7515,8 @@ fn testGenConcreteImpl(source: []const u8) !ConcreteImplResult {
 
 fn testGenConcreteImplOpts(source: []const u8, extra: struct {
     cpp_pmr_containers: bool = false,
+    cpp_impl_overrides: []const []const u8 = &.{},
+    cpp_impl_includes: []const []const u8 = &.{},
 }) !ConcreteImplResult {
     const alloc = testing.allocator;
     var ast_arena = std.heap.ArenaAllocator.init(alloc);
@@ -7142,6 +7532,8 @@ fn testGenConcreteImplOpts(source: []const u8, extra: struct {
         .input_stem = "dcps",
         .cpp_generate_impl = true,
         .cpp_pmr_containers = extra.cpp_pmr_containers,
+        .cpp_impl_overrides = extra.cpp_impl_overrides,
+        .cpp_impl_includes = extra.cpp_impl_includes,
     };
     var hdr_out = std.ArrayList(u8).empty;
     errdefer hdr_out.deinit(alloc);
@@ -7166,11 +7558,55 @@ test "cpp_backend: B1+B3 — entity Impl class generated" {
     const hdr = res.hdr.items;
     const src = res.src.items;
     try testing.expect(has(hdr, "class FooImpl"));
-    try testing.expect(has(hdr, "DDS_Foo native_handle() const noexcept { return ptr_; }"));
+    // Foo : Entity now owns its own native_handle() -- Entity is a pure
+    // mixin (excluded, used as a base by Foo), so Foo has no qualifying
+    // ancestor to inherit from and must declare + override its own.
+    try testing.expect(has(hdr, "DDS_Foo native_handle() const noexcept override { return ptr_; }"));
     // FooListenerBase declaration moved to dcps.hpp (Generator); not in dcps_impl.hpp
     try testing.expect(!has(hdr, "class FooListenerBridge"));
     try testing.expect(has(src, "DDS_Foo_do_something(ptr_)"));
     try testing.expect(has(src, "DDS_Entity_enable(DDS_Foo_as_DDS_Entity(ptr_))"));
+}
+
+test "cpp_backend: entity with multiple mixin bases (Topic-shaped) owns its own native_handle()" {
+    // Mirrors dcps.idl's Topic : Entity, TopicDescription -- genuine multiple
+    // inheritance from two unrelated, independently-excluded mixins. Neither
+    // Entity nor TopicDescription can safely provide native_handle() to a
+    // multiply-inheriting derived class (two same-named, non-covariant
+    // virtuals), so Multi must own its own fresh one directly, exactly like
+    // the single-base Foo:Entity case above.
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    interface Entity {};
+        \\    interface Description {};
+        \\    interface Multi : Entity, Description {};
+        \\};
+    );
+    defer res.deinit();
+    const hdr = res.hdr.items;
+    try testing.expect(has(hdr, "DDS_Multi native_handle() const noexcept override { return ptr_; }"));
+}
+
+test "cpp_backend: QueryCondition-shaped derived interface owns its own native_handle(), base does not" {
+    // Mirrors dcps.idl's QueryCondition : ReadCondition (a genuine same-
+    // module IS-A specialization, not a "wider view of the same entity"
+    // extension like zzdds::X : DDS::X). DDS_ReadCondition and
+    // DDS_QueryCondition are unrelated opaque C types -- if Derived inherited
+    // and converted to Base's type instead of owning its own, callers would
+    // get the wrong, less-specific handle. Base is excluded (used as
+    // Derived's base) so it can't provide one; Derived must own its own.
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    interface Base {};
+        \\    interface Derived : Base {};
+        \\};
+    );
+    defer res.deinit();
+    const hdr = res.hdr.items;
+    try testing.expect(has(hdr, "DDS_Derived native_handle() const noexcept override { return ptr_; }"));
+    // Base's impl keeps the ad hoc, non-virtual fallback -- it's excluded,
+    // not owning its own, and nothing inherits a compatible one for it either.
+    try testing.expect(has(hdr, "DDS_Base native_handle() const noexcept { return ptr_; }"));
 }
 
 test "cpp_backend: --cpp-pmr-containers on — str_ret operation/attribute adapters use std::pmr::string" {
@@ -7230,6 +7666,38 @@ test "cpp_backend: extension Impl forwards inherited operations through generate
     try testing.expect(has(hdr, "std::shared_ptr<::DDS::DomainParticipant> create_participant_ex() override;"));
     try testing.expect(has(src, "DDS_DomainParticipantFactory_create_participant(zzdds_DomainParticipantFactory_as_DDS_DomainParticipantFactory(ptr_))"));
     try testing.expect(has(src, "zzdds_DomainParticipantFactory_create_participant_ex(ptr_)"));
+}
+
+test "cpp_backend: cross-module extension of a base with multiple bases itself (Topic-shaped) still inherits and converts" {
+    // Mirrors the real dcps.idl/zzdds.idl Topic pair: DDS::Topic has TWO
+    // bases (Entity, Description) -- previously importedLeafBaseDeclaresNativeHandle
+    // required base.bases.len==0, which DDS::Topic never satisfies, so this
+    // cross-module extension shape never got picked up at all before this fix.
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    interface Entity {};
+        \\    interface Description {};
+        \\    interface Topic : Entity, Description {};
+        \\};
+        \\module zzdds {
+        \\    interface Topic : DDS::Topic {};
+        \\};
+    );
+    defer res.deinit();
+    const hdr = res.hdr.items;
+    // zzdds::TopicImpl inherits and converts from DDS::Topic, DESPITE
+    // DDS::Topic itself having two bases -- the exact case
+    // importedLeafBaseDeclaresNativeHandle's old base.bases.len==0 check
+    // would have missed. (DDS::TopicImpl's own native_handle() isn't
+    // asserted here: bundling both modules into one generation pass, as
+    // this test does for convenience, makes entity_base_ifaces see
+    // zzdds::Topic's cross-module usage of DDS::Topic as a base too --
+    // something that never happens in the real, separate-file dcps.idl/
+    // zzdds.idl build, where dcps.idl's own pass never sees zzdds.idl at
+    // all. That's a test-harness artifact of combining both modules, not a
+    // real-world case; the DomainParticipantFactory tests above already
+    // cover a real separate generation pass's actual behavior.)
+    try testing.expect(has(hdr, "DDS_Topic native_handle() const noexcept override { return zzdds_Topic_as_DDS_Topic(ptr_); }"));
 }
 
 test "cpp_backend: imported leaf base native_handle detection is generic" {
@@ -7346,6 +7814,69 @@ test "cpp_backend: nativeHandleBase errors for multiple distinct native handle b
     };
 
     try testing.expectError(error.MultipleNativeHandleBases, gen.nativeHandleBase(&child));
+}
+
+test "cpp_backend: --cpp-impl-override redirects both construction and parameter-adaptation sites" {
+    // Bar must take the dynamic_cast+entityImplName parameter-adaptation path
+    // for this test to exercise --cpp-impl-override's redirect at all (an
+    // interface that owns its own fresh native_handle() -- e.g. a plain
+    // `Bar : Entity` mixin leaf -- instead takes the simpler, override-
+    // independent virtual `p->native_handle()` dispatch path, since Entity is
+    // excluded and Bar has no qualifying ancestor to convert from).
+    //
+    // A `zzdds::X : DDS::X` cross-module extension shape (like the real
+    // dcps.idl/zzdds.idl DomainParticipantFactory pair -- see "entity_in
+    // param for derived root interface uses concrete handle" below) reliably
+    // takes the dynamic_cast path instead: Bar's own declared C type
+    // (zzdds_Bar) never matches what its inherited-and-converted
+    // native_handle() returns (DDS_Bar), so `use_virtual` is false.
+    var res = try testGenConcreteImplOpts(
+        \\module DDS {
+        \\    interface Bar {};
+        \\};
+        \\module zzdds {
+        \\    interface Bar : DDS::Bar {};
+        \\    interface Foo { Bar get_bar(); void take_bar(in Bar b); };
+        \\};
+    , .{ .cpp_impl_overrides = &.{"zzdds::Bar=::zzdds::detail::BarSupport"} });
+    defer res.deinit();
+    const src = res.src.items;
+    // Construction site (op return) uses the override, not the default.
+    try testing.expect(has(src, "return ::zzdds::detail::BarSupport::_getOrCreate(_h);"));
+    try testing.expect(!has(src, "return ::zzdds::BarImpl::_getOrCreate(_h);"));
+    // Parameter-adaptation site (take_bar's `b` argument) uses the override
+    // too -- same entityImplName() call, no separate fallback needed.
+    try testing.expect(has(src, "dynamic_cast<::zzdds::detail::BarSupport*>(_p.get())"));
+    try testing.expect(!has(src, "dynamic_cast<::zzdds::BarImpl*>(_p.get())"));
+    // The default class is still fully generated (just unused) -- additive,
+    // not destructive; nothing else in the spec is assumed to still be able
+    // to construct it, but nothing stops it from existing either.
+    try testing.expect(has(src, "std::shared_ptr<BarImpl> BarImpl::_getOrCreate(zzdds_Bar h) {"));
+}
+
+test "cpp_backend: --cpp-impl-include emits the extra #include" {
+    var res = try testGenConcreteImplOpts(
+        \\module DDS {
+        \\    interface Bar {};
+        \\    interface Foo { Bar get_bar(); };
+        \\};
+    , .{
+        .cpp_impl_overrides = &.{"DDS::Bar=::zzdds::BarImpl"},
+        .cpp_impl_includes = &.{"zzdds_impl.hpp"},
+    });
+    defer res.deinit();
+    try testing.expect(has(res.src.items, "#include \"zzdds_impl.hpp\""));
+}
+
+test "cpp_backend: no --cpp-impl-override leaves the mechanical default name (regression guard)" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    interface Bar {};
+        \\    interface Foo { Bar get_bar(); };
+        \\};
+    );
+    defer res.deinit();
+    try testing.expect(has(res.src.items, "return ::DDS::BarImpl::_getOrCreate(_h);"));
 }
 
 test "cpp_backend: B1+B3 — entity return wraps in Impl" {
@@ -7896,6 +8427,52 @@ test "cpp_backend: entity_in param for derived root interface uses concrete hand
     try testing.expect(has(src, "dynamic_cast<::zzdds::DomainParticipantFactoryImpl*>(_p.get())) return zidl_concrete_handle(*_impl);"));
     try testing.expect(has(src, "throw std::invalid_argument(\"zidl: incompatible entity implementation for zzdds::DomainParticipantFactory\")"));
     try testing.expect(!has(src, "dynamic_cast<::zzdds::DomainParticipantFactoryImpl*>(_p.get())) return _impl->native_handle();"));
+}
+
+test "cpp_backend: entity_in param for a base with multiple sibling implementors casts through all of them" {
+    // Mirrors dcps.idl's TopicDescription, implemented independently by
+    // Topic/ContentFilteredTopic/MultiTopic (none inherit from each other) --
+    // a parameter typed as the base must try every concrete implementor's
+    // dynamic_cast, not just the base's own mechanical <Iface>Impl name.
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    interface Base {};
+        \\    interface LeafA : Base {};
+        \\    interface LeafB : Base {};
+        \\    interface User {
+        \\        long use_base(in Base b);
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "entity parameter adaptation uses dynamic_cast and requires RTTI"));
+    try testing.expect(has(src, "dynamic_cast<::DDS::BaseImpl*>(_p.get())) return zidl_concrete_handle(*_impl);"));
+    try testing.expect(has(src, "dynamic_cast<::DDS::LeafAImpl*>(_p.get())) return DDS_LeafA_as_DDS_Base(zidl_concrete_handle(*_impl));"));
+    try testing.expect(has(src, "dynamic_cast<::DDS::LeafBImpl*>(_p.get())) return DDS_LeafB_as_DDS_Base(zidl_concrete_handle(*_impl));"));
+    try testing.expect(has(src, "throw std::invalid_argument(\"zidl: incompatible entity implementation for DDS::Base\")"));
+}
+
+test "cpp_backend: entity_in param for a base with a single implementor keeps the plain single-cast form" {
+    // Common case: no sibling implementors means the cascading-cast codegen
+    // must be byte-identical to the pre-existing single-cast form.
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    interface DomainParticipantFactory {};
+        \\};
+        \\module zzdds {
+        \\    interface DomainParticipantFactory : DDS::DomainParticipantFactory {};
+        \\    interface FactoryUser {
+        \\        long use_factory(in DomainParticipantFactory f);
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(
+        src,
+        "([](const auto& _p) -> zzdds_DomainParticipantFactory { if (!_p) return nullptr; if (auto* _impl = dynamic_cast<::zzdds::DomainParticipantFactoryImpl*>(_p.get())) return zidl_concrete_handle(*_impl); throw std::invalid_argument(\"zidl: incompatible entity implementation for zzdds::DomainParticipantFactory\"); })(f)",
+    ));
 }
 
 test "cpp_backend: entity_in param of an interface used as a base still uses plain nullptr" {
