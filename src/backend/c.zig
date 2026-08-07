@@ -596,7 +596,12 @@ const Generator = struct {
                 try self.emitStructZzddsWrapperProtos(c_name);
             }
         }
-        if (structHasSequenceFields(s) and !self.opts.c_no_free) {
+        if (structHasSequenceFields(s)) {
+            // Declared unconditionally, even under --c-no-free: the function
+            // still exists (it's just defined elsewhere -- see emitStructFree's
+            // gating below) and generated code in this same translation unit
+            // (get_field_from_cdr, read_n's error-path cleanup, ...) needs the
+            // prototype in scope to legally call it.
             const em = self.opts.export_macro;
             const sp: []const u8 = if (em.len > 0) " " else "";
             try self.print("{s}{s}void {s}_free({s} *v);\n\n", .{ em, sp, c_name, c_name });
@@ -2411,8 +2416,13 @@ const CdrGenerator = struct {
         // definition elsewhere) -- a struct with only bounded strings/no
         // sequences (e.g. zzdds-examples' SensorSample) gets no _free at
         // all, and calling one that doesn't exist is a link/compile error,
-        // not just a wasted no-op call.
-        const has_free = structHasSequenceFields(s) and !self.opts.c_no_free;
+        // not just a wasted no-op call. NOT gated on --c-no-free: that flag
+        // only suppresses this generation pass's own _free *definition* (to
+        // avoid a duplicate-symbol link error against an externally-provided
+        // one), not the function's existence -- the prototype above is still
+        // declared unconditionally, so it's always safe (and necessary, to
+        // avoid leaking every deserialized value) to call it here.
+        const has_free = structHasSequenceFields(s);
         try self.print("bool {s}_get_field_from_cdr(const uint8_t *_payload, size_t _payload_len, const char *_field, size_t _field_len, zzdds_filter_value *_out, uint8_t *_scratch, size_t _scratch_len) {{\n", .{c_name});
         try self.writeI("ZidlCdrReader _r_data;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r_data, _payload, _payload_len);\n");
@@ -2635,7 +2645,12 @@ const CdrGenerator = struct {
         try self.printI("{s}_deserialize(&_r, &values[_i]) :\n", .{c_name});
         try self.printI("{s}_deserialize_key(&_r, &values[_i]);\n", .{c_name});
         self.indent_depth -= 1;
-        if (structHasSequenceFields(s) and !self.opts.c_no_free) {
+        if (structHasSequenceFields(s)) {
+            // Not gated on --c-no-free -- see emitGetFieldFromCdr's has_free
+            // comment: the prototype is always declared, the function always
+            // exists (locally or externally), so this cleanup call is always
+            // safe and always needed to avoid leaking every already-decoded
+            // element on this error path.
             try self.writeI("if (_rc) {\n");
             self.indent_depth += 1;
             try self.printI("for (int _j = 0; _j < _i; _j++) {s}_free(&values[_j]);\n", .{c_name});
@@ -6124,14 +6139,17 @@ test "c_backend: sequence typedef gets _free declaration" {
     try testing.expect(has(h.items, "void StringSeq_free(StringSeq *v);"));
 }
 
-test "c_backend: --c-no-free suppresses _free declaration for struct and typedef" {
+test "c_backend: --c-no-free still declares struct _free prototype (function still exists externally), but suppresses the typedef prototype and the struct's own body" {
     const idl =
         \\struct Msg { sequence<long> ids; };
         \\typedef sequence<string> StringSeq;
     ;
     var h = try testGenFullOpts(idl, "t", .{ .c_no_free = true });
     defer h.deinit(testing.allocator);
-    try testing.expect(!has(h.items, "Msg_free"));
+    // Struct _free is a real function (just defined elsewhere under
+    // --c-no-free) -- generated code in the same translation unit (e.g.
+    // get_field_from_cdr) needs this prototype in scope to call it safely.
+    try testing.expect(has(h.items, "void Msg_free(Msg *v);"));
     try testing.expect(!has(h.items, "StringSeq_free"));
     // Nothing else about the struct's declaration should change.
     try testing.expect(has(h.items, "int Msg_serialize(ZidlCdrWriter *_w, const Msg *_v);"));
@@ -6141,9 +6159,23 @@ test "c_backend: --c-no-free suppresses _free body, other CDR functions unaffect
     const idl = "struct Msg { sequence<long> ids; };";
     var s = try testGenCdrOpts(idl, "t", .{ .c_no_free = true });
     defer s.deinit(testing.allocator);
-    try testing.expect(!has(s.items, "Msg_free"));
+    try testing.expect(!has(s.items, "void Msg_free(Msg *v) {"));
     try testing.expect(has(s.items, "int Msg_serialize(ZidlCdrWriter *_w, const Msg *_v) {"));
     try testing.expect(has(s.items, "int Msg_deserialize(ZidlCdrReader *_r, Msg *_v) {"));
+}
+
+test "c_backend: --c-no-free + --generate-zzdds-wrappers still calls Msg_free from get_field_from_cdr (no leak on the CFT evaluation path)" {
+    const idl = "struct Msg { sequence<long> ids; };";
+    var s = try testGenCdrOpts(idl, "t", .{ .c_no_free = true, .generate_zzdds_wrappers = true });
+    defer s.deinit(testing.allocator);
+    // The definition of Msg_free itself must still be suppressed...
+    try testing.expect(!has(s.items, "void Msg_free(Msg *v) {"));
+    // ...but get_field_from_cdr must still call the (externally-defined)
+    // Msg_free to release the sequence it just deserialized, on both the
+    // early-return (deserialize failure) and normal-completion paths --
+    // this was the real bug: has_free used to be tied to --c-no-free, so
+    // this whole cleanup call disappeared and every evaluation leaked.
+    try testing.expect(has(s.items, "Msg_free(&_v)"));
 }
 
 test "c_backend: --c-no-free is false by default (regression guard)" {
