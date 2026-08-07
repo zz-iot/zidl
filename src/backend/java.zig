@@ -1968,7 +1968,120 @@ const Generator = struct {
             try self.write("    return _obj.computeKeyHash();\n");
             try self.ind();
             try self.write("}\n");
+
+            try self.emitGetFieldFromCdr(s);
+        } else if (self.opts.generate_zzdds_wrappers and isZzddsTopicStructJava(s)) {
+            // Keyless topic type but --generate-zzdds-wrappers was requested
+            // -- see the matching `else if` in c.zig's emitStructFns for the
+            // full rationale (DDS 1.4 2.2.2.1: a keyless Topic is exactly
+            // one instance regardless of content). Only the three methods
+            // the wrapper codegen actually calls (serializeKey,
+            // computeKeyHash, deserializeKey) are needed here.
+            try self.write("\n");
+            try self.ind();
+            try self.write("public void serializeKey(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {\n");
+            try self.ind();
+            try self.write("    _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
+            if (appendable) {
+                try self.ind();
+                try self.write("    if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0); }\n");
+            }
+            try self.ind();
+            try self.write("}\n");
+
+            try self.write("\n");
+            try self.ind();
+            try self.print("public static {s}{s} deserializeKey(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {{\n", .{ self.opts.type_prefix, s.name });
+            if (appendable) {
+                try self.ind();
+                try self.write("    if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); int _size = _buf.getInt(); _buf.position(_buf.position() + _size); }\n");
+            }
+            try self.ind();
+            try self.print("    return new {s}{s}();\n", .{ self.opts.type_prefix, s.name });
+            try self.ind();
+            try self.write("}\n");
+
+            try self.write("\n");
+            try self.ind();
+            try self.write("public byte[] computeKeyHash() {\n");
+            try self.ind();
+            try self.write("    return new byte[16];\n");
+            try self.ind();
+            try self.write("}\n");
+
+            try self.write("\n");
+            try self.ind();
+            try self.print("public static byte[] computeKeyHashFromCdr(byte[] _payload) {{\n", .{});
+            try self.ind();
+            try self.write("    return new byte[16];\n");
+            try self.ind();
+            try self.write("}\n");
+
+            try self.write("\n");
+            try self.ind();
+            try self.write("public static Object getFieldFromCdr(byte[] _payload, String _field) {\n");
+            try self.ind();
+            try self.write("    return null;\n");
+            try self.ind();
+            try self.write("}\n");
         }
+    }
+
+    /// Emits `<Type>.getFieldFromCdr(byte[] payload, String field)` --
+    /// extracts a named field's value from a raw CDR payload for automatic
+    /// ContentFilteredTopic filtering, mirroring `computeKeyHashFromCdr`
+    /// above (full `deserializeFrom`, not a selective parse -- a filter
+    /// expression can reference any simple-typed member, not just `@key`
+    /// ones, and there's no meaningfully cheaper partial-parse shortcut for
+    /// CDR anyway). Returns `null` for an unknown/unsupported field; a
+    /// boxed `Long`/`Double` for an int-like/float-like member (an
+    /// `enum`/`bitmask` member via its own `.getValue()`); the `String`
+    /// itself for a string-like member (already a reference type -- no
+    /// boxing, and unlike the C/C++ backends' `scratch` buffer, nothing to
+    /// copy: Java's GC keeps the returned reference alive on its own, no
+    /// dangling-pointer hazard to design around).
+    fn emitGetFieldFromCdr(self: *Generator, s: *const ir.Struct) !void {
+        try self.write("\n");
+        try self.ind();
+        try self.write("public static Object getFieldFromCdr(byte[] _payload, String _field) {\n");
+        try self.ind();
+        try self.write("    java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(_payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
+        try self.ind();
+        try self.write("    int _xcdrVersion = _cdrDetectXcdr(_payload);\n");
+        try self.ind();
+        try self.write("    _buf.position(4);\n");
+        try self.ind();
+        try self.print("    {s}{s} _obj = deserializeFrom(_buf, 4, _xcdrVersion);\n", .{ self.opts.type_prefix, s.name });
+        try self.ind();
+        try self.write("    switch (_field) {\n");
+        for (s.members) |m| {
+            if (m.dimensions.len > 0) continue; // array member: not a simple filterable field
+            const expr = try std.fmt.allocPrint(self.alloc, "_obj.{s}", .{m.name});
+            defer self.alloc.free(expr);
+            switch (classifyFilterFieldKindJava(m.type_ref)) {
+                .skip => continue,
+                .int_like => {
+                    const int_expr = try intFieldExprJava(self.alloc, m.type_ref, expr);
+                    defer self.alloc.free(int_expr);
+                    try self.ind();
+                    try self.print("        case \"{s}\": return {s};\n", .{ m.name, int_expr });
+                },
+                .float_like => {
+                    try self.ind();
+                    try self.print("        case \"{s}\": return (double) {s};\n", .{ m.name, expr });
+                },
+                .string_like => {
+                    try self.ind();
+                    try self.print("        case \"{s}\": return {s};\n", .{ m.name, expr });
+                },
+            }
+        }
+        try self.ind();
+        try self.write("        default: return null;\n");
+        try self.ind();
+        try self.write("    }\n");
+        try self.ind();
+        try self.write("}\n");
     }
 
     /// Emit CDR write statement(s) for one struct member.
@@ -2903,10 +3016,12 @@ fn structHasKeyJava(s: *const ir.Struct) bool {
 
 /// True for structs `--generate-zzdds-wrappers` emits a typed
 /// `<CName>TypeSupport`/`<CName>DataWriter`/`<CName>DataReader` trio for —
-/// matches `isZzddsTopicStructC`'s rule in `c.zig`: keyed, not `@nested`,
-/// not `@mutable` (XCDR2 mutable/PL_CDR topic wrappers aren't supported here).
+/// matches `isZzddsTopicStructC`'s rule in `c.zig`: not `@nested`, not
+/// `@mutable` (XCDR2 mutable/PL_CDR topic wrappers aren't supported here).
+/// Keyed and keyless structs both qualify — see isZzddsTopicStruct in
+/// zig.zig for why (DDS 1.4 2.2.2.1 treats a keyless Topic as first-class).
 fn isZzddsTopicStructJava(s: *const ir.Struct) bool {
-    return structHasKeyJava(s) and !s.annotations.is_nested and s.annotations.extensibility != .mutable;
+    return !s.annotations.is_nested and s.annotations.extensibility != .mutable;
 }
 
 // ── --generate-zzdds-wrappers (Java) ─────────────────────────────────────────
@@ -2919,7 +3034,7 @@ fn isZzddsTopicStructJava(s: *const ir.Struct) bool {
 // methods and cross into zzdds through one small, hand-maintained,
 // non-generated native shim — `io.zzdds.runtime.ZzddsRuntime` (native methods
 // `registerTypeSupport`/`writeRaw`/`takeRaw`/`readRaw`), which itself wraps
-// `zzdds_register_type_support_c`/`zzdds_write_raw_kind`/`zzdds_take_one_raw`/
+// `zzdds_register_type_support`/`zzdds_write_raw_kind`/`zzdds_take_one_raw`/
 // `zzdds_read_one_raw` from `zzdds_c.h`. That runtime class and its native
 // implementation are zzdds's responsibility to ship, not zidl's to generate —
 // this generator only emits code that calls into it by the contract above.
@@ -3192,6 +3307,53 @@ fn emitZzddsDataReaderFile(
         \\
         \\    public Sample take() {{ return take(65536); }}
         \\    public Sample read() {{ return read(65536); }}
+        \\
+        \\    /** Drains the instance identified by {{@code prevHandle}} (0 to
+        \\     * start at the first instance) before moving to the next --
+        \\     * unlike {{@link #take()}}/{{@link #read()}}, which are plain FIFO. */
+        \\    public Sample take_next_instance(long prevHandle, int maxSampleSize) {{
+        \\        long[] _handle = new long[1];
+        \\        boolean[] _valid = new boolean[1];
+        \\        byte[] _payload = io.zzdds.runtime.ZzddsRuntime.takeNextInstanceRaw(reader, prevHandle, maxSampleSize, _handle, _valid);
+        \\        return fromPayload(_payload, _handle, _valid);
+        \\    }}
+        \\
+        \\    public Sample read_next_instance(long prevHandle, int maxSampleSize) {{
+        \\        long[] _handle = new long[1];
+        \\        boolean[] _valid = new boolean[1];
+        \\        byte[] _payload = io.zzdds.runtime.ZzddsRuntime.readNextInstanceRaw(reader, prevHandle, maxSampleSize, _handle, _valid);
+        \\        return fromPayload(_payload, _handle, _valid);
+        \\    }}
+        \\
+        \\    public Sample take_next_instance(long prevHandle) {{ return take_next_instance(prevHandle, 65536); }}
+        \\    public Sample read_next_instance(long prevHandle) {{ return read_next_instance(prevHandle, 65536); }}
+        \\
+        \\    private static Sample[] fromPayloads(byte[][] payloads, long[] handles, boolean[] valids) {{
+        \\        Sample[] _out = new Sample[payloads.length];
+        \\        for (int _i = 0; _i < payloads.length; _i++) {{
+        \\            _out[_i] = fromPayload(payloads[_i], new long[]{{ handles[_i] }}, new boolean[]{{ valids[_i] }});
+        \\        }}
+        \\        return _out;
+        \\    }}
+        \\
+        \\    /** Batch take/read of up to {{@code max}} samples matching the given
+        \\     * sample/view/instance state masks (e.g. {{@code Dcps.DDS.ANY_SAMPLE_STATE.value}})
+        \\     * -- non-destructive for {{@code read_n}}, removing from the reader's
+        \\     * history for {{@code take_n}}, same as C/C++'s equivalents. The
+        \\     * returned array's length is the true count (<= max). */
+        \\    public Sample[] take_n(int max, int sampleStates, int viewStates, int instanceStates) {{
+        \\        long[] _handles = new long[max];
+        \\        boolean[] _valids = new boolean[max];
+        \\        byte[][] _payloads = io.zzdds.runtime.ZzddsRuntime.takeNRaw(reader, max, sampleStates, viewStates, instanceStates, _handles, _valids);
+        \\        return fromPayloads(_payloads, _handles, _valids);
+        \\    }}
+        \\
+        \\    public Sample[] read_n(int max, int sampleStates, int viewStates, int instanceStates) {{
+        \\        long[] _handles = new long[max];
+        \\        boolean[] _valids = new boolean[max];
+        \\        byte[][] _payloads = io.zzdds.runtime.ZzddsRuntime.readNRaw(reader, max, sampleStates, viewStates, instanceStates, _handles, _valids);
+        \\        return fromPayloads(_payloads, _handles, _valids);
+        \\    }}
         \\}}
         \\
     , .{ .c = c_name, .t = type_java, .ri = reader_iface });
@@ -3466,6 +3628,29 @@ fn findConversionPath(
         }
     }
     return false;
+}
+
+/// Free-function core of `JniBridgeGenerator.entityUnboxFnName` — shared with
+/// `SeqParamMarshalGenerator.emitSeqEntity`, which needs the exact same
+/// "does this target have derived siblings in `all_entity_ifaces`" decision
+/// for a sequence *element* type, not just a bare single-entity param. Takes
+/// the already-resolved `target` interface directly (not a `TypeRef`) so
+/// both callers can supply one however they already have it in hand.
+fn entityUnboxFnNameFor(
+    alloc: std.mem.Allocator,
+    opts: interface.Options,
+    all_entity_ifaces: []const *const ir.Interface,
+    target: *const ir.Interface,
+) ![]u8 {
+    for (all_entity_ifaces) |candidate| {
+        if (candidate == target) continue;
+        if (interfaceHasBaseTransitively(candidate, target)) {
+            const target_c = try interface.prefixedCNameFromQualified(alloc, target.qualified_name, opts.type_prefix);
+            defer alloc.free(target_c);
+            return std.fmt.allocPrint(alloc, "zidl_java_unbox_as_{s}", .{target_c});
+        }
+    }
+    return alloc.dupe(u8, "zidl_java_unbox");
 }
 
 /// Generate a `<IfaceName>Impl.java` file for one IDL interface.
@@ -3814,24 +3999,70 @@ fn classifyTypeRef(tr: ir.TypeRef) JniCategory {
 /// always come back through an `out`/`inout` param), so that path has no
 /// marshaling built for it yet. `callback` (listener) types are Phase 3.
 /// True when `tr` (already known to be `JniCategory.value_struct`) is one
-/// `StructMarshalGenerator` actually generates `_from_java`/`_fill_java` for
-/// — i.e. it resolves (through any typedef chain) to an honest `struct`,
-/// `MemberShape.nested_struct`. A *bare* `sequence<T>` used directly as a
-/// param type (`ConditionSeq`, `StringSeq`, …) resolves to `seq_scalar`/
-/// `seq_string`/`seq_struct` instead: those marshaling shapes are only
-/// implemented for *struct member* access (via a `get_x()`/`set_x()`
-/// accessor pair), not for a bare value crossing the boundary on its own,
-/// and a `sequence<EntityInterface>` (`ConditionSeq`, `DataReaderSeq`) would
-/// additionally need entity box/unbox per element, not struct marshaling.
-/// Ops with such params stay in the "not yet supported" stub bucket.
+/// `StructMarshalGenerator`/`SeqParamMarshalGenerator` actually generates
+/// `_from_java`/`_fill_java` for:
+///   - `MemberShape.nested_struct` — an honest `struct`, handled field-by-
+///     field via `StructMarshalGenerator` (a `get_x()`/`set_x()` accessor
+///     pair on the containing Java object).
+///   - `MemberShape.seq_scalar`/`.seq_string` — a *bare* `sequence<T>` used
+///     directly as a param type (`StringSeq`, `InstanceHandleSeq`, …),
+///     handled by `SeqParamMarshalGenerator`: the incoming `jobject` *is*
+///     the `java.util.List` already (no getter), and results are written
+///     back by mutating that same list in place (`clear()` + `add()`), not
+///     by calling a setter on some containing object — there is none. Only
+///     when `tr` is itself `.named` (a typedef, e.g. `StringSeq`): the
+///     generated marshaling functions need a name to hang off of, and a
+///     genuinely anonymous inline `sequence<T>` param (no typedef) has none
+///     — see `SeqParamMarshalGenerator.collect`.
+///   - `MemberShape.seq_struct` whose element is itself `.entity`
+///     (`ConditionSeq`, `DataReaderSeq`, …): a bare `sequence<EntityInterface>`
+///     param, handled by `SeqParamMarshalGenerator.emitSeqEntity` — per-
+///     element box/unbox via the same machinery single-entity params already
+///     use (`entityUnboxFnName`/`emitUnboxAsDispatcher` for unbox; a
+///     box-as-most-derived cascade through the target's known concrete
+///     descendants, mirroring `emitUnboxAsDispatcher` but inverted, for box —
+///     see `emitSeqEntity`'s own doc comment). A `.seq_struct` whose element
+///     is a plain struct/enum stays unsupported: no operation in dcps.idl/
+///     zzdds.idl needs one as a bare param today, and it would need real
+///     struct-sequence marshaling this generator doesn't have.
+/// Ops with an unsupported param stay in the "not yet supported" stub bucket.
 fn paramIsSupportedValueStruct(tr: ir.TypeRef) bool {
-    return resolveMemberShape(tr) == .nested_struct;
+    return switch (resolveMemberShape(tr)) {
+        .nested_struct => true,
+        .seq_scalar, .seq_string => switch (tr) {
+            .named => true,
+            else => false,
+        },
+        .seq_struct => switch (tr) {
+            .named => classifyTypeRef(seqElementOf(tr)) == .entity,
+            else => false,
+        },
+        else => false,
+    };
+}
+
+/// True when `op` is shaped like a `get_listener()` accessor: zero params,
+/// named exactly `get_listener`, returning a `@callback` interface. Matched
+/// by name (not just shape) for the same robustness reason as cpp.zig's own
+/// `listenerTypeOf` (~4908 in cpp.zig) — guards against a hypothetical
+/// unrelated zero-param op that happens to return a callback-shaped type.
+fn isGetListenerOp(op: *const ir.Operation) bool {
+    if (op.params.len != 0) return false;
+    if (!std.mem.eql(u8, op.name, "get_listener")) return false;
+    const rt = op.return_type orelse return false;
+    return classifyTypeRef(rt) == .callback;
 }
 
 fn opIsJniSupported(op: *const ir.Operation) bool {
     if (op.return_type) |rt| {
         switch (classifyTypeRef(rt)) {
-            .callback, .value_struct => return false,
+            // `get_listener()` is a real, supported round-trip (see
+            // `emitJniBridgeOp`'s `ret_is_callback` branch) — every OTHER
+            // `.callback`-returning shape stays unsupported (none occur in
+            // dcps.idl/zzdds.idl today, but the general case still needs
+            // real marshaling this generator doesn't have).
+            .callback => if (!isGetListenerOp(op)) return false,
+            .value_struct => return false,
             else => {},
         }
     }
@@ -4055,7 +4286,7 @@ const JniBridgeGenerator = struct {
         // inherited `on_offered_deadline_missed(in DataWriter the_writer,
         // ...)` needs `zidl_java_box_DDS_DataWriter`).
         try self.collectCrossFileReferences(ifaces.items, &cross_refs);
-        if (cross_refs.entities.items.len > 0 or cross_refs.structs.items.len > 0 or cross_refs.listeners.items.len > 0) {
+        if (cross_refs.entities.items.len > 0 or cross_refs.structs.items.len > 0 or cross_refs.seqs.items.len > 0 or cross_refs.listeners.items.len > 0) {
             for (cross_refs.entities.items) |iface| {
                 const c_name = try interface.prefixedCNameFromQualified(self.alloc, iface.qualified_name, self.opts.type_prefix);
                 defer self.alloc.free(c_name);
@@ -4067,6 +4298,15 @@ const JniBridgeGenerator = struct {
                 try self.print(
                     "extern void {[c]s}_from_java(JNIEnv *env, jobject obj, {[c]s} *out);\n" ++
                         "extern void {[c]s}_fill_java(JNIEnv *env, const {[c]s} *in, jobject obj);\n",
+                    .{ .c = c_name },
+                );
+            }
+            for (cross_refs.seqs.items) |td| {
+                const c_name = try interface.prefixedCNameFromQualified(self.alloc, ir.typeDeclQualifiedName(td), self.opts.type_prefix);
+                defer self.alloc.free(c_name);
+                try self.print(
+                    "extern void {[c]s}_from_java(JNIEnv *env, jobject list, {[c]s} *out);\n" ++
+                        "extern void {[c]s}_fill_java(JNIEnv *env, const {[c]s} *in, jobject list);\n",
                     .{ .c = c_name },
                 );
             }
@@ -4137,6 +4377,15 @@ const JniBridgeGenerator = struct {
         self.stem_class = stem_class;
         var struct_gen = StructMarshalGenerator{ .alloc = self.alloc, .opts = self.opts, .out = self.out, .stem_class = stem_class, .cross_file = self.cross_file };
         try struct_gen.emitSource(spec);
+
+        // Bare `sequence<T>` operation-parameter marshaling (`StringSeq`,
+        // `InstanceHandleSeq`, …) — see `SeqParamMarshalGenerator`. Emitted
+        // after `struct_gen` for no particular reason other than mirroring
+        // its own "before the per-interface bridges" placement, which call
+        // into both for `value_struct`-categorized params (see
+        // `opIsJniSupported`/`paramIsSupportedValueStruct`).
+        var seq_gen = SeqParamMarshalGenerator{ .alloc = self.alloc, .opts = self.opts, .out = self.out, .cross_file = self.cross_file, .all_entity_ifaces = self.all_entity_ifaces };
+        try seq_gen.emitSource(spec);
 
         try self.emitItems(spec.items);
     }
@@ -4221,16 +4470,7 @@ const JniBridgeGenerator = struct {
     /// dispatcher if some do (see `emitUnboxAsDispatcher`). Always returns
     /// an owned, allocator-freed string for uniform call-site handling.
     fn entityUnboxFnName(self: *JniBridgeGenerator, tr: ir.TypeRef) ![]u8 {
-        const target = resolveToNamedDecl(tr).interface;
-        for (self.all_entity_ifaces) |candidate| {
-            if (candidate == target) continue;
-            if (interfaceHasBaseTransitively(candidate, target)) {
-                const target_c = try interface.prefixedCNameFromQualified(self.alloc, target.qualified_name, self.opts.type_prefix);
-                defer self.alloc.free(target_c);
-                return std.fmt.allocPrint(self.alloc, "zidl_java_unbox_as_{s}", .{target_c});
-            }
-        }
-        return self.alloc.dupe(u8, "zidl_java_unbox");
+        return entityUnboxFnNameFor(self.alloc, self.opts, self.all_entity_ifaces, resolveToNamedDecl(tr).interface);
     }
 
     /// Emits `zidl_java_unbox_as_<target_c>`: unboxes `obj`'s raw handle,
@@ -4337,11 +4577,16 @@ const JniBridgeGenerator = struct {
     const CrossFileReferences = struct {
         entities: std.ArrayListUnmanaged(*const ir.Interface) = .empty,
         structs: std.ArrayListUnmanaged(ir.TypeDecl) = .empty,
+        /// Bare named-sequence-typedef params (`StringSeq`, …) — handled by
+        /// `SeqParamMarshalGenerator`, kept separate from `structs` since
+        /// they're keyed/emitted differently (see `collectCrossFileReferences`).
+        seqs: std.ArrayListUnmanaged(ir.TypeDecl) = .empty,
         listeners: std.ArrayListUnmanaged(*const ir.Interface) = .empty,
 
         fn deinit(self: *CrossFileReferences, alloc: std.mem.Allocator) void {
             self.entities.deinit(alloc);
             self.structs.deinit(alloc);
+            self.seqs.deinit(alloc);
             self.listeners.deinit(alloc);
         }
     };
@@ -4395,25 +4640,51 @@ const JniBridgeGenerator = struct {
                         if (isLocalIface(out.listeners.items, target)) continue;
                         try out.listeners.append(self.alloc, target);
                     },
-                    .value_struct => {
-                        // `.value_struct` also covers a bare `sequence`/
-                        // `fixed_pt`/`map` type ref, or a typedef chain that
-                        // bottoms out at one (e.g. `typedef sequence<string>
-                        // StringSeq;`) — those have no named decl to resolve
-                        // to and never get real JNI marshaling generated for
-                        // them anyway (see
-                        // `paramIsSupportedValueStruct`/`opIsJniSupported`),
-                        // so skip via the non-panicking resolver.
-                        const td = tryResolveToNamedDecl(tr) orelse continue;
-                        if (self.cross_file.lookup(ir.typeDeclQualifiedName(td)) == null) continue;
-                        var already = false;
-                        for (out.structs.items) |existing| {
-                            if (std.mem.eql(u8, ir.typeDeclQualifiedName(existing), ir.typeDeclQualifiedName(td))) {
-                                already = true;
-                                break;
+                    .value_struct => switch (resolveMemberShape(tr)) {
+                        .seq_scalar, .seq_string => {
+                            // A bare named-sequence-typedef param
+                            // (`StringSeq`, `InstanceHandleSeq`, …) —
+                            // handled by `SeqParamMarshalGenerator`, keyed by
+                            // the typedef's OWN qualified name (not resolved
+                            // further into the anonymous `.sequence` it
+                            // aliases, which has no name of its own — unlike
+                            // the struct case below, there's no chain to
+                            // walk through here). An anonymous inline
+                            // `sequence<T>` param (no typedef) never gets
+                            // real marshaling generated for it either way
+                            // (see `paramIsSupportedValueStruct`), so skip it.
+                            const td = switch (tr) {
+                                .named => |t| t,
+                                else => continue,
+                            };
+                            if (self.cross_file.lookup(ir.typeDeclQualifiedName(td)) == null) continue;
+                            var already = false;
+                            for (out.seqs.items) |existing| {
+                                if (std.mem.eql(u8, ir.typeDeclQualifiedName(existing), ir.typeDeclQualifiedName(td))) {
+                                    already = true;
+                                    break;
+                                }
                             }
-                        }
-                        if (!already) try out.structs.append(self.alloc, td);
+                            if (!already) try out.seqs.append(self.alloc, td);
+                        },
+                        else => {
+                            // An honest struct/enum/etc — or a `seq_struct`/
+                            // anonymous sequence/fixed_pt/map that never gets
+                            // real JNI marshaling generated for it anyway
+                            // (see
+                            // `paramIsSupportedValueStruct`/`opIsJniSupported`),
+                            // so skip via the non-panicking resolver.
+                            const td = tryResolveToNamedDecl(tr) orelse continue;
+                            if (self.cross_file.lookup(ir.typeDeclQualifiedName(td)) == null) continue;
+                            var already = false;
+                            for (out.structs.items) |existing| {
+                                if (std.mem.eql(u8, ir.typeDeclQualifiedName(existing), ir.typeDeclQualifiedName(td))) {
+                                    already = true;
+                                    break;
+                                }
+                            }
+                            if (!already) try out.structs.append(self.alloc, td);
+                        },
                     },
                     else => {},
                 }
@@ -4712,6 +4983,26 @@ const JniBridgeGenerator = struct {
         const ret_c_name: ?[]u8 = if (ret_is_entity) try self.typeRefToC(op.return_type.?) else null;
         defer if (ret_c_name) |n| self.alloc.free(n);
 
+        // `get_listener()`: the real C ABI call returns the listener STRUCT
+        // by value (function pointers + `listener_data`), not a pointer —
+        // `_ret = (jobject)DDS_Foo_get_listener(...)` (the generic
+        // scalar-return path below) would be a nonsense reinterpret-cast, so
+        // this needs its own branch. No new C-ABI/core work needed: Java's
+        // own `set_listener` already stashes a `zidl_java_listener_ctx *`
+        // (a global ref to the original Java listener object) into
+        // `listener_data` (see `emitListenerParamPrep`), and zzdds core's
+        // real `get_listener()` vtable slot already returns that same
+        // pointer un-flattened — so this is a genuine round-trip that hands
+        // back the *same* Java object, not a freshly-boxed one (there is
+        // nothing to box: the object never stopped being Java-side).
+        // Known, accepted limitation: this cast is unsafe if some listener
+        // was ever installed by a non-Java binding sharing this process —
+        // not a real scenario for how these bindings are used today (each
+        // generated binding owns the whole process), so not guarded against.
+        const ret_is_callback = if (op.return_type) |rt| classifyTypeRef(rt) == .callback else false;
+        const ret_listener_c_name: ?[]u8 = if (ret_is_callback) try self.typeRefToC(op.return_type.?) else null;
+        defer if (ret_listener_c_name) |n| self.alloc.free(n);
+
         // `.callback` params on a `create_*`-shaped op need a post-call
         // listener_data readback — see the post-call block below. The core
         // now releases a listener's context automatically the moment it's
@@ -4828,6 +5119,8 @@ const JniBridgeGenerator = struct {
         // below.
         if (ret_is_entity) {
             try self.print("    void *_h = (void *){s}_{s}({s}", .{ call_c_name, op.name, self_expr });
+        } else if (ret_is_callback) {
+            try self.print("    {s} _l = {s}_{s}({s}", .{ ret_listener_c_name.?, call_c_name, op.name, self_expr });
         } else if (ret_is_string) {
             try self.print("    const char *_rets = (const char *){s}_{s}({s}", .{ call_c_name, op.name, self_expr });
         } else if (op.return_type != null) {
@@ -4894,8 +5187,21 @@ const JniBridgeGenerator = struct {
             if (classifyTypeRef(p.type_ref) != .value_struct) continue;
             const pc = try self.typeRefToC(p.type_ref);
             defer self.alloc.free(pc);
-            const td = resolveToNamedDecl(p.type_ref);
-            const owns_heap = td == .struct_ and structOwnsHeapMemory(td.struct_);
+            // `resolveToNamedDecl` panics on a bare `sequence<T>` param
+            // (`.seq_scalar`/`.seq_string` -- no named struct/enum decl to
+            // resolve to, see its own doc comment) -- only call it for the
+            // shape it actually supports. A sequence's `_buffer` is always
+            // malloc'd by `SeqParamMarshalGenerator`'s `_from_java` (even for
+            // an empty sequence, where it's simply NULL, and `_free` is a
+            // no-op on that), so it unconditionally owns heap memory.
+            const owns_heap = switch (resolveMemberShape(p.type_ref)) {
+                .nested_struct => blk: {
+                    const td = resolveToNamedDecl(p.type_ref);
+                    break :blk td == .struct_ and structOwnsHeapMemory(td.struct_);
+                },
+                .seq_scalar, .seq_string, .seq_struct => true,
+                else => unreachable, // paramIsSupportedValueStruct only allows the shapes above
+            };
             switch (p.mode) {
                 .in_ => if (owns_heap)
                     try self.print("    if (_p_{s}) {s}_free(&_c_{s});\n", .{ p.name, pc, p.name }),
@@ -4911,6 +5217,8 @@ const JniBridgeGenerator = struct {
 
         if (ret_is_entity) {
             try self.print("    return zidl_java_box_{s}(env, _h);\n", .{ret_c_name.?});
+        } else if (ret_is_callback) {
+            try self.write("    return _l.listener_data != NULL ? ((zidl_java_listener_ctx *)_l.listener_data)->ref : NULL;\n");
         } else if (ret_is_string) {
             try self.write("    return _rets != NULL ? (*env)->NewStringUTF(env, _rets) : NULL;\n");
         } else if (op.return_type != null) {
@@ -5180,6 +5488,47 @@ fn structOwnsHeapMemory(s: *const ir.Struct) bool {
         }
     }
     return false;
+}
+
+/// How `Generator.emitGetFieldFromCdr` (the data-type half of this file,
+/// generating `<Type>.getFieldFromCdr` — not the JNI bridge) treats one
+/// struct member: mirrors zig.zig's `FilterFieldKind`/`classifyFilterFieldKind`
+/// (see there for the full rationale) on top of this file's own
+/// `resolveMemberShape`, splitting its `.scalar` further into int-like vs
+/// float-like by base type.
+const JavaFilterFieldKind = enum { skip, int_like, float_like, string_like };
+
+fn classifyFilterFieldKindJava(tr: ir.TypeRef) JavaFilterFieldKind {
+    return switch (resolveMemberShape(tr)) {
+        .string_ => .string_like,
+        .enum_ => .int_like,
+        .scalar => switch (resolveScalarBase(tr)) {
+            .float, .double, .long_double => .float_like,
+            else => .int_like,
+        },
+        .nested_struct, .seq_scalar, .seq_string, .seq_struct => .skip,
+    };
+}
+
+/// Emits the Java expression converting `{expr}` (already known, by
+/// `classifyFilterFieldKindJava`, to be `.int_like`) to a boxed `Long` for
+/// `getFieldFromCdr`'s return value. Resolves through any typedef chain to
+/// find the real base/enum kind — `boolean` needs a ternary (Java has no
+/// `boolean`-to-`long` cast); every other integer base casts directly; an
+/// enum needs `.getValue()` first.
+fn intFieldExprJava(alloc: std.mem.Allocator, tr: ir.TypeRef, expr: []const u8) ![]u8 {
+    return switch (tr) {
+        .base => |b| switch (b) {
+            .boolean => std.fmt.allocPrint(alloc, "({s} ? 1L : 0L)", .{expr}),
+            else => std.fmt.allocPrint(alloc, "(long) {s}", .{expr}),
+        },
+        .named => |td| switch (td) {
+            .enum_, .bitmask => std.fmt.allocPrint(alloc, "(long) {s}.getValue()", .{expr}),
+            .typedef => |t| intFieldExprJava(alloc, t.type_ref, expr),
+            else => unreachable, // classifyFilterFieldKindJava only returns .int_like for the cases above
+        },
+        else => unreachable,
+    };
 }
 
 /// The scalar `TypeRef` a `.scalar`/`.seq_scalar`-shaped member ultimately
@@ -5652,6 +6001,390 @@ const StructMarshalGenerator = struct {
                 "       (*env)->CallVoidMethod(env, obj, mid, _l); }}\n",
             .{ .bin = bin, .name = m.name, .elem = elem_c },
         );
+    }
+};
+
+// ── SeqParamMarshalGenerator ───────────────────────────────────────────────────
+
+/// Emits `<c_name>_from_java`/`<c_name>_fill_java` for every *bare*
+/// `sequence<T>` (`StringSeq`, `InstanceHandleSeq`, …) used directly as an
+/// operation parameter's own type anywhere in the spec — as opposed to
+/// `StructMarshalGenerator`, which handles a `sequence<T>`-typed *struct
+/// member* (`PartitionQosPolicy.name`, …) via a `get_x()`/`set_x()` accessor
+/// pair on the containing object.
+///
+/// A bare parameter has no containing object to call an accessor on: the
+/// `jobject` the JNI bridge already has *is* the `java.util.List` (no getter
+/// needed), and there is nothing to call a setter on to hand results back —
+/// so unlike `StructMarshalGenerator`'s `*FillJava` (which builds a new
+/// `ArrayList` and calls `set_x(list)`), this generator's `_fill_java`
+/// mutates the caller's existing list in place (`clear()` then `add()` per
+/// element), matching how an `inout`/`out` struct param is filled in place
+/// via its own setters. Only `seq_scalar`/`seq_string` element shapes are
+/// covered (see `paramIsSupportedValueStruct`'s doc comment for why
+/// `seq_struct` is out of scope; no operation needs it today).
+const SeqParamMarshalGenerator = struct {
+    alloc: std.mem.Allocator,
+    opts: interface.Options,
+    out: *std.ArrayList(u8),
+    /// See `CrossFileResolver`. A sequence typedef declared in an imported
+    /// file (e.g. a zzdds.idl-local operation taking `DDS::StringSeq`) must
+    /// NOT get a local definition here — dcps.idl's own JNI bridge already
+    /// defines it (non-`static`, external linkage); a second definition
+    /// would collide at link time. `collect` filters these out; the caller
+    /// emits `extern` declarations for them instead (mirroring
+    /// `StructMarshalGenerator`'s cross-file handling) — see
+    /// `collectCrossFileReferences`'s `.seq_scalar`/`.seq_string` branch.
+    cross_file: CrossFileResolver = .{},
+    /// Every entity interface local to this file -- needed by `emitSeqEntity`
+    /// for the same "does this target have derived siblings in this file"
+    /// check `entityUnboxFnName`/`emitUnboxAsDispatcher` already do for a
+    /// bare (non-sequence) entity param; always populated from
+    /// `JniBridgeGenerator.all_entity_ifaces`.
+    all_entity_ifaces: []const *const ir.Interface = &.{},
+
+    fn write(self: *SeqParamMarshalGenerator, s: []const u8) !void {
+        try self.out.appendSlice(self.alloc, s);
+    }
+
+    fn print(self: *SeqParamMarshalGenerator, comptime fmt: []const u8, args: anytype) !void {
+        const s = try std.fmt.allocPrint(self.alloc, fmt, args);
+        defer self.alloc.free(s);
+        try self.out.appendSlice(self.alloc, s);
+    }
+
+    fn cName(self: *SeqParamMarshalGenerator, qualified_name: []const u8) ![]u8 {
+        return interface.prefixedCNameFromQualified(self.alloc, qualified_name, self.opts.type_prefix);
+    }
+
+    fn emitSource(self: *SeqParamMarshalGenerator, spec: *const ir.Spec) !void {
+        var seen = std.StringHashMapUnmanaged(void).empty;
+        defer seen.deinit(self.alloc);
+        var types = std.ArrayListUnmanaged(ir.TypeRef).empty;
+        defer types.deinit(self.alloc);
+        try self.collect(spec.items, &seen, &types);
+        if (types.items.len == 0) return;
+
+        try self.write("/* Bare sequence<T> operation-parameter marshaling (Java List<T> <-> C ABI sequence structs). */\n");
+        for (types.items) |tr| {
+            const c_name = try self.cName(ir.typeDeclQualifiedName(tr.named));
+            defer self.alloc.free(c_name);
+            try self.print(
+                "void {s}_from_java(JNIEnv *env, jobject list, {s} *out);\n" ++
+                    "void {s}_fill_java(JNIEnv *env, const {s} *in, jobject list);\n",
+                .{ c_name, c_name, c_name, c_name },
+            );
+        }
+        try self.write("\n");
+        for (types.items) |tr| try self.emitSeqType(tr);
+    }
+
+    /// Walks every interface's operations (recursing through modules), collecting
+    /// each distinct named (`.named`) bare-sequence param type once — see
+    /// `paramIsSupportedValueStruct`'s doc comment for why only `.named` types
+    /// (a genuinely anonymous inline `sequence<T>` param has no name to hang a
+    /// generated function on) and only `.seq_scalar`/`.seq_string` element
+    /// shapes qualify. Dedup key is the qualified type name: a base interface's
+    /// operations are declared once on the base itself (walked here directly,
+    /// not via a derived interface's inherited view of them), so no interface-
+    /// level dedup is needed, only across distinct sequence *types*.
+    fn collect(
+        self: *SeqParamMarshalGenerator,
+        items: []const ir.ModuleItem,
+        seen: *std.StringHashMapUnmanaged(void),
+        out: *std.ArrayListUnmanaged(ir.TypeRef),
+    ) !void {
+        for (items) |item| {
+            switch (item) {
+                .module => |m| try self.collect(m.items, seen, out),
+                .type_decl => |td| if (td == .interface) {
+                    for (td.interface.operations) |op| {
+                        for (op.params) |p| try self.maybeCollect(p.type_ref, seen, out);
+                    }
+                },
+                .const_ => {},
+            }
+        }
+    }
+
+    fn maybeCollect(
+        self: *SeqParamMarshalGenerator,
+        tr: ir.TypeRef,
+        seen: *std.StringHashMapUnmanaged(void),
+        out: *std.ArrayListUnmanaged(ir.TypeRef),
+    ) !void {
+        if (classifyTypeRef(tr) != .value_struct) return;
+        switch (resolveMemberShape(tr)) {
+            .seq_scalar, .seq_string => {},
+            .seq_struct => if (classifyTypeRef(seqElementOf(tr)) != .entity) return,
+            else => return,
+        }
+        const td = switch (tr) {
+            .named => |t| t,
+            else => return,
+        };
+        const qname = ir.typeDeclQualifiedName(td);
+        if (self.cross_file.lookup(qname) != null) return; // declared in an imported file -- extern-declared, not defined, here
+        if (seen.contains(qname)) return;
+        try seen.put(self.alloc, qname, {});
+        try out.append(self.alloc, tr);
+    }
+
+    fn emitSeqType(self: *SeqParamMarshalGenerator, tr: ir.TypeRef) !void {
+        const c_name = try self.cName(ir.typeDeclQualifiedName(tr.named));
+        defer self.alloc.free(c_name);
+        switch (resolveMemberShape(tr)) {
+            .seq_scalar => try self.emitSeqScalar(c_name, resolveScalarBase(seqElementOf(tr))),
+            .seq_string => try self.emitSeqString(c_name),
+            .seq_struct => try self.emitSeqEntity(c_name, resolveToNamedDecl(seqElementOf(tr)).interface),
+            else => unreachable, // collect() only appends seq_scalar/seq_string/seq_struct-of-entity
+        }
+    }
+
+    fn emitSeqScalar(self: *SeqParamMarshalGenerator, c_name: []const u8, b: ast.BaseTypeSpec) !void {
+        try self.print(
+            "void {[c]s}_from_java(JNIEnv *env, jobject list, {[c]s} *out) {{\n" ++
+                "    jclass _lc = (*env)->GetObjectClass(env, list);\n" ++
+                "    jmethodID _sz = (*env)->GetMethodID(env, _lc, \"size\", \"()I\");\n" ++
+                "    jmethodID _get = (*env)->GetMethodID(env, _lc, \"get\", \"(I)Ljava/lang/Object;\");\n" ++
+                "    int32_t _n = (*env)->CallIntMethod(env, list, _sz);\n" ++
+                "    out->_buffer = _n > 0 ? malloc(_n * sizeof(*out->_buffer)) : NULL;\n" ++
+                "    out->_length = _n; out->_maximum = _n; out->_release = _n > 0;\n" ++
+                "    for (int32_t _i = 0; _i < _n; _i++) {{\n" ++
+                "        jobject _box = (*env)->CallObjectMethod(env, list, _get, _i);\n" ++
+                "        jclass _bc = (*env)->GetObjectClass(env, _box);\n" ++
+                "        jmethodID _uv = (*env)->GetMethodID(env, _bc, \"{[unbox]s}Value\", \"(){[ch]c}\");\n" ++
+                "        out->_buffer[_i] = (*env)->Call{[acc]s}Method(env, _box, _uv);\n" ++
+                "    }}\n}}\n\n",
+            .{ .c = c_name, .unbox = unboxMethodName(b), .ch = jniTypeDescriptorChar(b), .acc = jniAccessorName(b) },
+        );
+
+        try self.print(
+            "void {[c]s}_fill_java(JNIEnv *env, const {[c]s} *in, jobject list) {{\n" ++
+                "    jclass _lc = (*env)->GetObjectClass(env, list);\n" ++
+                "    jmethodID _clear = (*env)->GetMethodID(env, _lc, \"clear\", \"()V\");\n" ++
+                "    (*env)->CallVoidMethod(env, list, _clear);\n" ++
+                "    jmethodID _add = (*env)->GetMethodID(env, _lc, \"add\", \"(Ljava/lang/Object;)Z\");\n" ++
+                "    jclass _bc = (*env)->FindClass(env, \"{[boxed]s}\");\n" ++
+                "    jmethodID _vo = (*env)->GetStaticMethodID(env, _bc, \"valueOf\", \"({[ch]c})L{[boxed]s};\");\n" ++
+                "    for (int32_t _i = 0; _i < in->_length; _i++) {{\n" ++
+                "        jobject _box = (*env)->CallStaticObjectMethod(env, _bc, _vo, ({[jt]s})in->_buffer[_i]);\n" ++
+                "        (*env)->CallBooleanMethod(env, list, _add, _box);\n" ++
+                "    }}\n}}\n\n",
+            .{ .c = c_name, .boxed = boxedClassName(b), .ch = jniTypeDescriptorChar(b), .jt = jniTypeForBase(b) },
+        );
+    }
+
+    fn emitSeqString(self: *SeqParamMarshalGenerator, c_name: []const u8) !void {
+        try self.print(
+            "void {[c]s}_from_java(JNIEnv *env, jobject list, {[c]s} *out) {{\n" ++
+                "    jclass _lc = (*env)->GetObjectClass(env, list);\n" ++
+                "    jmethodID _sz = (*env)->GetMethodID(env, _lc, \"size\", \"()I\");\n" ++
+                "    jmethodID _get = (*env)->GetMethodID(env, _lc, \"get\", \"(I)Ljava/lang/Object;\");\n" ++
+                "    int32_t _n = (*env)->CallIntMethod(env, list, _sz);\n" ++
+                "    out->_buffer = _n > 0 ? malloc(_n * sizeof(*out->_buffer)) : NULL;\n" ++
+                "    out->_length = _n; out->_maximum = _n; out->_release = _n > 0;\n" ++
+                "    for (int32_t _i = 0; _i < _n; _i++) {{\n" ++
+                "        jstring _s = (jstring)(*env)->CallObjectMethod(env, list, _get, _i);\n" ++
+                "        const char *_cs = (*env)->GetStringUTFChars(env, _s, NULL);\n" ++
+                "        out->_buffer[_i] = zidl_java_strdup(_cs);\n" ++
+                "        (*env)->ReleaseStringUTFChars(env, _s, _cs);\n" ++
+                "    }}\n}}\n\n",
+            .{ .c = c_name },
+        );
+
+        try self.print(
+            "void {[c]s}_fill_java(JNIEnv *env, const {[c]s} *in, jobject list) {{\n" ++
+                "    jclass _lc = (*env)->GetObjectClass(env, list);\n" ++
+                "    jmethodID _clear = (*env)->GetMethodID(env, _lc, \"clear\", \"()V\");\n" ++
+                "    (*env)->CallVoidMethod(env, list, _clear);\n" ++
+                "    jmethodID _add = (*env)->GetMethodID(env, _lc, \"add\", \"(Ljava/lang/Object;)Z\");\n" ++
+                "    for (int32_t _i = 0; _i < in->_length; _i++) {{\n" ++
+                "        jstring _s = (*env)->NewStringUTF(env, in->_buffer[_i]);\n" ++
+                "        (*env)->CallBooleanMethod(env, list, _add, _s);\n" ++
+                "    }}\n}}\n\n",
+            .{ .c = c_name },
+        );
+    }
+
+    /// `sequence<EntityInterface>` (`ConditionSeq`, `DataReaderSeq`, …): a
+    /// per-element box/unbox loop, same overall shape as `emitSeqScalar`/
+    /// `emitSeqString` but converting entity handles instead of primitives.
+    ///
+    /// Unbox (Java `List` element → native handle) reuses the exact same
+    /// machinery a bare single-entity param already uses:
+    /// `entityUnboxFnNameFor` picks the plain `zidl_java_unbox` or a
+    /// generated `zidl_java_unbox_as_<C>` widening dispatcher — the JVM
+    /// already knows the element object's real runtime class, so
+    /// `IsInstanceOf`-based dispatch (see `emitUnboxAsDispatcher`) is enough.
+    ///
+    /// Box (native handle → Java object, for the `out`/`inout` fill-back
+    /// direction) is genuinely new: there is no Java object yet to reflect
+    /// on, only a raw handle, so `emitBoxAsMostDerived` below walks zzdds's
+    /// checked *narrowing* conversions (`<Base>_as_<Derived>`, returning
+    /// NULL when not an instance — the mirror image of the widening
+    /// dispatcher's always-succeeds `<Derived>_as_<Base>` upcasts) instead.
+    fn emitSeqEntity(self: *SeqParamMarshalGenerator, c_name: []const u8, element_iface: *const ir.Interface) !void {
+        const unbox_fn = try entityUnboxFnNameFor(self.alloc, self.opts, self.all_entity_ifaces, element_iface);
+        defer self.alloc.free(unbox_fn);
+
+        try self.print(
+            "void {[c]s}_from_java(JNIEnv *env, jobject list, {[c]s} *out) {{\n" ++
+                "    jclass _lc = (*env)->GetObjectClass(env, list);\n" ++
+                "    jmethodID _sz = (*env)->GetMethodID(env, _lc, \"size\", \"()I\");\n" ++
+                "    jmethodID _get = (*env)->GetMethodID(env, _lc, \"get\", \"(I)Ljava/lang/Object;\");\n" ++
+                "    int32_t _n = (*env)->CallIntMethod(env, list, _sz);\n" ++
+                "    out->_buffer = _n > 0 ? malloc(_n * sizeof(*out->_buffer)) : NULL;\n" ++
+                "    out->_length = _n; out->_maximum = _n; out->_release = _n > 0;\n" ++
+                "    for (int32_t _i = 0; _i < _n; _i++) {{\n" ++
+                "        jobject _el = (*env)->CallObjectMethod(env, list, _get, _i);\n" ++
+                "        out->_buffer[_i] = {[unbox]s}(env, _el);\n" ++
+                "    }}\n}}\n\n",
+            .{ .c = c_name, .unbox = unbox_fn },
+        );
+
+        var derived = std.ArrayListUnmanaged(*const ir.Interface).empty;
+        defer derived.deinit(self.alloc);
+        for (self.all_entity_ifaces) |candidate| {
+            if (candidate == element_iface) continue;
+            if (interfaceHasBaseTransitively(candidate, element_iface)) try derived.append(self.alloc, candidate);
+        }
+        // The ELEMENT interface's own flat C name (e.g. "Condition"), not
+        // the sequence typedef's (e.g. "ConditionSeq") -- this names both
+        // the C-ABI conversion/box calls (`Condition_as_...`,
+        // `zidl_java_box_Condition`) and the dispatcher function itself,
+        // which is conceptually per-element-type and would be equally
+        // reusable by any other sequence-of-Condition, were one to exist.
+        const elem_c = try self.cName(element_iface.qualified_name);
+        defer self.alloc.free(elem_c);
+        const box_fn = try self.emitBoxAsMostDerived(elem_c, element_iface, derived.items);
+        defer self.alloc.free(box_fn);
+
+        try self.print(
+            "void {[c]s}_fill_java(JNIEnv *env, const {[c]s} *in, jobject list) {{\n" ++
+                "    jclass _lc = (*env)->GetObjectClass(env, list);\n" ++
+                "    jmethodID _clear = (*env)->GetMethodID(env, _lc, \"clear\", \"()V\");\n" ++
+                "    (*env)->CallVoidMethod(env, list, _clear);\n" ++
+                "    jmethodID _add = (*env)->GetMethodID(env, _lc, \"add\", \"(Ljava/lang/Object;)Z\");\n" ++
+                "    for (int32_t _i = 0; _i < in->_length; _i++) {{\n" ++
+                "        jobject _el = {[box]s}(env, in->_buffer[_i]);\n" ++
+                "        (*env)->CallBooleanMethod(env, list, _add, _el);\n" ++
+                "    }}\n}}\n\n",
+            .{ .c = c_name, .box = box_fn },
+        );
+    }
+
+    /// Returns the name of the function to call to box a native handle of
+    /// `target`'s C type as its most-derived known Java class: plain
+    /// `zidl_java_box_<target_c>` if `derived` is empty (no known concrete
+    /// descendant — e.g. `DataReader`), or a generated
+    /// `<target_c>_box_as_most_derived` dispatcher otherwise. `elem_c` must
+    /// be `target`'s OWN flat C name (e.g. "Condition"), not the calling
+    /// sequence typedef's — the dispatcher is conceptually per-element-type,
+    /// not per-sequence-type. Called once per bare `sequence<Entity>` param
+    /// type that needs it (`SeqParamMarshalGenerator.collect` dedups by
+    /// *sequence* type, not by element type — if two distinct sequence
+    /// typedefs ever shared the same entity element, e.g. two different
+    /// `sequence<Condition>` aliases, this would emit `<target_c>_box_as_
+    /// most_derived` twice, a duplicate-symbol link error; not a real
+    /// concern for dcps.idl/zzdds.idl today, where each entity element type
+    /// only ever has one bare-sequence typedef, but worth knowing if this
+    /// is ever extended).
+    ///
+    /// The dispatcher tries each entry in `derived`, MOST-DERIVED FIRST: a
+    /// genuine `QueryCondition` handle also satisfies the checked
+    /// conversion to the shallower `ReadCondition` (it IS one), so checking
+    /// depth-first is required to box it as `QueryConditionImpl`, not the
+    /// merely-compatible `ReadConditionImpl`. Each entry's "downward hop"
+    /// chain (`target` → … → that entry) is derived by reversing
+    /// `findConversionPath`'s own upward-hop output — dcps.h's checked
+    /// narrowing conversions, like the widening ones, only exist for
+    /// *direct* inheritance edges, so a two-level descendant needs two
+    /// chained calls (e.g. `Condition_as_ReadCondition` then
+    /// `ReadCondition_as_QueryCondition`), each checked for NULL before
+    /// proceeding to the next.
+    fn emitBoxAsMostDerived(
+        self: *SeqParamMarshalGenerator,
+        elem_c: []const u8,
+        target: *const ir.Interface,
+        derived: []const *const ir.Interface,
+    ) ![]u8 {
+        if (derived.len == 0) {
+            return std.fmt.allocPrint(self.alloc, "zidl_java_box_{s}", .{elem_c});
+        }
+
+        const Entry = struct { hops: std.ArrayListUnmanaged(*const ir.Interface) };
+        var entries = std.ArrayListUnmanaged(Entry).empty;
+        defer {
+            for (entries.items) |*e| e.hops.deinit(self.alloc);
+            entries.deinit(self.alloc);
+        }
+        for (derived) |d| {
+            var up_path = std.ArrayListUnmanaged(*const ir.Interface).empty;
+            defer up_path.deinit(self.alloc);
+            _ = try findConversionPath(self.alloc, d, target, &up_path);
+            // up_path = [hop1, hop2, ..., target] (from d up to target).
+            // The downward sequence (target -> ... -> d) is this reversed,
+            // dropping the trailing `target` entry (already the starting
+            // point below), with `d` itself appended at the end.
+            var down_hops = std.ArrayListUnmanaged(*const ir.Interface).empty;
+            var i: usize = up_path.items.len;
+            while (i > 1) {
+                i -= 1;
+                try down_hops.append(self.alloc, up_path.items[i - 1]);
+            }
+            try down_hops.append(self.alloc, d);
+            try entries.append(self.alloc, .{ .hops = down_hops });
+        }
+        std.mem.sort(Entry, entries.items, {}, struct {
+            fn lessThan(_: void, a: Entry, b: Entry) bool {
+                return a.hops.items.len > b.hops.items.len;
+            }
+        }.lessThan);
+
+        const fn_name = try std.fmt.allocPrint(self.alloc, "{s}_box_as_most_derived", .{elem_c});
+        try self.print("static jobject {s}(JNIEnv *env, void *handle) {{\n", .{fn_name});
+        try self.write("    if (handle == NULL) return NULL;\n");
+        for (entries.items) |e| {
+            var indent = std.ArrayListUnmanaged(u8).empty;
+            defer indent.deinit(self.alloc);
+            try indent.appendSlice(self.alloc, "    ");
+            try self.print("{s}{{\n", .{indent.items});
+            try indent.appendSlice(self.alloc, "    ");
+
+            var prev_c = try self.alloc.dupe(u8, elem_c);
+            defer self.alloc.free(prev_c);
+
+            for (e.hops.items, 0..) |hop, i| {
+                const hop_c = try self.cName(hop.qualified_name);
+                defer self.alloc.free(hop_c);
+                if (i == 0) {
+                    try self.print("{s}void *_v{d} = {s}_as_{s}(handle);\n", .{ indent.items, i, prev_c, hop_c });
+                } else {
+                    try self.print("{s}void *_v{d} = {s}_as_{s}(_v{d});\n", .{ indent.items, i, prev_c, hop_c, i - 1 });
+                }
+                self.alloc.free(prev_c);
+                prev_c = try self.alloc.dupe(u8, hop_c);
+
+                if (i == e.hops.items.len - 1) {
+                    try self.print("{s}if (_v{d} != NULL) return zidl_java_box_{s}(env, _v{d});\n", .{ indent.items, i, hop_c, i });
+                } else {
+                    try self.print("{s}if (_v{d} != NULL) {{\n", .{ indent.items, i });
+                    try indent.appendSlice(self.alloc, "    ");
+                }
+            }
+            var closes: usize = e.hops.items.len - 1;
+            while (closes > 0) {
+                indent.items.len -= 4;
+                try self.print("{s}}}\n", .{indent.items});
+                closes -= 1;
+            }
+            indent.items.len -= 4;
+            try self.print("{s}}}\n", .{indent.items});
+        }
+        try self.print("    return zidl_java_box_{s}(env, handle);\n", .{elem_c});
+        try self.write("}\n\n");
+        return fn_name;
     }
 };
 
@@ -6559,6 +7292,86 @@ test "java: --generate-zzdds-wrappers DataWriter selects XCDR1/XCDR2 encapsulati
     try testing.expect(std.mem.indexOf(u8, writer_content, "value.serialize(_buf, 4, xcdrVersion)") != null);
 }
 
+test "java: --generate-zzdds-wrappers DataReader gets take_next_instance/read_next_instance/take_n/read_n" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc,
+        \\@appendable struct Foo { @key unsigned long id; };
+    );
+    defer ir_spec.deinit();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const out_dir = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer alloc.free(out_dir);
+
+    const opts = interface.Options{
+        .input_stem = "sensor",
+        .split_files = true,
+        .generate_zzdds_wrappers = true,
+        .output_dir = out_dir,
+    };
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try generateSplitFiles(alloc, io, &ir_spec, opts);
+
+    const reader_content = try tmp.dir.readFileAlloc(io, "FooDataReader.java", alloc, .unlimited);
+    defer alloc.free(reader_content);
+    const r = reader_content;
+
+    // take_next_instance/read_next_instance: single-sample, instance-scoped,
+    // same shape as take()/read() plus a prevHandle param.
+    try testing.expect(std.mem.indexOf(u8, r, "public Sample take_next_instance(long prevHandle, int maxSampleSize) {") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.takeNextInstanceRaw(reader, prevHandle, maxSampleSize, _handle, _valid)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "public Sample read_next_instance(long prevHandle, int maxSampleSize) {") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.readNextInstanceRaw(reader, prevHandle, maxSampleSize, _handle, _valid)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "public Sample take_next_instance(long prevHandle) { return take_next_instance(prevHandle, 65536); }") != null);
+
+    // take_n/read_n: bulk, mask-filtered, returning Sample[] whose length is
+    // the true count (not necessarily `max`).
+    try testing.expect(std.mem.indexOf(u8, r, "public Sample[] take_n(int max, int sampleStates, int viewStates, int instanceStates) {") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.takeNRaw(reader, max, sampleStates, viewStates, instanceStates, _handles, _valids)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "public Sample[] read_n(int max, int sampleStates, int viewStates, int instanceStates) {") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.readNRaw(reader, max, sampleStates, viewStates, instanceStates, _handles, _valids)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "private static Sample[] fromPayloads(byte[][] payloads, long[] handles, boolean[] valids) {") != null);
+}
+
+test "java: --generate-zzdds-wrappers still emits DataWriter/DataReader for a keyless struct" {
+    // DDS 1.4 2.2.2.1: a keyless Topic is a legitimate single-instance
+    // Topic, not a corner case -- it must still get typed wrappers. (Java
+    // wrapper classes are only emitted in split-file mode -- see the
+    // "DataWriter selects XCDR1/XCDR2" test above for the same pattern.)
+    const alloc = testing.allocator;
+    const opts = interface.Options{ .input_stem = "nokey", .generate_zzdds_wrappers = true };
+    try testGenOpts(alloc, "struct NoKey { long x; long y; };", "nokey", opts, "public static final boolean HAS_KEY = false;");
+    try testGenOpts(alloc, "struct NoKey { long x; long y; };", "nokey", opts, "public byte[] computeKeyHash() {");
+    try testGenOpts(alloc, "struct NoKey { long x; long y; };", "nokey", opts, "public void serializeKey(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {");
+    try testGenOpts(alloc, "struct NoKey { long x; long y; };", "nokey", opts, "public static NoKey deserializeKey(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {");
+
+    var ir_spec = try buildIrSpec(alloc, "struct NoKey { long x; long y; };");
+    defer ir_spec.deinit();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const out_dir = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer alloc.free(out_dir);
+
+    const split_opts = interface.Options{
+        .input_stem = "nokey",
+        .split_files = true,
+        .generate_zzdds_wrappers = true,
+        .output_dir = out_dir,
+    };
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try generateSplitFiles(alloc, io, &ir_spec, split_opts);
+
+    const writer_content = try tmp.dir.readFileAlloc(io, "NoKeyDataWriter.java", alloc, .unlimited);
+    defer alloc.free(writer_content);
+    try testing.expect(std.mem.indexOf(u8, writer_content, "class NoKeyDataWriter") != null);
+
+    const reader_content = try tmp.dir.readFileAlloc(io, "NoKeyDataReader.java", alloc, .unlimited);
+    defer alloc.free(reader_content);
+    try testing.expect(std.mem.indexOf(u8, reader_content, "class NoKeyDataReader") != null);
+}
+
 test "java: --generate-zzdds-wrappers DataReader auto-detects xcdr version from the received payload" {
     const alloc = testing.allocator;
     var ir_spec = try buildIrSpec(alloc,
@@ -6983,8 +7796,52 @@ test "java: set_listener populates release_listener_data, no ad-hoc release book
     // no post-call readback-and-compare, no direct
     // `zidl_java_release_listener_ctx` call from this op at all.
     try testing.expect(std.mem.indexOf(u8, s, "_c_l.release_listener_data = zidl_java_release_listener_data;") != null);
-    try testing.expect(std.mem.indexOf(u8, s, "Widget_get_listener") == null);
     try testing.expect(std.mem.indexOf(u8, s, "Widget_set_listener((void *)(intptr_t)ptr") != null);
+    // get_listener() is a real, supported round-trip now (see the dedicated
+    // "java: get_listener() is a real round-trip" test below) — it DOES
+    // call Widget_get_listener.
+    try testing.expect(std.mem.indexOf(u8, s, "Widget_get_listener") != null);
+}
+
+test "java: get_listener() is a real round-trip, not a stub" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc,
+        \\interface FooListener { void on_event(); };
+        \\interface Widget {
+        \\    long set_listener(in FooListener l);
+        \\    FooListener get_listener();
+        \\};
+    );
+    defer ir_spec.deinit();
+
+    // Java-side: a real forwarding call, not a stub throw.
+    var ifaces = std.ArrayListUnmanaged(*const ir.Interface).empty;
+    defer ifaces.deinit(alloc);
+    try collectInterfaces(alloc, ir_spec.items, &ifaces);
+    const widget_iface = for (ifaces.items) |i| {
+        if (std.mem.eql(u8, i.name, "Widget")) break i;
+    } else return error.WidgetNotFound;
+    const stem_class = try stemToClassName(alloc, "widget");
+    defer alloc.free(stem_class);
+    var java_out = std.ArrayList(u8).empty;
+    defer java_out.deinit(alloc);
+    try generateImplFile(alloc, &ir_spec, widget_iface, stem_class, .{ .input_stem = "widget" }, &java_out);
+    const j = java_out.items;
+    try testing.expect(std.mem.indexOf(u8, j, "public Widget.FooListener get_listener()") != null);
+    try testing.expect(std.mem.indexOf(u8, j, "return n_get_listener(ptr_)") != null);
+    try testing.expect(std.mem.indexOf(u8, j, "private native Widget.FooListener n_get_listener(long ptr)") != null);
+    try testing.expect(std.mem.indexOf(u8, j, "throw new UnsupportedOperationException") == null);
+
+    // C side: a genuine round-trip through the real get_listener() vtable
+    // slot, extracting the Java global ref from listener_data -- not a
+    // client-side cache, and not a bogus cast of a by-value struct return.
+    var jni_out = std.ArrayList(u8).empty;
+    defer jni_out.deinit(alloc);
+    try generateJniSource(alloc, &ir_spec, .{ .input_stem = "widget" }, &jni_out);
+    const c = jni_out.items;
+    try testing.expect(std.mem.indexOf(u8, c, "JNIEXPORT jobject JNICALL") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "FooListener _l = Widget_get_listener((void *)(intptr_t)ptr);") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "return _l.listener_data != NULL ? ((zidl_java_listener_ctx *)_l.listener_data)->ref : NULL;") != null);
 }
 
 test "java: create_* listener param has no old-listener capture, but does verify installation" {
@@ -7284,6 +8141,179 @@ test "java: cross-file value_struct param gets extern marshaling declarations, n
     try testing.expect(std.mem.indexOf(u8, s, "void DDS_DomainParticipantQos_from_java(JNIEnv *env, jobject obj, DDS_DomainParticipantQos *out) {") == null);
     // The actual call site must still use it correctly.
     try testing.expect(std.mem.indexOf(u8, s, "DDS_DomainParticipantQos_from_java(env, qos, &_c_qos);") != null);
+}
+
+test "java: bare sequence<T> params get real JNI marshaling, not a stub throw" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc,
+        \\typedef sequence<string> StrSeq;
+        \\typedef sequence<long> LongSeq;
+        \\interface Widget {
+        \\    void set_params(in StrSeq params);
+        \\    void get_values(inout LongSeq values);
+        \\};
+    );
+    defer ir_spec.deinit();
+
+    // Java-side: real forwarding calls, not `throw new UnsupportedOperationException`.
+    var ifaces = std.ArrayListUnmanaged(*const ir.Interface).empty;
+    defer ifaces.deinit(alloc);
+    try collectInterfaces(alloc, ir_spec.items, &ifaces);
+    const stem_class = try stemToClassName(alloc, "widget");
+    defer alloc.free(stem_class);
+    var java_out = std.ArrayList(u8).empty;
+    defer java_out.deinit(alloc);
+    try generateImplFile(alloc, &ir_spec, ifaces.items[0], stem_class, .{ .input_stem = "widget" }, &java_out);
+    const j = java_out.items;
+    try testing.expect(std.mem.indexOf(u8, j, "public void set_params(java.util.List<String> params)") != null);
+    try testing.expect(std.mem.indexOf(u8, j, "n_set_params(ptr_, params);") != null);
+    try testing.expect(std.mem.indexOf(u8, j, "public void get_values(java.util.List<Integer> values)") != null);
+    try testing.expect(std.mem.indexOf(u8, j, "n_get_values(ptr_, values);") != null);
+    try testing.expect(std.mem.indexOf(u8, j, "throw new UnsupportedOperationException") == null);
+
+    // C side: standalone marshaling functions + correctly-wired call sites.
+    var jni_out = std.ArrayList(u8).empty;
+    defer jni_out.deinit(alloc);
+    try generateJniSource(alloc, &ir_spec, .{ .input_stem = "widget" }, &jni_out);
+    const c = jni_out.items;
+
+    // Standalone functions declared and defined (not struct-member-shaped:
+    // no `get_`/`set_` accessor call, no enclosing `cls`/`jclass obj` lookup).
+    try testing.expect(std.mem.indexOf(u8, c, "void StrSeq_from_java(JNIEnv *env, jobject list, StrSeq *out);") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "void StrSeq_fill_java(JNIEnv *env, const StrSeq *in, jobject list);") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "void LongSeq_from_java(JNIEnv *env, jobject list, LongSeq *out) {") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "void LongSeq_fill_java(JNIEnv *env, const LongSeq *in, jobject list) {") != null);
+    // fill_java mutates the existing list in place (clear + add), not a new
+    // ArrayList handed to a setter -- there is no setter for a bare param.
+    try testing.expect(std.mem.indexOf(u8, c, "\"clear\", \"()V\"") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "jclass _lc = (*env)->FindClass(env, \"java/util/ArrayList\");") == null);
+
+    // set_params (in): from_java on the incoming list, passed by pointer.
+    try testing.expect(std.mem.indexOf(u8, c, "StrSeq_from_java(env, params, &_c_params);") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "Widget_set_params((void *)(intptr_t)ptr, _p_params);") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "StrSeq_free(&_c_params);") != null);
+
+    // get_values (inout): from_java before the call, fill_java + free after.
+    try testing.expect(std.mem.indexOf(u8, c, "LongSeq_from_java(env, values, &_c_values);") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "Widget_get_values((void *)(intptr_t)ptr, &_c_values);") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "LongSeq_fill_java(env, &_c_values, values); LongSeq_free(&_c_values);") != null);
+}
+
+test "java: bare sequence<Entity> param (DataReaderSeq-shaped, no multi-implementor) gets real JNI marshaling" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc,
+        \\interface Entity {};
+        \\interface DataReader : Entity {};
+        \\typedef sequence<DataReader> DataReaderSeq;
+        \\interface Subscriber {
+        \\    long get_datareaders(inout DataReaderSeq readers);
+        \\};
+    );
+    defer ir_spec.deinit();
+
+    var ifaces = std.ArrayListUnmanaged(*const ir.Interface).empty;
+    defer ifaces.deinit(alloc);
+    try collectInterfaces(alloc, ir_spec.items, &ifaces);
+    const sub_iface = for (ifaces.items) |i| {
+        if (std.mem.eql(u8, i.name, "Subscriber")) break i;
+    } else return error.SubscriberNotFound;
+
+    const stem_class = try stemToClassName(alloc, "widget");
+    defer alloc.free(stem_class);
+    var java_out = std.ArrayList(u8).empty;
+    defer java_out.deinit(alloc);
+    try generateImplFile(alloc, &ir_spec, sub_iface, stem_class, .{ .input_stem = "widget" }, &java_out);
+    const j = java_out.items;
+    try testing.expect(std.mem.indexOf(u8, j, "public int get_datareaders(java.util.List<Widget.DataReader> readers)") != null);
+    try testing.expect(std.mem.indexOf(u8, j, "n_get_datareaders(ptr_, readers)") != null);
+    try testing.expect(std.mem.indexOf(u8, j, "throw new UnsupportedOperationException") == null);
+
+    var jni_out = std.ArrayList(u8).empty;
+    defer jni_out.deinit(alloc);
+    try generateJniSource(alloc, &ir_spec, .{ .input_stem = "widget" }, &jni_out);
+    const c = jni_out.items;
+    try testing.expect(std.mem.indexOf(u8, c, "void DataReaderSeq_from_java(JNIEnv *env, jobject list, DataReaderSeq *out) {") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "out->_buffer[_i] = zidl_java_unbox(env, _el);") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "void DataReaderSeq_fill_java(JNIEnv *env, const DataReaderSeq *in, jobject list) {") != null);
+    // No multi-implementor cascade needed for a plain, subclass-free entity.
+    try testing.expect(std.mem.indexOf(u8, c, "jobject _el = zidl_java_box_DataReader(env, in->_buffer[_i]);") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "box_as_most_derived") == null);
+}
+
+test "java: bare sequence<Entity> param with multiple concrete descendants (ConditionSeq-shaped) boxes most-derived-first" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc,
+        \\interface Entity {};
+        \\interface Condition : Entity {};
+        \\interface GuardCondition : Condition {};
+        \\interface StatusCondition : Condition {};
+        \\interface ReadCondition : Condition {};
+        \\interface QueryCondition : ReadCondition {};
+        \\typedef sequence<Condition> ConditionSeq;
+        \\interface WaitSet {
+        \\    long wait(inout ConditionSeq active_conditions);
+        \\};
+    );
+    defer ir_spec.deinit();
+
+    var ifaces = std.ArrayListUnmanaged(*const ir.Interface).empty;
+    defer ifaces.deinit(alloc);
+    try collectInterfaces(alloc, ir_spec.items, &ifaces);
+    const waitset_iface = for (ifaces.items) |i| {
+        if (std.mem.eql(u8, i.name, "WaitSet")) break i;
+    } else return error.WaitSetNotFound;
+
+    const stem_class = try stemToClassName(alloc, "widget");
+    defer alloc.free(stem_class);
+    var java_out = std.ArrayList(u8).empty;
+    defer java_out.deinit(alloc);
+    try generateImplFile(alloc, &ir_spec, waitset_iface, stem_class, .{ .input_stem = "widget" }, &java_out);
+    const j = java_out.items;
+    try testing.expect(std.mem.indexOf(u8, j, "public int wait(java.util.List<Widget.Condition> active_conditions)") != null);
+    try testing.expect(std.mem.indexOf(u8, j, "n_wait(ptr_, active_conditions)") != null);
+    try testing.expect(std.mem.indexOf(u8, j, "throw new UnsupportedOperationException") == null);
+
+    var jni_out = std.ArrayList(u8).empty;
+    defer jni_out.deinit(alloc);
+    try generateJniSource(alloc, &ir_spec, .{ .input_stem = "widget" }, &jni_out);
+    const c = jni_out.items;
+
+    // Unbox (Java -> native): the existing widening dispatcher, not a plain unbox.
+    try testing.expect(std.mem.indexOf(u8, c, "out->_buffer[_i] = zidl_java_unbox_as_Condition(env, _el);") != null);
+
+    // Box (native -> Java): a dedicated most-derived dispatcher, trying the
+    // two-hop QueryCondition BEFORE the shallower one-hop ReadCondition --
+    // a genuine QueryCondition handle would also satisfy a ReadCondition
+    // check, so order must put the deeper match first.
+    const query_pos = std.mem.indexOf(u8, c, "ReadCondition_as_QueryCondition(_v0);") orelse return error.QueryConditionConversionNotFound;
+    const readcond_only_pos = std.mem.indexOf(u8, c, "if (_v0 != NULL) return zidl_java_box_ReadCondition(env, _v0);") orelse return error.ReadConditionFallbackNotFound;
+    try testing.expect(query_pos < readcond_only_pos);
+    try testing.expect(std.mem.indexOf(u8, c, "static jobject Condition_box_as_most_derived(JNIEnv *env, void *handle) {") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "void *_v0 = Condition_as_GuardCondition(handle);") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "void *_v0 = Condition_as_StatusCondition(handle);") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "return zidl_java_box_Condition(env, handle);") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "jobject _el = Condition_box_as_most_derived(env, in->_buffer[_i]);") != null);
+}
+
+test "java: get_discovered_participants-shaped inout InstanceHandleSeq op is JNI-supported" {
+    // Regression guard for the exact dcps.idl shape this fix targets --
+    // `create_contentfilteredtopic`/`create_multitopic`'s `in StringSeq` and
+    // `get_discovered_participants`/`get_discovered_topics`'s
+    // `inout InstanceHandleSeq` all hit this same bare-named-sequence path.
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc,
+        \\typedef long InstanceHandle_t;
+        \\typedef sequence<InstanceHandle_t> InstanceHandleSeq;
+        \\interface DomainParticipant {
+        \\    long get_discovered_participants(inout InstanceHandleSeq participant_handles);
+        \\};
+    );
+    defer ir_spec.deinit();
+
+    var ifaces = std.ArrayListUnmanaged(*const ir.Interface).empty;
+    defer ifaces.deinit(alloc);
+    try collectInterfaces(alloc, ir_spec.items, &ifaces);
+    try testing.expect(opIsJniSupported(&ifaces.items[0].operations[0]));
 }
 
 test "java: cross-file listener param gets extern trampoline declarations, not duplicates" {

@@ -34,7 +34,7 @@
  *     calls). Must accept `ptr == NULL` as a no-op.
  *   - The struct itself (not just `ctx`) must outlive every object created
  *     through it — the same lifetime discipline already used for
- *     `zzdds_register_type_support_c`'s callback pointer. Nothing that
+ *     `zzdds_register_type_support`'s callback pointer. Nothing that
  *     consumes a `ZidlAllocator` copies it internally.
  */
 #ifndef ZIDL_ALLOCATOR_H

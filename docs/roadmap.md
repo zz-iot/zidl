@@ -5,6 +5,38 @@ For what is currently implemented, see [`features.md`](features.md).
 
 ---
 
+## Plugin architecture — direction, not yet started
+
+**Not scheduled; recorded here so near-term flag additions don't quietly paint zidl into
+a corner.** zidl currently has a small but growing set of flags whose only real reason to
+exist is "what zzdds specifically needs from its C++/Java/etc. impl generation"
+(`--cpp-generate-impl`'s override mechanism below is the newest example; the C ABI's
+`--generate-zzdds-wrappers` is an older one, named after zzdds outright). Every one of
+these bakes a specific DDS implementation's opinions into zidl core, permanently, even
+though zidl's stated audience is "any DDS implementation, or none" (see the Python/C#/
+Rust backend sections below — none of them are zzdds-specific).
+
+The direction being pointed at, not committed to a design yet: pull the
+implementation-specific pieces of each backend (which concrete class backs an abstract
+IDL interface, wrapper-generation conventions, listener-bridging conventions, ...) out of
+zidl core and into a set of implementation-owned plugins — in zzdds's case, one plugin
+per binding it ships (Zig/C/C++/Java), living in the zzdds repo, not this one. zidl core
+would stay responsible for the IDL-to-IR pipeline and the generic per-language emission
+primitives (type mapping, CDR codegen, the interface/impl split); a plugin would supply
+the policy layer on top (e.g. "construct `zzdds::DataWriterImpl`, not the interface's
+default impl, for `DataWriter`").
+
+Until that split exists, new implementation-specific needs should still land as explicit,
+mechanism-only flags (blind substitution/config zidl doesn't validate against another
+IDL file) rather than teaching zidl core to parse a second IDL file and infer policy from
+it — the latter is exactly the kind of decision a future plugin should own, and building
+it into core now would likely need to be unwound later. `--cpp-impl-override`/
+`--cpp-impl-include` (below) are being scoped with this in mind: primitive enough that a
+future plugin could emit them programmatically instead of a human hand-writing them into
+`build.zig`.
+
+---
+
 ## Embedded / MicroZig / XRCE Roadmap
 
 **Status:** `--profile xrce` exists and validates important XRCE constraints before
@@ -41,6 +73,23 @@ Existing-backend features that have `// TODO` or deferred markers in the code or
 documentation, are not intentionally omitted, and are not yet tracked elsewhere in
 this roadmap. New language backends have their own sections below.
 
+**C++ backend: `--generate-interfaces`'s generic complex-type adapter (`cpp.zig`'s
+`ImplGenerator`/`generateImplSource`, several `/* TODO: adapt C++ types to C ABI */`
+sites) silently returns a default value for params/returns that aren't scalar/entity/
+string — confirmed dead code for zzdds, verified 2026-08-07, not a live gap.** Checked
+against zzdds's own `build.zig`: every `--generate-interfaces` invocation without
+`--cpp-generate-impl` (lines ~741/749 for `dcps.hpp`/`zzdds.hpp`, ~588/600 for the
+allocator-smoke test) only installs/consumes the generated `.hpp` header — any `_impl.cpp`
+those runs might also emit is never added to a compile step. zzdds's real, shipped entity
+implementation exclusively comes from the separate `--cpp-generate-impl` runs, which
+dispatch to `cpp.zig`'s `ConcreteImplGenerator` (a completely different code path,
+gated specifically on `generate_interfaces and !cpp_generate_impl`). So this stub is
+real but unreachable for zzdds today; documented in `features.md` as a known limitation
+for any consumer that *does* use bare `--generate-interfaces` without
+`--cpp-impl-override`/`--cpp-generate-impl`. Re-raise only if such a consumer appears, or
+if a real IDL operation with a non-scalar/entity/string parameter needs generic
+(non-override) C++ interface adaptation.
+
 **PL_CDR (RTPS ParameterList) codegen in non-Zig backends — not planned, verified out of
 scope for all of them (C, C++, Java, and future Python/C#/Rust/Haskell alike).**
 `--zig-pl-cdr` is a Zig-backend-only flag; every other backend parses and silently ignores
@@ -60,6 +109,76 @@ only if a consumer other than zzdds needs a non-Zig program to implement RTPS wi
 discovery directly, without going through the Zig core.
 
 ### C and C++ backends
+
+- **C++ backend: `--cpp-generate-impl` couldn't construct a vendor-extended entity impl —
+  fixed via `--cpp-impl-override`/`--cpp-impl-include`. Done.** Found while porting
+  zzdds-examples' `hello_world` to C++ (2026-08-04): `PublisherImpl::create_datawriter`
+  and `DomainParticipantImpl::create_topic` (both in zzdds's generated `dcps_impl.cpp`)
+  always construct the base `DDS::DataWriterImpl`/`DDS::TopicImpl`, never the
+  vendor-extended `zzdds::DataWriterImpl`/`zzdds::TopicImpl` that zzdds's *separately
+  generated* `zzdds_impl.hpp` declares (with `set_listener_ex`/`as_topic_description`).
+  A caller's natural `static_pointer_cast<zzdds::DataWriterImpl>(dw)` compiles cleanly
+  but is undefined behavior — confirmed by reproducing a segfault through a corrupted
+  vtable, not just by inspection.
+
+  Root cause is structural, not a missed call site: `--cpp-generate-impl` runs *twice*,
+  completely independently — once over `dcps.idl` (→ `dcps_impl.cpp`), once over
+  `zzdds.idl` (→ `zzdds_impl.cpp`). The `dcps.idl` pass has no way to know
+  `zzdds::DataWriterImpl` exists; from its point of view `DDS::DataWriterImpl` *is* "the"
+  concrete `DDS::DataWriter`. There's also no existing IDL-level escape hatch for this —
+  `zzdds.idl` extends `DataWriter`/`DataReader`/`Topic`/`DomainParticipant`/
+  `DomainParticipantFactory` individually, but nothing overrides the *factory methods*
+  that construct them.
+
+  **Scoped fix** (worked out with zzdds; see zzdds's own roadmap for the consumer side):
+  two new flags on the `--cpp-generate-impl` pass being generated *from the base IDL*
+  (i.e. passed alongside `dcps.idl`'s generation, not `zzdds.idl`'s):
+  - `--cpp-impl-override <Interface>=<QualifiedClass>` (repeatable) — every site that
+    would construct/return the default impl class for `<Interface>` (every
+    `_getOrCreate` call for it) uses `<QualifiedClass>::_getOrCreate(...)` instead. The
+    default impl class is still generated (unused, not deleted) — keeps the change
+    additive, no "should this class still exist" question.
+  - `--cpp-impl-include <header>` (repeatable) — adds an extra `#include` so
+    `<QualifiedClass>` is visible.
+
+  **The part that isn't just construction-site substitution**: `dcps_impl.cpp` also
+  *consumes* entities constantly, via `dynamic_cast<DDS::TopicImpl*>(...)` in every
+  parameter-adaptation lambda that recovers a native handle from a `shared_ptr<DDS::Topic>`
+  argument (e.g. `create_datawriter`'s topic parameter). Once `create_topic` returns a
+  `zzdds::TopicImpl` instead, those casts fail — `zzdds::TopicImpl` and `DDS::TopicImpl`
+  are unrelated siblings, not parent/child. Fixing this does **not** require retrofitting
+  multiple/virtual inheritance onto either class (that route was considered and dropped —
+  diamond-shaped inheritance through the shared `DDS::Topic` base, needing every default
+  impl class to switch to virtual inheritance just to support the rare extended case).
+  Simpler and sufficient: when an override is registered for `<Interface>`, the
+  parameter-adaptation lambda tries `dynamic_cast<QualifiedClass*>` as an additional
+  fallback alongside the default class's cast. `zzdds::TopicImpl` needs no changes at all.
+
+  Implementation note for whoever picks this up: route both the construction sites *and*
+  the adaptation-lambda fallback through one central "resolve the concrete impl class name
+  for interface X" function in `cpp.zig`'s impl generator, consulting the override table —
+  don't hand-patch individual call sites, there are ~20 per entity kind across the file and
+  missing one reintroduces the identity-cache-split bug this is meant to fix (a `_getOrCreate`
+  call that's missed keeps populating the *default* class's cache instead of the override's,
+  so the same native handle ends up with two non-identical wrapper objects).
+
+  **This class of decision — "which concrete class backs abstract interface X" — is a
+  DDS-implementation policy choice, not something zidl core should be accumulating
+  hardcoded flags for indefinitely.** `--cpp-impl-override`/`--cpp-impl-include` were
+  scoped as a general, blind (no cross-IDL parsing) *mechanism* specifically so a future
+  zzdds-owned zidl plugin can drive them programmatically instead of a human hand-writing
+  the override list in `build.zig` — see "Plugin architecture" below.
+
+  **Implemented as scoped above, both flags landing exactly as designed**: `cpp.zig`'s
+  `entityImplName()` is the single choke-point function consulting the override table,
+  used by both `_getOrCreate` construction sites and `dynamic_cast` parameter-adaptation
+  sites, matching the "route through one central function" implementation note above. No
+  changes needed to the default (unoverridden) impl classes or to `zzdds::TopicImpl`
+  itself, as predicted. Consumer side (zzdds's four hand-written `*Support` classes
+  composing the base `DDS::*Impl`, plus the `build.zig` wiring) is done too — see zzdds's
+  own roadmap "C++ ABI" entry for the verification detail (full 6-pair cross-binding
+  matrix, zzdds's own test suite, `cpp/hello_world`'s raw-C-ABI workaround removed). Not
+  yet in a tagged zidl release; zzdds's pin stays on `v0.3.1-zig.0.16.0` until one is cut.
 
 - **`ZidlCdrAllocator` (user-supplied allocator for strings/sequences). Done.**
   `zidl_cdr_read_string`/`read_wstring` and the C backend's generated inline sequence-buffer
@@ -332,6 +451,84 @@ discovery directly, without going through the Zig core.
   C-ABI boundary as a single opaque pointer to a `zidl_rt.EntityBox`, matching
   the C backend's handle one-for-one. See `docs/ecosystem.md` §"`--zig-generate-c-api`"
   for the generated-code shape.
+- **C++ backend: entity-parameter `dynamic_cast` adaptation only tried one
+  concrete class per interface — fixed. Done.** Found while re-verifying
+  `zzdds-examples/cpp/custom-allocator` against a fresh local rebuild
+  (2026-08-07): `create_datareader(std::shared_ptr<TopicDescription>, ...)`'s
+  generated C-ABI adapter only tried `dynamic_cast<TopicDescriptionImpl*>` —
+  the one concrete class `entityImplName()` maps `TopicDescription` to. But
+  `DDS::Topic : Entity, TopicDescription` at the abstract interface level, so
+  `std::shared_ptr<Topic>` converts implicitly to `std::shared_ptr<TopicDescription>`
+  and compiles fine, while the *concrete* `TopicImpl` (or its
+  `--cpp-impl-override` replacement) doesn't itself inherit from
+  `TopicDescriptionImpl` — each concrete `DDS::*Impl` class implements exactly
+  one interface's pure virtuals. The `dynamic_cast` failed at runtime and
+  threw `std::invalid_argument`, forcing callers through a workaround
+  (`dp->lookup_topicdescription(name)` first, to get a genuine
+  `TopicDescriptionImpl`-backed object).
+
+  zidl's IR already had everything needed (`Interface.bases`) — no IR changes
+  required. New `collectBaseImplementors` (`src/backend/interface.zig`) walks
+  every concrete (non-callback, non-base) interface's base chain once per
+  codegen run and records it against every ancestor interface it transitively
+  implements; `cpp.zig`'s entity-parameter adapter (the `entity_in` case)
+  consults this to emit an extra `dynamic_cast` fallback clause per sibling
+  concrete class, in addition to the existing single-class cast, before
+  throwing. Composes with `--cpp-impl-override` automatically, since every
+  sibling's impl name is still resolved through the same `entityImplName()`
+  choke-point. `Topic`/`ContentFilteredTopic`/`MultiTopic` (all implementing
+  `TopicDescription`) is the only multiple-inheritance case in
+  `dcps.idl`/`zzdds.idl` today, but the fix is general — any interface with
+  more than one concrete implementor benefits. Verified: two new regression
+  tests (generic synthetic `Base`/`LeafA`/`LeafB` case, plus a single-implementor
+  case confirming the plain single-cast form is unchanged); live-verified
+  against real zzdds — the generated `SubscriberImpl::create_datareader`
+  adapter now cascades `TopicDescriptionImpl` → `zzdds::detail::TopicSupport`
+  (a `Topic`) → `ContentFilteredTopicImpl` → `MultiTopicImpl` — and by
+  removing `cpp/custom-allocator`'s `lookup_topicdescription` workaround
+  entirely (both normal and zero-allocation-guarded acceptance runs pass).
+
+## ContentFilteredTopic filtering: `get_field_from_cdr` (all backends, Done)
+
+Found 2026-08-07 while exercising `zzdds-examples`: `ContentFilteredTopic`
+filtering never actually activated in *any* binding, silently — a `DataReader`
+created against a `ContentFilteredTopic` received every sample regardless of
+its filter expression, with no error anywhere. Root cause: zzdds's
+`TypeSupport.get_field` callback (the hook CFT evaluation calls to pull a
+named field's value out of a raw CDR payload) was never wired up by any
+codegen backend — every generated `TypeSupport` registration passed a null/
+absent `get_field` function, so zzdds's CFT evaluator had nothing to call and
+silently passed every sample through (matching its own documented "an
+evaluation error passes the sample through" semantics, which masked the gap
+completely instead of surfacing it).
+
+Fixed by adding `emitGetFieldFromCdr` to all four backends, each emitting the
+shape `TypeSupport.get_field` expects
+(`zzdds_get_field_from_cdr_fn`/`getFieldFromCdr`): `{c_name}_get_field_from_cdr`
+(C, `c.zig`), a free function of the same name (C++, `cpp.zig`),
+`<Type>.getFieldFromCdr` (Java, `java.zig`), and `getFieldFromCdr` as a decl
+on the generated Zig struct (`zig.zig`). Always emitted, even for a struct
+with no filterable members (then it just always returns false) — gated the
+same way as the rest of `--generate-zzdds-wrappers`' output. Does a full
+CDR deserialize (any simple-typed member, not just `@key` ones — a CFT filter
+expression can reference any of them, and CDR isn't randomly addressable, so
+a partial/selective parse isn't meaningfully simpler than a full one), reusing
+the struct's own generated `_deserialize`/`_free` rather than hand-rolling a
+member walk. A matched string member's bytes are copied into a caller-supplied
+scratch buffer rather than returned as a pointer into the deserialized value,
+since that value is freed before the function returns; a string too long for
+the scratch buffer leaves the field unmatched rather than truncating and
+risking a wrong comparison result.
+
+Also fixed along the way: the Java backend's bare named `sequence<T>`
+operation params (`StringSeq`, `InstanceHandleSeq`, …) were stubbed to
+`UnsupportedOperationException` — needed real JNI marshaling for
+`register_type_support`'s `get_field_from_cdr` parameter to actually be
+callable from Java. Verified end-to-end: zzdds core wiring +
+`TypeSupport.get_field` invocation, all four zidl backends' generated code,
+all four `zzdds-examples/*/shape` ports, and `dds-rtps/srcZig/shape_main.zig`
+all updated and live-verified with a real CFT filter expression actually
+suppressing non-matching samples (previously silently delivered).
 
 ## Entity handle ABI: heap-boxing (Implemented, zidl side)
 
@@ -506,6 +703,104 @@ hand-written.
 
 ### Zig backend
 
+- **`--zig-generate-c-api` bare `sequence<EntityInterface>` operation params —
+  binary layout corruption, fixed. Done.** Surfaced 2026-08-07 while
+  live-verifying a same-participant discovery fix in zzdds: Java's
+  `Subscriber.get_datareaders()` returned a real, correctly-counted
+  `DataReader`, but *any* native call on it crashed with SIGSEGV. Not a
+  Java-specific bug (two initial theories pointing at Java-side boxing were
+  both wrong) — a core C-ABI layout mismatch affecting every binding equally,
+  just never triggered before this was the first real caller of a bare
+  `sequence<EntityInterface>` operation (`get_datareaders`/`WaitSet.wait`/
+  `get_conditions`) through the generated C ABI. For a typedef like
+  `DataReaderSeq`, the C backend's header declares single-opaque-pointer
+  elements (8 bytes), but `--zig-generate-c-api`'s exported function reused
+  its own native extern struct — full `{ptr, vtable}` fat-pointer elements
+  (16 bytes) — directly as the parameter type, with zero boxing. Matches a
+  TODO this backend had already flagged for sequences generally; entity
+  elements were the one case that had never been reached, since scalar/string
+  sequences never had a size mismatch to expose it.
+
+  Fixed: new `typeRefIsEntitySequence` detects a bare `sequence<EntityInterface>`
+  typedef; `emitCApiOp` now reinterprets the caller's buffer as the real C-ABI
+  shape, calls the vtable through a native-shaped temporary, and boxes each
+  result element individually via the same `.vtable.get_c_abi_handle(.ptr)`
+  convention used everywhere else for entity returns. Also fixed a
+  control-flow bug this surfaced: non-void/non-entity-returning operations
+  used to inline `return _self.vtable.foo(...)` directly, making the new
+  post-call boxing code unreachable — fixed by capturing the return value and
+  returning it after boxing. Generic, not Java-specific — C/C++/Zig get the
+  fix for free too (once a `WaitSet`/`GuardCondition` C-ABI constructor exists
+  to actually exercise `WaitSet.wait()`/`get_conditions()` end-to-end; that
+  gap is tracked separately, in zzdds's own roadmap). Verified: one new
+  regression test asserting the exact generated-code shape, plus zzdds's real
+  C++ `test-bindings` smoke test and full test suite; live-verified
+  `create_readcondition()` on a `get_datareaders()`-returned reader now
+  succeeds (previously a guaranteed SIGSEGV).
+
+- **`computeKeyHashFromCdr` (per topic struct) — Done, and a real live leak fixed along
+  the way.** Found while reviewing zzdds-examples' `hello_world` for rough edges
+  (2026-08-06): the Zig backend generated `computeKeyHash(value: @This())` (works on an
+  already-deserialized value) but never the C/C++ backends' equivalent
+  `{Type}_compute_key_hash_from_cdr(payload, len, hash_out)` — a function matching
+  zzdds's `TypeSupport.compute_key_hash` callback shape exactly
+  (`fn(ctx: *anyopaque, payload: []const u8) [16]u8`), so generated code can be passed
+  directly to a TypeSupport registration call without hand-written CDR-deserialize-then-
+  hash glue. Added `emitComputeKeyHashFromCdr` (`zig.zig`), gated the same way
+  `computeKeyHash` already is (`--generate-zzdds-wrappers` and `isZzddsTopicStruct`).
+
+  Unlike the C backend (whose generated function resolves its allocator from a global,
+  process-wide override — `zidl_cdr_set_allocator` — defaulting to malloc/free), this
+  stays consistent with the rest of the Zig runtime's explicit-allocator idiom instead of
+  importing C's global-state pattern: `ctx` is a `*const std.mem.Allocator`, supplied by
+  the caller at registration time via `TypeSupport.ctx`, used only for variable-length
+  `@key` fields. Keyless structs never dereference it, matching `TypeSupport.ctx`'s
+  existing "Zig-native implementations that need no state may pass `undefined`" contract.
+
+  **Found a real, live bug while verifying, not by looking for one**: an early version
+  leaked on every call for a keyed struct with any variable-length key field (string or
+  unbounded sequence) — `deserializeKey` heap-allocates such fields, and nothing freed the
+  resulting temporary value. Root cause traced deeper than this one function: zidl's Zig
+  backend's `deinit()`/`clone()` generation (`structNeedsCleanup`/`typeRefNeedsSeqDeinit`)
+  only ever counted unbounded *sequences* as needing cleanup, never plain unbounded
+  `string`/`wstring` fields outside `--zig-generate-toml-config` — a narrower version of a
+  bug already found and fixed for the C backend (see "C backend: `{Type}_free()` is
+  declared but never given a body" below), just never ported to Zig. Confirmed *live*, not
+  hypothetical: zzdds's own `dcps.idl` has `TopicBuiltinTopicData`/
+  `PublicationBuiltinTopicData`/`SubscriptionBuiltinTopicData`, each with plain unbounded
+  `string name`/`type_name`/`topic_name` fields that `deinit()` silently never freed.
+
+  **Widened the gate (new `memberNeedsCleanup`, replacing `typeRefNeedsCleanup`) to match
+  the C backend's parity — with one exclusion the C fix didn't need to consider.** C's
+  runtime `_default()` always calls `zidl_cdr_strdup` unconditionally, so by the time
+  `_free()` could ever run, a string field is *always* a genuine heap pointer, never a raw
+  literal — freeing it unconditionally is always safe. Zig's comptime struct-literal field
+  defaults can't do the equivalent at compile time: a member with an explicit non-empty
+  `@default("...")` string, on a value that was default-constructed and never actually
+  deserialized (a real, not just theoretical, scenario — e.g. an `errdefer`-triggered
+  `deinit()` firing before that field was ever reached), is still pointing at static
+  literal storage; `alloc.free()` on that is memory corruption, not a leak. Confirmed this
+  isn't hypothetical either: `zzdds.idl` has several (`@default("default")`,
+  `@default("239.255.0.1")`, ...). New `typeRefIsDirectPlainString`/
+  `memberHasNonEmptyStringDefault` narrow the exclusion to exactly that shape — a member
+  that is *itself* a plain unbounded string (or typedef chain to one) with a non-empty
+  default, outside `--zig-generate-toml-config` (which is exempt: `emitFieldSeqCloneStmt`
+  already dupes plain strings unconditionally regardless of that flag, and
+  `_toml_applied` tracks real per-value ownership for exactly this case). Such a member is
+  deliberately left out of cleanup outside that flag — a narrow, pre-existing gap, not a
+  new regression — rather than risk freeing static memory.
+
+  Verified past "compiles": new unit tests for the general case, the non-empty-default
+  exclusion (and its empty-default and toml-config counterexamples), and golden fixtures
+  regenerated and reviewed as a clean expected diff (`Sample`/`Frame`/`Beacon` gain real
+  `deinit()`/`clone()` string handling). Real, not just unit-tested: a standalone Zig
+  program serializing a keyed struct with a variable-length string key, then calling the
+  generated `computeKeyHashFromCdr` on the raw bytes, confirmed the hash matches
+  `computeKeyHash` on the original value with zero leaks (`std.testing.allocator`'s leak
+  checker, clean). Against real zzdds: `TopicBuiltinTopicData.deinit()` now frees `name`/
+  `type_name`; zzdds's own `zig build test`/`test-bindings` (Java smoke test,
+  `cpp_allocator_smoke`) green with no regressions.
+
 - **Union discriminant edge cases**: `wstring` and `fixed_pt` discriminant types emit a
   `// TODO: unsupported discriminant` comment in `serialize` / `deserialize` bodies.
 - **Sequence element read with array-typedef element**: A rare edge case where a sequence
@@ -542,6 +837,12 @@ hand-written.
 
 | Item | Notes |
 |---|---|
+| ContentFilteredTopic filtering: `get_field_from_cdr` (all backends) | Wires zzdds's `TypeSupport.get_field` hook, previously never emitted by any backend so CFT filtering silently never activated in any binding. See "ContentFilteredTopic filtering" above for the full writeup, including the Java bare-`sequence<T>`-param JNI marshaling fix it needed. |
+| C++ backend: entity-parameter `dynamic_cast` now tries every sibling concrete implementor | New `collectBaseImplementors` (`interface.zig`) lets the C-ABI adapter for an interface with multiple concrete implementors (e.g. `TopicDescription`: `Topic`/`ContentFilteredTopic`/`MultiTopic`) try each one instead of just the single class `entityImplName()` maps by name — see "C and C++ backends" above for the full writeup. Removed `zzdds-examples/cpp/custom-allocator`'s `lookup_topicdescription` workaround. |
+| `--zig-generate-c-api` bare `sequence<EntityInterface>` params: binary layout corruption fixed | Entity-sequence elements (`DataReaderSeq`, `ConditionSeq`, …) now boxed to the C ABI's single-opaque-pointer layout instead of passing the native 16-byte fat-pointer layout straight through — see "Zig backend" above for the full writeup. |
+| Zig backend: `computeKeyHashFromCdr` + `deinit()`/`clone()` plain-unbounded-string parity | Generates the Zig-backend equivalent of C/C++/Java's `{Type}_compute_key_hash_from_cdr`, and along the way widened `deinit()`/`clone()` cleanup to cover plain unbounded `string`/`wstring` fields outside `--zig-generate-toml-config` (previously only unbounded sequences counted — a real, live leak in generated code, not just this new function; see "Zig backend" above for the full writeup, including the non-empty-`@default` exclusion this needed that the C-backend parity fix didn't). |
+| C++ backend: `--cpp-impl-override`/`--cpp-impl-include` | Lets `--cpp-generate-impl`'s construction and `dynamic_cast` parameter-adaptation sites resolve a vendor-extended concrete class instead of the default abstract one, for entity interfaces. See "C and C++ backends" above for the full design and zzdds's own roadmap for the consumer side (four hand-written `*Support` classes, `build.zig` wiring, `cpp/hello_world`'s raw-C-ABI workaround removed). Not yet in a tagged release. |
+| C backend: `--c-no-free` | Suppresses `{Type}_free()` (prototype and body) for a whole generation pass. Needed when a consumer compiles a generated `_cdr.c` into a binary that *already* exports `{Type}_free` for the same structs from elsewhere — confirmed as a real, not hypothetical, need: zzdds compiling its own `dcps_cdr.c` into `libzzdds.so` hit 25 duplicate-symbol link errors against its existing native `--zig-generate-c-api` `_free` exports before this existed. Deliberately scoped to `_free` only (not folded into `--no-typesupport`, which suppresses `serialize`/`deserialize`/`skip` too) — those three had no collision to avoid, confirmed by the fact that removing just `_free` from the mix cleared every error. See zzdds's `docs/roadmap.md` "Planned" for the consumer side (a second, `--c-no-free`-flagged generation pass feeding what's compiled into `libzzdds.so`, kept separate from the pass that produces the installed header, which must keep declaring `_free` since it's still real). |
 | Java backend: real entity JNI bridge, QoS/status marshaling, listener upcalls, `--generate-zzdds-wrappers` | Previously the Java backend only got as far as generating `*Impl.java` + a `dcps_jni.c` that never linked (wrong `zidl_`-prefixed symbol names, structs/listeners passed by value where the real ABI takes pointers, entity params/returns naively C-cast between `jobject` and the opaque handle) and was never compiled, linked, or run by any test. Fixed: correct `{c_name}_{op}` symbol calls and pointer conventions matching `c.zig`; real entity box/unbox via `GetLongField`/`NewObject` with multi-hop `_as_<Base>` widening for entity interface views (`interfaceHasBaseTransitively`/`findConversionPath`); field-by-field QoS/status struct marshaling (`StructMarshalGenerator`, reusing the CDR emitter's field-shape dispatch); listener JNI upcall trampolines (cached `JavaVM*`, `AttachCurrentThreadAsDaemon` for zzdds's own network threads, boxed entity + status args); `--generate-zzdds-wrappers` Java support (typed DataWriter/DataReader + `computeKeyHashFromCdr`). Also fixed, found only via real cross-process runtime testing (not golden-diffing generated text) — a genuine `jstring`-handling bug: `string`/`wstring` params and returns were cast directly between `jstring` and `const char *` instead of going through `GetStringUTFChars`/`NewStringUTF`/`ReleaseStringUTFChars`. This produced garbage topic/type-name bytes that happened to read as *consistent* garbage within one JVM (interned string literals share one object, so both sides of an in-process test coincidentally "matched"), masking the bug in every same-process test; it only surfaced as silent DDS discovery-match failure between two separate JVM processes — traced by instrumenting the RTPS/SEDP receive path down to the decoded (garbage) topic/type-name strings. New: a compiled+linked entity JNI integration test in zidl's own `integration-test` step, and zzdds's `zzdds-java-example/` (two real JVM processes, real UDP RTPS discovery) plus a `test-bindings` Java smoke test. |
 | `--zig-generate-toml-config` (Zig backend) | Emits `applyToml(alloc, table: anytype) !void` per struct, driven entirely by the IR (including the already-generic `@default` metadata and each enum's existing `_fromString` helper) — no new parser dependency, `table` is duck-typed. Built for `zzdds`'s config-file support (see its `docs/decisions.md` §Configuration); found and fixed a real pre-existing bug along the way: `clone()` was only ever emitted in the typesupport-enabled path, never under `--no-typesupport` (exactly what `zzdds`'s own vendor-config generation uses) — moved into the same `structNeedsSeqDeinit` gate as `deinit()`, since both are lifecycle operations independent of CDR/wire support. See `docs/backend_zig.md` §TOML config application. |
 | C++ backend: four bugs found via zzdds's real (compile+link+run) C-ABI allocator-injection verification | None of these were caught before because nobody had compiled zzdds's own `zzdds_impl.cpp` (as opposed to `dcps_impl.cpp`, unaffected) with a real C++ compiler. **(1)** `native_handle()` override mismatch — cross-module entity `.bases` were reset to empty by the IR builder's import-fill (`resetNonCallbackInterfaces`, to avoid growing Zig vtables), making a real base (`DDS::DomainParticipant : Entity`) look base-less from a different file's generation pass; fixed by preserving `.bases` specifically while still resetting operations/attributes, plus making `collectEntityBaseNames` walk the base chain transitively (`src/ir/builder.zig`, `src/backend/interface.zig`). **(2)** Listener trampoline wrapping the wrong class for a cross-module `@callback interface`'s flattened-in entity parameter (bare class name resolved in the listener's own namespace instead of the parameter's actual module) — fixed by using the existing `entityImplName()` qualifier consistently. **(3)** A regression from this session's own `_getOrCreate` work: making it unconditional meant its `make_shared` body got compiled for entity classes intentionally left abstract (completed by a hand-written subclass elsewhere, e.g. zzdds's `DomainParticipantFactorySupport`); fixed with a pre-scan pass so `_getOrCreate` is only emitted for interfaces actually wrapped somewhere in the spec. **(4)** Scalar-typedef listener parameters (e.g. `typedef long InstanceHandle_t`) passed by pointer in the C++ trampoline while the C listener struct declared the same field by value — the C backend's `isCPrimitive` already resolves typedef chains correctly; added the equivalent `typeRefIsCScalar` to the C++ backend. All four verified via `zig build test` + `integration-test` plus a real `dcps_impl.cpp`/`zzdds_impl.cpp` recompile after each fix — see zzdds's `docs/design/allocator-strategy.md` for the full writeup. |

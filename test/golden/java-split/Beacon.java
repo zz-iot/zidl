@@ -108,5 +108,17 @@ public class Beacon implements java.io.Serializable {
         Beacon _obj = deserializeFrom(_buf, 4, _xcdrVersion);
         return _obj.computeKeyHash();
     }
+
+    public static Object getFieldFromCdr(byte[] _payload, String _field) {
+        java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(_payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        int _xcdrVersion = _cdrDetectXcdr(_payload);
+        _buf.position(4);
+        Beacon _obj = deserializeFrom(_buf, 4, _xcdrVersion);
+        switch (_field) {
+            case "id": return (long) _obj.id;
+            case "payload": return _obj.payload;
+            default: return null;
+        }
+    }
 } // Beacon
 

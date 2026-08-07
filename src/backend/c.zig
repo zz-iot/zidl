@@ -596,7 +596,7 @@ const Generator = struct {
                 try self.emitStructZzddsWrapperProtos(c_name);
             }
         }
-        if (structHasSequenceFields(s)) {
+        if (structHasSequenceFields(s) and !self.opts.c_no_free) {
             const em = self.opts.export_macro;
             const sp: []const u8 = if (em.len > 0) " " else "";
             try self.print("{s}{s}void {s}_free({s} *v);\n\n", .{ em, sp, c_name, c_name });
@@ -612,7 +612,10 @@ const Generator = struct {
         try self.print("{s}{s}int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, c_name });
         try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, c_name });
         try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
-        if (has_key) {
+        // Keyless structs still get these prototypes when wrappers were
+        // requested -- see the matching `else if` in emitStructFns, which
+        // emits trivial (constant-zero-hash) bodies for them.
+        if (has_key or (self.opts.generate_zzdds_wrappers and isZzddsTopicStructC(s))) {
             try self.print("{s}{s}int {s}_serialize_key(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, c_name });
             try self.print("{s}{s}int {s}_deserialize_key(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, c_name });
             try self.print("{s}{s}int {s}_compute_key_hash(const {s} *_v, uint8_t _hash[16]);\n", .{ em, sp, c_name, c_name });
@@ -634,6 +637,7 @@ const Generator = struct {
         try self.print("typedef struct {s}DataReader {{\n", .{c_name});
         try self.write("    DDS_DataReader reader;\n");
         try self.print("}} {s}DataReader;\n\n", .{c_name});
+        try self.print("{s}{s}bool {s}_get_field_from_cdr(const uint8_t *_payload, size_t _payload_len, const char *_field, size_t _field_len, zzdds_filter_value *_out, uint8_t *_scratch, size_t _scratch_len);\n", .{ em, sp, c_name });
         try self.print("{s}{s}int {s}TypeSupport_register(DDS_DomainParticipant participant, const char *type_name);\n", .{ em, sp, c_name });
         try self.print("{s}{s}void {s}DataWriter_init({s}DataWriter *self, DDS_DataWriter writer, int xcdr_version);\n", .{ em, sp, c_name, c_name });
         try self.print("{s}{s}int {s}DataWriter_write({s}DataWriter *self, const {s} *value, DDS_InstanceHandle_t handle);\n", .{ em, sp, c_name, c_name, c_name });
@@ -788,7 +792,7 @@ const Generator = struct {
             .sequence => |seq| seq.bound == null,
             else => false,
         };
-        if (is_unbounded_seq) {
+        if (is_unbounded_seq and !self.opts.c_no_free) {
             const em = self.opts.export_macro;
             const sp: []const u8 = if (em.len > 0) " " else "";
             try self.print("{s}{s}void {s}_free({s} *v);\n\n", .{ em, sp, c_name, c_name });
@@ -1350,8 +1354,11 @@ fn structHasKeyC(s: *const ir.Struct) bool {
     return false;
 }
 
+/// See isZzddsTopicStruct in zig.zig for why keyless structs are included --
+/// DDS 1.4 2.2.2.1 treats a keyless Topic as first-class ("restricted to a
+/// single instance"), so this only excludes what genuinely can't be a topic.
 fn isZzddsTopicStructC(s: *const ir.Struct) bool {
-    return structHasKeyC(s) and !s.annotations.is_nested and s.annotations.extensibility != .mutable;
+    return !s.annotations.is_nested and s.annotations.extensibility != .mutable;
 }
 
 fn itemsHaveZzddsTopicStructC(items: []const ir.ModuleItem) bool {
@@ -1584,6 +1591,46 @@ fn baseToCType(b: ast.BaseTypeSpec) []const u8 {
     };
 }
 
+/// How `emitGetFieldFromCdr` treats one struct member: as a filterable int
+/// (any integer base or enum), float (float/double/long double), string
+/// (bounded or unbounded -- both are plain `char *` in C, see `typeRefToC`),
+/// or `.skip` (nested struct/sequence/map/union/fixed_pt/array -- not a
+/// simple value the DDS filter-expression grammar can compare). Mirrors
+/// zig.zig's `FilterFieldKind`/`classifyFilterFieldKind`, but as a plain enum
+/// rather than a tagged union -- C's `string_like` carries no bound payload
+/// the way Zig's does, so there's nothing to union over.
+const CFilterFieldKind = enum { skip, int_like, float_like, string_like };
+
+fn classifyFilterFieldKindC(tr: ir.TypeRef) CFilterFieldKind {
+    return switch (tr) {
+        .base => |b| switch (b) {
+            .boolean, .octet, .uint8, .char, .wchar, .int8, .short, .int16, .long, .int32, .long_long, .int64, .unsigned_short, .uint16, .unsigned_long, .uint32, .unsigned_long_long, .uint64 => .int_like,
+            .float, .double, .long_double => .float_like,
+            .any, .object, .value_base => .skip,
+        },
+        .string => .string_like,
+        .wstring, .sequence, .map, .fixed_pt => .skip,
+        .named => |td| switch (td) {
+            .enum_ => .int_like,
+            .typedef => |t| classifyFilterFieldKindC(t.type_ref),
+            .struct_, .union_, .bitset, .bitmask, .exception, .native, .interface => .skip,
+        },
+    };
+}
+
+/// Emits the C expression converting `_v.{name}` (already known, by
+/// `classifyFilterFieldKindC`, to be `.int_like`) to an `int64_t` for
+/// `zzdds_filter_value.i`. Resolves through any typedef chain to find the
+/// real base/enum kind -- though C's implicit integer promotions make the
+/// cast identical (`(int64_t)(...)`) regardless of which base/enum it
+/// resolves to, unlike Zig's `@intFromBool` vs `@intCast` split.
+fn intFieldExprC(alloc: std.mem.Allocator, tr: ir.TypeRef, name: []const u8) ![]u8 {
+    return switch (tr) {
+        .base, .named => std.fmt.allocPrint(alloc, "(int64_t)(_v.{s})", .{name}),
+        else => unreachable, // classifyFilterFieldKindC only returns .int_like for the cases above
+    };
+}
+
 /// A clean identifier fragment for a base type, used when constructing
 /// sequence typedef names (e.g. `"int32_t"` → `"int32_t_seq"`).
 fn baseToSeqKey(b: ast.BaseTypeSpec) []const u8 {
@@ -1743,7 +1790,7 @@ const CdrGenerator = struct {
                 try self.emitStructFns(s);
                 try self.emitDefault(s);
                 if (structHasDefault(s)) try self.emitApplyDefaults(s);
-                if (structHasSequenceFields(s)) try self.emitStructFree(s);
+                if (structHasSequenceFields(s) and !self.opts.c_no_free) try self.emitStructFree(s);
             },
             .exception => |e| try self.emitExceptionFns(e),
             .union_ => |u| try self.emitUnionFns(u),
@@ -2281,16 +2328,155 @@ const CdrGenerator = struct {
                 try self.printI("return {s}_compute_key_hash(_v, _hash);\n", .{c_name});
             }
             try self.write("}\n\n");
+        } else if (self.opts.generate_zzdds_wrappers and isZzddsTopicStructC(s)) {
+            // Keyless topic type but --generate-zzdds-wrappers was requested:
+            // emit trivial key functions so emitStructZzddsWrappers' codegen
+            // (DataWriter_write/dispose/unregister, register_instance, etc.)
+            // works unchanged for keyless structs too. Per DDS 1.4 2.2.2.1 a
+            // keyless Topic is exactly one instance regardless of content, so
+            // the key-only wire payload is legitimately empty and the
+            // instance-identity hash is always the same constant value --
+            // see the matching comment in zig.zig's emitStructSerializeFns.
+            try self.print("int {s}_serialize_key(ZidlCdrWriter *_w, const {s} *_v) {{\n", .{ c_name, c_name });
+            try self.writeI("(void)_v;\n");
+            if (appendable) {
+                try self.writeI("size_t _dh;\n");
+                try self.writeI("int _rc = zidl_cdr_reserve_dheader_maybe(_w, &_dh);\n");
+                try self.writeI("if (_rc) return _rc;\n");
+                try self.writeI("zidl_cdr_patch_dheader_maybe(_w, _dh);\n");
+            }
+            try self.writeI("return ZIDL_CDR_OK;\n");
+            try self.write("}\n\n");
+
+            try self.print("int {s}_deserialize_key(ZidlCdrReader *_r, {s} *_v) {{\n", .{ c_name, c_name });
+            try self.writeI("(void)_v;\n");
+            if (appendable) {
+                try self.writeI("if (_r->xcdr_version == ZIDL_XCDR2) {\n");
+                self.indent_depth += 1;
+                try self.writeI("uint32_t _size;\n");
+                try self.writeI("int _rc = zidl_cdr_read_dheader(_r, &_size);\n");
+                try self.writeI("if (_rc) return _rc;\n");
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            }
+            try self.writeI("return ZIDL_CDR_OK;\n");
+            try self.write("}\n\n");
+
+            try self.print("int {s}_compute_key_hash(const {s} *_v, uint8_t _hash[16]) {{\n", .{ c_name, c_name });
+            try self.writeI("(void)_v;\n");
+            try self.writeI("memset(_hash, 0, 16);\n");
+            try self.writeI("return ZIDL_CDR_OK;\n");
+            try self.write("}\n\n");
+
+            try self.print("int {s}_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {{\n", .{c_name});
+            try self.writeI("(void)_payload;\n");
+            try self.writeI("(void)_len;\n");
+            try self.writeI("memset(_hash, 0, 16);\n");
+            try self.writeI("return ZIDL_CDR_OK;\n");
+            try self.write("}\n\n");
         }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and isZzddsTopicStructC(s)) {
             try self.emitStructZzddsWrappers(s, c_name);
         }
     }
 
+    /// Emit `{c_name}_get_field_from_cdr`, the C-ABI's
+    /// `zzdds_get_field_from_cdr_fn`-shaped function extracting a named field
+    /// from a raw CDR payload -- used to evaluate ContentFilteredTopic
+    /// expressions automatically at delivery time (see zzdds_c.h's
+    /// `zzdds_get_field_from_cdr_fn` doc comment). Always emitted, even for a
+    /// struct with no filterable members (it then just always returns
+    /// false) -- gated the same way as the rest of
+    /// `--generate-zzdds-wrappers`' output (this function is only called from
+    /// `emitStructZzddsWrappers`).
+    ///
+    /// Structurally mirrors `_compute_key_hash_from_cdr` above but does a
+    /// FULL deserialize (a CFT filter expression can reference any
+    /// simple-typed member, not just @key ones -- and CDR isn't randomly
+    /// addressable, so a partial/selective parse skipping straight to the
+    /// requested field isn't meaningfully simpler than a full one), reusing
+    /// the struct's own generated `_deserialize`/`_free` rather than hand-
+    /// rolling a member walk the way `_compute_key_hash_from_cdr` does.
+    ///
+    /// `_scratch`/`_scratch_len`: a matched string member's bytes are copied
+    /// there rather than returned as a pointer into `_v` -- `_v` is freed
+    /// (via `{c_name}_free`) before this function returns, so a pointer into
+    /// it would dangle. A string too long for `_scratch` leaves this field
+    /// unmatched (falls through to `return false`) rather than truncating
+    /// and risking a wrong comparison result -- matches zzdds's own "an
+    /// evaluation error passes the sample through" semantics.
+    fn emitGetFieldFromCdr(self: *CdrGenerator, s: *const ir.Struct, c_name: []const u8) !void {
+        // {c_name}_free only exists when the struct actually owns heap
+        // memory (see structHasSequenceFields's gating of its declaration/
+        // definition elsewhere) -- a struct with only bounded strings/no
+        // sequences (e.g. zzdds-examples' SensorSample) gets no _free at
+        // all, and calling one that doesn't exist is a link/compile error,
+        // not just a wasted no-op call.
+        const has_free = structHasSequenceFields(s) and !self.opts.c_no_free;
+        try self.print("bool {s}_get_field_from_cdr(const uint8_t *_payload, size_t _payload_len, const char *_field, size_t _field_len, zzdds_filter_value *_out, uint8_t *_scratch, size_t _scratch_len) {{\n", .{c_name});
+        try self.writeI("ZidlCdrReader _r_data;\n");
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r_data, _payload, _payload_len);\n");
+        try self.writeI("if (_rc) return false;\n");
+        try self.writeI("ZidlCdrReader *_r = &_r_data;\n");
+        try self.printI("{s} _v;\n", .{c_name});
+        try self.printI("memset(&_v, 0, sizeof({s}));\n", .{c_name});
+        try self.printI("_rc = {s}_deserialize(_r, &_v);\n", .{c_name});
+        if (has_free) {
+            try self.printI("if (_rc) {{ {s}_free(&_v); return false; }}\n", .{c_name});
+        } else {
+            try self.writeI("if (_rc) return false;\n");
+        }
+        try self.writeI("bool _matched = false;\n");
+        var first = true;
+        for (s.members) |m| {
+            if (m.dimensions.len > 0) continue; // array member: not a simple filterable field
+            const kind = classifyFilterFieldKindC(m.type_ref);
+            if (kind == .skip) continue;
+            try self.printI("{s} (_field_len == sizeof(\"{s}\") - 1 && memcmp(_field, \"{s}\", _field_len) == 0) {{\n", .{ if (first) "if" else "} else if", m.name, m.name });
+            first = false;
+            self.indent_depth += 1;
+            switch (kind) {
+                .skip => unreachable,
+                .int_like => {
+                    const expr = try intFieldExprC(self.alloc, m.type_ref, m.name);
+                    defer self.alloc.free(expr);
+                    try self.writeI("_out->kind = 0;\n");
+                    try self.printI("_out->i = {s};\n", .{expr});
+                    try self.writeI("_matched = true;\n");
+                },
+                .float_like => {
+                    try self.writeI("_out->kind = 1;\n");
+                    try self.printI("_out->f = (double)(_v.{s});\n", .{m.name});
+                    try self.writeI("_matched = true;\n");
+                },
+                .string_like => {
+                    try self.printI("const char *_s = _v.{s};\n", .{m.name});
+                    try self.writeI("size_t _s_len = _s ? strlen(_s) : 0;\n");
+                    try self.writeI("if (_s_len <= _scratch_len) {\n");
+                    self.indent_depth += 1;
+                    try self.writeI("memcpy(_scratch, _s, _s_len);\n");
+                    try self.writeI("_out->kind = 2;\n");
+                    try self.writeI("_out->s_ptr = _scratch;\n");
+                    try self.writeI("_out->s_len = _s_len;\n");
+                    try self.writeI("_matched = true;\n");
+                    self.indent_depth -= 1;
+                    try self.writeI("}\n");
+                },
+            }
+            self.indent_depth -= 1;
+        }
+        if (!first) try self.writeI("}\n");
+        if (has_free) try self.printI("{s}_free(&_v);\n", .{c_name});
+        try self.writeI("return _matched;\n");
+        try self.write("}\n\n");
+    }
+
     fn emitStructZzddsWrappers(self: *CdrGenerator, s: *const ir.Struct, c_name: []const u8) !void {
+        try self.emitGetFieldFromCdr(s, c_name);
+
         try self.print("int {s}TypeSupport_register(DDS_DomainParticipant participant, const char *type_name) {{\n", .{c_name});
         // A1: fallback uses IDL-scoped name (e.g. "ovidds::Frame"), not C-flat "ovidds_Frame"
-        try self.printI("return zzdds_register_type_support_c(participant, type_name ? type_name : \"{s}\", {s}_compute_key_hash_from_cdr);\n", .{ s.qualified_name, c_name });
+        try self.printI("return zzdds_register_type_support(participant, type_name ? type_name : \"{s}\", {s}_compute_key_hash_from_cdr, {s}_get_field_from_cdr);\n", .{ s.qualified_name, c_name, c_name });
         try self.write("}\n\n");
 
         try self.print("void {s}DataWriter_init({s}DataWriter *self, DDS_DataWriter writer, int xcdr_version) {{\n", .{ c_name, c_name });
@@ -2449,7 +2635,7 @@ const CdrGenerator = struct {
         try self.printI("{s}_deserialize(&_r, &values[_i]) :\n", .{c_name});
         try self.printI("{s}_deserialize_key(&_r, &values[_i]);\n", .{c_name});
         self.indent_depth -= 1;
-        if (structHasSequenceFields(s)) {
+        if (structHasSequenceFields(s) and !self.opts.c_no_free) {
             try self.writeI("if (_rc) {\n");
             self.indent_depth += 1;
             try self.printI("for (int _j = 0; _j < _i; _j++) {s}_free(&values[_j]);\n", .{c_name});
@@ -2458,6 +2644,13 @@ const CdrGenerator = struct {
             self.indent_depth -= 1;
             try self.writeI("}\n");
         } else {
+            // --c-no-free (if set) suppressed {c_name}_free -- can't call it
+            // here either, so this CDR-error cleanup path leaks the samples
+            // already decoded into `values[0.._i)` rather than calling a
+            // function that no longer exists. Not zzdds's own combination
+            // (its dcps.idl/zzdds.idl generation never passes
+            // --generate-zzdds-wrappers), but kept correct rather than
+            // silently broken for anyone else who does combine them.
             try self.writeI("if (_rc) { zzdds_return_raw_samples(self->reader, &_arr); return _rc; }\n");
         }
         self.indent_depth -= 1;
@@ -4269,6 +4462,7 @@ fn testGenFullOpts(source: []const u8, stem: []const u8, extra: struct {
     export_macro: []const u8 = "",
     no_typesupport: bool = false,
     generate_zzdds_wrappers: bool = false,
+    c_no_free: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
 
@@ -4297,6 +4491,7 @@ fn testGenFullOpts(source: []const u8, stem: []const u8, extra: struct {
         .export_macro = extra.export_macro,
         .no_typesupport = extra.no_typesupport,
         .generate_zzdds_wrappers = extra.generate_zzdds_wrappers,
+        .c_no_free = extra.c_no_free,
     };
     try generateHeader(alloc, &ir_spec, opts, &out);
 
@@ -4844,6 +5039,7 @@ fn testGenCdrOpts(source: []const u8, stem: []const u8, opts_extra: struct {
     no_typesupport: bool = false,
     type_prefix: []const u8 = "",
     generate_zzdds_wrappers: bool = false,
+    c_no_free: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
 
@@ -4868,6 +5064,7 @@ fn testGenCdrOpts(source: []const u8, stem: []const u8, opts_extra: struct {
         .no_typesupport = opts_extra.no_typesupport,
         .type_prefix = opts_extra.type_prefix,
         .generate_zzdds_wrappers = opts_extra.generate_zzdds_wrappers,
+        .c_no_free = opts_extra.c_no_free,
     };
     try generateCdrSource(alloc, &ir_spec, opts, &out);
 
@@ -4911,9 +5108,91 @@ test "c_backend: zzdds wrappers suppressed when no_typesupport" {
     try testing.expect(!has(s, "TopicDataWriter"));
 }
 
+test "c_backend: get_field_from_cdr generated for int/float/string members, skips nested" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Inner { long z; };" ++
+            "@appendable struct Topic { @key long x; double y; string<16> color; Inner nested; sequence<long> seq; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "bool Topic_get_field_from_cdr(const uint8_t *_payload, size_t _payload_len, const char *_field, size_t _field_len, zzdds_filter_value *_out, uint8_t *_scratch, size_t _scratch_len) {"));
+    try testing.expect(has(s, "Topic _v;"));
+    try testing.expect(has(s, "_rc = Topic_deserialize(_r, &_v);"));
+    try testing.expect(has(s, "if (_rc) { Topic_free(&_v); return false; }"));
+    // int-like member
+    try testing.expect(has(s, "if (_field_len == sizeof(\"x\") - 1 && memcmp(_field, \"x\", _field_len) == 0) {"));
+    try testing.expect(has(s, "_out->kind = 0;"));
+    try testing.expect(has(s, "_out->i = (int64_t)(_v.x);"));
+    // float-like member
+    try testing.expect(has(s, "} else if (_field_len == sizeof(\"y\") - 1 && memcmp(_field, \"y\", _field_len) == 0) {"));
+    try testing.expect(has(s, "_out->kind = 1;"));
+    try testing.expect(has(s, "_out->f = (double)(_v.y);"));
+    // string-like member: scratch-buffer copy, not a raw pointer into _v
+    try testing.expect(has(s, "} else if (_field_len == sizeof(\"color\") - 1 && memcmp(_field, \"color\", _field_len) == 0) {"));
+    try testing.expect(has(s, "const char *_s = _v.color;"));
+    try testing.expect(has(s, "if (_s_len <= _scratch_len) {"));
+    try testing.expect(has(s, "memcpy(_scratch, _s, _s_len);"));
+    try testing.expect(has(s, "_out->s_ptr = _scratch;"));
+    // nested struct / sequence members are not filterable -- skipped entirely
+    try testing.expect(!has(s, "\"nested\""));
+    try testing.expect(!has(s, "\"seq\""));
+    try testing.expect(has(s, "Topic_free(&_v);\n    return _matched;"));
+    // TypeSupport_register wires the new function in
+    try testing.expect(has(s, "zzdds_register_type_support(participant, type_name ? type_name : \"Topic\", Topic_compute_key_hash_from_cdr, Topic_get_field_from_cdr);"));
+}
+
+test "c_backend: get_field_from_cdr with no filterable members always returns false" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key sequence<long> seq; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "bool Topic_get_field_from_cdr("));
+    try testing.expect(has(s, "bool _matched = false;"));
+    try testing.expect(!has(s, "_matched = true;"));
+    try testing.expect(has(s, "Topic_free(&_v);\n    return _matched;"));
+}
+
+test "c_backend: get_field_from_cdr on a struct with no _free (bounded strings only) doesn't call one" {
+    // Regression: a struct with only bounded strings/scalars (no sequence,
+    // no unbounded string) gets no {c_name}_free at all (structHasSequenceFields
+    // is false) -- emitGetFieldFromCdr must not call one, or this doesn't
+    // compile. Caught via a real zzdds-examples build (SensorSample, deliberately
+    // fully bounded), not by an earlier unit test here -- every prior test used a
+    // sequence field, which always has a _free, masking this.
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; string<16> name; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "bool Topic_get_field_from_cdr("));
+    try testing.expect(has(s, "if (_rc) return false;"));
+    try testing.expect(!has(s, "Topic_free"));
+    try testing.expect(has(s, "return _matched;\n}"));
+}
+
+test "c_backend: get_field_from_cdr prototype declared in header when zzdds wrappers enabled" {
+    var h = try testGenFullOpts(
+        "@appendable struct Topic { @key long id; string<16> name; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "bool Topic_get_field_from_cdr(const uint8_t *_payload, size_t _payload_len, const char *_field, size_t _field_len, zzdds_filter_value *_out, uint8_t *_scratch, size_t _scratch_len);"));
+}
+
 test "c_backend: zzdds_c omitted when no qualifying topic struct" {
+    // A plain top-level keyless struct now qualifies (see the next test) --
+    // what's genuinely disqualified is @nested (any key or not) and
+    // @mutable.
     var out = try testGenFullOpts(
-        "struct Plain { long id; }; @nested struct NestedKey { @key long id; }; @mutable struct MutableKey { @key long id; };",
+        "@nested struct NestedPlain { long id; }; @nested struct NestedKey { @key long id; }; @mutable struct MutableKey { @key long id; };",
         "plain",
         .{ .generate_zzdds_wrappers = true },
     );
@@ -4921,6 +5200,21 @@ test "c_backend: zzdds_c omitted when no qualifying topic struct" {
     const s = out.items;
     try testing.expect(!has(s, "zzdds_c.h"));
     try testing.expect(!has(s, "DataWriter"));
+}
+
+test "c_backend: zzdds wrappers still emitted for a keyless top-level struct" {
+    // DDS 1.4 2.2.2.1: a keyless Topic is a legitimate single-instance
+    // Topic, not a corner case -- it must still get a DataWriter/DataReader.
+    var out = try testGenFullOpts(
+        "struct NoKey { long x; long y; };",
+        "nokey",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "zzdds_c.h"));
+    try testing.expect(has(s, "NoKeyDataWriter"));
+    try testing.expect(has(s, "NoKeyDataReader"));
 }
 
 test "c_backend: zzdds wrapper prototypes for keyed topic" {
@@ -5012,7 +5306,7 @@ test "c_backend cdr: _n_impl has no cleanup loop when struct has no sequence fie
 
 test "c_backend cdr: zzdds_c omitted when no qualifying topic struct" {
     var out = try testGenCdrOpts(
-        "struct Plain { long id; }; @nested struct NestedKey { @key long id; }; @mutable struct MutableKey { @key long id; };",
+        "@nested struct NestedPlain { long id; }; @nested struct NestedKey { @key long id; }; @mutable struct MutableKey { @key long id; };",
         "plain",
         .{ .generate_zzdds_wrappers = true },
     );
@@ -5828,6 +6122,35 @@ test "c_backend: sequence typedef gets _free declaration" {
     var h = try testGen(idl, "t");
     defer h.deinit(testing.allocator);
     try testing.expect(has(h.items, "void StringSeq_free(StringSeq *v);"));
+}
+
+test "c_backend: --c-no-free suppresses _free declaration for struct and typedef" {
+    const idl =
+        \\struct Msg { sequence<long> ids; };
+        \\typedef sequence<string> StringSeq;
+    ;
+    var h = try testGenFullOpts(idl, "t", .{ .c_no_free = true });
+    defer h.deinit(testing.allocator);
+    try testing.expect(!has(h.items, "Msg_free"));
+    try testing.expect(!has(h.items, "StringSeq_free"));
+    // Nothing else about the struct's declaration should change.
+    try testing.expect(has(h.items, "int Msg_serialize(ZidlCdrWriter *_w, const Msg *_v);"));
+}
+
+test "c_backend: --c-no-free suppresses _free body, other CDR functions unaffected" {
+    const idl = "struct Msg { sequence<long> ids; };";
+    var s = try testGenCdrOpts(idl, "t", .{ .c_no_free = true });
+    defer s.deinit(testing.allocator);
+    try testing.expect(!has(s.items, "Msg_free"));
+    try testing.expect(has(s.items, "int Msg_serialize(ZidlCdrWriter *_w, const Msg *_v) {"));
+    try testing.expect(has(s.items, "int Msg_deserialize(ZidlCdrReader *_r, Msg *_v) {"));
+}
+
+test "c_backend: --c-no-free is false by default (regression guard)" {
+    const idl = "struct Msg { sequence<long> ids; };";
+    var h = try testGen(idl, "t");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "void Msg_free(Msg *v);"));
 }
 
 test "c_backend: sequence typedef _free respects export macro" {

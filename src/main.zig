@@ -25,8 +25,12 @@
 //!   --c-export-macro <macro>       DLL export macro for function declarations (C, C++ backends)
 //!   --c-extern-c                   Wrap header in extern "C" {} (C backend)
 //!   --c-header-guard-prefix <pfx>  Prefix for include guard macros (C, C++ backends)
+//!   --c-no-free                    Suppress {Type}_free() -- prototype and body (C backend)
 //!   --c-pragma-once                Use #pragma once instead of #ifndef guards (C, C++ backends)
 //!   --cpp-namespace <ns>           Wrap all output in an outer namespace (C++ backend)
+//!   --cpp-impl-override <Interface>=<Class>  Construct/cast against <Class> instead of the
+//!                                  default impl for <Interface> (C++ backend, --cpp-generate-impl)
+//!   --cpp-impl-include <header>    Extra #include for a --cpp-impl-override class (C++ backend)
 //!
 //!   --java-jni-library <name>      System.loadLibrary() name for JNI impls (Java backend)
 //!   --java-package <pkg>           Package prefix, e.g. com.example (Java backend)
@@ -82,6 +86,9 @@ const Opts = struct {
     zig_generate_toml_config: bool = false,
     cpp_generate_impl: bool = false,
     cpp_pmr_containers: bool = false,
+    cpp_impl_overrides: std.ArrayListUnmanaged([]const u8) = .empty,
+    cpp_impl_includes: std.ArrayListUnmanaged([]const u8) = .empty,
+    c_no_free: bool = false,
     preprocess_timestamp_seconds: ?u64 = null,
     inputs: std.ArrayListUnmanaged([]const u8) = .empty,
 };
@@ -129,6 +136,24 @@ pub fn main(init: std.process.Init) !void {
             opts.cpp_generate_impl = true;
         } else if (std.mem.eql(u8, arg, "--cpp-pmr-containers")) {
             opts.cpp_pmr_containers = true;
+        } else if (std.mem.eql(u8, arg, "--cpp-impl-override")) {
+            i += 1;
+            if (i >= args.len) {
+                try stderr.print("error: --cpp-impl-override requires an argument\n", .{});
+                try stderr.flush();
+                std.process.exit(1);
+            }
+            try opts.cpp_impl_overrides.append(arena, args[i]);
+        } else if (std.mem.eql(u8, arg, "--cpp-impl-include")) {
+            i += 1;
+            if (i >= args.len) {
+                try stderr.print("error: --cpp-impl-include requires an argument\n", .{});
+                try stderr.flush();
+                std.process.exit(1);
+            }
+            try opts.cpp_impl_includes.append(arena, args[i]);
+        } else if (std.mem.eql(u8, arg, "--c-no-free")) {
+            opts.c_no_free = true;
         } else if (std.mem.eql(u8, arg, "-b")) {
             i += 1;
             if (i >= args.len) {
@@ -638,6 +663,9 @@ fn processFile(
         .zig_version = opts.zig_version,
         .cpp_generate_impl = opts.cpp_generate_impl,
         .cpp_pmr_containers = opts.cpp_pmr_containers,
+        .cpp_impl_overrides = opts.cpp_impl_overrides.items,
+        .cpp_impl_includes = opts.cpp_impl_includes.items,
+        .c_no_free = opts.c_no_free,
     };
     try be.generate(&ir_spec, gen_opts);
 }
@@ -724,12 +752,24 @@ fn printUsage(w: *Io.Writer) !void {
         \\  --c-export-macro <macro>       DLL export macro for function declarations (C, C++ backends)
         \\  --c-extern-c                   Wrap header in extern "C" {{}} (C backend)
         \\  --c-header-guard-prefix <pfx>  Prefix for include guard macros (C, C++ backends)
+        \\  --c-no-free                    Suppress {{Type}}_free() -- prototype and body (C backend).
+        \\                                 For when the consumer already links a {{Type}}_free from
+        \\                                 elsewhere (e.g. zzdds's own --zig-generate-c-api export) and
+        \\                                 compiling this generation's copy in too would duplicate-define
+        \\                                 it. Only _free is affected -- serialize/deserialize/skip/
+        \\                                 default/key functions are unaffected.
         \\  --c-pragma-once                Use #pragma once instead of #ifndef guards (C, C++ backends)
         \\  --cpp-namespace <ns>           Wrap all output in an outer namespace (C++ backend)
         \\  --cpp-generate-impl            Emit concrete Impl classes and listener bridges (C++ backend)
         \\  --cpp-pmr-containers           Use std::pmr::vector/string/wstring for sequence/string/wstring
         \\                                 fields instead of std::vector/std::string/std::wstring, so they
         \\                                 route through zidl::setCppAllocator (C++ backend)
+        \\  --cpp-impl-override <Interface>=<Class>  Construct/cast against <Class> instead of the
+        \\                                 mechanically-named default impl for <Interface>, at every
+        \\                                 _getOrCreate and parameter-adaptation site (repeatable,
+        \\                                 --cpp-generate-impl only)
+        \\  --cpp-impl-include <header>    Extra #include for a --cpp-impl-override class to be visible
+        \\                                 (repeatable, --cpp-generate-impl only)
         \\
         \\  --java-jni-library <name>      System.loadLibrary() name for JNI impls (Java backend)
         \\  --java-package <pkg>           Package prefix, e.g. com.example (Java backend)

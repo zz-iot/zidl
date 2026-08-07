@@ -34,7 +34,9 @@ All four backends generate the same core set of outputs for every IDL input:
 | CDR `@mutable` (XCDR2 EMHEADER) | Implemented in all backends |
 | CDR `@mutable` (PL_CDR / RTPS ParameterList) | Zig only, via `--zig-pl-cdr` flag |
 | `--generate-interfaces` DCPS binding layer | Zig/C/Java: implemented; C++ abstract classes plus primitive/string C ABI adapters implemented, complex adapters remain TODO stubs |
-| `--generate-zzdds-wrappers` | Opt-in typed zzdds TypeSupport/DataWriter/DataReader wrappers for keyed, non-mutable topic structs in Zig, C, and C++ |
+| `--generate-zzdds-wrappers` | Opt-in typed zzdds TypeSupport/DataWriter/DataReader wrappers for non-mutable topic structs (keyed or keyless) in Zig, C, C++, and Java — keyless structs get trivial constant-zero-hash key-function bodies so a `TypeSupport` registration call is uniform either way |
+| `--zig-generate-c-api` bare `sequence<EntityInterface>` operation params (Zig backend) | Boxes each result element to the C ABI's single-opaque-pointer sequence layout (previously reused the native `{ptr,vtable}` fat-pointer layout directly as the exported function's parameter type — a binary layout corruption for any binding calling `Subscriber.get_datareaders`/`WaitSet.wait`/`get_conditions` through the real C ABI) |
+| `getFieldFromCdr`/`get_field_from_cdr` (all `--generate-zzdds-wrappers` backends) | Per-topic-struct field extraction from a raw CDR payload, wired into `TypeSupport.get_field` at registration — lets a `DataReader` created against a `ContentFilteredTopic` filter automatically at the reader layer, with no app-side re-checking. Full deserialize (any simple-typed member, not just `@key` ones), not a selective parse. Bare named `sequence<T>` operation params (`StringSeq`, `InstanceHandleSeq`, …) also get real JNI marshaling in the Java backend (previously stubbed to `UnsupportedOperationException`) |
 | `--zig-generate-c-api` C-ABI export functions (Zig backend) | Implemented — trivial forwarders from `DDS_*` C symbols to vtable |
 | `--split-files` (one file per type) | Implemented |
 | `deinit(alloc)` on types with sequence fields (Zig) | Implemented |

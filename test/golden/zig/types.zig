@@ -208,6 +208,7 @@ pub const Sample = struct {
     }
 
     pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
+        if (self.str.len != 0) alloc.free(self.str);
         if (self.nums._release) {
             if (self.nums._buffer) |_buf| {
                 alloc.free(_buf[0..self.nums._maximum]);
@@ -218,6 +219,8 @@ pub const Sample = struct {
 
     pub fn clone(self: @This(), alloc: std.mem.Allocator) !@This() {
         var result = self;
+        result.str = if (self.str.len != 0) try alloc.dupe(u8, self.str) else self.str;
+        errdefer if (result.str.len != 0) alloc.free(result.str);
         result.nums = .{};
         if (self.nums._length > 0) {
             const _buf = try alloc.alloc(i32, self.nums._length);
@@ -277,6 +280,17 @@ pub const Frame = struct {
         }
         _ = try reader.readU32();
         try reader.skipString();
+    }
+
+    pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
+        if (self.topic.len != 0) alloc.free(self.topic);
+    }
+
+    pub fn clone(self: @This(), alloc: std.mem.Allocator) !@This() {
+        var result = self;
+        result.topic = if (self.topic.len != 0) try alloc.dupe(u8, self.topic) else self.topic;
+        errdefer if (result.topic.len != 0) alloc.free(result.topic);
+        return result;
     }
 
     pub const type_object: []const u8 = &[_]u8{ 0x00, 0x07, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0xF1, 0x51, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x0B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x07, 0x65, 0x33, 0x33, 0x6F, 0x00, 0x0C, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x70, 0x00, 0x9D, 0x9B, 0x68, 0xAC };
@@ -349,6 +363,17 @@ pub const Beacon = struct {
         var _khw = zidl_rt.KeyHashWriter.init();
         @This().serializeKey(&_khw, value) catch unreachable;
         return _khw.final();
+    }
+
+    pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
+        if (self.payload.len != 0) alloc.free(self.payload);
+    }
+
+    pub fn clone(self: @This(), alloc: std.mem.Allocator) !@This() {
+        var result = self;
+        result.payload = if (self.payload.len != 0) try alloc.dupe(u8, self.payload) else self.payload;
+        errdefer if (result.payload.len != 0) alloc.free(result.payload);
+        return result;
     }
 
     pub const type_object: []const u8 = &[_]u8{ 0x00, 0x07, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0xF1, 0x51, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x0B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0x00, 0x07, 0xB8, 0x0B, 0xB7, 0x74, 0x00, 0x0C, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x70, 0x00, 0x32, 0x1C, 0x3C, 0xF4 };
