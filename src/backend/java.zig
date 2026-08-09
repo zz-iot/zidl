@@ -2017,13 +2017,20 @@ const Generator = struct {
             try self.ind();
             try self.write("}\n");
 
-            try self.write("\n");
-            try self.ind();
-            try self.write("public static Object getFieldFromCdr(byte[] _payload, String _field) {\n");
-            try self.ind();
-            try self.write("    return null;\n");
-            try self.ind();
-            try self.write("}\n");
+            // Real getFieldFromCdr, not a `return null;` stub -- a filter
+            // expression (ContentFilteredTopic or QueryCondition) can
+            // reference any simple-typed member, not just `@key` ones, so
+            // this is needed here exactly as much as it is for a keyed
+            // struct (see emitGetFieldFromCdr's own doc comment). Confirmed
+            // as a real, live gap (not just by inspection): a keyless
+            // topic's create_querycondition() with a non-empty expression
+            // succeeds today (its own precondition only checks "is a
+            // get_field_fn registered at all"), but the query silently never
+            // matches anything, since the registered function was this
+            // stub. deserializeFrom (which the real generator calls) exists
+            // unconditionally on every topic struct regardless of key
+            // status, so no other change is needed to call it here.
+            try self.emitGetFieldFromCdr(s);
         }
     }
 
@@ -7345,6 +7352,15 @@ test "java: --generate-zzdds-wrappers still emits DataWriter/DataReader for a ke
     try testGenOpts(alloc, "struct NoKey { long x; long y; };", "nokey", opts, "public byte[] computeKeyHash() {");
     try testGenOpts(alloc, "struct NoKey { long x; long y; };", "nokey", opts, "public void serializeKey(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {");
     try testGenOpts(alloc, "struct NoKey { long x; long y; };", "nokey", opts, "public static NoKey deserializeKey(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {");
+    // Real getFieldFromCdr, not the `return null;` stub a keyless topic used
+    // to get -- a filter expression can reference any simple-typed member,
+    // not just `@key` ones, so ContentFilteredTopic/QueryCondition filtering
+    // on a keyless topic (a legitimate, real case -- see this test's own
+    // point) silently never matched anything before this fix. Confirmed via
+    // a real crash-free standalone run, not just this golden check: see
+    // zzdds's own roadmap (WaitSet/condition example entry) for the
+    // getFieldFromCdr("priority")-on-a-real-payload verification.
+    try testGenOpts(alloc, "struct NoKey { long x; long y; };", "nokey", opts, "case \"x\": return (long) _obj.x;");
 
     var ir_spec = try buildIrSpec(alloc, "struct NoKey { long x; long y; };");
     defer ir_spec.deinit();

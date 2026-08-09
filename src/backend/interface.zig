@@ -551,9 +551,8 @@ fn collectBaseChain(
     }
 }
 
-/// For every concrete (non-callback, not-itself-based-by-anything-else — see
-/// `entity_base_ifaces`) interface anywhere in `items`, record it against
-/// every ancestor's qualified name in its base chain (transitively).
+/// For every concrete (non-callback) interface anywhere in `items`, record it
+/// against every ancestor's qualified name in its base chain (transitively).
 ///
 /// Needed because a base interface can have multiple *sibling* concrete
 /// implementations that don't inherit from each other: e.g. dcps.idl's
@@ -566,18 +565,46 @@ fn collectBaseChain(
 /// parameter `dynamic_cast` adaptation needs to try every one, not just the
 /// base's own mechanical `<Iface>Impl` name — see `emitAdaptedParams`'s
 /// `entity_in` case in cpp.zig, the sole consumer of this.
+///
+/// Deliberately does NOT exclude interfaces found in `entity_base_ifaces`
+/// (unlike an earlier version of this function, which took that set as a
+/// parameter and skipped anything in it). `entity_base_ifaces` answers a
+/// different question — "does this interface need its own *virtual*
+/// `native_handle()`, or does a more-derived interface own a more specific
+/// one instead" (see `ifaceOwnsNativeHandle`) — which is NOT the same as "is
+/// this interface ever the actual most-derived runtime type of an object."
+/// `ReadCondition` is the concrete counterexample that exposed the bug:
+/// excluded from `entity_base_ifaces` so `QueryCondition` can own its own,
+/// more specific `DDS_QueryCondition` handle instead of inheriting
+/// `ReadCondition`'s — but `ReadCondition` still gets its own real,
+/// independently-constructible `ReadConditionImpl` (with its own
+/// `_getOrCreate`), returned as-is by `DataReader::create_readcondition`
+/// whenever the app doesn't ask for a `QueryCondition`. Confirmed via a real
+/// crash, not just by inspection: `WaitSet::attach_condition`/
+/// `detach_condition`'s generated `Condition`-parameter adapter cascade
+/// (`dynamic_cast<ConditionImpl*>`, `GuardConditionImpl*`,
+/// `StatusConditionImpl*`, `QueryConditionImpl*`, in that order) never
+/// included `ReadConditionImpl` at all under the old exclusion, so attaching
+/// a plain `ReadCondition` (not further specialized to a `QueryCondition`)
+/// threw `std::invalid_argument("zidl: incompatible entity implementation
+/// for DDS::Condition")` at runtime — every non-callback interface gets its
+/// own concrete impl class regardless of `entity_base_ifaces` membership
+/// (confirmed: `ConditionImpl`/`EntityImpl`/`TopicDescriptionImpl` — the
+/// three interfaces this exclusion was originally written to describe as
+/// "genuinely abstract-only" — all have their own generated class too), so
+/// there is no case where excluding an `entity_base_ifaces` member here is
+/// actually correct.
 pub fn collectBaseImplementors(
     alloc: std.mem.Allocator,
     items: []const ir.ModuleItem,
-    entity_base_ifaces: *const std.StringHashMapUnmanaged(void),
     result: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged(*const ir.Interface)),
 ) anyerror!void {
     for (items) |item| {
         switch (item) {
-            .module => |m| try collectBaseImplementors(alloc, m.items, entity_base_ifaces, result),
+            .module => |m| try collectBaseImplementors(alloc, m.items, result),
             .type_decl => |td| switch (td) {
                 .interface => |iface| {
-                    if (!isCallbackInterface(iface) and !entity_base_ifaces.contains(iface.qualified_name)) {
+                    if (!isCallbackInterface(iface)) {
                         try recordBaseChainImplementor(alloc, iface, iface, result);
                     }
                 },

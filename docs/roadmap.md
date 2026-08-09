@@ -37,6 +37,122 @@ future plugin could emit them programmatically instead of a human hand-writing t
 
 ---
 
+## Binding design review: interfaces vs. impls, inheritance, and C-ABI identity — not scheduled, recorded for a future pass
+
+**Not scheduled; recorded here so the tensions found while building the WaitSet/condition
+example (`zzdds-examples/{zig,c,cpp,java}/waitset/`, see `zzdds/docs/roadmap.md`'s matching
+entry) don't get lost before a deliberate review happens.** The ask: a general review of
+zidl's overall pattern for generated classes/interfaces/listeners vs. their concrete impls
+— especially interface inheritance and C-ABI boxing/unboxing — aiming for one strategy that
+feels consistent across bindings and stays as flexible as possible without giving up much
+performance. This section records the concrete tension that prompted the request, plus
+other complications noticed along the way, as review scope — not a design, and not a
+decision about what changes.
+
+**The anchor case: condition identity survives "same view, asked for repeatedly" but not
+"same object, different view."** Two existing mechanisms already give wrapper/handle
+identity, and it's worth being precise about the guarantee each one actually makes:
+
+- `CachedCAbiHandle` (`zzdds/src/util/c_abi_handle.zig`) gives a Zig object one C-ABI box
+  *per interface view*, lazily created and reused for the life of the object (replacing two
+  earlier designs — a hybrid leaf/base split that mis-dispatched on nil results, and
+  box-fresh-every-call, which broke identity and leaked on widened-view accessors). A
+  `TopicImpl` asked for its `Topic` box twice gets the same box both times. Asked for its
+  `Entity` box, it gets a *different*, independently cached box — correctly, since each
+  view needs its own vtable.
+- `_getOrCreate` (C++ backend, `ConcreteImplGenerator`) gives the C++ wrapper the same
+  guarantee one level up: a per-class `handle -> weak_ptr<Impl>` cache means the same C-ABI
+  handle in always yields the same `shared_ptr` out, at every entity-returning call site
+  (op return, attribute getter, sequence-of-entities out-adaptation, listener-trampoline
+  argument).
+
+Both mechanisms were built to solve the same narrower problem: repeated requests for *the
+same interface view* of the same object must yield the same wrapper. Neither was ever asked
+to solve, and neither does solve, "is this the same underlying object as that other view I
+already hold." `GuardConditionImpl` boxes as `GuardCondition` via one cached field and as
+`Condition` via a second, independently-cached field — two different, unrelated-looking
+boxes for one Zig object, by design. This is invisible until an API genuinely needs
+cross-view identity, and `WaitSet.wait()` is the first place that happened: it always
+returns conditions boxed as base `Condition` (via `_getOrCreate`'s handle-keyed cache,
+keyed on the `Condition`-view handle), so an application holding a `GuardCondition` it
+attached earlier cannot recognize it in `wait()`'s result by pointer/handle/wrapper-identity
+comparison — only by re-deriving identity out-of-band (in this case, checking each held
+condition's own `get_trigger_value()` directly instead of trusting list membership). Worked
+around at the application layer in all four `waitset` example ports; not fixed at the root.
+See `zzdds/docs/roadmap.md` for the fuller bug writeup.
+
+**A related, but distinct, asymmetry: parameter adaptation tries harder than return
+adaptation.** `collectBaseImplementors` (`zidl/src/backend/interface.zig`) builds a
+dynamic_cast cascade so an entity/condition *parameter* (e.g. `attach_condition(Condition)`)
+can be recovered as its real concrete type by trying each candidate subclass in turn. There
+is no equivalent cascade for entity/condition *return values* — a return is boxed once, as
+whatever view the operation's IDL signature declares, and never tries to recover a more
+specific concrete type the way a parameter does. This asymmetry is the deeper mechanical
+root of the `wait()` bug above (it's a return-value site), but it's worth naming as its own
+axis, separate from the caching tension, since a review might fix one without the other.
+
+**What the current design gets right — worth preserving, not just working around:**
+- C's opaque-handle-per-interface model sidesteps wrapper-identity entirely: the handle
+  *is* the identity, there's no wrapper object to keep in sync with it. Simpler, and
+  arguably the reason C hasn't hit this bug — worth understanding *why* before assuming
+  C++/Java's richer wrapper model is strictly better.
+- C++'s real inheritance (`Condition`/`GuardCondition`/etc. as genuine C++ subclasses) makes
+  upcasting free and implicit — no manual `as_Condition()` call needed, unlike Zig's
+  interface-as-vtable model (see next point). Confirmed a real ergonomic win this round.
+- Zig's native `{ptr, vtable}` fat-pointer representation needs no boxing at all for
+  pure-Zig-to-Zig code — identity is exact, free, and this whole class of bug structurally
+  cannot occur there. The bug only exists at the C-ABI boundary and above.
+- The synthetic `as_{Base}` upcast method zidl generates is uniform and mechanical — no
+  hand-maintained per-consumer mapping of "which interfaces can this one be viewed as."
+  Noticed one inconsistency worth a follow-up, not a redesign: pure Zig-native code doesn't
+  get an `as_{Base}` convenience method the way C/C++/Java do (their vtable slot exists, but
+  there's no ergonomic wrapper) — every *other* binding has this ergonomic layer, Zig itself
+  doesn't, which stood out while writing `zig/waitset` directly against the native API.
+
+**Other complications noticed, not yet fully explored:**
+- **Factory-less entities need hand-written, per-binding bootstrap, three times over, with
+  no generated or systematic support.** `WaitSet`/`GuardCondition` have no factory operation
+  in `dcps.idl` (per OMG spec, they're app-instantiated directly), so this round needed a
+  hand-written C-ABI constructor (`zzdds_create_waitset`/`zzdds_create_guardcondition`), a
+  hand-written C++ friend-factory wrapper, and a hand-written Java JNI native method — each
+  authored from scratch by mirroring `DomainParticipantFactory`'s existing
+  `zzdds_create_factory()` bootstrap by hand, not generated. Every future factory-less
+  interface repeats this exact three-times-by-hand cost. Worth asking during the review
+  whether zidl could detect "no factory operation, not itself a base interface" and offer to
+  generate the bootstrap the way it already generates `as_{Base}`.
+- **Listener trampolines may have a latent version of the same cross-view identity gap.**
+  Per `docs/decisions.md`'s listener-release-hook design, listener-delivered entity/condition
+  arguments already go through `_getOrCreate`-style wrapping in C++ trampolines. That means
+  *if* any listener ever delivers a condition or entity through a narrower or different view
+  than the application originally held it as, the same "different box, same object"
+  confusion is possible there too — not confirmed to have happened, not investigated this
+  round, but structurally the same mechanism, so worth checking deliberately rather than
+  assuming listeners are exempt because conditions were the first place it surfaced.
+- **The un-swept box cache's memory tradeoff may not generalize to every workload.**
+  `CachedCAbiHandle` and `_getOrCreate` both accept "boxes/wrapper entries live as long as
+  the owning object, no active cache-sweep" as fine — reasonable for long-lived entities
+  like `Topic`/`Writer`, less obviously fine if a review broadens scope to workloads that
+  create/destroy many short-lived `GuardCondition`s or `ReadCondition`s rapidly. Worth
+  re-confirming under that lens rather than assuming the existing tradeoff generalizes.
+- **Allocator tiering is a precedent any redesign needs to keep, not incidentally break.**
+  Boxes/wrappers are allocated through the existing allocator-injection machinery (the
+  Tier 0-3 allocator-strategy work); a redesign of the boxing/caching layer should keep
+  taking an allocator as a parameter rather than reintroducing a hardcoded one.
+- **Fixes here tend to land behind an unreleased zidl checkout, which is its own process
+  complication.** Several of this round's real fixes (the `collectBaseImplementors`
+  exclusion bug, the entity-sequence `_free` stride bug) only existed as uncommitted local
+  changes for a while, consumed by zzdds via a temporary `.path` override in
+  `build.zig.zon` rather than a tagged release. Easy to lose track of which zzdds/
+  zzdds-examples behavior depends on which specific local zidl state. Not really an
+  interface/inheritance/boxing question, but it directly affects how verifiable any future
+  review's own findings are, so worth naming.
+
+**Explicitly out of scope for this entry:** no decision is being made here about which
+tradeoff to keep, which to fix, or what a unified design would look like. That's the
+review itself, not yet started.
+
+---
+
 ## Embedded / MicroZig / XRCE Roadmap
 
 **Status:** `--profile xrce` exists and validates important XRCE constraints before
@@ -90,6 +206,31 @@ for any consumer that *does* use bare `--generate-interfaces` without
 if a real IDL operation with a non-scalar/entity/string parameter needs generic
 (non-override) C++ interface adaptation.
 
+**C++ backend: entity/entity-sequence *return* values never recover a more-derived
+concrete type, only entity *parameters* do — real gap, not yet fixed.** Found building
+zzdds-examples' `cpp/waitset` (2026-08-10): `WaitSet::wait()`/`get_conditions()`'s
+generated C++ bodies always box each returned `Condition` via
+`::DDS::ConditionImpl::_getOrCreate` (the base interface's own default concrete class) —
+unlike entity *parameter* adaptation (`attach_condition`'s cascade, see "C and C++
+backends" above), there's no attempt to try `GuardConditionImpl`/`StatusConditionImpl`/
+`ReadConditionImpl`/`QueryConditionImpl` instead. Combined with each condition-family
+interface's C-ABI handle being cached independently *per view* (zzdds's
+`GuardConditionImpl.gc_c_abi` vs `.cond_c_abi`, e.g.), a `Condition` returned from
+`wait()` can never be `std::shared_ptr`-identity-equal to (or `dynamic_pointer_cast`-
+recoverable as) the concretely-typed shared_ptr an application originally attached, even
+though both refer to the same underlying condition — breaking the standard DDS idiom of
+iterating `active_conditions` and comparing against held condition objects. See zzdds's
+own roadmap (WaitSet/condition example entry) for the full writeup and the workaround
+`cpp/waitset` uses instead (branching on each held condition's own `get_trigger_value()`
+directly). A real fix needs either a return-path implementor cascade (determining which
+concrete class a bare `DDS_Condition` handle was *really* boxed from isn't information
+the handle alone carries — would need a runtime "what interface is this" tag/query) or
+unifying per-view C-ABI handle caching so every view of the same object boxes to the
+same address — a real design question, not a mechanical fix. Zig-native code is
+unaffected (native `{ptr,vtable}` values compare directly, no boxing involved) — this is
+specific to crossing the C ABI. Likely affects C and Java too (unverified — `c/waitset`/
+`java/waitset` don't exist yet); re-raise there once they do.
+
 **PL_CDR (RTPS ParameterList) codegen in non-Zig backends — not planned, verified out of
 scope for all of them (C, C++, Java, and future Python/C#/Rust/Haskell alike).**
 `--zig-pl-cdr` is a Zig-backend-only flag; every other backend parses and silently ignores
@@ -109,6 +250,78 @@ only if a consumer other than zzdds needs a non-Zig program to implement RTPS wi
 discovery directly, without going through the Zig core.
 
 ### C and C++ backends
+
+- **C++ backend: `collectBaseImplementors` wrongly excluded `ReadCondition` (and any
+  other interface that's simultaneously "used as someone's base" AND "has its own real
+  concrete implementor") from an interface's entity-parameter `dynamic_cast` cascade —
+  fixed. Done.** Found while building zzdds-examples' `cpp/waitset` (2026-08-09/10),
+  the first real exercise of `WaitSet::attach_condition`/`detach_condition` with a plain
+  (non-`QueryCondition`) `ReadCondition` through any binding: `dynamic_cast<
+  ::DDS::ReadConditionImpl*>` was simply missing from the generated `Condition`-parameter
+  adaptation cascade (`ConditionImpl`, `GuardConditionImpl`, `StatusConditionImpl`,
+  `QueryConditionImpl` were all tried; `ReadConditionImpl` never was), throwing
+  `std::invalid_argument("zidl: incompatible entity implementation for DDS::Condition")`
+  at runtime — confirmed via a real crash, not by inspection.
+
+  Root cause: `collectBaseImplementors` (`src/backend/interface.zig`) took
+  `entity_base_ifaces` as a parameter and skipped any interface it contained, on the
+  reasoning that being "used as a base" meant an interface was purely a structural mixin
+  with no leaf of its own — true for `Entity`/`TopicDescription`/`Condition`, but wrong
+  for `ReadCondition`: `entity_base_ifaces` answers a narrower question
+  (`ifaceOwnsNativeHandle`'s: does *this* interface need its own *virtual*
+  `native_handle()`, or does a more-derived interface — `QueryCondition` — own a more
+  specific one instead), not "is this interface ever the actual most-derived runtime
+  type of an object." `ReadCondition` is legitimately excluded from the first question
+  (so `QueryCondition` can declare its own `DDS_QueryCondition`-returning
+  `native_handle()` instead of inheriting `ReadCondition`'s) but not the second —
+  `create_readcondition()` returns a plain `ReadCondition` whenever the app doesn't ask
+  for a `QueryCondition`, and `ReadConditionImpl` is a real, independently-constructible
+  class with its own `_getOrCreate`, confirmed generated regardless of
+  `entity_base_ifaces` membership (as are `ConditionImpl`/`EntityImpl`/
+  `TopicDescriptionImpl` themselves — every non-callback interface gets its own concrete
+  impl class unconditionally; there is no case where excluding an `entity_base_ifaces`
+  member from `collectBaseImplementors` was ever actually correct).
+
+  Fixed by dropping the `entity_base_ifaces` parameter from `collectBaseImplementors`
+  entirely — every non-callback interface is now a valid cascade leaf, matching what the
+  impl-class generator already does unconditionally. Verified: `zig build test` green
+  (1008/1008, no golden fixture regression — none of zidl's own test IDL happened to
+  have this specific "extended-and-independently-leaf" shape before); real end-to-end
+  against zzdds — rebuilt `cpp/waitset` against a local zidl checkout, confirmed the
+  crash reproduces on the pre-fix build and is gone after, 5+ consecutive real runs
+  clean, plus valgrind (0 errors, 0 leaks) and a manual `-fsanitize=thread` build (no
+  races, 2 runs).
+
+- **Zig backend: a `sequence<EntityInterface>` typedef's C-ABI `_free` function used the
+  native (fat-pointer) element size instead of the boxed (opaque-pointer) one — fixed.
+  Done.** Found immediately after the fix above, building the same `cpp/waitset` example
+  (2026-08-10): `DDS_ConditionSeq_free` (and every other `sequence<EntityInterface>`
+  typedef's generated free function, `zig.zig`'s `is_unbounded_seq` code path) called the
+  type's own native `.deinit()`, which frees `self._buffer[0..self._maximum]` using
+  `DDS.Condition`'s native 16-byte `{ptr, vtable}` fat-pointer stride. That's correct for
+  a `ConditionSeq` built directly by Zig-native code, but every instance a C/C++/Java
+  caller actually holds was boxed down to one 8-byte opaque pointer per element by the
+  existing entity-sequence C-ABI adaptation (the "`--zig-generate-c-api` bare
+  `sequence<EntityInterface>` operation params" fix below, already shipped in
+  `v0.3.2-zig.0.16.0`) before ever crossing the ABI — freeing it via the native stride
+  requests double the correct byte range from the allocator. Confirmed via valgrind on a
+  real crash (`munmap_chunk(): invalid pointer`, deterministically on every single call,
+  not a rare race) inside a real `WaitSetImpl::wait()` C++ call — this is the first time
+  `wait()`'s C-ABI output path was ever exercised end-to-end with real attached
+  conditions, since nothing could construct a `WaitSet` through any binding before
+  zzdds's own bootstrap-constructor work landed alongside this example.
+
+  Fixed by detecting the same "is this a `sequence<EntityInterface>`" condition used
+  elsewhere in this backend and, only for that case, emitting a `_free` body that
+  reinterprets `_buffer` as `[*]?*anyopaque` (`@ptrCast`) before computing the free
+  range, and frees only the buffer itself — never the individual boxed entity handles it
+  points to, which are independently cached/owned via each entity's own
+  `get_c_abi_handle()`. The native `.deinit()` method itself is untouched (still correct
+  for its own, non-C-ABI callers). `emitStructCApiFree` (the sibling free-function
+  generator for plain data structs with sequence fields) doesn't need the equivalent fix
+  — a struct field can never be entity-interface-typed. Verified the same way as the fix
+  above: real crash before, clean after, across 5+ runs, valgrind, and a manual TSAN
+  build.
 
 - **C++ backend: `--cpp-generate-impl` couldn't construct a vendor-extended entity impl —
   fixed via `--cpp-impl-override`/`--cpp-impl-include`. Done.** Found while porting
@@ -808,6 +1021,39 @@ hand-written.
   path.
 
 ### Java backend
+
+- **`getFieldFromCdr` was a `return null;` stub for a keyless topic under
+  `--generate-zzdds-wrappers` — fixed. Done.** Found building zzdds-examples'
+  `java/waitset` (2026-08-10), whose `WaitsetSample` type is deliberately
+  keyless (matching `hello_world`'s own convention across every binding):
+  `emitStructZzddsWrappers`'s keyless-topic branch (added when
+  `--generate-zzdds-wrappers` was extended to keyless topics per DDS 1.4
+  §2.2.2.1) only emitted the three methods that path's own author believed
+  the wrapper codegen actually calls (`serializeKey`/`computeKeyHash`/
+  `deserializeKey`) plus a hardcoded stub for `getFieldFromCdr` — but a
+  filter expression (`ContentFilteredTopic` or `QueryCondition`) can
+  reference any simple-typed member, not just `@key` ones, so this stub
+  silently broke filtering for every keyless topic in Java specifically —
+  the keyed-struct branch already called the real `emitGetFieldFromCdr`
+  (added in the "ContentFilteredTopic filtering: `get_field_from_cdr`"
+  round), just never extended to this one. The C and C++ backends don't
+  have the equivalent bug: both call their own `emitGetFieldFromCdr`
+  unconditionally, with no keyed/keyless branch at all.
+
+  Confirmed via a real, minimal, targeted check (not just a golden-diff):
+  serialized a real `WaitsetSample` value to CDR bytes by hand, called the
+  pre-fix generated `getFieldFromCdr(payload, "priority")` directly (no DDS
+  setup needed — it's a pure static function) and confirmed it returned
+  `null` for a field that's genuinely present; regenerated after the fix and
+  confirmed the same call now returns the correct boxed value (and still
+  `null` for a field that really doesn't exist). Fixed by calling the
+  existing `emitGetFieldFromCdr` from the keyless branch instead of emitting
+  its own inline stub — no changes needed to `emitGetFieldFromCdr` itself,
+  since `deserializeFrom` (which it calls) already exists unconditionally on
+  every topic struct regardless of key status. New assertion added to the
+  existing "`--generate-zzdds-wrappers` still emits DataWriter/DataReader
+  for a keyless struct" test, checking for the real generated switch-case
+  body rather than the stub. `zig build test` green (1008/1008).
 
 - **`any` / `object` / `value_base` member access**: Emits a `// TODO: any/object`
   comment. These IDL constructs are rarely used in modern DDS profiles; implementation

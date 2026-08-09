@@ -3308,7 +3308,7 @@ const ConcreteImplGenerator = struct {
         if (spec.imports.len != 0) try self.hdrWrite("\n");
 
         try interface.collectEntityBaseNames(self.alloc, spec.items, &self.entity_base_ifaces);
-        try interface.collectBaseImplementors(self.alloc, spec.items, &self.entity_base_ifaces, &self.base_implementors);
+        try interface.collectBaseImplementors(self.alloc, spec.items, &self.base_implementors);
 
         // Pre-scan: discover which entity interfaces are ever wrapped via
         // _getOrCreate (op return, attribute, sequence element, listener

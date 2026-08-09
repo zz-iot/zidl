@@ -1197,10 +1197,47 @@ const Generator = struct {
                 const c_name = try self.cApiQualName(t.qualified_name, pfx);
                 defer self.alloc.free(c_name);
                 try self.ind();
-                try self.print(
-                    "pub export fn {s}_free(v: *{s}{s}) callconv(.c) void {{ v.deinit(std.heap.c_allocator); }}\n\n",
-                    .{ c_name, pfx, t.name },
-                );
+                // A sequence<EntityInterface> typedef's C-ABI-facing free
+                // function CANNOT reuse the plain .deinit() above: every
+                // instance of this type a C/C++/Java caller actually holds
+                // (e.g. WaitSet.wait()'s ConditionSeq out-param) was boxed to
+                // one opaque pointer per element by emitCApiOp's own
+                // adaptation before it ever crossed the C ABI (see
+                // typeRefIsEntitySequence's other call sites) -- never the
+                // native {ptr,vtable} fat-pointer element .deinit() assumes.
+                // Calling .deinit() on that boxed buffer computes free()'s
+                // size using the wrong (native, larger) element stride,
+                // corrupting the heap. Confirmed via a real crash, not just
+                // by inspection: valgrind reported an invalid heap write
+                // inside a real WaitSetImpl::wait() C++ call, every single
+                // invocation, not a rare race, tracing back to exactly this
+                // function once WaitSet/GuardCondition gained a real C-ABI
+                // constructor and a real example could exercise wait()
+                // end-to-end for the first time. This body reinterprets the
+                // buffer as what it actually is on this path -- one opaque
+                // pointer per element -- and frees only the buffer itself;
+                // it must NOT touch the individual boxed entity handles it
+                // points to (those are independently cached/owned via each
+                // entity's own get_c_abi_handle(), not something this
+                // sequence's own free should release).
+                const is_entity_seq = switch (seq.element.*) {
+                    .named => |etd| switch (etd) {
+                        .interface => |iface| !isCallbackInterface(iface),
+                        else => false,
+                    },
+                    else => false,
+                };
+                if (is_entity_seq) {
+                    try self.print(
+                        "pub export fn {s}_free(v: *{s}{s}) callconv(.c) void {{ if (v._release) {{ if (v._buffer) |_b| std.heap.c_allocator.free(@as([*]?*anyopaque, @ptrCast(_b))[0..v._maximum]); }} v.* = .{{}}; }}\n\n",
+                        .{ c_name, pfx, t.name },
+                    );
+                } else {
+                    try self.print(
+                        "pub export fn {s}_free(v: *{s}{s}) callconv(.c) void {{ v.deinit(std.heap.c_allocator); }}\n\n",
+                        .{ c_name, pfx, t.name },
+                    );
+                }
             }
             return;
         }
