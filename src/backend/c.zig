@@ -2669,10 +2669,21 @@ const CdrGenerator = struct {
             // comment: the prototype is always declared, the function always
             // exists (locally or externally), so this cleanup call is always
             // safe and always needed to avoid leaking every already-decoded
-            // element on this error path.
+            // element on this error path. `_j <= _i` (not `_j < _i`): the
+            // *current*, partially-decoded element must be freed too, not
+            // just the ones before it -- deserialize/deserialize_key can
+            // allocate several fields before a later one fails, leaving
+            // values[_i] holding real, now-orphaned allocations if skipped.
+            // Safe to call _free on a partial struct because every field it
+            // touches is null/zero-guarded (deserialize never leaves a field
+            // it hasn't reached yet in anything but its caller-supplied
+            // zero-initialized state) -- confirmed as a real, reachable
+            // leak via Greptile review, not just in theory: every one of
+            // this PR's new batch instance/condition reader methods calls
+            // this same path.
             try self.writeI("if (_rc) {\n");
             self.indent_depth += 1;
-            try self.printI("for (int _j = 0; _j < _i; _j++) {s}_free(&values[_j]);\n", .{c_name});
+            try self.printI("for (int _j = 0; _j <= _i; _j++) {s}_free(&values[_j]);\n", .{c_name});
             try self.writeI("zzdds_return_raw_samples(self->reader, &_arr);\n");
             try self.writeI("return _rc;\n");
             self.indent_depth -= 1;
@@ -2717,9 +2728,14 @@ const CdrGenerator = struct {
         try self.printI("{s}_deserialize_key(&_r, &values[_i]);\n", .{c_name});
         self.indent_depth -= 1;
         if (structHasSequenceFields(s)) {
+            // `_j <= _i`, matching DataReader_n_impl's own fix above: the
+            // *current*, partially-decoded element must be freed too, not
+            // just the ones before it -- see that function's comment for
+            // the full safety argument (deserialize only touches fields it
+            // reaches before failing; _free is null/zero-guarded per field).
             try self.writeI("if (_rc) {\n");
             self.indent_depth += 1;
-            try self.printI("for (size_t _j = 0; _j < _i; _j++) {s}_free(&values[_j]);\n", .{c_name});
+            try self.printI("for (size_t _j = 0; _j <= _i; _j++) {s}_free(&values[_j]);\n", .{c_name});
             try self.writeI("zzdds_return_raw_samples(self->reader, _arr);\n");
             try self.writeI("return _rc;\n");
             self.indent_depth -= 1;
@@ -5411,7 +5427,10 @@ test "c_backend cdr: _n_impl cleans up partial samples when struct has sequence 
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "for (int _j = 0; _j < _i; _j++) Msg_free(&values[_j]);"));
+    // `_j <= _i`: the current, partially-decoded element must be freed too
+    // (a real leak Greptile caught in review — see the generator's own
+    // comment for the safety argument), not just the ones before it.
+    try testing.expect(has(s, "for (int _j = 0; _j <= _i; _j++) Msg_free(&values[_j]);"));
     try testing.expect(has(s, "zzdds_return_raw_samples(self->reader, &_arr);"));
 }
 
@@ -5518,7 +5537,7 @@ test "c_backend cdr: _decode_arr cleans up partial samples when struct has seque
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "for (size_t _j = 0; _j < _i; _j++) Msg_free(&values[_j]);"));
+    try testing.expect(has(s, "for (size_t _j = 0; _j <= _i; _j++) Msg_free(&values[_j]);"));
     try testing.expect(has(s, "static int MsgDataReader_decode_arr(MsgDataReader *self, zzdds_raw_sample_array *_arr, Msg *values, zzdds_sample_info *infos) {"));
 }
 
