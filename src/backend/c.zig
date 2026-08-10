@@ -2659,6 +2659,20 @@ const CdrGenerator = struct {
         try self.writeI("infos[_i] = _arr.samples[_i].info;\n");
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _arr.samples[_i].data, _arr.samples[_i].data_len);\n");
+        if (structHasSequenceFields(s)) {
+            // Zero values[_i] before attempting to decode into it, so that
+            // IF decoding fails partway through, every field it never
+            // reached is a well-defined NULL/empty state rather than
+            // whatever the caller's storage happened to contain -- the
+            // cleanup below calls _free() on this same (possibly partial)
+            // element, and _free() is only null/zero-safe per field, not
+            // safe against indeterminate/garbage pointers. Caught in review
+            // (Greptile): the caller is not guaranteed to have zero-
+            // initialized `values` itself, so relying on that would let a
+            // failed decode free a garbage pointer instead of cleanly
+            // reporting the error -- corruption/crash, not just a leak.
+            try self.writeI("memset(&values[_i], 0, sizeof(values[_i]));\n");
+        }
         try self.writeI("if (!_rc) _rc = infos[_i].valid_data ?\n");
         self.indent_depth += 1;
         try self.printI("{s}_deserialize(&_r, &values[_i]) :\n", .{c_name});
@@ -2674,13 +2688,10 @@ const CdrGenerator = struct {
             // just the ones before it -- deserialize/deserialize_key can
             // allocate several fields before a later one fails, leaving
             // values[_i] holding real, now-orphaned allocations if skipped.
-            // Safe to call _free on a partial struct because every field it
-            // touches is null/zero-guarded (deserialize never leaves a field
-            // it hasn't reached yet in anything but its caller-supplied
-            // zero-initialized state) -- confirmed as a real, reachable
-            // leak via Greptile review, not just in theory: every one of
-            // this PR's new batch instance/condition reader methods calls
-            // this same path.
+            // Safe to call _free on values[_i] (partial or not) because it
+            // was zeroed immediately above, so every field _free() might
+            // touch is either a real allocation or a well-defined NULL/empty
+            // state -- never indeterminate caller-supplied memory.
             try self.writeI("if (_rc) {\n");
             self.indent_depth += 1;
             try self.printI("for (int _j = 0; _j <= _i; _j++) {s}_free(&values[_j]);\n", .{c_name});
@@ -2722,6 +2733,14 @@ const CdrGenerator = struct {
         try self.writeI("infos[_i] = _arr->samples[_i].info;\n");
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _arr->samples[_i].data, _arr->samples[_i].data_len);\n");
+        if (structHasSequenceFields(s)) {
+            // See DataReader_n_impl's matching comment above: zero
+            // values[_i] before decoding into it so a partial failure
+            // leaves only real allocations or well-defined NULL/empty
+            // fields -- never indeterminate caller-supplied memory -- for
+            // the _free() cleanup below to touch.
+            try self.writeI("memset(&values[_i], 0, sizeof(values[_i]));\n");
+        }
         try self.writeI("if (!_rc) _rc = infos[_i].valid_data ?\n");
         self.indent_depth += 1;
         try self.printI("{s}_deserialize(&_r, &values[_i]) :\n", .{c_name});
@@ -2731,8 +2750,7 @@ const CdrGenerator = struct {
             // `_j <= _i`, matching DataReader_n_impl's own fix above: the
             // *current*, partially-decoded element must be freed too, not
             // just the ones before it -- see that function's comment for
-            // the full safety argument (deserialize only touches fields it
-            // reaches before failing; _free is null/zero-guarded per field).
+            // the full safety argument.
             try self.writeI("if (_rc) {\n");
             self.indent_depth += 1;
             try self.printI("for (size_t _j = 0; _j <= _i; _j++) {s}_free(&values[_j]);\n", .{c_name});
@@ -5432,9 +5450,15 @@ test "c_backend cdr: _n_impl cleans up partial samples when struct has sequence 
     // comment for the safety argument), not just the ones before it.
     try testing.expect(has(s, "for (int _j = 0; _j <= _i; _j++) Msg_free(&values[_j]);"));
     try testing.expect(has(s, "zzdds_return_raw_samples(self->reader, &_arr);"));
+    // values[_i] must be zeroed *before* the decode attempt -- otherwise
+    // _free() above could touch indeterminate caller-supplied memory for
+    // whatever fields a partial decode never reached (a second real bug
+    // Greptile caught, on top of the leak: freeing the current element
+    // isn't safe unless it's known-zeroed first).
+    try testing.expect(has(s, "memset(&values[_i], 0, sizeof(values[_i]));"));
 }
 
-test "c_backend cdr: _n_impl has no cleanup loop when struct has no sequence fields" {
+test "c_backend cdr: _n_impl has no cleanup loop or memset when struct has no sequence fields" {
     var out = try testGenCdrOpts(
         "@appendable struct Msg { @key long id; long value; };",
         "msg",
@@ -5444,6 +5468,10 @@ test "c_backend cdr: _n_impl has no cleanup loop when struct has no sequence fie
     const s = out.items;
     try testing.expect(!has(s, "Msg_free(&values[_j])"));
     try testing.expect(has(s, "if (_rc) { zzdds_return_raw_samples(self->reader, &_arr); return _rc; }"));
+    // No _free() is ever called on values[_i] for a struct with no
+    // sequence/string fields, so there's nothing for the memset to protect
+    // -- must not be emitted.
+    try testing.expect(!has(s, "memset(&values[_i]"));
 }
 
 test "c_backend cdr: zzdds_c omitted when no qualifying topic struct" {
@@ -5539,6 +5567,7 @@ test "c_backend cdr: _decode_arr cleans up partial samples when struct has seque
     const s = out.items;
     try testing.expect(has(s, "for (size_t _j = 0; _j <= _i; _j++) Msg_free(&values[_j]);"));
     try testing.expect(has(s, "static int MsgDataReader_decode_arr(MsgDataReader *self, zzdds_raw_sample_array *_arr, Msg *values, zzdds_sample_info *infos) {"));
+    try testing.expect(has(s, "memset(&values[_i], 0, sizeof(values[_i]));"));
 }
 
 test "c_backend cdr: source file banner and includes" {
