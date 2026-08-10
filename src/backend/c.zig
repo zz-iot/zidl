@@ -649,6 +649,7 @@ const Generator = struct {
         try self.print("{s}{s}int {s}DataWriter_dispose({s}DataWriter *self, const {s} *key, DDS_InstanceHandle_t handle);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataWriter_unregister({s}DataWriter *self, const {s} *key, DDS_InstanceHandle_t handle);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}DDS_InstanceHandle_t {s}DataWriter_register_instance({s}DataWriter *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}DDS_InstanceHandle_t {s}DataWriter_register_instance_w_timestamp({s}DataWriter *self, const {s} *key, DDS_Time_t timestamp);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataWriter_write_w_timestamp({s}DataWriter *self, const {s} *value, DDS_InstanceHandle_t handle, DDS_Time_t timestamp);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataWriter_dispose_w_timestamp({s}DataWriter *self, const {s} *key, DDS_InstanceHandle_t handle, DDS_Time_t timestamp);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataWriter_unregister_w_timestamp({s}DataWriter *self, const {s} *key, DDS_InstanceHandle_t handle, DDS_Time_t timestamp);\n", .{ em, sp, c_name, c_name, c_name });
@@ -663,6 +664,12 @@ const Generator = struct {
         try self.print("{s}{s}DDS_InstanceHandle_t {s}DataReader_lookup_instance({s}DataReader *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataReader_take_n({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataReader_read_n({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_take_instance({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_read_instance({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_take_w_condition({s}DataReader *self, DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_read_w_condition({s}DataReader *self, DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_take_next_instance_w_condition({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_read_next_instance_w_condition({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataReader_take_loaned({s}DataReader *self, {s} *out, zzdds_sample_info *info, zzdds_loaned_sample *loan);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}void {s}DataReader_return_loan({s}DataReader *self, zzdds_loaned_sample *loan);\n\n", .{ em, sp, c_name, c_name });
     }
@@ -2529,6 +2536,18 @@ const CdrGenerator = struct {
         try self.writeI("return zzdds_register_instance_raw(self->writer, _hash);\n");
         try self.write("}\n\n");
 
+        // Unlike write/dispose/unregister_w_timestamp above (which thread
+        // `timestamp` through to zzdds_write_raw_w_timestamp), zzdds's own
+        // instance registration (zzdds_register_instance_raw) is a pure,
+        // stateless key-hash-to-handle computation with no source-timestamp
+        // involvement at all -- `timestamp` is accepted here only for
+        // spec-shape compliance (matching register_instance_w_timestamp's
+        // implicit IDL) and is genuinely unused.
+        try self.print("DDS_InstanceHandle_t {s}DataWriter_register_instance_w_timestamp({s}DataWriter *self, const {s} *key, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("(void)timestamp;\n");
+        try self.printI("return {s}DataWriter_register_instance(self, key);\n", .{c_name});
+        try self.write("}\n\n");
+
         try self.print("static int {s}DataWriter_write_kind_w_timestamp({s}DataWriter *self, zzdds_write_kind kind, const {s} *value, int key_only, DDS_InstanceHandle_t handle, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
         try self.writeI("ZidlCdrWriter _w;\n");
         try self.writeI("uint8_t _hash[16];\n");
@@ -2679,6 +2698,95 @@ const CdrGenerator = struct {
         try self.write("}\n\n");
         try self.print("int {s}DataReader_read_n({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, c_name, c_name });
         try self.printI("return {s}DataReader_n_impl(self, values, infos, max, ss, vs, is, 0);\n", .{c_name});
+        try self.write("}\n\n");
+
+        // Decodes zzdds_raw_sample_array `_arr` into `values`/`infos`, freeing
+        // `_arr` either way -- the shared tail of every batch reader op below
+        // (take_instance/read_instance, take_w_condition/read_w_condition,
+        // take_next_instance_w_condition/read_next_instance_w_condition),
+        // which otherwise only differ in which zzdds_*_raw call produces `_arr`.
+        try self.print("static int {s}DataReader_decode_arr({s}DataReader *self, zzdds_raw_sample_array *_arr, {s} *values, zzdds_sample_info *infos) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("for (size_t _i = 0; _i < _arr->count; _i++) {\n");
+        self.indent_depth += 1;
+        try self.writeI("infos[_i] = _arr->samples[_i].info;\n");
+        try self.writeI("ZidlCdrReader _r;\n");
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _arr->samples[_i].data, _arr->samples[_i].data_len);\n");
+        try self.writeI("if (!_rc) _rc = infos[_i].valid_data ?\n");
+        self.indent_depth += 1;
+        try self.printI("{s}_deserialize(&_r, &values[_i]) :\n", .{c_name});
+        try self.printI("{s}_deserialize_key(&_r, &values[_i]);\n", .{c_name});
+        self.indent_depth -= 1;
+        if (structHasSequenceFields(s)) {
+            try self.writeI("if (_rc) {\n");
+            self.indent_depth += 1;
+            try self.printI("for (size_t _j = 0; _j < _i; _j++) {s}_free(&values[_j]);\n", .{c_name});
+            try self.writeI("zzdds_return_raw_samples(self->reader, _arr);\n");
+            try self.writeI("return _rc;\n");
+            self.indent_depth -= 1;
+            try self.writeI("}\n");
+        } else {
+            // See the matching --c-no-free comment in DataReader_n_impl above.
+            try self.writeI("if (_rc) { zzdds_return_raw_samples(self->reader, _arr); return _rc; }\n");
+        }
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.writeI("int _n = (int)_arr->count;\n");
+        try self.writeI("zzdds_return_raw_samples(self->reader, _arr);\n");
+        try self.writeI("return _n;\n");
+        try self.write("}\n\n");
+
+        try self.print("static int {s}DataReader_n_instance_impl({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is, int destructive) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("zzdds_raw_sample_array _arr = {NULL, 0, 0};\n");
+        try self.writeI("int _n = destructive ?\n");
+        self.indent_depth += 1;
+        try self.writeI("zzdds_take_n_instance_raw(self->reader, instance_handle, ss, vs, is, max, &_arr) :\n");
+        try self.writeI("zzdds_read_n_instance_raw(self->reader, instance_handle, ss, vs, is, max, &_arr);\n");
+        self.indent_depth -= 1;
+        try self.writeI("if (_n <= 0) return _n;\n");
+        try self.printI("return {s}DataReader_decode_arr(self, &_arr, values, infos);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader_take_instance({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataReader_n_instance_impl(self, instance_handle, values, infos, max, ss, vs, is, 1);\n", .{c_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataReader_read_instance({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataReader_n_instance_impl(self, instance_handle, values, infos, max, ss, vs, is, 0);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("static int {s}DataReader_w_condition_impl({s}DataReader *self, DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max, int destructive) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("zzdds_raw_sample_array _arr = {NULL, 0, 0};\n");
+        try self.writeI("int _n = destructive ?\n");
+        self.indent_depth += 1;
+        try self.writeI("zzdds_take_w_condition_raw(self->reader, condition, max, &_arr) :\n");
+        try self.writeI("zzdds_read_w_condition_raw(self->reader, condition, max, &_arr);\n");
+        self.indent_depth -= 1;
+        try self.writeI("if (_n <= 0) return _n;\n");
+        try self.printI("return {s}DataReader_decode_arr(self, &_arr, values, infos);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader_take_w_condition({s}DataReader *self, DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataReader_w_condition_impl(self, condition, values, infos, max, 1);\n", .{c_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataReader_read_w_condition({s}DataReader *self, DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataReader_w_condition_impl(self, condition, values, infos, max, 0);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("static int {s}DataReader_next_instance_w_condition_impl({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max, int destructive) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("zzdds_raw_sample_array _arr = {NULL, 0, 0};\n");
+        try self.writeI("int _n = destructive ?\n");
+        self.indent_depth += 1;
+        try self.writeI("zzdds_take_next_instance_w_condition_raw(self->reader, condition, prev, max, &_arr) :\n");
+        try self.writeI("zzdds_read_next_instance_w_condition_raw(self->reader, condition, prev, max, &_arr);\n");
+        self.indent_depth -= 1;
+        try self.writeI("if (_n <= 0) return _n;\n");
+        try self.printI("return {s}DataReader_decode_arr(self, &_arr, values, infos);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader_take_next_instance_w_condition({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataReader_next_instance_w_condition_impl(self, condition, prev, values, infos, max, 1);\n", .{c_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataReader_read_next_instance_w_condition({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataReader_next_instance_w_condition_impl(self, condition, prev, values, infos, max, 0);\n", .{c_name});
         try self.write("}\n\n");
 
         try self.print("int {s}DataReader_take_loaned({s}DataReader *self, {s} *out, zzdds_sample_info *info, zzdds_loaned_sample *loan) {{\n", .{ c_name, c_name, c_name });
@@ -5327,6 +5435,91 @@ test "c_backend cdr: zzdds_c omitted when no qualifying topic struct" {
     );
     defer out.deinit(testing.allocator);
     try testing.expect(!has(out.items, "zzdds_c.h"));
+}
+
+// ── _w_condition family / batch take_instance / register_instance_w_timestamp ──
+
+test "c_backend: zzdds wrapper prototypes declare the _w_condition family, batch take_instance, and register_instance_w_timestamp" {
+    var out = try testGenFullOpts(
+        "@appendable struct Topic { @key long id; string<16> name; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "DDS_InstanceHandle_t TopicDataWriter_register_instance_w_timestamp(TopicDataWriter *self, const Topic *key, DDS_Time_t timestamp);"));
+    try testing.expect(has(s, "int TopicDataReader_take_instance(TopicDataReader *self, DDS_InstanceHandle_t instance_handle, Topic *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);"));
+    try testing.expect(has(s, "int TopicDataReader_read_instance(TopicDataReader *self, DDS_InstanceHandle_t instance_handle, Topic *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);"));
+    try testing.expect(has(s, "int TopicDataReader_take_w_condition(TopicDataReader *self, DDS_ReadCondition condition, Topic *values, zzdds_sample_info *infos, int max);"));
+    try testing.expect(has(s, "int TopicDataReader_read_w_condition(TopicDataReader *self, DDS_ReadCondition condition, Topic *values, zzdds_sample_info *infos, int max);"));
+    try testing.expect(has(s, "int TopicDataReader_take_next_instance_w_condition(TopicDataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, Topic *values, zzdds_sample_info *infos, int max);"));
+    try testing.expect(has(s, "int TopicDataReader_read_next_instance_w_condition(TopicDataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, Topic *values, zzdds_sample_info *infos, int max);"));
+}
+
+test "c_backend cdr: register_instance_w_timestamp ignores its timestamp and delegates to register_instance" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "DDS_InstanceHandle_t TopicDataWriter_register_instance_w_timestamp(TopicDataWriter *self, const Topic *key, DDS_Time_t timestamp) {"));
+    try testing.expect(has(s, "(void)timestamp;"));
+    try testing.expect(has(s, "return TopicDataWriter_register_instance(self, key);"));
+}
+
+test "c_backend cdr: take_instance/read_instance call the instance-scoped raw ops" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "zzdds_take_n_instance_raw(self->reader, instance_handle, ss, vs, is, max, &_arr) :"));
+    try testing.expect(has(s, "zzdds_read_n_instance_raw(self->reader, instance_handle, ss, vs, is, max, &_arr);"));
+    try testing.expect(has(s, "int TopicDataReader_take_instance(TopicDataReader *self, DDS_InstanceHandle_t instance_handle, Topic *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {"));
+    try testing.expect(has(s, "return TopicDataReader_n_instance_impl(self, instance_handle, values, infos, max, ss, vs, is, 1);"));
+}
+
+test "c_backend cdr: take_w_condition/read_w_condition call zzdds_take_w_condition_raw/zzdds_read_w_condition_raw" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "zzdds_take_w_condition_raw(self->reader, condition, max, &_arr) :"));
+    try testing.expect(has(s, "zzdds_read_w_condition_raw(self->reader, condition, max, &_arr);"));
+    try testing.expect(has(s, "int TopicDataReader_take_w_condition(TopicDataReader *self, DDS_ReadCondition condition, Topic *values, zzdds_sample_info *infos, int max) {"));
+    try testing.expect(has(s, "return TopicDataReader_w_condition_impl(self, condition, values, infos, max, 1);"));
+}
+
+test "c_backend cdr: take_next_instance_w_condition/read_next_instance_w_condition call the matching raw ops" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "zzdds_take_next_instance_w_condition_raw(self->reader, condition, prev, max, &_arr) :"));
+    try testing.expect(has(s, "zzdds_read_next_instance_w_condition_raw(self->reader, condition, prev, max, &_arr);"));
+    try testing.expect(has(s, "int TopicDataReader_take_next_instance_w_condition(TopicDataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, Topic *values, zzdds_sample_info *infos, int max) {"));
+}
+
+test "c_backend cdr: _decode_arr cleans up partial samples when struct has sequence fields" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Msg { @key long id; sequence<octet> data; };",
+        "msg",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "for (size_t _j = 0; _j < _i; _j++) Msg_free(&values[_j]);"));
+    try testing.expect(has(s, "static int MsgDataReader_decode_arr(MsgDataReader *self, zzdds_raw_sample_array *_arr, Msg *values, zzdds_sample_info *infos) {"));
 }
 
 test "c_backend cdr: source file banner and includes" {

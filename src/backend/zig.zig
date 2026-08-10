@@ -3456,6 +3456,14 @@ const Generator = struct {
         try self.emitReaderBatchMethod(type_name, "take_instance", true, true, needs_deinit);
         // read_instance
         try self.emitReaderBatchMethod(type_name, "read_instance", false, true, needs_deinit);
+        // take_w_condition
+        try self.emitReaderWConditionMethod(type_name, "take_w_condition", true, needs_deinit);
+        // read_w_condition
+        try self.emitReaderWConditionMethod(type_name, "read_w_condition", false, needs_deinit);
+        // take_next_instance_w_condition
+        try self.emitReaderNextInstanceWConditionMethod(type_name, "take_next_instance_w_condition", true, needs_deinit);
+        // read_next_instance_w_condition
+        try self.emitReaderNextInstanceWConditionMethod(type_name, "read_next_instance_w_condition", false, needs_deinit);
 
         // get_key_value
         try self.write("\n");
@@ -3579,6 +3587,74 @@ const Generator = struct {
         try self.write("        }\n");
         try self.ind();
         try self.print("        try {s}(self._dr, &_tmp, max, ss, vs, is{s}, self._alloc);\n", .{ raw_fn, ih_arg });
+        try self.emitReaderDecodeTmpTail(type_name, needs_deinit);
+    }
+
+    /// Emit a batch take/read method scoped to a ReadCondition (which may
+    /// itself be a QueryCondition upcast via as_ReadCondition()) -- the raw
+    /// path to what the OMG spec calls take_w_condition/read_w_condition.
+    /// State masks (and, for a QueryCondition, the query filter) come from
+    /// `cond` itself, unlike emitReaderBatchMethod's mask parameters.
+    fn emitReaderWConditionMethod(
+        self: *Generator,
+        type_name: []const u8,
+        method_name: []const u8,
+        destructive: bool,
+        needs_deinit: bool,
+    ) !void {
+        const raw_fn = if (destructive) "_zzdds.takeWithReadConditionRaw" else "_zzdds.readWithReadConditionRaw";
+        try self.write("\n");
+        try self.ind();
+        try self.print("    pub fn {s}(self: @This(), out: *std.ArrayListUnmanaged(SampledValue), cond: _zzdds.DDS.ReadCondition, max: i32) !bool {{\n", .{method_name});
+        try self.ind();
+        try self.write("        var _tmp: std.ArrayListUnmanaged(_zzdds.OwnedRawSample) = .empty;\n");
+        try self.ind();
+        try self.write("        defer {\n");
+        try self.ind();
+        try self.write("            for (_tmp.items) |_s| _s.deinit();\n");
+        try self.ind();
+        try self.write("            _tmp.deinit(self._alloc);\n");
+        try self.ind();
+        try self.write("        }\n");
+        try self.ind();
+        try self.print("        try {s}(self._dr, cond, &_tmp, max, self._alloc);\n", .{raw_fn});
+        try self.emitReaderDecodeTmpTail(type_name, needs_deinit);
+    }
+
+    /// Emit a batch take/read method scoped to a ReadCondition AND the "next
+    /// instance" after `prev` -- the raw path to what the OMG spec calls
+    /// take_next_instance_w_condition/read_next_instance_w_condition.
+    fn emitReaderNextInstanceWConditionMethod(
+        self: *Generator,
+        type_name: []const u8,
+        method_name: []const u8,
+        destructive: bool,
+        needs_deinit: bool,
+    ) !void {
+        const raw_fn = if (destructive) "_zzdds.takeNextInstanceWithReadConditionRaw" else "_zzdds.readNextInstanceWithReadConditionRaw";
+        try self.write("\n");
+        try self.ind();
+        try self.print("    pub fn {s}(self: @This(), out: *std.ArrayListUnmanaged(SampledValue), cond: _zzdds.DDS.ReadCondition, prev: _zzdds.DDS.InstanceHandle_t, max: i32) !bool {{\n", .{method_name});
+        try self.ind();
+        try self.write("        var _tmp: std.ArrayListUnmanaged(_zzdds.OwnedRawSample) = .empty;\n");
+        try self.ind();
+        try self.write("        defer {\n");
+        try self.ind();
+        try self.write("            for (_tmp.items) |_s| _s.deinit();\n");
+        try self.ind();
+        try self.write("            _tmp.deinit(self._alloc);\n");
+        try self.ind();
+        try self.write("        }\n");
+        try self.ind();
+        try self.print("        try {s}(self._dr, cond, prev, &_tmp, max, self._alloc);\n", .{raw_fn});
+        try self.emitReaderDecodeTmpTail(type_name, needs_deinit);
+    }
+
+    /// Shared tail for every batch reader method above: given `_tmp` (already
+    /// populated by the caller's own raw op call), decodes each sample into
+    /// `out`. The three emitReader*Method functions above only differ in
+    /// which raw op populates `_tmp` and that op's own parameter list.
+    fn emitReaderDecodeTmpTail(self: *Generator, type_name: []const u8, needs_deinit: bool) !void {
         try self.ind();
         try self.write("        if (_tmp.items.len == 0) return false;\n");
         try self.ind();
@@ -7848,6 +7924,33 @@ test "zig_backend: typed DataWriter/DataReader for keyed @appendable struct" {
     try testing.expect(has(s, "ShapeType.deserialize(&_r, self._alloc)"));
     // no SampledValue.deinit — ShapeType has no unbounded sequences
     try testing.expect(!has(s, "pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {"));
+}
+
+test "zig_backend: typed DataReader gets take_w_condition/read_w_condition and take_next_instance_w_condition/read_next_instance_w_condition" {
+    var out = try testGenOpts(
+        \\@appendable struct ShapeType { @key string<128> color; long x; long y; long shapesize; };
+    , "shape", .{ .generate_zzdds_wrappers = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+
+    // take_w_condition/read_w_condition: state masks (and, for a
+    // QueryCondition, the query filter) come from `cond` itself -- no mask
+    // parameters, unlike take()/read()/take_instance()/read_instance().
+    try testing.expect(has(s, "pub fn take_w_condition(self: @This(), out: *std.ArrayListUnmanaged(SampledValue), cond: _zzdds.DDS.ReadCondition, max: i32) !bool {"));
+    try testing.expect(has(s, "_zzdds.takeWithReadConditionRaw(self._dr, cond, &_tmp, max, self._alloc);"));
+    try testing.expect(has(s, "pub fn read_w_condition(self: @This(), out: *std.ArrayListUnmanaged(SampledValue), cond: _zzdds.DDS.ReadCondition, max: i32) !bool {"));
+    try testing.expect(has(s, "_zzdds.readWithReadConditionRaw(self._dr, cond, &_tmp, max, self._alloc);"));
+
+    // take_next_instance_w_condition/read_next_instance_w_condition: also
+    // scoped to the "next instance" after `prev`.
+    try testing.expect(has(s, "pub fn take_next_instance_w_condition(self: @This(), out: *std.ArrayListUnmanaged(SampledValue), cond: _zzdds.DDS.ReadCondition, prev: _zzdds.DDS.InstanceHandle_t, max: i32) !bool {"));
+    try testing.expect(has(s, "_zzdds.takeNextInstanceWithReadConditionRaw(self._dr, cond, prev, &_tmp, max, self._alloc);"));
+    try testing.expect(has(s, "pub fn read_next_instance_w_condition(self: @This(), out: *std.ArrayListUnmanaged(SampledValue), cond: _zzdds.DDS.ReadCondition, prev: _zzdds.DDS.InstanceHandle_t, max: i32) !bool {"));
+    try testing.expect(has(s, "_zzdds.readNextInstanceWithReadConditionRaw(self._dr, cond, prev, &_tmp, max, self._alloc);"));
+
+    // Shared decode tail must still fire for the new methods too (proves the
+    // emitReaderDecodeTmpTail extraction didn't drop anything).
+    try testing.expect(has(s, "ShapeType.deserialize(&_r, self._alloc)"));
 }
 
 test "zig_backend: typed DataWriter uses writeEncapHeader for @final struct" {

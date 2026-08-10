@@ -3138,6 +3138,8 @@ fn generateZzddsWrapperFiles(
         defer alloc.free(writer_iface);
         const reader_iface = try zzddsDcpsQualifiedName(alloc, opts, "DDS::DataReader");
         defer alloc.free(reader_iface);
+        const read_condition_iface = try zzddsDcpsQualifiedName(alloc, opts, "DDS::ReadCondition");
+        defer alloc.free(read_condition_iface);
 
         var buf = std.ArrayList(u8).empty;
         defer buf.deinit(alloc);
@@ -3155,7 +3157,7 @@ fn generateZzddsWrapperFiles(
         try writeOutputFile(alloc, io, opts, writer_filename, buf.items);
 
         buf.clearRetainingCapacity();
-        try emitZzddsDataReaderFile(alloc, opts, &buf, c_name, type_java, reader_iface);
+        try emitZzddsDataReaderFile(alloc, opts, &buf, c_name, type_java, reader_iface, read_condition_iface);
         const reader_filename = try std.fmt.allocPrint(alloc, "{s}DataReader.java", .{c_name});
         defer alloc.free(reader_filename);
         try writeOutputFile(alloc, io, opts, reader_filename, buf.items);
@@ -3246,6 +3248,60 @@ fn emitZzddsDataWriterFile(
         \\    public int unregister({[t]s} key, long handle) {{
         \\        return io.zzdds.runtime.ZzddsRuntime.writeRaw(writer, 2, key.computeKeyHash(), handle, toPayload(key, true));
         \\    }}
+        \\
+        \\    /** DDS_Time_t's sec/nanosec fields, passed separately -- JNI can't
+        \\     * marshal a C struct by value. */
+        \\    public int write_w_timestamp({[t]s} value, long handle, int sec, int nanosec) {{
+        \\        return io.zzdds.runtime.ZzddsRuntime.writeRawWTimestamp(writer, 0, value.computeKeyHash(), handle, toPayload(value, false), sec, nanosec);
+        \\    }}
+        \\
+        \\    public int dispose_w_timestamp({[t]s} key, long handle, int sec, int nanosec) {{
+        \\        return io.zzdds.runtime.ZzddsRuntime.writeRawWTimestamp(writer, 1, key.computeKeyHash(), handle, toPayload(key, true), sec, nanosec);
+        \\    }}
+        \\
+        \\    public int unregister_w_timestamp({[t]s} key, long handle, int sec, int nanosec) {{
+        \\        return io.zzdds.runtime.ZzddsRuntime.writeRawWTimestamp(writer, 2, key.computeKeyHash(), handle, toPayload(key, true), sec, nanosec);
+        \\    }}
+        \\
+        \\    /** Computes the deterministic instance handle for {{@code key}} --
+        \\     * zzdds's own instance registration has no side effects beyond this
+        \\     * computation. */
+        \\    public long register_instance({[t]s} key) {{
+        \\        return io.zzdds.runtime.ZzddsRuntime.registerInstanceRaw(writer, key.computeKeyHash());
+        \\    }}
+        \\
+        \\    /** {{@code timestamp}} is accepted for spec-shape compliance (matching
+        \\     * register_instance_w_timestamp's implicit IDL) and is genuinely
+        \\     * unused -- same as C/C++'s equivalent. */
+        \\    public long register_instance_w_timestamp({[t]s} key, int sec, int nanosec) {{
+        \\        return register_instance(key);
+        \\    }}
+        \\
+        \\    /** Determines XCDR1 vs XCDR2 from the payload's own 4-byte CDR
+        \\     * encapsulation header, same as {[c]s}DataReader's own helper. */
+        \\    private static int xcdrVersionOf(byte[] payload) {{
+        \\        int _id = ((payload[0] & 0xFF) << 8) | (payload[1] & 0xFF);
+        \\        if (_id == 0x0001) return 1;
+        \\        if (_id == 0x0007) return 2;
+        \\        throw new IllegalArgumentException("zidl: unsupported CDR encapsulation id 0x" + Integer.toHexString(_id));
+        \\    }}
+        \\
+        \\    /** Returns the stored key-only fields for {{@code handle}}, or null
+        \\     * if no alive write has been made for that instance. */
+        \\    public {[t]s} get_key_value(long handle) {{
+        \\        byte[] _payload = io.zzdds.runtime.ZzddsRuntime.getKeyValueWriterRaw(writer, handle);
+        \\        if (_payload == null) return null;
+        \\        java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(_payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        \\        int _xcdrVersion = xcdrVersionOf(_payload);
+        \\        _buf.position(4);
+        \\        return {[t]s}.deserializeKey(_buf, 4, _xcdrVersion);
+        \\    }}
+        \\
+        \\    /** Returns {{@code DDS_HANDLE_NIL}} (0) if no alive write has been
+        \\     * made for {{@code key}}. */
+        \\    public long lookup_instance({[t]s} key) {{
+        \\        return io.zzdds.runtime.ZzddsRuntime.lookupInstanceWriterRaw(writer, key.computeKeyHash());
+        \\    }}
         \\}}
         \\
     , .{ .c = c_name, .t = type_java, .wi = writer_iface });
@@ -3260,6 +3316,7 @@ fn emitZzddsDataReaderFile(
     c_name: []const u8,
     type_java: []const u8,
     reader_iface: []const u8,
+    read_condition_iface: []const u8,
 ) !void {
     try emitZzddsPackageHeader(opts, out, alloc);
     const s = try std.fmt.allocPrint(alloc,
@@ -3361,9 +3418,82 @@ fn emitZzddsDataReaderFile(
         \\        byte[][] _payloads = io.zzdds.runtime.ZzddsRuntime.readNRaw(reader, max, sampleStates, viewStates, instanceStates, _handles, _valids);
         \\        return fromPayloads(_payloads, _handles, _valids);
         \\    }}
+        \\
+        \\    /** Batch take/read restricted to one instance, same semantics as
+        \\     * {{@link #take_n}}/{{@link #read_n}} otherwise -- {{@code instanceHandle}}
+        \\     * must be a real instance handle, not {{@code DDS_HANDLE_NIL}} (there
+        \\     * is no "no filter" sentinel here, unlike {{@link #take_n}}). */
+        \\    public Sample[] take_instance(long instanceHandle, int max, int sampleStates, int viewStates, int instanceStates) {{
+        \\        long[] _handles = new long[max];
+        \\        boolean[] _valids = new boolean[max];
+        \\        byte[][] _payloads = io.zzdds.runtime.ZzddsRuntime.takeNInstanceRaw(reader, instanceHandle, max, sampleStates, viewStates, instanceStates, _handles, _valids);
+        \\        return fromPayloads(_payloads, _handles, _valids);
+        \\    }}
+        \\
+        \\    public Sample[] read_instance(long instanceHandle, int max, int sampleStates, int viewStates, int instanceStates) {{
+        \\        long[] _handles = new long[max];
+        \\        boolean[] _valids = new boolean[max];
+        \\        byte[][] _payloads = io.zzdds.runtime.ZzddsRuntime.readNInstanceRaw(reader, instanceHandle, max, sampleStates, viewStates, instanceStates, _handles, _valids);
+        \\        return fromPayloads(_payloads, _handles, _valids);
+        \\    }}
+        \\
+        \\    /** Batch take/read restricted to a {{@code ReadCondition}} (or a
+        \\     * {{@code QueryCondition}}, which satisfies {{@code ReadCondition}}
+        \\     * directly via its own generated interface inheritance -- no upcast
+        \\     * needed, unlike C/C++'s {{@code as_ReadCondition()}}). State masks
+        \\     * (and, for a QueryCondition, the query filter) come from
+        \\     * {{@code condition}} itself. */
+        \\    public Sample[] take_w_condition({[rc]s} condition, int max) {{
+        \\        long[] _handles = new long[max];
+        \\        boolean[] _valids = new boolean[max];
+        \\        byte[][] _payloads = io.zzdds.runtime.ZzddsRuntime.takeWConditionRaw(reader, condition, max, _handles, _valids);
+        \\        return fromPayloads(_payloads, _handles, _valids);
+        \\    }}
+        \\
+        \\    public Sample[] read_w_condition({[rc]s} condition, int max) {{
+        \\        long[] _handles = new long[max];
+        \\        boolean[] _valids = new boolean[max];
+        \\        byte[][] _payloads = io.zzdds.runtime.ZzddsRuntime.readWConditionRaw(reader, condition, max, _handles, _valids);
+        \\        return fromPayloads(_payloads, _handles, _valids);
+        \\    }}
+        \\
+        \\    /** Batch take/read restricted to {{@code condition}} AND scoped to the
+        \\     * "next instance" after {{@code prev}}. Per spec, instance *selection*
+        \\     * itself is restricted to instances with a matching sample, not just
+        \\     * the next instance with any sample at all. */
+        \\    public Sample[] take_next_instance_w_condition({[rc]s} condition, long prev, int max) {{
+        \\        long[] _handles = new long[max];
+        \\        boolean[] _valids = new boolean[max];
+        \\        byte[][] _payloads = io.zzdds.runtime.ZzddsRuntime.takeNextInstanceWConditionRaw(reader, condition, prev, max, _handles, _valids);
+        \\        return fromPayloads(_payloads, _handles, _valids);
+        \\    }}
+        \\
+        \\    public Sample[] read_next_instance_w_condition({[rc]s} condition, long prev, int max) {{
+        \\        long[] _handles = new long[max];
+        \\        boolean[] _valids = new boolean[max];
+        \\        byte[][] _payloads = io.zzdds.runtime.ZzddsRuntime.readNextInstanceWConditionRaw(reader, condition, prev, max, _handles, _valids);
+        \\        return fromPayloads(_payloads, _handles, _valids);
+        \\    }}
+        \\
+        \\    /** Returns the stored key-only fields for {{@code handle}}, or null
+        \\     * if no alive sample has arrived for that instance. */
+        \\    public {[t]s} get_key_value(long handle) {{
+        \\        byte[] _payload = io.zzdds.runtime.ZzddsRuntime.getKeyValueReaderRaw(reader, handle);
+        \\        if (_payload == null) return null;
+        \\        java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(_payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        \\        int _xcdrVersion = xcdrVersionOf(_payload);
+        \\        _buf.position(4);
+        \\        return {[t]s}.deserializeKey(_buf, 4, _xcdrVersion);
+        \\    }}
+        \\
+        \\    /** Returns {{@code DDS_HANDLE_NIL}} (0) if no alive sample has arrived
+        \\     * for {{@code key}}. */
+        \\    public long lookup_instance({[t]s} key) {{
+        \\        return io.zzdds.runtime.ZzddsRuntime.lookupInstanceReaderRaw(reader, key.computeKeyHash());
+        \\    }}
         \\}}
         \\
-    , .{ .c = c_name, .t = type_java, .ri = reader_iface });
+    , .{ .c = c_name, .t = type_java, .ri = reader_iface, .rc = read_condition_iface });
     defer alloc.free(s);
     try out.appendSlice(alloc, s);
 }
@@ -7339,6 +7469,100 @@ test "java: --generate-zzdds-wrappers DataReader gets take_next_instance/read_ne
     try testing.expect(std.mem.indexOf(u8, r, "public Sample[] read_n(int max, int sampleStates, int viewStates, int instanceStates) {") != null);
     try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.readNRaw(reader, max, sampleStates, viewStates, instanceStates, _handles, _valids)") != null);
     try testing.expect(std.mem.indexOf(u8, r, "private static Sample[] fromPayloads(byte[][] payloads, long[] handles, boolean[] valids) {") != null);
+}
+
+test "java: --generate-zzdds-wrappers DataWriter gets register_instance, _w_timestamp family, and get_key_value/lookup_instance" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc,
+        \\@appendable struct Foo { @key unsigned long id; };
+    );
+    defer ir_spec.deinit();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const out_dir = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer alloc.free(out_dir);
+
+    const opts = interface.Options{
+        .input_stem = "sensor",
+        .split_files = true,
+        .generate_zzdds_wrappers = true,
+        .output_dir = out_dir,
+    };
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try generateSplitFiles(alloc, io, &ir_spec, opts);
+
+    const writer_content = try tmp.dir.readFileAlloc(io, "FooDataWriter.java", alloc, .unlimited);
+    defer alloc.free(writer_content);
+    const w = writer_content;
+
+    try testing.expect(std.mem.indexOf(u8, w, "public long register_instance(Foo key) {") != null);
+    try testing.expect(std.mem.indexOf(u8, w, "ZzddsRuntime.registerInstanceRaw(writer, key.computeKeyHash())") != null);
+    try testing.expect(std.mem.indexOf(u8, w, "public long register_instance_w_timestamp(Foo key, int sec, int nanosec) {") != null);
+    try testing.expect(std.mem.indexOf(u8, w, "return register_instance(key);") != null);
+
+    try testing.expect(std.mem.indexOf(u8, w, "public int write_w_timestamp(Foo value, long handle, int sec, int nanosec) {") != null);
+    try testing.expect(std.mem.indexOf(u8, w, "ZzddsRuntime.writeRawWTimestamp(writer, 0, value.computeKeyHash(), handle, toPayload(value, false), sec, nanosec)") != null);
+    try testing.expect(std.mem.indexOf(u8, w, "public int dispose_w_timestamp(Foo key, long handle, int sec, int nanosec) {") != null);
+    try testing.expect(std.mem.indexOf(u8, w, "ZzddsRuntime.writeRawWTimestamp(writer, 1, key.computeKeyHash(), handle, toPayload(key, true), sec, nanosec)") != null);
+    try testing.expect(std.mem.indexOf(u8, w, "public int unregister_w_timestamp(Foo key, long handle, int sec, int nanosec) {") != null);
+    try testing.expect(std.mem.indexOf(u8, w, "ZzddsRuntime.writeRawWTimestamp(writer, 2, key.computeKeyHash(), handle, toPayload(key, true), sec, nanosec)") != null);
+
+    try testing.expect(std.mem.indexOf(u8, w, "public Foo get_key_value(long handle) {") != null);
+    try testing.expect(std.mem.indexOf(u8, w, "ZzddsRuntime.getKeyValueWriterRaw(writer, handle)") != null);
+    try testing.expect(std.mem.indexOf(u8, w, "Foo.deserializeKey(_buf, 4, _xcdrVersion)") != null);
+    try testing.expect(std.mem.indexOf(u8, w, "public long lookup_instance(Foo key) {") != null);
+    try testing.expect(std.mem.indexOf(u8, w, "ZzddsRuntime.lookupInstanceWriterRaw(writer, key.computeKeyHash())") != null);
+}
+
+test "java: --generate-zzdds-wrappers DataReader gets take_instance/read_instance, the _w_condition family, and get_key_value/lookup_instance" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc,
+        \\@appendable struct Foo { @key unsigned long id; };
+    );
+    defer ir_spec.deinit();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const out_dir = try std.fmt.allocPrint(alloc, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer alloc.free(out_dir);
+
+    const opts = interface.Options{
+        .input_stem = "sensor",
+        .split_files = true,
+        .generate_zzdds_wrappers = true,
+        .output_dir = out_dir,
+    };
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try generateSplitFiles(alloc, io, &ir_spec, opts);
+
+    const reader_content = try tmp.dir.readFileAlloc(io, "FooDataReader.java", alloc, .unlimited);
+    defer alloc.free(reader_content);
+    const r = reader_content;
+
+    try testing.expect(std.mem.indexOf(u8, r, "public Sample[] take_instance(long instanceHandle, int max, int sampleStates, int viewStates, int instanceStates) {") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.takeNInstanceRaw(reader, instanceHandle, max, sampleStates, viewStates, instanceStates, _handles, _valids)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "public Sample[] read_instance(long instanceHandle, int max, int sampleStates, int viewStates, int instanceStates) {") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.readNInstanceRaw(reader, instanceHandle, max, sampleStates, viewStates, instanceStates, _handles, _valids)") != null);
+
+    // The condition parameter is typed as the real generated ReadCondition
+    // interface (not a raw Object) -- a QueryCondition satisfies it directly
+    // via Java interface inheritance, no as_ReadCondition() upcast needed.
+    try testing.expect(std.mem.indexOf(u8, r, "public Sample[] take_w_condition(Dcps.DDS.ReadCondition condition, int max) {") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.takeWConditionRaw(reader, condition, max, _handles, _valids)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "public Sample[] read_w_condition(Dcps.DDS.ReadCondition condition, int max) {") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.readWConditionRaw(reader, condition, max, _handles, _valids)") != null);
+
+    try testing.expect(std.mem.indexOf(u8, r, "public Sample[] take_next_instance_w_condition(Dcps.DDS.ReadCondition condition, long prev, int max) {") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.takeNextInstanceWConditionRaw(reader, condition, prev, max, _handles, _valids)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "public Sample[] read_next_instance_w_condition(Dcps.DDS.ReadCondition condition, long prev, int max) {") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.readNextInstanceWConditionRaw(reader, condition, prev, max, _handles, _valids)") != null);
+
+    try testing.expect(std.mem.indexOf(u8, r, "public Foo get_key_value(long handle) {") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.getKeyValueReaderRaw(reader, handle)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "Foo.deserializeKey(_buf, 4, _xcdrVersion)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "public long lookup_instance(Foo key) {") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.lookupInstanceReaderRaw(reader, key.computeKeyHash())") != null);
 }
 
 test "java: --generate-zzdds-wrappers still emits DataWriter/DataReader for a keyless struct" {

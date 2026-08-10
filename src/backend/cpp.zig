@@ -476,6 +476,7 @@ const Generator = struct {
         try self.write("public:\n");
         try self.print("    {s}DataWriter(DDS_DataWriter writer, int xcdr_version = ZIDL_XCDR1) : writer_(writer), xcdr_version_(xcdr_version) {{}}\n", .{class_name});
         try self.print("    DDS_InstanceHandle_t register_instance(const {s}& key);\n", .{cpp_qname});
+        try self.print("    DDS_InstanceHandle_t register_instance_w_timestamp(const {s}& key, DDS_Time_t timestamp);\n", .{cpp_qname});
         try self.print("    int write(const {s}& value);\n", .{cpp_qname});
         try self.print("    int write_w_timestamp(const {s}& value, DDS_Time_t timestamp);\n", .{cpp_qname});
         try self.print("    int dispose(const {s}& key);\n", .{cpp_qname});
@@ -522,6 +523,12 @@ const Generator = struct {
         try self.print("    DDS_InstanceHandle_t lookup_instance(const {s}& key);\n", .{cpp_qname});
         try self.print("    int take_n({s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{cpp_qname});
         try self.print("    int read_n({s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{cpp_qname});
+        try self.print("    int take_instance(DDS_InstanceHandle_t instance_handle, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{cpp_qname});
+        try self.print("    int read_instance(DDS_InstanceHandle_t instance_handle, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{cpp_qname});
+        try self.print("    int take_w_condition(DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max);\n", .{cpp_qname});
+        try self.print("    int read_w_condition(DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max);\n", .{cpp_qname});
+        try self.print("    int take_next_instance_w_condition(DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max);\n", .{cpp_qname});
+        try self.print("    int read_next_instance_w_condition(DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max);\n", .{cpp_qname});
         try self.write("    int take_loaned(Loan& out);\n");
         try self.write("private:\n");
         try self.write("    DDS_DataReader reader_;\n");
@@ -2034,6 +2041,19 @@ const CdrGenerator = struct {
         try self.writeI("return _ih;\n");
         try self.write("}\n\n");
 
+        // Unlike write/dispose/unregister_w_timestamp below (which thread
+        // `timestamp` through to zzdds_write_raw_w_timestamp), zzdds's own
+        // instance registration (zzdds_register_instance_raw) is a pure,
+        // stateless key-hash-to-handle computation with no source-timestamp
+        // involvement -- `timestamp` is accepted here only for spec-shape
+        // compliance and is genuinely unused; delegates straight to
+        // register_instance() so the instance_handles_ bookkeeping stays in
+        // one place.
+        try self.print("DDS_InstanceHandle_t {s}DataWriter::register_instance_w_timestamp(const {s}& key, DDS_Time_t timestamp) {{\n", .{ class_name, cpp_qname });
+        try self.writeI("(void)timestamp;\n");
+        try self.writeI("return register_instance(key);\n");
+        try self.write("}\n\n");
+
         try self.print("static int {s}_write_kind_w_timestamp(DDS_DataWriter writer, int xcdr_version, zzdds_write_kind kind, const {s}& value, bool key_only, DDS_InstanceHandle_t handle, DDS_Time_t timestamp) {{\n", .{ class_name, cpp_qname });
         try self.writeI("ZidlCdrWriter _w;\n");
         try self.writeI("uint8_t _hash[16];\n");
@@ -2207,6 +2227,96 @@ const CdrGenerator = struct {
         try self.print("int {s}DataReader::read_n({s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ class_name, cpp_qname });
         try self.writeI("return ");
         try self.print("{s}_reader_n_impl(reader_, values, infos, max, ss, vs, is, false);\n", .{class_name});
+        try self.write("}\n\n");
+
+        // Decodes zzdds_raw_sample_array `_arr` into `values`/`infos`, freeing
+        // `_arr` either way -- the shared tail of every batch reader op below
+        // (take_instance/read_instance, take_w_condition/read_w_condition,
+        // take_next_instance_w_condition/read_next_instance_w_condition),
+        // which otherwise only differ in which zzdds_*_raw call produces `_arr`.
+        try self.print("static int {s}_reader_decode_arr(DDS_DataReader reader, zzdds_raw_sample_array *_arr, {s} *values, zzdds_sample_info *infos) {{\n", .{ class_name, cpp_qname });
+        try self.writeI("for (size_t _i = 0; _i < _arr->count; _i++) {\n");
+        self.indent_depth += 1;
+        try self.writeI("infos[_i] = _arr->samples[_i].info;\n");
+        try self.writeI("ZidlCdrReader _r;\n");
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _arr->samples[_i].data, _arr->samples[_i].data_len);\n");
+        try self.writeI("if (!_rc) _rc = infos[_i].valid_data ?\n");
+        self.indent_depth += 1;
+        try self.printI("{s}_deserialize(&_r, &values[_i]) :\n", .{c_name});
+        try self.printI("{s}_deserialize_key(&_r, &values[_i]);\n", .{c_name});
+        self.indent_depth -= 1;
+        try self.writeI("if (_rc) {\n");
+        self.indent_depth += 1;
+        try self.writeI("for (size_t _j = 0; _j < _i; _j++) values[_j] = {};\n");
+        try self.writeI("zzdds_return_raw_samples(reader, _arr);\n");
+        try self.writeI("return _rc;\n");
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.writeI("int _n = (int)_arr->count;\n");
+        try self.writeI("zzdds_return_raw_samples(reader, _arr);\n");
+        try self.writeI("return _n;\n");
+        try self.write("}\n\n");
+
+        try self.print("static int {s}_reader_n_instance_impl(DDS_DataReader reader, DDS_InstanceHandle_t instance_handle, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is, bool destructive) {{\n", .{ class_name, cpp_qname });
+        try self.writeI("zzdds_raw_sample_array _arr{};\n");
+        try self.writeI("int _n = destructive ?\n");
+        self.indent_depth += 1;
+        try self.writeI("zzdds_take_n_instance_raw(reader, instance_handle, ss, vs, is, max, &_arr) :\n");
+        try self.writeI("zzdds_read_n_instance_raw(reader, instance_handle, ss, vs, is, max, &_arr);\n");
+        self.indent_depth -= 1;
+        try self.writeI("if (_n <= 0) return _n;\n");
+        try self.printI("return {s}_reader_decode_arr(reader, &_arr, values, infos);\n", .{class_name});
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader::take_instance(DDS_InstanceHandle_t instance_handle, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ class_name, cpp_qname });
+        try self.writeI("return ");
+        try self.print("{s}_reader_n_instance_impl(reader_, instance_handle, values, infos, max, ss, vs, is, true);\n", .{class_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataReader::read_instance(DDS_InstanceHandle_t instance_handle, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ class_name, cpp_qname });
+        try self.writeI("return ");
+        try self.print("{s}_reader_n_instance_impl(reader_, instance_handle, values, infos, max, ss, vs, is, false);\n", .{class_name});
+        try self.write("}\n\n");
+
+        try self.print("static int {s}_reader_w_condition_impl(DDS_DataReader reader, DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max, bool destructive) {{\n", .{ class_name, cpp_qname });
+        try self.writeI("zzdds_raw_sample_array _arr{};\n");
+        try self.writeI("int _n = destructive ?\n");
+        self.indent_depth += 1;
+        try self.writeI("zzdds_take_w_condition_raw(reader, condition, max, &_arr) :\n");
+        try self.writeI("zzdds_read_w_condition_raw(reader, condition, max, &_arr);\n");
+        self.indent_depth -= 1;
+        try self.writeI("if (_n <= 0) return _n;\n");
+        try self.printI("return {s}_reader_decode_arr(reader, &_arr, values, infos);\n", .{class_name});
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader::take_w_condition(DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max) {{\n", .{ class_name, cpp_qname });
+        try self.writeI("return ");
+        try self.print("{s}_reader_w_condition_impl(reader_, condition, values, infos, max, true);\n", .{class_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataReader::read_w_condition(DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max) {{\n", .{ class_name, cpp_qname });
+        try self.writeI("return ");
+        try self.print("{s}_reader_w_condition_impl(reader_, condition, values, infos, max, false);\n", .{class_name});
+        try self.write("}\n\n");
+
+        try self.print("static int {s}_reader_next_instance_w_condition_impl(DDS_DataReader reader, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max, bool destructive) {{\n", .{ class_name, cpp_qname });
+        try self.writeI("zzdds_raw_sample_array _arr{};\n");
+        try self.writeI("int _n = destructive ?\n");
+        self.indent_depth += 1;
+        try self.writeI("zzdds_take_next_instance_w_condition_raw(reader, condition, prev, max, &_arr) :\n");
+        try self.writeI("zzdds_read_next_instance_w_condition_raw(reader, condition, prev, max, &_arr);\n");
+        self.indent_depth -= 1;
+        try self.writeI("if (_n <= 0) return _n;\n");
+        try self.printI("return {s}_reader_decode_arr(reader, &_arr, values, infos);\n", .{class_name});
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader::take_next_instance_w_condition(DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max) {{\n", .{ class_name, cpp_qname });
+        try self.writeI("return ");
+        try self.print("{s}_reader_next_instance_w_condition_impl(reader_, condition, prev, values, infos, max, true);\n", .{class_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataReader::read_next_instance_w_condition(DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max) {{\n", .{ class_name, cpp_qname });
+        try self.writeI("return ");
+        try self.print("{s}_reader_next_instance_w_condition_impl(reader_, condition, prev, values, infos, max, false);\n", .{class_name});
         try self.write("}\n\n");
 
         try self.print("int {s}DataReader::take_loaned(Loan& out) {{\n", .{class_name});
@@ -7237,6 +7347,89 @@ test "cpp_backend cdr: _reader_n_impl cleans up partial samples on deserializati
     const s = out.items;
     try testing.expect(has(s, "for (int _j = 0; _j < _i; _j++) values[_j] = {};"));
     try testing.expect(has(s, "zzdds_return_raw_samples(reader, &_arr);"));
+}
+
+// ── _w_condition family / batch take_instance / register_instance_w_timestamp ──
+
+test "cpp_backend: zzdds wrapper declarations include the _w_condition family, batch take_instance, and register_instance_w_timestamp" {
+    var out = try testGenOpts(
+        "@appendable struct Topic { @key long id; string<16> name; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "DDS_InstanceHandle_t register_instance_w_timestamp(const ::Topic& key, DDS_Time_t timestamp);"));
+    try testing.expect(has(s, "int take_instance(DDS_InstanceHandle_t instance_handle, ::Topic *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);"));
+    try testing.expect(has(s, "int read_instance(DDS_InstanceHandle_t instance_handle, ::Topic *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);"));
+    try testing.expect(has(s, "int take_w_condition(DDS_ReadCondition condition, ::Topic *values, zzdds_sample_info *infos, int max);"));
+    try testing.expect(has(s, "int read_w_condition(DDS_ReadCondition condition, ::Topic *values, zzdds_sample_info *infos, int max);"));
+    try testing.expect(has(s, "int take_next_instance_w_condition(DDS_ReadCondition condition, DDS_InstanceHandle_t prev, ::Topic *values, zzdds_sample_info *infos, int max);"));
+    try testing.expect(has(s, "int read_next_instance_w_condition(DDS_ReadCondition condition, DDS_InstanceHandle_t prev, ::Topic *values, zzdds_sample_info *infos, int max);"));
+}
+
+test "cpp_backend cdr: register_instance_w_timestamp ignores its timestamp and delegates to register_instance" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "DDS_InstanceHandle_t TopicDataWriter::register_instance_w_timestamp(const ::Topic& key, DDS_Time_t timestamp) {"));
+    try testing.expect(has(s, "(void)timestamp;"));
+    try testing.expect(has(s, "return register_instance(key);"));
+}
+
+test "cpp_backend cdr: take_instance/read_instance call the instance-scoped raw ops" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "zzdds_take_n_instance_raw(reader, instance_handle, ss, vs, is, max, &_arr) :"));
+    try testing.expect(has(s, "zzdds_read_n_instance_raw(reader, instance_handle, ss, vs, is, max, &_arr);"));
+    try testing.expect(has(s, "int TopicDataReader::take_instance(DDS_InstanceHandle_t instance_handle, ::Topic *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {"));
+}
+
+test "cpp_backend cdr: take_w_condition/read_w_condition call zzdds_take_w_condition_raw/zzdds_read_w_condition_raw" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "zzdds_take_w_condition_raw(reader, condition, max, &_arr) :"));
+    try testing.expect(has(s, "zzdds_read_w_condition_raw(reader, condition, max, &_arr);"));
+    try testing.expect(has(s, "int TopicDataReader::take_w_condition(DDS_ReadCondition condition, ::Topic *values, zzdds_sample_info *infos, int max) {"));
+}
+
+test "cpp_backend cdr: take_next_instance_w_condition/read_next_instance_w_condition call the matching raw ops" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "zzdds_take_next_instance_w_condition_raw(reader, condition, prev, max, &_arr) :"));
+    try testing.expect(has(s, "zzdds_read_next_instance_w_condition_raw(reader, condition, prev, max, &_arr);"));
+    try testing.expect(has(s, "int TopicDataReader::take_next_instance_w_condition(DDS_ReadCondition condition, DDS_InstanceHandle_t prev, ::Topic *values, zzdds_sample_info *infos, int max) {"));
+}
+
+test "cpp_backend cdr: _reader_decode_arr cleans up partial samples on deserialization failure" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; string name; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "static int Topic_reader_decode_arr(DDS_DataReader reader, zzdds_raw_sample_array *_arr, ::Topic *values, zzdds_sample_info *infos) {"));
+    try testing.expect(has(s, "for (size_t _j = 0; _j < _i; _j++) values[_j] = {};"));
 }
 
 test "cpp_backend: A1+A2 — namespaced struct uses IDL-scoped type name and namespace wrapper" {
