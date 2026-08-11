@@ -683,6 +683,20 @@ const Generator = struct {
             try self.print("    {s}();\n", .{u.name});
             try self.print("    {s}(const {s} &other);\n", .{ u.name, u.name });
             try self.print("    {s} &operator=(const {s} &other);\n", .{ u.name, u.name });
+            // A real (not compiler-implicit) noexcept move ctor/assign,
+            // needed for two reasons: (1) operator=(const&) copies into a
+            // temporary first, then *moves* that temporary into *this so
+            // nothing past the (only throwable) copy can fail -- but that's
+            // only true if the move it performs is actually noexcept, not a
+            // silent fallback to a throwing copy; (2) when this union is
+            // itself used as a case inside another union, that outer
+            // union's own move needs a real move to delegate to for the
+            // same reason. Without these, std::move(other) here would bind
+            // to the copy ctor above (a plain `const&` accepts an rvalue),
+            // which reintroduces exactly the exception-safety hole this
+            // whole lifecycle story exists to close.
+            try self.print("    {s}({s} &&other) noexcept;\n", .{ u.name, u.name });
+            try self.print("    {s} &operator=({s} &&other) noexcept;\n", .{ u.name, u.name });
             try self.print("    ~{s}();\n", .{u.name});
             try self.print("    void _d({s} v);\n", .{disc_cpp});
         } else {
@@ -722,8 +736,8 @@ const Generator = struct {
             try self.write("    void _destroy_active() noexcept;\n");
             try self.write("    void _construct_default();\n");
             try self.print("    void _copy_construct_from(const {s} &other);\n", .{u.name});
-            // Move-from: used by operator= via a temporary, not by the move
-            // ctor/assign (there isn't one -- see the class comment above).
+            // Shared by the move ctor, move assignment, and operator=(const&)'s
+            // temporary-to-*this step.
             try self.print("    void _move_construct_from({s} &other);\n", .{u.name});
         }
         try self.print("    {s} _disc{{}};\n", .{disc_cpp});
@@ -2456,6 +2470,41 @@ const CdrGenerator = struct {
 
     // ── Union ─────────────────────────────────────────────────────────────────
 
+    /// True if a scalar (non-array) union case of this type is serialized
+    /// via `Foo_serialize(_w, &access)` -- i.e. needs an addressable lvalue
+    /// -- rather than by passing/calling on `access` directly. See
+    /// `emitUnionCaseSerializeAccess`.
+    fn typeRefNeedsAddressableAccess(tr: ir.TypeRef) bool {
+        return switch (resolveTypeRef(tr)) {
+            .named => |td| switch (td) {
+                .struct_, .union_, .exception => true,
+                else => false,
+            },
+            else => false,
+        };
+    }
+
+    /// Build the access expression for a scalar (non-array) union case
+    /// inside a serialize switch arm. The case's own getter
+    /// (`{s} {s}() const { return _u._{s}; }` in Generator.emitUnion, see
+    /// there) returns by value for every non-array case -- fine for a type
+    /// serialized by calling a method on it or passing it directly (base,
+    /// string, sequence, enum, …), but a struct/union/exception-typed case
+    /// is serialized via `Foo_serialize(_w, &access)`, and taking the
+    /// address of that by-value return (a temporary) is ill-formed C++.
+    /// For those, declare a local `const` copy first and return its name (a
+    /// real lvalue) instead of the raw getter-call expression.
+    fn emitUnionCaseSerializeAccess(self: *CdrGenerator, cas: ir.UnionCase) anyerror![]u8 {
+        if (typeRefNeedsAddressableAccess(cas.type_ref)) {
+            const cpp_type = try cppTypeStr(self.alloc, self.opts, cas.type_ref);
+            defer self.alloc.free(cpp_type);
+            const tmp_name = try std.fmt.allocPrint(self.alloc, "_tmp_{s}", .{cas.name});
+            try self.printI("const {s} {s} = _v->{s}();\n", .{ cpp_type, tmp_name, cas.name });
+            return tmp_name;
+        }
+        return std.fmt.allocPrint(self.alloc, "_v->{s}()", .{cas.name});
+    }
+
     fn emitUnionFns(self: *CdrGenerator, u: *const ir.Union) anyerror!void {
         const c_name = try self.prefixedCName(u.qualified_name);
         defer self.alloc.free(c_name);
@@ -2512,7 +2561,7 @@ const CdrGenerator = struct {
                     try self.printI("zidl_cdr_patch_emheader(_w, _em_c{d}, _es_c{d}); }}\n", .{ cas_idx, cas_idx });
                     self.indent_depth -= 1;
                 } else {
-                    const access = try std.fmt.allocPrint(self.alloc, "_v->{s}()", .{cas.name});
+                    const access = try self.emitUnionCaseSerializeAccess(cas);
                     defer self.alloc.free(access);
                     if (lcForCppTypeRef(cas.type_ref, cas.dimensions)) |lc| {
                         try self.printI("_rc = zidl_cdr_write_emheader(_w, {d}, 0, {d});\n", .{ case_member_id, lc });
@@ -2561,7 +2610,7 @@ const CdrGenerator = struct {
                     defer self.alloc.free(access);
                     try self.emitWriteArray(cas.type_ref, access, cas.dimensions, 0);
                 } else {
-                    const access = try std.fmt.allocPrint(self.alloc, "_v->{s}()", .{cas.name});
+                    const access = try self.emitUnionCaseSerializeAccess(cas);
                     defer self.alloc.free(access);
                     try self.emitWriteForTypeRef(cas.type_ref, cas.name, access);
                 }
@@ -3087,6 +3136,33 @@ const CdrGenerator = struct {
         try self.print("{s}::{s}(const {s} &other) : _disc(other._disc) {{\n", .{ cpp_qname, u.name, cpp_qname });
         self.indent_depth += 1;
         try self.writeI("_copy_construct_from(other);\n");
+        self.indent_depth -= 1;
+        try self.write("}\n\n");
+
+        // Real (not compiler-implicit) move ctor/assign: every case's own
+        // move is noexcept (std::string/vector/map's move ctors are
+        // noexcept by the standard; a nested generated union's move is
+        // noexcept because every such union gets this exact same pair; a
+        // struct case's compiler-implicit move is noexcept because its
+        // members can only be one of those). So this is never a
+        // throwing-copy fallback the way std::move(other) would be for a
+        // type with no move ctor of its own.
+        try self.print("{s}::{s}({s} &&other) noexcept : _disc(other._disc) {{\n", .{ cpp_qname, u.name, cpp_qname });
+        self.indent_depth += 1;
+        try self.writeI("_move_construct_from(other);\n");
+        self.indent_depth -= 1;
+        try self.write("}\n\n");
+
+        try self.print("{s} &{s}::operator=({s} &&other) noexcept {{\n", .{ cpp_qname, cpp_qname, cpp_qname });
+        self.indent_depth += 1;
+        try self.writeI("if (this != &other) {\n");
+        self.indent_depth += 1;
+        try self.writeI("_destroy_active();\n");
+        try self.writeI("_disc = other._disc;\n");
+        try self.writeI("_move_construct_from(other);\n");
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.writeI("return *this;\n");
         self.indent_depth -= 1;
         try self.write("}\n\n");
 
@@ -6965,6 +7041,54 @@ test "cpp_backend cdr: non-trivial union operator= copies into a temporary befor
     // after the temporary's construction safe.
     try testing.expect(has(s, "void ::Var::_move_construct_from(::Var &other) {"));
     try testing.expect(has(s, "new (&(_u._s)) std::string(std::move(other._u._s));"));
+}
+
+test "cpp_backend: non-trivial union gets a real noexcept move ctor/assign" {
+    var out = try testGen(
+        \\union Var switch (long) { case 0: long i; default: string s; };
+    , "var");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Required so std::move(other) in _move_construct_from actually selects
+    // a real move (noexcept) instead of silently falling back to the copy
+    // ctor above it (a plain `const&` parameter also accepts an rvalue) --
+    // which would reintroduce the throwing-copy hole operator= exists to
+    // avoid, specifically when this union is itself used as a case inside
+    // another union (see the CDR test below).
+    try testing.expect(has(s, "Var(Var &&other) noexcept;"));
+    try testing.expect(has(s, "Var &operator=(Var &&other) noexcept;"));
+}
+
+test "cpp_backend cdr: a union used as another union's case gets a real move, not a throwing-copy fallback" {
+    var out = try testGenCdr(
+        \\union Inner switch (long) { case 0: long i; default: string s; };
+        \\union Outer switch (long) { case 0: long i; default: Inner nested; };
+    , "outer");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Inner itself must get a real move ctor (checked above already applies
+    // per-union, so this just confirms Outer's own move-from delegates via
+    // std::move -- which only avoids Inner's copy ctor because Inner has a
+    // real move ctor to bind to).
+    try testing.expect(has(s, "void ::Outer::_move_construct_from(::Outer &other) {"));
+    try testing.expect(has(s, "new (&(_u._nested)) ::Inner(std::move(other._u._nested));"));
+}
+
+test "cpp_backend cdr: serializing a struct/union-typed union case copies into a local first, not &-of-temporary" {
+    var out = try testGenCdr(
+        \\union Inner switch (long) { case 0: long i; default: string s; };
+        \\union Outer switch (long) { case 0: long i; default: Inner nested; };
+    , "outer");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // The case getter (`{s} {s}() const { return _u._{s}; }` in
+    // Generator.emitUnion) returns by value for every non-array case --
+    // `Inner_serialize(_w, &_v->nested())` would take the address of that
+    // temporary, which is ill-formed C++. A local const copy is an
+    // addressable lvalue instead.
+    try testing.expect(has(s, "const ::Inner _tmp_nested = _v->nested();"));
+    try testing.expect(has(s, "Inner_serialize(_w, &_tmp_nested);"));
+    try testing.expect(!has(s, "Inner_serialize(_w, &_v->nested());"));
 }
 
 test "cpp_backend: typedef scalar" {
