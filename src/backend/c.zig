@@ -696,6 +696,13 @@ const Generator = struct {
         if (!self.opts.no_typesupport) {
             try self.emitUnionCdrProtos(c_name);
         }
+        if (unionHasSequenceFields(u)) {
+            // Declared unconditionally, even under --c-no-free -- see the
+            // matching struct _free prototype comment above (emitStruct).
+            const em = self.opts.export_macro;
+            const sp: []const u8 = if (em.len > 0) " " else "";
+            try self.print("{s}{s}void {s}_free({s} *v);\n\n", .{ em, sp, c_name, c_name });
+        }
         try self.emitVerbatimForPlacement(u.annotations.raw, "after-declaration");
     }
 
@@ -1421,10 +1428,29 @@ fn typeRefHasSequence(tr: ir.TypeRef) bool {
             // not a reason to skip generating a _free() at all.
             .typedef => |t| typeRefHasSequence(t.type_ref),
             .struct_ => |s| structHasSequenceFields(s),
+            .union_ => |u| unionHasSequenceFields(u),
             else => false,
         },
         else => false,
     };
+}
+
+/// True if any of `u`'s cases owns heap memory (an unbounded string/wstring,
+/// a sequence, or a nested struct/union that itself does) -- the union
+/// equivalent of `structHasSequenceFields`. Found missing during review
+/// (Greptile, PR #38): without this, a struct member typed as a named union
+/// was invisible to `typeRefHasSequence`, so a union case's owned content
+/// was never freed by anything -- not `_free()` gating, not `emitUnionFree`
+/// (which didn't exist at all before this fix either, for any consumer, not
+/// just struct members). Confirmed via direct inspection, not just the
+/// review comment: `emitUnionFns` (serialize/deserialize) never emitted a
+/// `_free` function for any union, and `typeRefHasSequence`'s `.named`
+/// switch had no `.union_` arm at all.
+fn unionHasSequenceFields(u: *const ir.Union) bool {
+    for (u.cases) |cas| {
+        if (typeRefHasSequence(cas.type_ref)) return true;
+    }
+    return false;
 }
 
 fn isDefaultUnionCase(cas: ir.UnionCase) bool {
@@ -1805,7 +1831,10 @@ const CdrGenerator = struct {
                 if (structHasSequenceFields(s) and !self.opts.c_no_free) try self.emitStructFree(s);
             },
             .exception => |e| try self.emitExceptionFns(e),
-            .union_ => |u| try self.emitUnionFns(u),
+            .union_ => |u| {
+                try self.emitUnionFns(u);
+                if (unionHasSequenceFields(u) and !self.opts.c_no_free) try self.emitUnionFree(u);
+            },
             else => {},
         }
     }
@@ -3934,6 +3963,46 @@ const CdrGenerator = struct {
         try self.write("}\n\n");
     }
 
+    /// Emit `void <CName>_free(<CName> *v)` for a union -- the union
+    /// counterpart of `emitStructFree`, switching on the active discriminant
+    /// (`v->_d`) and freeing whichever case's content is actually owned
+    /// heap memory. Only called when `unionHasSequenceFields(u)` is true.
+    /// Cases that don't own memory get no switch arm at all (an unmatched
+    /// discriminant value with no case and no default is a well-defined
+    /// C no-op, same as `emitStructFree` skipping non-owning members
+    /// entirely rather than emitting an empty guard for them).
+    fn emitUnionFree(self: *CdrGenerator, u: *const ir.Union) anyerror!void {
+        const c_name = try self.prefixedCName(u.qualified_name);
+        defer self.alloc.free(c_name);
+
+        try self.print("void {s}_free({s} *v) {{\n", .{ c_name, c_name });
+        try self.writeI("switch (v->_d) {\n");
+        self.indent_depth += 1;
+        for (u.cases) |cas| {
+            // Every case gets a label, owning or not: a non-owning case must
+            // not be silently omitted, or its discriminant value falls
+            // through to `default:` at runtime whenever the default case
+            // happens to be an owning one -- e.g. a plain int case wrongly
+            // running the default string case's free() on a non-pointer.
+            try self.emitUnionCaseLabelLinesC(u.discriminant, cas);
+            self.indent_depth += 1;
+            if (typeRefHasSequence(cas.type_ref)) {
+                const access = try std.fmt.allocPrint(self.alloc, "v->_u.{s}", .{cas.name});
+                defer self.alloc.free(access);
+                if (cas.dimensions.len > 0) {
+                    try self.emitFreeArrayElementsGeneral(cas.type_ref, access, cas.dimensions, 0);
+                } else {
+                    try self.emitFreeTypeRefGeneral(cas.type_ref, access, 0);
+                }
+            }
+            try self.writeI("break;\n");
+            self.indent_depth -= 1;
+        }
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.write("}\n\n");
+    }
+
     /// Emit the free logic for a single non-array field/element lvalue of type
     /// `tr`. Assumes `typeRefHasSequence(tr)` is already known true by the caller
     /// (callers only invoke this for fields worth visiting).
@@ -3977,6 +4046,11 @@ const CdrGenerator = struct {
                     const ns_c = try self.prefixedCName(ns.qualified_name);
                     defer self.alloc.free(ns_c);
                     try self.printI("{s}_free(&{s});\n", .{ ns_c, lval });
+                },
+                .union_ => |nu| if (unionHasSequenceFields(nu)) {
+                    const nu_c = try self.prefixedCName(nu.qualified_name);
+                    defer self.alloc.free(nu_c);
+                    try self.printI("{s}_free(&{s});\n", .{ nu_c, lval });
                 },
                 else => {},
             },
@@ -4852,6 +4926,72 @@ test "c_backend: typedef scalar" {
     var out = try testGen("typedef long MyInt;", "types");
     defer out.deinit(testing.allocator);
     try testing.expect(has(out.items, "typedef int32_t MyInt;"));
+}
+
+// ── Union ownership / _free (Greptile review, PR #38) ───────────────────────
+//
+// Before this fix, no union ever got a _free() at all -- typeRefHasSequence
+// had no .union_ arm, so a union case's owned content was invisible to
+// every ownership-tracking consumer, not just the batch-decode cleanup this
+// PR originally touched.
+
+test "c_backend: union with an owned case gets a _free prototype" {
+    var out = try testGen(
+        \\union Var switch (long) { case 0: long i; default: string s; };
+    , "var");
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "void Var_free(Var *v);"));
+}
+
+test "c_backend: union with no owning cases gets no _free at all" {
+    var out = try testGen(
+        \\union NoOwn switch (long) { case 0: long a; default: long b; };
+    , "noown");
+    defer out.deinit(testing.allocator);
+    try testing.expect(!has(out.items, "NoOwn_free"));
+}
+
+test "c_backend cdr: union _free frees only the owning case" {
+    var out = try testGenCdr(
+        \\union Var switch (long) { case 0: long i; default: string s; };
+    , "var");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "void Var_free(Var *v) {"));
+    try testing.expect(has(s, "switch (v->_d) {"));
+    // The int case (0) owns nothing, but it still needs its own case label
+    // with a bare break -- omitting it would let discriminant 0 fall through
+    // into `default:` below and wrongly run the string case's free() on a
+    // non-pointer value.
+    try testing.expect(has(s, "case 0:\n            break;"));
+    try testing.expect(!has(s, "case 0:\n    zidl_cdr_free"));
+    // The string case (default) does free.
+    try testing.expect(has(s, "default:\n"));
+    try testing.expect(has(s, "zidl_cdr_free_str(v->_u.s);"));
+}
+
+test "c_backend cdr: struct embedding an owning union delegates to the union's own _free" {
+    var out = try testGenCdr(
+        \\union Var switch (long) { case 0: long i; default: string s; };
+        \\struct Holder { @key long id; Var v; };
+    , "holder");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // The union member alone must be enough to trigger Holder_free's
+    // existence -- this is the actual bug: before the .union_ arm was added
+    // to typeRefHasSequence, a struct whose *only* owning content was a
+    // union member got no _free() generated for it at all.
+    try testing.expect(has(s, "void Holder_free(Holder *v) {"));
+    try testing.expect(has(s, "Var_free(&v->v);"));
+}
+
+test "c_backend cdr: struct with only a non-owning union member gets no _free" {
+    var out = try testGenCdr(
+        \\union NoOwn switch (long) { case 0: long a; default: long b; };
+        \\struct Holder { @key long id; NoOwn v; };
+    , "holder");
+    defer out.deinit(testing.allocator);
+    try testing.expect(!has(out.items, "Holder_free"));
 }
 
 test "c_backend: typedef array" {

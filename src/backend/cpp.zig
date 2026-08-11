@@ -33,10 +33,15 @@
 //! resolve unambiguously inside any namespace.  Example: a type `Foo::Bar::Baz`
 //! is referenced as `::Foo::Bar::Baz`.
 //!
-//! Unions with members of non-trivially-constructible types (std::string,
-//! std::vector, …) produce C++ that requires explicit constructor/destructor
-//! definitions; the generator does not emit those.  Backends targeting complex
-//! unions should use `std::variant` instead.
+//! Unions with cases of non-trivially-constructible types (std::string,
+//! std::vector, …) get explicit constructor/destructor/copy special member
+//! functions generated for them (declared in the header, defined out-of-line
+//! in the .cpp), since a raw anonymous union with such a member has no
+//! usable implicit ones.  `_d()` -- not just the ctor/dtor/copy ops -- is
+//! also responsible for placement-constructing/destroying the active case
+//! when the discriminant changes; case setters assume `_d()` was already
+//! called with a matching value, which is how (de)serialization always
+//! calls them.
 
 const std = @import("std");
 const ast = @import("../ast.zig");
@@ -198,6 +203,7 @@ const Generator = struct {
         optional: bool = false,
         union_arrays: bool = false,
         memory: bool = false,
+        union_lifetime: bool = false,
     };
 
     fn scanIncludes(items: []const ir.ModuleItem) IncludeNeeds {
@@ -222,6 +228,7 @@ const Generator = struct {
                             if (c.dimensions.len > 0) needs.union_arrays = true;
                             scanIncludesTypeRef(c.type_ref, needs);
                         }
+                        if (unionNeedsCppLifetime(u)) needs.union_lifetime = true;
                     },
                     .exception => |e| {
                         for (e.members) |mem| {
@@ -282,6 +289,7 @@ const Generator = struct {
         if (needs.map) try self.write("#include <map>\n");
         if (needs.optional) try self.write("#include <optional>\n");
         if (needs.union_arrays) try self.write("#include <cstring>\n");
+        if (needs.union_lifetime) try self.write("#include <new>\n");
         try self.write("#include <array>\n");
         try self.write("#include <stdexcept>\n");
         if (!self.opts.no_typesupport) {
@@ -658,21 +666,50 @@ const Generator = struct {
         try self.emitVerbatimForPlacement(u.annotations.raw, "before-declaration");
         const disc_cpp = try self.typeRefToCpp(u.discriminant);
         defer self.alloc.free(disc_cpp);
+        const needs_lifetime = unionNeedsCppLifetime(u);
 
         try self.print("class {s} {{\npublic:\n", .{u.name});
 
-        // Discriminant accessors.
-        try self.print("    void _d({s} v) noexcept {{ _disc = v; }}\n", .{disc_cpp});
+        if (needs_lifetime) {
+            // At least one case holds a non-trivially-constructible/
+            // destructible type (std::string, std::vector, …). The raw
+            // union below has no usable implicit special member functions
+            // for that, so they're declared here and defined out-of-line
+            // (in the .cpp) to placement-construct/destroy whichever case
+            // `_disc` currently selects. `_d()` -- not just the ctor/dtor/
+            // copy ops -- must also switch the active member: it's the only
+            // point that knows a case change is happening, since the case
+            // setter below doesn't know what was previously active.
+            try self.print("    {s}();\n", .{u.name});
+            try self.print("    {s}(const {s} &other);\n", .{ u.name, u.name });
+            try self.print("    {s} &operator=(const {s} &other);\n", .{ u.name, u.name });
+            try self.print("    ~{s}();\n", .{u.name});
+            try self.print("    void _d({s} v);\n", .{disc_cpp});
+        } else {
+            try self.print("    void _d({s} v) noexcept {{ _disc = v; }}\n", .{disc_cpp});
+        }
         try self.print("    {s} _d() const noexcept {{ return _disc; }}\n", .{disc_cpp});
 
-        // Case accessors (setter + getter).
+        // Case accessors (setter + getter). Valid once _d() has selected the
+        // matching case -- a no-op for a union with no non-trivial cases.
         for (u.cases) |cas| {
             const mem_cpp = try self.typeRefToCpp(cas.type_ref);
             defer self.alloc.free(mem_cpp);
             if (cas.dimensions.len > 0) {
                 const dims_str = try cArrayDimsStr(self.alloc, cas.dimensions);
                 defer self.alloc.free(dims_str);
-                try self.print("    void {s}({s} const (&v){s}) noexcept {{ std::memcpy(_u._{s}, v, sizeof(_u._{s})); }}\n", .{ cas.name, mem_cpp, dims_str, cas.name, cas.name });
+                if (typeRefIsCppNonTrivial(cas.type_ref)) {
+                    // memcpy would corrupt a non-trivial element's internal
+                    // representation (e.g. std::string) -- assign element-
+                    // by-element into the already-constructed array instead.
+                    const dst_base = try std.fmt.allocPrint(self.alloc, "_u._{s}", .{cas.name});
+                    defer self.alloc.free(dst_base);
+                    const loop = try arrayAssignLoopCpp(self.alloc, cas.dimensions, 0, dst_base, "v");
+                    defer self.alloc.free(loop);
+                    try self.print("    void {s}({s} const (&v){s}) {{ {s} }}\n", .{ cas.name, mem_cpp, dims_str, loop });
+                } else {
+                    try self.print("    void {s}({s} const (&v){s}) noexcept {{ std::memcpy(_u._{s}, v, sizeof(_u._{s})); }}\n", .{ cas.name, mem_cpp, dims_str, cas.name, cas.name });
+                }
                 try self.print("    auto {s}() const noexcept -> {s} const (&){s} {{ return _u._{s}; }}\n", .{ cas.name, mem_cpp, dims_str, cas.name });
             } else {
                 try self.print("    void {s}({s} v) {{ _u._{s} = v; }}\n", .{ cas.name, mem_cpp, cas.name });
@@ -681,8 +718,25 @@ const Generator = struct {
         }
 
         try self.write("private:\n");
+        if (needs_lifetime) {
+            try self.write("    void _destroy_active() noexcept;\n");
+            try self.write("    void _construct_default();\n");
+            try self.print("    void _copy_construct_from(const {s} &other);\n", .{u.name});
+        }
         try self.print("    {s} _disc{{}};\n", .{disc_cpp});
-        try self.write("    union {\n");
+        if (needs_lifetime) {
+            // A plain unnamed union has no way to name a constructor, so its
+            // implicit default ctor/dtor stay deleted (ill-formed) for any
+            // non-trivial member regardless of what special members Var
+            // itself declares above. Naming the union type lets it get its
+            // own EMPTY ctor/dtor -- "empty" is correct: no member is
+            // constructed until _construct_default()/_d() placement-new one
+            // in, and none is torn down here until _destroy_active() does,
+            // both driven by the runtime discriminant, not by this type.
+            try self.write("    union _Storage {\n");
+        } else {
+            try self.write("    union {\n");
+        }
         for (u.cases) |cas| {
             const mem_cpp = try self.typeRefToCpp(cas.type_ref);
             defer self.alloc.free(mem_cpp);
@@ -694,8 +748,10 @@ const Generator = struct {
                 try self.print("        {s} _{s};\n", .{ mem_cpp, cas.name });
             }
         }
-        // NOTE: anonymous union with non-trivially-constructible members (e.g.
-        // std::string) requires explicit constructors/destructors; not generated here.
+        if (needs_lifetime) {
+            try self.write("        _Storage() {}\n");
+            try self.write("        ~_Storage() {}\n");
+        }
         try self.write("    } _u;\n");
         try self.print("}}; // class {s}\n\n", .{u.name});
 
@@ -1402,7 +1458,10 @@ const CdrGenerator = struct {
         switch (td) {
             .struct_ => |s| try self.emitStructFns(s),
             .exception => |e| try self.emitExceptionFns(e),
-            .union_ => |u| try self.emitUnionFns(u),
+            .union_ => |u| {
+                try self.emitUnionFns(u);
+                if (unionNeedsCppLifetime(u)) try self.emitUnionLifecycleFns(u);
+            },
             else => {},
         }
     }
@@ -2549,6 +2608,11 @@ const CdrGenerator = struct {
                     continue;
                 }
                 try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
+                // A case body scope of its own: a bare `_tmp_*` declaration
+                // directly under the case label would make this an ill-formed
+                // "jump to case label" once there's more than one case (later
+                // labels jump past this one's initialization).
+                try self.writeI("{\n");
                 self.indent_depth += 1;
                 if (cas.dimensions.len > 0) {
                     const cpp_type = try cppTypeStr(self.alloc, self.opts, cas.type_ref);
@@ -2571,6 +2635,7 @@ const CdrGenerator = struct {
                 }
                 try self.writeI("break;\n");
                 self.indent_depth -= 1;
+                try self.writeI("}\n");
             }
             if (!has_default_d) {
                 try self.writeI("default:\n");
@@ -2603,6 +2668,9 @@ const CdrGenerator = struct {
             for (u.cases) |cas| {
                 if (isDefaultUnionCase(cas)) has_default = true;
                 try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
+                // See the mutable-union deserialize branch above for why this
+                // case body needs its own scope.
+                try self.writeI("{\n");
                 self.indent_depth += 1;
                 if (cas.dimensions.len > 0) {
                     const cpp_type = try cppTypeStr(self.alloc, self.opts, cas.type_ref);
@@ -2625,6 +2693,7 @@ const CdrGenerator = struct {
                 }
                 try self.writeI("break;\n");
                 self.indent_depth -= 1;
+                try self.writeI("}\n");
             }
             if (!has_default) {
                 try self.writeI("default:\n");
@@ -2788,6 +2857,217 @@ const CdrGenerator = struct {
                 },
             }
         }
+    }
+
+    // ── Union special member functions (non-trivial cases only) ────────────────
+    //
+    // Declared in Generator.emitUnion (header); defined here (out-of-line, in
+    // the .cpp) since they need CdrGenerator's indent-tracking write helpers.
+    // `_destroy_active`/`_construct_default`/`_copy_construct_from` are
+    // switch-on-discriminant helpers shared by the constructor, destructor,
+    // copy constructor, copy assignment operator, and `_d()`. Every case gets
+    // its own label, even trivial ones: a case missing its label would fall
+    // through into `default:` at runtime whenever the default case happens to
+    // be non-trivial, wrongly running that case's placement-new/destructor on
+    // a scalar -- the exact hazard (and fix) already found in the C backend's
+    // generated union `_free()`.
+
+    const UnionLifecycleOp = enum { destroy, construct_default, copy };
+
+    /// Emit the single-case body for one leaf (non-array) lvalue of type
+    /// `tr`. `src_access` is only read for `.copy`.
+    fn emitUnionLifecycleLeaf(
+        self: *CdrGenerator,
+        op: UnionLifecycleOp,
+        tr: ir.TypeRef,
+        dst_access: []const u8,
+        src_access: []const u8,
+    ) anyerror!void {
+        const non_trivial = typeRefIsCppNonTrivial(tr);
+        switch (op) {
+            .destroy => {
+                if (!non_trivial) return;
+                const cpp_type = try cppTypeStr(self.alloc, self.opts, tr);
+                defer self.alloc.free(cpp_type);
+                try self.printI("{{ using _LT = {s}; ({s}).~_LT(); }}\n", .{ cpp_type, dst_access });
+            },
+            .construct_default => {
+                if (!non_trivial) return;
+                const cpp_type = try cppTypeStr(self.alloc, self.opts, tr);
+                defer self.alloc.free(cpp_type);
+                try self.printI("new (&({s})) {s}();\n", .{ dst_access, cpp_type });
+            },
+            .copy => {
+                if (non_trivial) {
+                    const cpp_type = try cppTypeStr(self.alloc, self.opts, tr);
+                    defer self.alloc.free(cpp_type);
+                    try self.printI("new (&({s})) {s}({s});\n", .{ dst_access, cpp_type, src_access });
+                } else {
+                    try self.printI("{s} = {s};\n", .{ dst_access, src_access });
+                }
+            },
+        }
+    }
+
+    /// Nested-loop analog of `emitUnionLifecycleLeaf` for an array-typed case
+    /// (`cas.dimensions.len > 0`), recursing one loop per dimension.
+    fn emitUnionArrayLifecycleOp(
+        self: *CdrGenerator,
+        op: UnionLifecycleOp,
+        elem_tr: ir.TypeRef,
+        dst_access: []const u8,
+        src_access: []const u8,
+        dims: []const u64,
+        dim_idx: usize,
+    ) anyerror!void {
+        const var_name = try std.fmt.allocPrint(self.alloc, "_li{d}", .{dim_idx});
+        defer self.alloc.free(var_name);
+        try self.printI("{{ uint32_t {s}; for ({s} = 0; {s} < {d}u; {s}++) {{\n", .{
+            var_name, var_name, var_name, dims[0], var_name,
+        });
+        self.indent_depth += 1;
+        const dst_elem = try std.fmt.allocPrint(self.alloc, "{s}[{s}]", .{ dst_access, var_name });
+        defer self.alloc.free(dst_elem);
+        const src_elem = try std.fmt.allocPrint(self.alloc, "{s}[{s}]", .{ src_access, var_name });
+        defer self.alloc.free(src_elem);
+        if (dims.len > 1) {
+            try self.emitUnionArrayLifecycleOp(op, elem_tr, dst_elem, src_elem, dims[1..], dim_idx + 1);
+        } else {
+            try self.emitUnionLifecycleLeaf(op, elem_tr, dst_elem, src_elem);
+        }
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.writeI("}\n");
+    }
+
+    /// Emit one case's body inside a `_destroy_active`/`_construct_default`
+    /// switch (discriminant already selects `_disc`'s own case; no source
+    /// value involved).
+    fn emitUnionCaseSelfOp(self: *CdrGenerator, op: UnionLifecycleOp, cas: ir.UnionCase) anyerror!void {
+        if (!typeRefIsCppNonTrivial(cas.type_ref)) return;
+        const access = try std.fmt.allocPrint(self.alloc, "_u._{s}", .{cas.name});
+        defer self.alloc.free(access);
+        if (cas.dimensions.len > 0) {
+            try self.emitUnionArrayLifecycleOp(op, cas.type_ref, access, access, cas.dimensions, 0);
+        } else {
+            try self.emitUnionLifecycleLeaf(op, cas.type_ref, access, access);
+        }
+    }
+
+    fn emitUnionDestroyActive(self: *CdrGenerator, u: *const ir.Union, cpp_qname: []const u8) anyerror!void {
+        try self.print("void {s}::_destroy_active() noexcept {{\n", .{cpp_qname});
+        try self.writeI("switch (_disc) {\n");
+        self.indent_depth += 1;
+        for (u.cases) |cas| {
+            try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
+            self.indent_depth += 1;
+            try self.emitUnionCaseSelfOp(.destroy, cas);
+            try self.writeI("break;\n");
+            self.indent_depth -= 1;
+        }
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.write("}\n\n");
+    }
+
+    fn emitUnionConstructDefault(self: *CdrGenerator, u: *const ir.Union, cpp_qname: []const u8) anyerror!void {
+        try self.print("void {s}::_construct_default() {{\n", .{cpp_qname});
+        try self.writeI("switch (_disc) {\n");
+        self.indent_depth += 1;
+        for (u.cases) |cas| {
+            try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
+            self.indent_depth += 1;
+            try self.emitUnionCaseSelfOp(.construct_default, cas);
+            try self.writeI("break;\n");
+            self.indent_depth -= 1;
+        }
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.write("}\n\n");
+    }
+
+    fn emitUnionCopyConstructFrom(self: *CdrGenerator, u: *const ir.Union, cpp_qname: []const u8) anyerror!void {
+        try self.print("void {s}::_copy_construct_from(const {s} &other) {{\n", .{ cpp_qname, cpp_qname });
+        try self.writeI("switch (other._disc) {\n");
+        self.indent_depth += 1;
+        for (u.cases) |cas| {
+            try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
+            self.indent_depth += 1;
+            const dst = try std.fmt.allocPrint(self.alloc, "_u._{s}", .{cas.name});
+            defer self.alloc.free(dst);
+            const src = try std.fmt.allocPrint(self.alloc, "other._u._{s}", .{cas.name});
+            defer self.alloc.free(src);
+            if (cas.dimensions.len > 0) {
+                if (typeRefIsCppNonTrivial(cas.type_ref)) {
+                    try self.emitUnionArrayLifecycleOp(.copy, cas.type_ref, dst, src, cas.dimensions, 0);
+                } else {
+                    try self.printI("std::memcpy({s}, {s}, sizeof({s}));\n", .{ dst, src, dst });
+                }
+            } else {
+                try self.emitUnionLifecycleLeaf(.copy, cas.type_ref, dst, src);
+            }
+            try self.writeI("break;\n");
+            self.indent_depth -= 1;
+        }
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.write("}\n\n");
+    }
+
+    /// Emit the special member functions and `_d()` declared (for a
+    /// lifetime-needing union) in Generator.emitUnion.
+    fn emitUnionLifecycleFns(self: *CdrGenerator, u: *const ir.Union) anyerror!void {
+        const cpp_qname = try std.fmt.allocPrint(self.alloc, "::{s}", .{u.qualified_name});
+        defer self.alloc.free(cpp_qname);
+        const disc_cpp = try cppTypeStr(self.alloc, self.opts, u.discriminant);
+        defer self.alloc.free(disc_cpp);
+
+        try self.emitUnionDestroyActive(u, cpp_qname);
+        try self.emitUnionConstructDefault(u, cpp_qname);
+        try self.emitUnionCopyConstructFrom(u, cpp_qname);
+
+        try self.print("{s}::{s}() {{\n", .{ cpp_qname, u.name });
+        self.indent_depth += 1;
+        try self.writeI("_construct_default();\n");
+        self.indent_depth -= 1;
+        try self.write("}\n\n");
+
+        try self.print("{s}::{s}(const {s} &other) : _disc(other._disc) {{\n", .{ cpp_qname, u.name, cpp_qname });
+        self.indent_depth += 1;
+        try self.writeI("_copy_construct_from(other);\n");
+        self.indent_depth -= 1;
+        try self.write("}\n\n");
+
+        try self.print("{s} &{s}::operator=(const {s} &other) {{\n", .{ cpp_qname, cpp_qname, cpp_qname });
+        self.indent_depth += 1;
+        try self.writeI("if (this != &other) {\n");
+        self.indent_depth += 1;
+        try self.writeI("_destroy_active();\n");
+        try self.writeI("_disc = other._disc;\n");
+        try self.writeI("_copy_construct_from(other);\n");
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.writeI("return *this;\n");
+        self.indent_depth -= 1;
+        try self.write("}\n\n");
+
+        try self.print("{s}::~{s}() {{\n", .{ cpp_qname, u.name });
+        self.indent_depth += 1;
+        try self.writeI("_destroy_active();\n");
+        self.indent_depth -= 1;
+        try self.write("}\n\n");
+
+        try self.print("void {s}::_d({s} v) {{\n", .{ cpp_qname, disc_cpp });
+        self.indent_depth += 1;
+        try self.writeI("if (v != _disc) {\n");
+        self.indent_depth += 1;
+        try self.writeI("_destroy_active();\n");
+        try self.writeI("_disc = v;\n");
+        try self.writeI("_construct_default();\n");
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        self.indent_depth -= 1;
+        try self.write("}\n\n");
     }
 
     // ── Write helpers ─────────────────────────────────────────────────────────
@@ -5544,6 +5824,70 @@ fn isDefaultUnionCase(cas: ir.UnionCase) bool {
     return false;
 }
 
+/// True if `tr` maps to a C++ type that is not trivially default-
+/// constructible/destructible (std::string, std::vector, std::map, or an
+/// array/struct/union transitively containing one). Such a type cannot be a
+/// member of a raw C++ union without explicit placement-new/destructor
+/// calls -- the implicit special member functions the union would
+/// otherwise need are ill-formed, so this predicate decides when
+/// `unionNeedsCppLifetime` requires generating them by hand instead.
+fn typeRefIsCppNonTrivial(tr: ir.TypeRef) bool {
+    return switch (tr) {
+        .base, .fixed_pt => false,
+        .string, .wstring, .sequence, .map => true,
+        .named => |td| switch (td) {
+            .struct_ => |s| structIsCppNonTrivial(s),
+            .union_ => |u| unionNeedsCppLifetime(u),
+            .typedef => |t| typeRefIsCppNonTrivial(t.type_ref),
+            .enum_, .bitset, .bitmask, .exception, .native, .interface => false,
+        },
+    };
+}
+
+fn structIsCppNonTrivial(s: *const ir.Struct) bool {
+    if (s.base) |b| {
+        switch (b) {
+            .struct_ => |bs| if (structIsCppNonTrivial(bs)) return true,
+            else => {},
+        }
+    }
+    for (s.members) |m| {
+        if (typeRefIsCppNonTrivial(m.type_ref)) return true;
+    }
+    return false;
+}
+
+/// True if `u` has at least one case whose type is non-trivial (see
+/// `typeRefIsCppNonTrivial`), meaning the generated union class needs
+/// explicit constructor/destructor/copy special member functions instead of
+/// the (otherwise ill-formed) implicit ones.
+fn unionNeedsCppLifetime(u: *const ir.Union) bool {
+    for (u.cases) |cas| {
+        if (typeRefIsCppNonTrivial(cas.type_ref)) return true;
+    }
+    return false;
+}
+
+/// Build a nested-`for`-loop C++ statement string that assigns
+/// `dst[i0][i1]… = src[i0][i1]…` element-by-element over `dims`. Used for
+/// array-typed union case setters whose element type is non-trivial, where
+/// `std::memcpy` (the setter's normal fast path) would violate the element
+/// type's invariants (e.g. corrupt a std::string's internal representation).
+fn arrayAssignLoopCpp(alloc: std.mem.Allocator, dims: []const u64, dim_idx: usize, dst: []const u8, src: []const u8) ![]u8 {
+    const idx = try std.fmt.allocPrint(alloc, "_i{d}", .{dim_idx});
+    defer alloc.free(idx);
+    const dst2 = try std.fmt.allocPrint(alloc, "{s}[{s}]", .{ dst, idx });
+    defer alloc.free(dst2);
+    if (dims.len > 1) {
+        const src2 = try std.fmt.allocPrint(alloc, "{s}[{s}]", .{ src, idx });
+        defer alloc.free(src2);
+        const inner = try arrayAssignLoopCpp(alloc, dims[1..], dim_idx + 1, dst2, src2);
+        defer alloc.free(inner);
+        return std.fmt.allocPrint(alloc, "for (uint32_t {s} = 0; {s} < {d}u; {s}++) {{ {s} }}", .{ idx, idx, dims[0], idx, inner });
+    }
+    return std.fmt.allocPrint(alloc, "for (uint32_t {s} = 0; {s} < {d}u; {s}++) {{ {s} = {s}[{s}]; }}", .{ idx, idx, dims[0], idx, dst2, src, idx });
+}
+
 /// Recursively unwrap typedef chains to the underlying base or enum TypeRef.
 /// Array typedefs (dimensions.len > 0) are not unwrapped.
 fn resolveTypeRef(tr: ir.TypeRef) ir.TypeRef {
@@ -5806,6 +6150,7 @@ fn scanIncludesTypeDecl(td: ir.TypeDecl, needs: *Generator.IncludeNeeds) void {
         },
         .union_ => |u| {
             for (u.cases) |c| Generator.scanIncludesTypeRef(c.type_ref, needs);
+            if (unionNeedsCppLifetime(u)) needs.union_lifetime = true;
         },
         .exception => |e| {
             for (e.members) |m| {
@@ -5941,6 +6286,7 @@ fn generateTypeHeader(
     if (opts.generate_interfaces and needs.memory) try gen.write("#include <memory>\n");
     if (needs.map) try gen.write("#include <map>\n");
     if (needs.optional) try gen.write("#include <optional>\n");
+    if (needs.union_lifetime) try gen.write("#include <new>\n");
     try gen.write("#include <array>\n");
     try gen.write("#include <stdexcept>\n");
     if (!opts.no_typesupport) {
@@ -6461,6 +6807,77 @@ test "cpp_backend: union array CDR serialize/deserialize" {
     try testing.expect(has(s, "_v->arr(_tmp_arr)"));
     // no TODO stubs remain
     try testing.expect(!has(s, "TODO"));
+}
+
+test "cpp_backend: union with a non-trivial case gets explicit lifetime special members" {
+    var out = try testGen(
+        \\union Var switch (long) { case 0: long i; default: string s; };
+    , "var");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "Var();"));
+    try testing.expect(has(s, "Var(const Var &other);"));
+    try testing.expect(has(s, "Var &operator=(const Var &other);"));
+    try testing.expect(has(s, "~Var();"));
+    // Setting the discriminant is no longer a trivial noexcept assignment --
+    // it has to placement-construct/destroy the active case.
+    try testing.expect(has(s, "void _d(int32_t v);"));
+    try testing.expect(!has(s, "void _d(int32_t v) noexcept { _disc = v; }"));
+    // The anonymous union needs its own name to declare a (deliberately
+    // empty) ctor/dtor pair -- otherwise its implicit ones stay deleted for
+    // any non-trivial member, regardless of what Var itself declares.
+    try testing.expect(has(s, "union _Storage {"));
+    try testing.expect(has(s, "_Storage() {}"));
+    try testing.expect(has(s, "~_Storage() {}"));
+    try testing.expect(has(s, "#include <new>"));
+}
+
+test "cpp_backend: union with only trivial cases keeps the plain unnamed union" {
+    var out = try testGen(
+        \\union Var switch (long) { case 0: long i; case 1: double d; };
+    , "var");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // No regression for the common case: same trivial noexcept setter as
+    // before, no extra special members, no named storage type.
+    try testing.expect(has(s, "void _d(int32_t v) noexcept { _disc = v; }"));
+    try testing.expect(!has(s, "union _Storage {"));
+    try testing.expect(!has(s, "Var(const Var &other);"));
+    try testing.expect(!has(s, "#include <new>"));
+}
+
+test "cpp_backend cdr: non-trivial union gets _destroy_active/_construct_default/_copy_construct_from with a label for every case" {
+    var out = try testGenCdr(
+        \\union Var switch (long) { case 0: long i; default: string s; };
+    , "var");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "void ::Var::_destroy_active() noexcept {"));
+    try testing.expect(has(s, "void ::Var::_construct_default() {"));
+    try testing.expect(has(s, "void ::Var::_copy_construct_from(const ::Var &other) {"));
+    // Every case needs its own label, even the trivial one -- omitting it
+    // would let discriminant 0 fall through into `default:` at runtime and
+    // wrongly placement-new/destroy a std::string over the int's bit
+    // pattern. Same hazard (and fix) as the C backend's union _free().
+    try testing.expect(has(s, "case 0:"));
+    try testing.expect(has(s, "using _LT = std::string; (_u._s).~_LT();"));
+    try testing.expect(has(s, "new (&(_u._s)) std::string();"));
+    try testing.expect(has(s, "new (&(_u._s)) std::string(other._u._s);"));
+    // Trivial case in _copy_construct_from: plain value copy, not placement.
+    try testing.expect(has(s, "_u._i = other._u._i;"));
+}
+
+test "cpp_backend cdr: union deserialize wraps each case body in its own scope" {
+    var out = try testGenCdr(
+        \\union Var switch (long) { case 0: long i; default: string s; };
+    , "var");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // A bare `_tmp_*` declaration directly under a case label (no braces)
+    // is ill-formed once there's more than one case -- a later label jumps
+    // past this one's initialization ("jump to case label" in gcc/clang).
+    try testing.expect(has(s, "case 0:\n        {\n"));
+    try testing.expect(has(s, "default:\n        {\n"));
 }
 
 test "cpp_backend: typedef scalar" {
