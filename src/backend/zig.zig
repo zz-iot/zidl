@@ -435,9 +435,53 @@ const Generator = struct {
         if (!self.opts.no_typesupport) {
             try self.emitUnionCdr(u);
         }
+        if (self.unionNeedsCleanup(u)) {
+            // Lifecycle operations, not CDR typesupport -- generated
+            // regardless of whether wire (de)serialization was also
+            // requested, matching emitStruct's structNeedsCleanup gating.
+            try self.write("\n");
+            try self.emitUnionDeinitFn(u);
+            try self.write("\n");
+            try self.emitUnionCloneFn(u);
+        }
 
         try self.ind();
         try self.print("}}; // {s}{s}\n\n", .{ pfx, u.name });
+    }
+
+    /// Read a union case's value into a fresh local, then adopt it via a
+    /// whole-union-literal assignment (`out._u = .{ .case = _tmp };`) rather
+    /// than a direct field write (`out._u.case = ...;`).
+    ///
+    /// Zig's plain (non-`enum`-tagged) union still carries a hidden active-
+    /// field tag in safety-checked builds, and a direct `place.field = v;`
+    /// assignment asserts the write is *to the field already active* rather
+    /// than switching to it -- it panics ("invalid enum value" while
+    /// formatting the mismatch, since `out._u` starts `undefined`, i.e. its
+    /// hidden tag is poisoned, not just wrong) the moment `deserializeInto`
+    /// writes a case that doesn't already happen to be the union's zero-value
+    /// default. Reassigning the whole union via a `.{ .case = value }`
+    /// literal is what actually switches the active field safely. This
+    /// affects every generated Zig union, not just ones with owning cases --
+    /// discovered here only because a real deserialize was finally run
+    /// against one (no prior test did).
+    fn emitUnionCaseDeserializeAssign(self: *Generator, out_expr: []const u8, cas: ir.UnionCase, extra: []const u8) anyerror!void {
+        const case_zig = try self.typeRefToZig(cas.type_ref);
+        defer self.alloc.free(case_zig);
+        const tmp_type = if (cas.dimensions.len > 0)
+            try self.makeArrayType(case_zig, cas.dimensions)
+        else
+            try self.alloc.dupe(u8, case_zig);
+        defer self.alloc.free(tmp_type);
+        try self.ind();
+        try self.print("{s}var _tmp: {s} = undefined;\n", .{ extra, tmp_type });
+        if (cas.dimensions.len > 0) {
+            try self.emitReadArray(cas.type_ref, "_tmp", cas.dimensions, extra, 0);
+        } else {
+            try self.emitReadForTypeRef(cas.type_ref, "_tmp", extra);
+        }
+        try self.ind();
+        try self.print("{s}{s}._u = .{{ .{s} = _tmp }};\n", .{ extra, out_expr, cas.name });
     }
 
     fn emitUnionCdr(self: *Generator, u: *const ir.Union) anyerror!void {
@@ -639,15 +683,7 @@ const Generator = struct {
                 if (isDefaultUnionCase(cas)) continue;
                 try self.emitZigUnionCaseArmPattern(u.discriminant, cas, "                    ");
                 try self.write(" => {\n");
-                if (cas.dimensions.len > 0) {
-                    const lval = try std.fmt.allocPrint(self.alloc, "out._u.{s}", .{cas.name});
-                    defer self.alloc.free(lval);
-                    try self.emitReadArray(cas.type_ref, lval, cas.dimensions, "                        ", 0);
-                } else {
-                    const lval = try std.fmt.allocPrint(self.alloc, "out._u.{s}", .{cas.name});
-                    defer self.alloc.free(lval);
-                    try self.emitReadForTypeRef(cas.type_ref, lval, "                        ");
-                }
+                try self.emitUnionCaseDeserializeAssign("out", cas, "                        ");
                 _ = cas_idx;
                 try self.ind();
                 try self.write("                    },\n");
@@ -655,15 +691,7 @@ const Generator = struct {
             if (default_case) |dc| {
                 try self.ind();
                 try self.write("                    else => {\n");
-                if (dc.dimensions.len > 0) {
-                    const lval = try std.fmt.allocPrint(self.alloc, "out._u.{s}", .{dc.name});
-                    defer self.alloc.free(lval);
-                    try self.emitReadArray(dc.type_ref, lval, dc.dimensions, "                        ", 0);
-                } else {
-                    const lval = try std.fmt.allocPrint(self.alloc, "out._u.{s}", .{dc.name});
-                    defer self.alloc.free(lval);
-                    try self.emitReadForTypeRef(dc.type_ref, lval, "                        ");
-                }
+                try self.emitUnionCaseDeserializeAssign("out", dc, "                        ");
                 try self.ind();
                 try self.write("                    },\n");
             } else {
@@ -696,30 +724,14 @@ const Generator = struct {
                 if (isDefaultUnionCase(cas)) continue; // handled as else
                 try self.emitZigUnionCaseArmPattern(u.discriminant, cas, "            ");
                 try self.write(" => {\n");
-                if (cas.dimensions.len > 0) {
-                    const lval = try std.fmt.allocPrint(self.alloc, "out._u.{s}", .{cas.name});
-                    defer self.alloc.free(lval);
-                    try self.emitReadArray(cas.type_ref, lval, cas.dimensions, "                ", 0);
-                } else {
-                    const lval = try std.fmt.allocPrint(self.alloc, "out._u.{s}", .{cas.name});
-                    defer self.alloc.free(lval);
-                    try self.emitReadForTypeRef(cas.type_ref, lval, "                ");
-                }
+                try self.emitUnionCaseDeserializeAssign("out", cas, "                ");
                 try self.ind();
                 try self.write("            },\n");
             }
             if (default_case) |dc| {
                 try self.ind();
                 try self.write("            else => {\n");
-                if (dc.dimensions.len > 0) {
-                    const lval = try std.fmt.allocPrint(self.alloc, "out._u.{s}", .{dc.name});
-                    defer self.alloc.free(lval);
-                    try self.emitReadArray(dc.type_ref, lval, dc.dimensions, "                ", 0);
-                } else {
-                    const lval = try std.fmt.allocPrint(self.alloc, "out._u.{s}", .{dc.name});
-                    defer self.alloc.free(lval);
-                    try self.emitReadForTypeRef(dc.type_ref, lval, "                ");
-                }
+                try self.emitUnionCaseDeserializeAssign("out", dc, "                ");
                 try self.ind();
                 try self.write("            },\n");
             } else {
@@ -905,6 +917,104 @@ const Generator = struct {
             }
         }
         _ = disc;
+    }
+
+    /// Emit `pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void` for
+    /// a union with at least one owning case (`unionNeedsCleanup`). Every
+    /// non-default case gets its own switch arm regardless of whether it
+    /// itself owns anything (empty body if not) -- skipping a non-owning
+    /// case's arm would let its discriminant value fall through to `else`
+    /// whenever the default case *is* owning, wrongly running the default
+    /// case's cleanup on that case's (non-pointer) payload. Same hazard, and
+    /// same fix, as the C backend's generated union `_free()`.
+    fn emitUnionDeinitFn(self: *Generator, u: *const ir.Union) !void {
+        try self.ind();
+        try self.write("    pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {\n");
+        try self.ind();
+        try self.write("        switch (self._d) {\n");
+        var default_case: ?ir.UnionCase = null;
+        for (u.cases) |cas| {
+            if (isDefaultUnionCase(cas)) {
+                default_case = cas;
+                continue;
+            }
+            try self.emitZigUnionCaseArmPattern(u.discriminant, cas, "            ");
+            try self.write(" => {\n");
+            if (self.caseNeedsCleanup(cas)) {
+                const field_name = try std.fmt.allocPrint(self.alloc, "_u.{s}", .{cas.name});
+                defer self.alloc.free(field_name);
+                try self.emitFieldSeqDeinit(field_name, cas.type_ref, "                ");
+            }
+            try self.ind();
+            try self.write("            },\n");
+        }
+        try self.ind();
+        try self.write("            else => {\n");
+        if (default_case) |dc| {
+            if (self.caseNeedsCleanup(dc)) {
+                const field_name = try std.fmt.allocPrint(self.alloc, "_u.{s}", .{dc.name});
+                defer self.alloc.free(field_name);
+                try self.emitFieldSeqDeinit(field_name, dc.type_ref, "                ");
+            }
+        }
+        try self.ind();
+        try self.write("            },\n");
+        try self.ind();
+        try self.write("        }\n");
+        try self.ind();
+        try self.write("    }\n");
+    }
+
+    /// Emit `pub fn clone(self: @This(), alloc: std.mem.Allocator) !@This()`
+    /// for a union with at least one owning case. `var result = self;` below
+    /// already shallow-copies whichever case is active; the switch below
+    /// replaces that shallow copy with an independent deep copy only for the
+    /// currently-active case (mutually exclusive with every other case by
+    /// construction, unlike a struct's independent fields -- so at most one
+    /// clone statement ever runs). See `emitUnionDeinitFn` for why every
+    /// case still needs its own arm.
+    fn emitUnionCloneFn(self: *Generator, u: *const ir.Union) !void {
+        try self.ind();
+        try self.write("    pub fn clone(self: @This(), alloc: std.mem.Allocator) !@This() {\n");
+        try self.ind();
+        try self.write("        var result = self;\n");
+        try self.ind();
+        try self.write("        switch (self._d) {\n");
+        var default_case: ?ir.UnionCase = null;
+        for (u.cases) |cas| {
+            if (isDefaultUnionCase(cas)) {
+                default_case = cas;
+                continue;
+            }
+            try self.emitZigUnionCaseArmPattern(u.discriminant, cas, "            ");
+            try self.write(" => {\n");
+            if (self.caseNeedsCleanup(cas)) {
+                const field_name = try std.fmt.allocPrint(self.alloc, "_u.{s}", .{cas.name});
+                defer self.alloc.free(field_name);
+                try self.emitFieldSeqCloneStmt(field_name, cas.type_ref, "                ");
+                try self.emitFieldSeqCloneErrdefer(field_name, cas.type_ref, "                ");
+            }
+            try self.ind();
+            try self.write("            },\n");
+        }
+        try self.ind();
+        try self.write("            else => {\n");
+        if (default_case) |dc| {
+            if (self.caseNeedsCleanup(dc)) {
+                const field_name = try std.fmt.allocPrint(self.alloc, "_u.{s}", .{dc.name});
+                defer self.alloc.free(field_name);
+                try self.emitFieldSeqCloneStmt(field_name, dc.type_ref, "                ");
+                try self.emitFieldSeqCloneErrdefer(field_name, dc.type_ref, "                ");
+            }
+        }
+        try self.ind();
+        try self.write("            },\n");
+        try self.ind();
+        try self.write("        }\n");
+        try self.ind();
+        try self.write("        return result;\n");
+        try self.ind();
+        try self.write("    }\n");
     }
 
     // ── Enum ──────────────────────────────────────────────────────────────────
@@ -3456,6 +3566,14 @@ const Generator = struct {
         try self.emitReaderBatchMethod(type_name, "take_instance", true, true, needs_deinit);
         // read_instance
         try self.emitReaderBatchMethod(type_name, "read_instance", false, true, needs_deinit);
+        // take_w_condition
+        try self.emitReaderWConditionMethod(type_name, "take_w_condition", true, needs_deinit);
+        // read_w_condition
+        try self.emitReaderWConditionMethod(type_name, "read_w_condition", false, needs_deinit);
+        // take_next_instance_w_condition
+        try self.emitReaderNextInstanceWConditionMethod(type_name, "take_next_instance_w_condition", true, needs_deinit);
+        // read_next_instance_w_condition
+        try self.emitReaderNextInstanceWConditionMethod(type_name, "read_next_instance_w_condition", false, needs_deinit);
 
         // get_key_value
         try self.write("\n");
@@ -3579,6 +3697,74 @@ const Generator = struct {
         try self.write("        }\n");
         try self.ind();
         try self.print("        try {s}(self._dr, &_tmp, max, ss, vs, is{s}, self._alloc);\n", .{ raw_fn, ih_arg });
+        try self.emitReaderDecodeTmpTail(type_name, needs_deinit);
+    }
+
+    /// Emit a batch take/read method scoped to a ReadCondition (which may
+    /// itself be a QueryCondition upcast via as_ReadCondition()) -- the raw
+    /// path to what the OMG spec calls take_w_condition/read_w_condition.
+    /// State masks (and, for a QueryCondition, the query filter) come from
+    /// `cond` itself, unlike emitReaderBatchMethod's mask parameters.
+    fn emitReaderWConditionMethod(
+        self: *Generator,
+        type_name: []const u8,
+        method_name: []const u8,
+        destructive: bool,
+        needs_deinit: bool,
+    ) !void {
+        const raw_fn = if (destructive) "_zzdds.takeWithReadConditionRaw" else "_zzdds.readWithReadConditionRaw";
+        try self.write("\n");
+        try self.ind();
+        try self.print("    pub fn {s}(self: @This(), out: *std.ArrayListUnmanaged(SampledValue), cond: _zzdds.DDS.ReadCondition, max: i32) !bool {{\n", .{method_name});
+        try self.ind();
+        try self.write("        var _tmp: std.ArrayListUnmanaged(_zzdds.OwnedRawSample) = .empty;\n");
+        try self.ind();
+        try self.write("        defer {\n");
+        try self.ind();
+        try self.write("            for (_tmp.items) |_s| _s.deinit();\n");
+        try self.ind();
+        try self.write("            _tmp.deinit(self._alloc);\n");
+        try self.ind();
+        try self.write("        }\n");
+        try self.ind();
+        try self.print("        try {s}(self._dr, cond, &_tmp, max, self._alloc);\n", .{raw_fn});
+        try self.emitReaderDecodeTmpTail(type_name, needs_deinit);
+    }
+
+    /// Emit a batch take/read method scoped to a ReadCondition AND the "next
+    /// instance" after `prev` -- the raw path to what the OMG spec calls
+    /// take_next_instance_w_condition/read_next_instance_w_condition.
+    fn emitReaderNextInstanceWConditionMethod(
+        self: *Generator,
+        type_name: []const u8,
+        method_name: []const u8,
+        destructive: bool,
+        needs_deinit: bool,
+    ) !void {
+        const raw_fn = if (destructive) "_zzdds.takeNextInstanceWithReadConditionRaw" else "_zzdds.readNextInstanceWithReadConditionRaw";
+        try self.write("\n");
+        try self.ind();
+        try self.print("    pub fn {s}(self: @This(), out: *std.ArrayListUnmanaged(SampledValue), cond: _zzdds.DDS.ReadCondition, prev: _zzdds.DDS.InstanceHandle_t, max: i32) !bool {{\n", .{method_name});
+        try self.ind();
+        try self.write("        var _tmp: std.ArrayListUnmanaged(_zzdds.OwnedRawSample) = .empty;\n");
+        try self.ind();
+        try self.write("        defer {\n");
+        try self.ind();
+        try self.write("            for (_tmp.items) |_s| _s.deinit();\n");
+        try self.ind();
+        try self.write("            _tmp.deinit(self._alloc);\n");
+        try self.ind();
+        try self.write("        }\n");
+        try self.ind();
+        try self.print("        try {s}(self._dr, cond, prev, &_tmp, max, self._alloc);\n", .{raw_fn});
+        try self.emitReaderDecodeTmpTail(type_name, needs_deinit);
+    }
+
+    /// Shared tail for every batch reader method above: given `_tmp` (already
+    /// populated by the caller's own raw op call), decodes each sample into
+    /// `out`. The three emitReader*Method functions above only differ in
+    /// which raw op populates `_tmp` and that op's own parameter list.
+    fn emitReaderDecodeTmpTail(self: *Generator, type_name: []const u8, needs_deinit: bool) !void {
         try self.ind();
         try self.write("        if (_tmp.items.len == 0) return false;\n");
         try self.ind();
@@ -3736,6 +3922,31 @@ const Generator = struct {
         return false;
     }
 
+    /// Union-case analog of `memberNeedsCleanup`.
+    fn caseNeedsCleanup(self: *Generator, cas: ir.UnionCase) bool {
+        if (typeRefNeedsSeqDeinit(cas.type_ref)) return true;
+        if (!typeRefHasUnboundedString(cas.type_ref)) return false;
+        if (typeRefIsDirectPlainString(cas.type_ref) and
+            !self.opts.zig_generate_toml_config and
+            caseHasNonEmptyStringDefault(cas))
+        {
+            return false;
+        }
+        return true;
+    }
+
+    /// Union analog of `structNeedsCleanup`: true if the union needs its own
+    /// generated `deinit()`/`clone()` (see `emitUnionDeinitFn`/
+    /// `emitUnionCloneFn`) -- and, via `unionNeedsSeqDeinit`/
+    /// `unionHasUnboundedString`, whether a struct embedding this union as a
+    /// field needs to call them.
+    fn unionNeedsCleanup(self: *Generator, u: *const ir.Union) bool {
+        for (u.cases) |cas| {
+            if (self.caseNeedsCleanup(cas)) return true;
+        }
+        return false;
+    }
+
     /// Emit `pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void` for
     /// structs whose sequence fields may have been heap-allocated by
     /// `deserializeInto` (identified by `_release == true`), or whose unbounded
@@ -3820,7 +4031,7 @@ const Generator = struct {
                     try self.ind();
                     try self.print("{s}self.{s}.deinit(alloc);\n", .{ indent, field_name });
                 },
-                .struct_ => {
+                .struct_, .union_ => {
                     try self.ind();
                     try self.print("{s}self.{s}.deinit(alloc);\n", .{ indent, field_name });
                 },
@@ -3953,7 +4164,7 @@ const Generator = struct {
                     try self.ind();
                     try self.print("{s}result.{s} = try self.{s}.clone(alloc);\n", .{ indent, field_name, field_name });
                 },
-                .struct_ => {
+                .struct_, .union_ => {
                     try self.ind();
                     try self.print("{s}result.{s} = try self.{s}.clone(alloc);\n", .{ indent, field_name, field_name });
                 },
@@ -4008,7 +4219,7 @@ const Generator = struct {
                     try self.ind();
                     try self.print("{s}errdefer result.{s}.deinit(alloc);\n", .{ indent, field_name });
                 },
-                .struct_ => {
+                .struct_, .union_ => {
                     try self.ind();
                     try self.print("{s}errdefer result.{s}.deinit(alloc);\n", .{ indent, field_name });
                 },
@@ -5591,7 +5802,13 @@ fn typeRefNeedsAllocator(tr: ir.TypeRef) bool {
         .wstring => true, // readWstring always allocates, even for bounded wstring
         .sequence => |seq| seq.bound == null,
         .named => |td| switch (td) {
-            .struct_, .exception => true, // conservatively: may have nested strings/seqs
+            // Conservatively: may have nested strings/seqs. A union case can
+            // just as easily own a string/sequence as a struct field can --
+            // omitting it here previously left a struct field's
+            // deserializeInto emitting a stale `_ = allocator;` discard right
+            // before actually using it (to forward into a union member's own
+            // deserializeInto), which fails to compile.
+            .struct_, .union_, .exception => true,
             .typedef => |t| typeRefNeedsAllocator(t.type_ref),
             else => false,
         },
@@ -5654,6 +5871,7 @@ fn typeRefNeedsSeqDeinit(tr: ir.TypeRef) bool {
         .named => |td| switch (td) {
             .typedef => |t| typeRefNeedsSeqDeinit(t.type_ref),
             .struct_ => |s| structNeedsSeqDeinit(s),
+            .union_ => |u| unionNeedsSeqDeinit(u),
             else => false,
         },
         else => false,
@@ -5667,6 +5885,21 @@ fn structNeedsSeqDeinit(s: *const ir.Struct) bool {
     };
     for (s.members) |m| {
         if (typeRefNeedsSeqDeinit(m.type_ref)) return true;
+    }
+    return false;
+}
+
+/// Union analog of `structNeedsSeqDeinit`: true if any case's type recursively
+/// contains an unbounded sequence. A struct whose only heap-owning content is
+/// a union member (rather than a sequence field of its own) previously fell
+/// through `typeRefNeedsSeqDeinit`'s `.named` switch unhandled -- the union
+/// case never counted toward the struct's own `structNeedsCleanup`, so
+/// neither the struct's `deinit()`/`clone()` were generated at all, nor (even
+/// where they were, for unrelated reasons) did they ever call into the
+/// union's own cleanup.
+fn unionNeedsSeqDeinit(u: *const ir.Union) bool {
+    for (u.cases) |cas| {
+        if (typeRefNeedsSeqDeinit(cas.type_ref)) return true;
     }
     return false;
 }
@@ -5704,6 +5937,7 @@ fn typeRefHasUnboundedString(tr: ir.TypeRef) bool {
         .named => |td| switch (td) {
             .typedef => |t| if (t.dimensions.len == 0) typeRefHasUnboundedString(t.type_ref) else false,
             .struct_ => |s| structHasUnboundedString(s),
+            .union_ => |u| unionHasUnboundedString(u),
             else => false,
         },
         else => false,
@@ -5713,6 +5947,14 @@ fn typeRefHasUnboundedString(tr: ir.TypeRef) bool {
 fn structHasUnboundedString(s: *const ir.Struct) bool {
     for (s.members) |m| {
         if (typeRefHasUnboundedString(m.type_ref)) return true;
+    }
+    return false;
+}
+
+/// Union analog of `structHasUnboundedString` -- see `unionNeedsSeqDeinit`.
+fn unionHasUnboundedString(u: *const ir.Union) bool {
+    for (u.cases) |cas| {
+        if (typeRefHasUnboundedString(cas.type_ref)) return true;
     }
     return false;
 }
@@ -5738,6 +5980,15 @@ fn typeRefIsDirectPlainString(tr: ir.TypeRef) bool {
 /// True if `m` has an explicit `@default("...")` with non-empty content.
 fn memberHasNonEmptyStringDefault(m: ir.StructMember) bool {
     const dv = m.annotations.default_value orelse return false;
+    return switch (dv) {
+        .string => |s| s.len > 0,
+        else => false,
+    };
+}
+
+/// Union-case analog of `memberHasNonEmptyStringDefault`.
+fn caseHasNonEmptyStringDefault(cas: ir.UnionCase) bool {
+    const dv = cas.annotations.default_value orelse return false;
     return switch (dv) {
         .string => |s| s.len > 0,
         else => false,
@@ -6213,6 +6464,76 @@ test "zig_backend: union CDR appendable adds DHEADER" {
     const s = out.items;
     try testing.expect(has(s, "const _dh = try writer.reserveDheaderMaybe();"));
     try testing.expect(has(s, "try reader.skipDheaderIfXcdr2();"));
+}
+
+test "zig_backend: union with a non-trivial case gets deinit/clone, every case gets its own arm" {
+    var out = try testGen(
+        \\union Var switch (long) { case 0: long i; default: string s; };
+    , "var_t");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {"));
+    try testing.expect(has(s, "pub fn clone(self: @This(), alloc: std.mem.Allocator) !@This() {"));
+    // The int case (0) owns nothing, but still needs its own (empty) arm --
+    // omitting it would let discriminant 0 fall through to `else` and wrongly
+    // run the string case's free on the int's bit pattern. Same hazard, and
+    // same fix, as the C backend's generated union `_free()`.
+    try testing.expect(has(s,
+        \\        switch (self._d) {
+        \\            0 => {
+        \\            },
+        \\            else => {
+        \\                if (self._u.s.len != 0) alloc.free(self._u.s);
+        \\            },
+        \\        }
+    ));
+    try testing.expect(has(s, "result._u.s = if (self._u.s.len != 0) try alloc.dupe(u8, self._u.s) else self._u.s;"));
+}
+
+test "zig_backend: union with only trivial cases gets no deinit/clone" {
+    var out = try testGen(
+        \\union Var switch (long) { case 0: long i; case 1: double d; };
+    , "var_t");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(!has(s, "pub fn deinit"));
+    try testing.expect(!has(s, "pub fn clone"));
+}
+
+test "zig_backend: struct embedding a non-trivial union delegates deinit/clone to it" {
+    var out = try testGen(
+        \\union Var switch (long) { case 0: long i; default: string s; };
+        \\struct Holder { @key long id; Var v; };
+    , "holder_t");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // The union member alone must be enough to trigger Holder's own
+    // deinit/clone -- before typeRefNeedsSeqDeinit's .named switch handled
+    // .union_, a struct whose only owning content was a union member got no
+    // deinit()/clone() of its own at all, and even where it did (for
+    // unrelated reasons), never called into the union's.
+    try testing.expect(has(s, "pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {\n        self.v.deinit(alloc);\n    }"));
+    try testing.expect(has(s, "result.v = try self.v.clone(alloc);"));
+    try testing.expect(has(s, "errdefer result.v.deinit(alloc);"));
+}
+
+test "zig_backend: union deserializeInto adopts a case via a whole-union-literal assign, not a direct field write" {
+    var out = try testGen(
+        \\union Var switch (long) { case 0: long i; default: string s; };
+    , "var_t");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // A direct `out._u.s = ...;` field write panics at runtime in Zig 0.16
+    // safety-checked builds ("invalid enum value" from the union's hidden
+    // active-field tag) unless that field is already active -- which it
+    // never is starting from `out._u = undefined`. Reassigning the whole
+    // union via a `.{ .case = value }` literal is what actually switches the
+    // active field safely. This affected every generated Zig union, not just
+    // ones with owning cases.
+    try testing.expect(has(s, "out._u = .{ .i = _tmp };"));
+    try testing.expect(has(s, "out._u = .{ .s = _tmp };"));
+    try testing.expect(!has(s, "out._u.i ="));
+    try testing.expect(!has(s, "out._u.s ="));
 }
 
 test "zig_backend: typedef scalar" {
@@ -7848,6 +8169,33 @@ test "zig_backend: typed DataWriter/DataReader for keyed @appendable struct" {
     try testing.expect(has(s, "ShapeType.deserialize(&_r, self._alloc)"));
     // no SampledValue.deinit — ShapeType has no unbounded sequences
     try testing.expect(!has(s, "pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {"));
+}
+
+test "zig_backend: typed DataReader gets take_w_condition/read_w_condition and take_next_instance_w_condition/read_next_instance_w_condition" {
+    var out = try testGenOpts(
+        \\@appendable struct ShapeType { @key string<128> color; long x; long y; long shapesize; };
+    , "shape", .{ .generate_zzdds_wrappers = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+
+    // take_w_condition/read_w_condition: state masks (and, for a
+    // QueryCondition, the query filter) come from `cond` itself -- no mask
+    // parameters, unlike take()/read()/take_instance()/read_instance().
+    try testing.expect(has(s, "pub fn take_w_condition(self: @This(), out: *std.ArrayListUnmanaged(SampledValue), cond: _zzdds.DDS.ReadCondition, max: i32) !bool {"));
+    try testing.expect(has(s, "_zzdds.takeWithReadConditionRaw(self._dr, cond, &_tmp, max, self._alloc);"));
+    try testing.expect(has(s, "pub fn read_w_condition(self: @This(), out: *std.ArrayListUnmanaged(SampledValue), cond: _zzdds.DDS.ReadCondition, max: i32) !bool {"));
+    try testing.expect(has(s, "_zzdds.readWithReadConditionRaw(self._dr, cond, &_tmp, max, self._alloc);"));
+
+    // take_next_instance_w_condition/read_next_instance_w_condition: also
+    // scoped to the "next instance" after `prev`.
+    try testing.expect(has(s, "pub fn take_next_instance_w_condition(self: @This(), out: *std.ArrayListUnmanaged(SampledValue), cond: _zzdds.DDS.ReadCondition, prev: _zzdds.DDS.InstanceHandle_t, max: i32) !bool {"));
+    try testing.expect(has(s, "_zzdds.takeNextInstanceWithReadConditionRaw(self._dr, cond, prev, &_tmp, max, self._alloc);"));
+    try testing.expect(has(s, "pub fn read_next_instance_w_condition(self: @This(), out: *std.ArrayListUnmanaged(SampledValue), cond: _zzdds.DDS.ReadCondition, prev: _zzdds.DDS.InstanceHandle_t, max: i32) !bool {"));
+    try testing.expect(has(s, "_zzdds.readNextInstanceWithReadConditionRaw(self._dr, cond, prev, &_tmp, max, self._alloc);"));
+
+    // Shared decode tail must still fire for the new methods too (proves the
+    // emitReaderDecodeTmpTail extraction didn't drop anything).
+    try testing.expect(has(s, "ShapeType.deserialize(&_r, self._alloc)"));
 }
 
 test "zig_backend: typed DataWriter uses writeEncapHeader for @final struct" {

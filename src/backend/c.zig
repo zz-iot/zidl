@@ -649,6 +649,7 @@ const Generator = struct {
         try self.print("{s}{s}int {s}DataWriter_dispose({s}DataWriter *self, const {s} *key, DDS_InstanceHandle_t handle);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataWriter_unregister({s}DataWriter *self, const {s} *key, DDS_InstanceHandle_t handle);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}DDS_InstanceHandle_t {s}DataWriter_register_instance({s}DataWriter *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}DDS_InstanceHandle_t {s}DataWriter_register_instance_w_timestamp({s}DataWriter *self, const {s} *key, DDS_Time_t timestamp);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataWriter_write_w_timestamp({s}DataWriter *self, const {s} *value, DDS_InstanceHandle_t handle, DDS_Time_t timestamp);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataWriter_dispose_w_timestamp({s}DataWriter *self, const {s} *key, DDS_InstanceHandle_t handle, DDS_Time_t timestamp);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataWriter_unregister_w_timestamp({s}DataWriter *self, const {s} *key, DDS_InstanceHandle_t handle, DDS_Time_t timestamp);\n", .{ em, sp, c_name, c_name, c_name });
@@ -663,6 +664,12 @@ const Generator = struct {
         try self.print("{s}{s}DDS_InstanceHandle_t {s}DataReader_lookup_instance({s}DataReader *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataReader_take_n({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataReader_read_n({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_take_instance({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_read_instance({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_take_w_condition({s}DataReader *self, DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_read_w_condition({s}DataReader *self, DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_take_next_instance_w_condition({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_read_next_instance_w_condition({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataReader_take_loaned({s}DataReader *self, {s} *out, zzdds_sample_info *info, zzdds_loaned_sample *loan);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}void {s}DataReader_return_loan({s}DataReader *self, zzdds_loaned_sample *loan);\n\n", .{ em, sp, c_name, c_name });
     }
@@ -688,6 +695,13 @@ const Generator = struct {
 
         if (!self.opts.no_typesupport) {
             try self.emitUnionCdrProtos(c_name);
+        }
+        if (unionHasSequenceFields(u)) {
+            // Declared unconditionally, even under --c-no-free -- see the
+            // matching struct _free prototype comment above (emitStruct).
+            const em = self.opts.export_macro;
+            const sp: []const u8 = if (em.len > 0) " " else "";
+            try self.print("{s}{s}void {s}_free({s} *v);\n\n", .{ em, sp, c_name, c_name });
         }
         try self.emitVerbatimForPlacement(u.annotations.raw, "after-declaration");
     }
@@ -1414,10 +1428,29 @@ fn typeRefHasSequence(tr: ir.TypeRef) bool {
             // not a reason to skip generating a _free() at all.
             .typedef => |t| typeRefHasSequence(t.type_ref),
             .struct_ => |s| structHasSequenceFields(s),
+            .union_ => |u| unionHasSequenceFields(u),
             else => false,
         },
         else => false,
     };
+}
+
+/// True if any of `u`'s cases owns heap memory (an unbounded string/wstring,
+/// a sequence, or a nested struct/union that itself does) -- the union
+/// equivalent of `structHasSequenceFields`. Found missing during review
+/// (Greptile, PR #38): without this, a struct member typed as a named union
+/// was invisible to `typeRefHasSequence`, so a union case's owned content
+/// was never freed by anything -- not `_free()` gating, not `emitUnionFree`
+/// (which didn't exist at all before this fix either, for any consumer, not
+/// just struct members). Confirmed via direct inspection, not just the
+/// review comment: `emitUnionFns` (serialize/deserialize) never emitted a
+/// `_free` function for any union, and `typeRefHasSequence`'s `.named`
+/// switch had no `.union_` arm at all.
+fn unionHasSequenceFields(u: *const ir.Union) bool {
+    for (u.cases) |cas| {
+        if (typeRefHasSequence(cas.type_ref)) return true;
+    }
+    return false;
 }
 
 fn isDefaultUnionCase(cas: ir.UnionCase) bool {
@@ -1798,7 +1831,10 @@ const CdrGenerator = struct {
                 if (structHasSequenceFields(s) and !self.opts.c_no_free) try self.emitStructFree(s);
             },
             .exception => |e| try self.emitExceptionFns(e),
-            .union_ => |u| try self.emitUnionFns(u),
+            .union_ => |u| {
+                try self.emitUnionFns(u);
+                if (unionHasSequenceFields(u) and !self.opts.c_no_free) try self.emitUnionFree(u);
+            },
             else => {},
         }
     }
@@ -2529,6 +2565,18 @@ const CdrGenerator = struct {
         try self.writeI("return zzdds_register_instance_raw(self->writer, _hash);\n");
         try self.write("}\n\n");
 
+        // Unlike write/dispose/unregister_w_timestamp above (which thread
+        // `timestamp` through to zzdds_write_raw_w_timestamp), zzdds's own
+        // instance registration (zzdds_register_instance_raw) is a pure,
+        // stateless key-hash-to-handle computation with no source-timestamp
+        // involvement at all -- `timestamp` is accepted here only for
+        // spec-shape compliance (matching register_instance_w_timestamp's
+        // implicit IDL) and is genuinely unused.
+        try self.print("DDS_InstanceHandle_t {s}DataWriter_register_instance_w_timestamp({s}DataWriter *self, const {s} *key, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("(void)timestamp;\n");
+        try self.printI("return {s}DataWriter_register_instance(self, key);\n", .{c_name});
+        try self.write("}\n\n");
+
         try self.print("static int {s}DataWriter_write_kind_w_timestamp({s}DataWriter *self, zzdds_write_kind kind, const {s} *value, int key_only, DDS_InstanceHandle_t handle, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
         try self.writeI("ZidlCdrWriter _w;\n");
         try self.writeI("uint8_t _hash[16];\n");
@@ -2640,6 +2688,20 @@ const CdrGenerator = struct {
         try self.writeI("infos[_i] = _arr.samples[_i].info;\n");
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _arr.samples[_i].data, _arr.samples[_i].data_len);\n");
+        if (structHasSequenceFields(s)) {
+            // Zero values[_i] before attempting to decode into it, so that
+            // IF decoding fails partway through, every field it never
+            // reached is a well-defined NULL/empty state rather than
+            // whatever the caller's storage happened to contain -- the
+            // cleanup below calls _free() on this same (possibly partial)
+            // element, and _free() is only null/zero-safe per field, not
+            // safe against indeterminate/garbage pointers. Caught in review
+            // (Greptile): the caller is not guaranteed to have zero-
+            // initialized `values` itself, so relying on that would let a
+            // failed decode free a garbage pointer instead of cleanly
+            // reporting the error -- corruption/crash, not just a leak.
+            try self.writeI("memset(&values[_i], 0, sizeof(values[_i]));\n");
+        }
         try self.writeI("if (!_rc) _rc = infos[_i].valid_data ?\n");
         self.indent_depth += 1;
         try self.printI("{s}_deserialize(&_r, &values[_i]) :\n", .{c_name});
@@ -2650,10 +2712,18 @@ const CdrGenerator = struct {
             // comment: the prototype is always declared, the function always
             // exists (locally or externally), so this cleanup call is always
             // safe and always needed to avoid leaking every already-decoded
-            // element on this error path.
+            // element on this error path. `_j <= _i` (not `_j < _i`): the
+            // *current*, partially-decoded element must be freed too, not
+            // just the ones before it -- deserialize/deserialize_key can
+            // allocate several fields before a later one fails, leaving
+            // values[_i] holding real, now-orphaned allocations if skipped.
+            // Safe to call _free on values[_i] (partial or not) because it
+            // was zeroed immediately above, so every field _free() might
+            // touch is either a real allocation or a well-defined NULL/empty
+            // state -- never indeterminate caller-supplied memory.
             try self.writeI("if (_rc) {\n");
             self.indent_depth += 1;
-            try self.printI("for (int _j = 0; _j < _i; _j++) {s}_free(&values[_j]);\n", .{c_name});
+            try self.printI("for (int _j = 0; _j <= _i; _j++) {s}_free(&values[_j]);\n", .{c_name});
             try self.writeI("zzdds_return_raw_samples(self->reader, &_arr);\n");
             try self.writeI("return _rc;\n");
             self.indent_depth -= 1;
@@ -2679,6 +2749,107 @@ const CdrGenerator = struct {
         try self.write("}\n\n");
         try self.print("int {s}DataReader_read_n({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, c_name, c_name });
         try self.printI("return {s}DataReader_n_impl(self, values, infos, max, ss, vs, is, 0);\n", .{c_name});
+        try self.write("}\n\n");
+
+        // Decodes zzdds_raw_sample_array `_arr` into `values`/`infos`, freeing
+        // `_arr` either way -- the shared tail of every batch reader op below
+        // (take_instance/read_instance, take_w_condition/read_w_condition,
+        // take_next_instance_w_condition/read_next_instance_w_condition),
+        // which otherwise only differ in which zzdds_*_raw call produces `_arr`.
+        try self.print("static int {s}DataReader_decode_arr({s}DataReader *self, zzdds_raw_sample_array *_arr, {s} *values, zzdds_sample_info *infos) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("for (size_t _i = 0; _i < _arr->count; _i++) {\n");
+        self.indent_depth += 1;
+        try self.writeI("infos[_i] = _arr->samples[_i].info;\n");
+        try self.writeI("ZidlCdrReader _r;\n");
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _arr->samples[_i].data, _arr->samples[_i].data_len);\n");
+        if (structHasSequenceFields(s)) {
+            // See DataReader_n_impl's matching comment above: zero
+            // values[_i] before decoding into it so a partial failure
+            // leaves only real allocations or well-defined NULL/empty
+            // fields -- never indeterminate caller-supplied memory -- for
+            // the _free() cleanup below to touch.
+            try self.writeI("memset(&values[_i], 0, sizeof(values[_i]));\n");
+        }
+        try self.writeI("if (!_rc) _rc = infos[_i].valid_data ?\n");
+        self.indent_depth += 1;
+        try self.printI("{s}_deserialize(&_r, &values[_i]) :\n", .{c_name});
+        try self.printI("{s}_deserialize_key(&_r, &values[_i]);\n", .{c_name});
+        self.indent_depth -= 1;
+        if (structHasSequenceFields(s)) {
+            // `_j <= _i`, matching DataReader_n_impl's own fix above: the
+            // *current*, partially-decoded element must be freed too, not
+            // just the ones before it -- see that function's comment for
+            // the full safety argument.
+            try self.writeI("if (_rc) {\n");
+            self.indent_depth += 1;
+            try self.printI("for (size_t _j = 0; _j <= _i; _j++) {s}_free(&values[_j]);\n", .{c_name});
+            try self.writeI("zzdds_return_raw_samples(self->reader, _arr);\n");
+            try self.writeI("return _rc;\n");
+            self.indent_depth -= 1;
+            try self.writeI("}\n");
+        } else {
+            // See the matching --c-no-free comment in DataReader_n_impl above.
+            try self.writeI("if (_rc) { zzdds_return_raw_samples(self->reader, _arr); return _rc; }\n");
+        }
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.writeI("int _n = (int)_arr->count;\n");
+        try self.writeI("zzdds_return_raw_samples(self->reader, _arr);\n");
+        try self.writeI("return _n;\n");
+        try self.write("}\n\n");
+
+        try self.print("static int {s}DataReader_n_instance_impl({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is, int destructive) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("zzdds_raw_sample_array _arr = {NULL, 0, 0};\n");
+        try self.writeI("int _n = destructive ?\n");
+        self.indent_depth += 1;
+        try self.writeI("zzdds_take_n_instance_raw(self->reader, instance_handle, ss, vs, is, max, &_arr) :\n");
+        try self.writeI("zzdds_read_n_instance_raw(self->reader, instance_handle, ss, vs, is, max, &_arr);\n");
+        self.indent_depth -= 1;
+        try self.writeI("if (_n <= 0) return _n;\n");
+        try self.printI("return {s}DataReader_decode_arr(self, &_arr, values, infos);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader_take_instance({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataReader_n_instance_impl(self, instance_handle, values, infos, max, ss, vs, is, 1);\n", .{c_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataReader_read_instance({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataReader_n_instance_impl(self, instance_handle, values, infos, max, ss, vs, is, 0);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("static int {s}DataReader_w_condition_impl({s}DataReader *self, DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max, int destructive) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("zzdds_raw_sample_array _arr = {NULL, 0, 0};\n");
+        try self.writeI("int _n = destructive ?\n");
+        self.indent_depth += 1;
+        try self.writeI("zzdds_take_w_condition_raw(self->reader, condition, max, &_arr) :\n");
+        try self.writeI("zzdds_read_w_condition_raw(self->reader, condition, max, &_arr);\n");
+        self.indent_depth -= 1;
+        try self.writeI("if (_n <= 0) return _n;\n");
+        try self.printI("return {s}DataReader_decode_arr(self, &_arr, values, infos);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader_take_w_condition({s}DataReader *self, DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataReader_w_condition_impl(self, condition, values, infos, max, 1);\n", .{c_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataReader_read_w_condition({s}DataReader *self, DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataReader_w_condition_impl(self, condition, values, infos, max, 0);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("static int {s}DataReader_next_instance_w_condition_impl({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max, int destructive) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("zzdds_raw_sample_array _arr = {NULL, 0, 0};\n");
+        try self.writeI("int _n = destructive ?\n");
+        self.indent_depth += 1;
+        try self.writeI("zzdds_take_next_instance_w_condition_raw(self->reader, condition, prev, max, &_arr) :\n");
+        try self.writeI("zzdds_read_next_instance_w_condition_raw(self->reader, condition, prev, max, &_arr);\n");
+        self.indent_depth -= 1;
+        try self.writeI("if (_n <= 0) return _n;\n");
+        try self.printI("return {s}DataReader_decode_arr(self, &_arr, values, infos);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader_take_next_instance_w_condition({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataReader_next_instance_w_condition_impl(self, condition, prev, values, infos, max, 1);\n", .{c_name});
+        try self.write("}\n\n");
+        try self.print("int {s}DataReader_read_next_instance_w_condition({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max) {{\n", .{ c_name, c_name, c_name });
+        try self.printI("return {s}DataReader_next_instance_w_condition_impl(self, condition, prev, values, infos, max, 0);\n", .{c_name});
         try self.write("}\n\n");
 
         try self.print("int {s}DataReader_take_loaned({s}DataReader *self, {s} *out, zzdds_sample_info *info, zzdds_loaned_sample *loan) {{\n", .{ c_name, c_name, c_name });
@@ -3792,6 +3963,46 @@ const CdrGenerator = struct {
         try self.write("}\n\n");
     }
 
+    /// Emit `void <CName>_free(<CName> *v)` for a union -- the union
+    /// counterpart of `emitStructFree`, switching on the active discriminant
+    /// (`v->_d`) and freeing whichever case's content is actually owned
+    /// heap memory. Only called when `unionHasSequenceFields(u)` is true.
+    /// Cases that don't own memory get no switch arm at all (an unmatched
+    /// discriminant value with no case and no default is a well-defined
+    /// C no-op, same as `emitStructFree` skipping non-owning members
+    /// entirely rather than emitting an empty guard for them).
+    fn emitUnionFree(self: *CdrGenerator, u: *const ir.Union) anyerror!void {
+        const c_name = try self.prefixedCName(u.qualified_name);
+        defer self.alloc.free(c_name);
+
+        try self.print("void {s}_free({s} *v) {{\n", .{ c_name, c_name });
+        try self.writeI("switch (v->_d) {\n");
+        self.indent_depth += 1;
+        for (u.cases) |cas| {
+            // Every case gets a label, owning or not: a non-owning case must
+            // not be silently omitted, or its discriminant value falls
+            // through to `default:` at runtime whenever the default case
+            // happens to be an owning one -- e.g. a plain int case wrongly
+            // running the default string case's free() on a non-pointer.
+            try self.emitUnionCaseLabelLinesC(u.discriminant, cas);
+            self.indent_depth += 1;
+            if (typeRefHasSequence(cas.type_ref)) {
+                const access = try std.fmt.allocPrint(self.alloc, "v->_u.{s}", .{cas.name});
+                defer self.alloc.free(access);
+                if (cas.dimensions.len > 0) {
+                    try self.emitFreeArrayElementsGeneral(cas.type_ref, access, cas.dimensions, 0);
+                } else {
+                    try self.emitFreeTypeRefGeneral(cas.type_ref, access, 0);
+                }
+            }
+            try self.writeI("break;\n");
+            self.indent_depth -= 1;
+        }
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.write("}\n\n");
+    }
+
     /// Emit the free logic for a single non-array field/element lvalue of type
     /// `tr`. Assumes `typeRefHasSequence(tr)` is already known true by the caller
     /// (callers only invoke this for fields worth visiting).
@@ -3835,6 +4046,11 @@ const CdrGenerator = struct {
                     const ns_c = try self.prefixedCName(ns.qualified_name);
                     defer self.alloc.free(ns_c);
                     try self.printI("{s}_free(&{s});\n", .{ ns_c, lval });
+                },
+                .union_ => |nu| if (unionHasSequenceFields(nu)) {
+                    const nu_c = try self.prefixedCName(nu.qualified_name);
+                    defer self.alloc.free(nu_c);
+                    try self.printI("{s}_free(&{s});\n", .{ nu_c, lval });
                 },
                 else => {},
             },
@@ -4712,6 +4928,72 @@ test "c_backend: typedef scalar" {
     try testing.expect(has(out.items, "typedef int32_t MyInt;"));
 }
 
+// ── Union ownership / _free (Greptile review, PR #38) ───────────────────────
+//
+// Before this fix, no union ever got a _free() at all -- typeRefHasSequence
+// had no .union_ arm, so a union case's owned content was invisible to
+// every ownership-tracking consumer, not just the batch-decode cleanup this
+// PR originally touched.
+
+test "c_backend: union with an owned case gets a _free prototype" {
+    var out = try testGen(
+        \\union Var switch (long) { case 0: long i; default: string s; };
+    , "var");
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "void Var_free(Var *v);"));
+}
+
+test "c_backend: union with no owning cases gets no _free at all" {
+    var out = try testGen(
+        \\union NoOwn switch (long) { case 0: long a; default: long b; };
+    , "noown");
+    defer out.deinit(testing.allocator);
+    try testing.expect(!has(out.items, "NoOwn_free"));
+}
+
+test "c_backend cdr: union _free frees only the owning case" {
+    var out = try testGenCdr(
+        \\union Var switch (long) { case 0: long i; default: string s; };
+    , "var");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "void Var_free(Var *v) {"));
+    try testing.expect(has(s, "switch (v->_d) {"));
+    // The int case (0) owns nothing, but it still needs its own case label
+    // with a bare break -- omitting it would let discriminant 0 fall through
+    // into `default:` below and wrongly run the string case's free() on a
+    // non-pointer value.
+    try testing.expect(has(s, "case 0:\n            break;"));
+    try testing.expect(!has(s, "case 0:\n    zidl_cdr_free"));
+    // The string case (default) does free.
+    try testing.expect(has(s, "default:\n"));
+    try testing.expect(has(s, "zidl_cdr_free_str(v->_u.s);"));
+}
+
+test "c_backend cdr: struct embedding an owning union delegates to the union's own _free" {
+    var out = try testGenCdr(
+        \\union Var switch (long) { case 0: long i; default: string s; };
+        \\struct Holder { @key long id; Var v; };
+    , "holder");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // The union member alone must be enough to trigger Holder_free's
+    // existence -- this is the actual bug: before the .union_ arm was added
+    // to typeRefHasSequence, a struct whose *only* owning content was a
+    // union member got no _free() generated for it at all.
+    try testing.expect(has(s, "void Holder_free(Holder *v) {"));
+    try testing.expect(has(s, "Var_free(&v->v);"));
+}
+
+test "c_backend cdr: struct with only a non-owning union member gets no _free" {
+    var out = try testGenCdr(
+        \\union NoOwn switch (long) { case 0: long a; default: long b; };
+        \\struct Holder { @key long id; NoOwn v; };
+    , "holder");
+    defer out.deinit(testing.allocator);
+    try testing.expect(!has(out.items, "Holder_free"));
+}
+
 test "c_backend: typedef array" {
     var out = try testGen("typedef long Matrix[2][4];", "types");
     defer out.deinit(testing.allocator);
@@ -5303,11 +5585,20 @@ test "c_backend cdr: _n_impl cleans up partial samples when struct has sequence 
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "for (int _j = 0; _j < _i; _j++) Msg_free(&values[_j]);"));
+    // `_j <= _i`: the current, partially-decoded element must be freed too
+    // (a real leak Greptile caught in review — see the generator's own
+    // comment for the safety argument), not just the ones before it.
+    try testing.expect(has(s, "for (int _j = 0; _j <= _i; _j++) Msg_free(&values[_j]);"));
     try testing.expect(has(s, "zzdds_return_raw_samples(self->reader, &_arr);"));
+    // values[_i] must be zeroed *before* the decode attempt -- otherwise
+    // _free() above could touch indeterminate caller-supplied memory for
+    // whatever fields a partial decode never reached (a second real bug
+    // Greptile caught, on top of the leak: freeing the current element
+    // isn't safe unless it's known-zeroed first).
+    try testing.expect(has(s, "memset(&values[_i], 0, sizeof(values[_i]));"));
 }
 
-test "c_backend cdr: _n_impl has no cleanup loop when struct has no sequence fields" {
+test "c_backend cdr: _n_impl has no cleanup loop or memset when struct has no sequence fields" {
     var out = try testGenCdrOpts(
         "@appendable struct Msg { @key long id; long value; };",
         "msg",
@@ -5317,6 +5608,10 @@ test "c_backend cdr: _n_impl has no cleanup loop when struct has no sequence fie
     const s = out.items;
     try testing.expect(!has(s, "Msg_free(&values[_j])"));
     try testing.expect(has(s, "if (_rc) { zzdds_return_raw_samples(self->reader, &_arr); return _rc; }"));
+    // No _free() is ever called on values[_i] for a struct with no
+    // sequence/string fields, so there's nothing for the memset to protect
+    // -- must not be emitted.
+    try testing.expect(!has(s, "memset(&values[_i]"));
 }
 
 test "c_backend cdr: zzdds_c omitted when no qualifying topic struct" {
@@ -5327,6 +5622,92 @@ test "c_backend cdr: zzdds_c omitted when no qualifying topic struct" {
     );
     defer out.deinit(testing.allocator);
     try testing.expect(!has(out.items, "zzdds_c.h"));
+}
+
+// ── _w_condition family / batch take_instance / register_instance_w_timestamp ──
+
+test "c_backend: zzdds wrapper prototypes declare the _w_condition family, batch take_instance, and register_instance_w_timestamp" {
+    var out = try testGenFullOpts(
+        "@appendable struct Topic { @key long id; string<16> name; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "DDS_InstanceHandle_t TopicDataWriter_register_instance_w_timestamp(TopicDataWriter *self, const Topic *key, DDS_Time_t timestamp);"));
+    try testing.expect(has(s, "int TopicDataReader_take_instance(TopicDataReader *self, DDS_InstanceHandle_t instance_handle, Topic *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);"));
+    try testing.expect(has(s, "int TopicDataReader_read_instance(TopicDataReader *self, DDS_InstanceHandle_t instance_handle, Topic *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);"));
+    try testing.expect(has(s, "int TopicDataReader_take_w_condition(TopicDataReader *self, DDS_ReadCondition condition, Topic *values, zzdds_sample_info *infos, int max);"));
+    try testing.expect(has(s, "int TopicDataReader_read_w_condition(TopicDataReader *self, DDS_ReadCondition condition, Topic *values, zzdds_sample_info *infos, int max);"));
+    try testing.expect(has(s, "int TopicDataReader_take_next_instance_w_condition(TopicDataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, Topic *values, zzdds_sample_info *infos, int max);"));
+    try testing.expect(has(s, "int TopicDataReader_read_next_instance_w_condition(TopicDataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, Topic *values, zzdds_sample_info *infos, int max);"));
+}
+
+test "c_backend cdr: register_instance_w_timestamp ignores its timestamp and delegates to register_instance" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "DDS_InstanceHandle_t TopicDataWriter_register_instance_w_timestamp(TopicDataWriter *self, const Topic *key, DDS_Time_t timestamp) {"));
+    try testing.expect(has(s, "(void)timestamp;"));
+    try testing.expect(has(s, "return TopicDataWriter_register_instance(self, key);"));
+}
+
+test "c_backend cdr: take_instance/read_instance call the instance-scoped raw ops" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "zzdds_take_n_instance_raw(self->reader, instance_handle, ss, vs, is, max, &_arr) :"));
+    try testing.expect(has(s, "zzdds_read_n_instance_raw(self->reader, instance_handle, ss, vs, is, max, &_arr);"));
+    try testing.expect(has(s, "int TopicDataReader_take_instance(TopicDataReader *self, DDS_InstanceHandle_t instance_handle, Topic *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {"));
+    try testing.expect(has(s, "return TopicDataReader_n_instance_impl(self, instance_handle, values, infos, max, ss, vs, is, 1);"));
+}
+
+test "c_backend cdr: take_w_condition/read_w_condition call zzdds_take_w_condition_raw/zzdds_read_w_condition_raw" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "zzdds_take_w_condition_raw(self->reader, condition, max, &_arr) :"));
+    try testing.expect(has(s, "zzdds_read_w_condition_raw(self->reader, condition, max, &_arr);"));
+    try testing.expect(has(s, "int TopicDataReader_take_w_condition(TopicDataReader *self, DDS_ReadCondition condition, Topic *values, zzdds_sample_info *infos, int max) {"));
+    try testing.expect(has(s, "return TopicDataReader_w_condition_impl(self, condition, values, infos, max, 1);"));
+}
+
+test "c_backend cdr: take_next_instance_w_condition/read_next_instance_w_condition call the matching raw ops" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "zzdds_take_next_instance_w_condition_raw(self->reader, condition, prev, max, &_arr) :"));
+    try testing.expect(has(s, "zzdds_read_next_instance_w_condition_raw(self->reader, condition, prev, max, &_arr);"));
+    try testing.expect(has(s, "int TopicDataReader_take_next_instance_w_condition(TopicDataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, Topic *values, zzdds_sample_info *infos, int max) {"));
+}
+
+test "c_backend cdr: _decode_arr cleans up partial samples when struct has sequence fields" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Msg { @key long id; sequence<octet> data; };",
+        "msg",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "for (size_t _j = 0; _j <= _i; _j++) Msg_free(&values[_j]);"));
+    try testing.expect(has(s, "static int MsgDataReader_decode_arr(MsgDataReader *self, zzdds_raw_sample_array *_arr, Msg *values, zzdds_sample_info *infos) {"));
+    try testing.expect(has(s, "memset(&values[_i], 0, sizeof(values[_i]));"));
 }
 
 test "c_backend cdr: source file banner and includes" {
