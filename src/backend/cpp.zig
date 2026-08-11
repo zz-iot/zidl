@@ -722,6 +722,9 @@ const Generator = struct {
             try self.write("    void _destroy_active() noexcept;\n");
             try self.write("    void _construct_default();\n");
             try self.print("    void _copy_construct_from(const {s} &other);\n", .{u.name});
+            // Move-from: used by operator= via a temporary, not by the move
+            // ctor/assign (there isn't one -- see the class comment above).
+            try self.print("    void _move_construct_from({s} &other);\n", .{u.name});
         }
         try self.print("    {s} _disc{{}};\n", .{disc_cpp});
         if (needs_lifetime) {
@@ -2872,10 +2875,10 @@ const CdrGenerator = struct {
     // a scalar -- the exact hazard (and fix) already found in the C backend's
     // generated union `_free()`.
 
-    const UnionLifecycleOp = enum { destroy, construct_default, copy };
+    const UnionLifecycleOp = enum { destroy, construct_default, copy, move_construct };
 
     /// Emit the single-case body for one leaf (non-array) lvalue of type
-    /// `tr`. `src_access` is only read for `.copy`.
+    /// `tr`. `src_access` is only read for `.copy`/`.move_construct`.
     fn emitUnionLifecycleLeaf(
         self: *CdrGenerator,
         op: UnionLifecycleOp,
@@ -2902,6 +2905,23 @@ const CdrGenerator = struct {
                     const cpp_type = try cppTypeStr(self.alloc, self.opts, tr);
                     defer self.alloc.free(cpp_type);
                     try self.printI("new (&({s})) {s}({s});\n", .{ dst_access, cpp_type, src_access });
+                } else {
+                    try self.printI("{s} = {s};\n", .{ dst_access, src_access });
+                }
+            },
+            .move_construct => {
+                if (non_trivial) {
+                    // std::string/vector/map's move constructor is noexcept
+                    // -- unlike .copy, this can't throw and leave the
+                    // destination's discriminant pointing at unconstructed
+                    // storage. Used by operator= (see
+                    // emitUnionMoveConstructFrom) specifically because its
+                    // copy path already has a live temporary to move from
+                    // once the (throwable) copy into that temporary
+                    // succeeded, so nothing past this point can fail.
+                    const cpp_type = try cppTypeStr(self.alloc, self.opts, tr);
+                    defer self.alloc.free(cpp_type);
+                    try self.printI("new (&({s})) {s}(std::move({s}));\n", .{ dst_access, cpp_type, src_access });
                 } else {
                     try self.printI("{s} = {s};\n", .{ dst_access, src_access });
                 }
@@ -3014,6 +3034,37 @@ const CdrGenerator = struct {
         try self.write("}\n\n");
     }
 
+    /// Move-construct analog of `emitUnionCopyConstructFrom`, using
+    /// `.move_construct` instead of `.copy` -- see `operator=`'s use of this
+    /// in `emitUnionLifecycleFns` for why: unlike a copy, this can't throw.
+    fn emitUnionMoveConstructFrom(self: *CdrGenerator, u: *const ir.Union, cpp_qname: []const u8) anyerror!void {
+        try self.print("void {s}::_move_construct_from({s} &other) {{\n", .{ cpp_qname, cpp_qname });
+        try self.writeI("switch (other._disc) {\n");
+        self.indent_depth += 1;
+        for (u.cases) |cas| {
+            try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
+            self.indent_depth += 1;
+            const dst = try std.fmt.allocPrint(self.alloc, "_u._{s}", .{cas.name});
+            defer self.alloc.free(dst);
+            const src = try std.fmt.allocPrint(self.alloc, "other._u._{s}", .{cas.name});
+            defer self.alloc.free(src);
+            if (cas.dimensions.len > 0) {
+                if (typeRefIsCppNonTrivial(cas.type_ref)) {
+                    try self.emitUnionArrayLifecycleOp(.move_construct, cas.type_ref, dst, src, cas.dimensions, 0);
+                } else {
+                    try self.printI("std::memcpy({s}, {s}, sizeof({s}));\n", .{ dst, src, dst });
+                }
+            } else {
+                try self.emitUnionLifecycleLeaf(.move_construct, cas.type_ref, dst, src);
+            }
+            try self.writeI("break;\n");
+            self.indent_depth -= 1;
+        }
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.write("}\n\n");
+    }
+
     /// Emit the special member functions and `_d()` declared (for a
     /// lifetime-needing union) in Generator.emitUnion.
     fn emitUnionLifecycleFns(self: *CdrGenerator, u: *const ir.Union) anyerror!void {
@@ -3025,6 +3076,7 @@ const CdrGenerator = struct {
         try self.emitUnionDestroyActive(u, cpp_qname);
         try self.emitUnionConstructDefault(u, cpp_qname);
         try self.emitUnionCopyConstructFrom(u, cpp_qname);
+        try self.emitUnionMoveConstructFrom(u, cpp_qname);
 
         try self.print("{s}::{s}() {{\n", .{ cpp_qname, u.name });
         self.indent_depth += 1;
@@ -3042,9 +3094,16 @@ const CdrGenerator = struct {
         self.indent_depth += 1;
         try self.writeI("if (this != &other) {\n");
         self.indent_depth += 1;
+        // Strong exception guarantee: copy into a temporary first (the only
+        // step that can throw -- e.g. std::string/vector/map's copy ctor
+        // under bad_alloc). If that throws, *this is untouched. Everything
+        // from here on is noexcept (destroy, plain int assignment, move
+        // construction), so *this can never be left with _disc naming a case
+        // whose storage was never actually constructed.
+        try self.printI("{s} tmp(other);\n", .{cpp_qname});
         try self.writeI("_destroy_active();\n");
-        try self.writeI("_disc = other._disc;\n");
-        try self.writeI("_copy_construct_from(other);\n");
+        try self.writeI("_disc = tmp._disc;\n");
+        try self.writeI("_move_construct_from(tmp);\n");
         self.indent_depth -= 1;
         try self.writeI("}\n");
         try self.writeI("return *this;\n");
@@ -6878,6 +6937,34 @@ test "cpp_backend cdr: union deserialize wraps each case body in its own scope" 
     // past this one's initialization ("jump to case label" in gcc/clang).
     try testing.expect(has(s, "case 0:\n        {\n"));
     try testing.expect(has(s, "default:\n        {\n"));
+}
+
+test "cpp_backend cdr: non-trivial union operator= copies into a temporary before touching *this" {
+    var out = try testGenCdr(
+        \\union Var switch (long) { case 0: long i; default: string s; };
+    , "var");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Strong exception guarantee: if copying `other` into the temporary
+    // throws (e.g. std::string's copy ctor under bad_alloc), *this must be
+    // completely untouched -- so the copy has to happen *before*
+    // _destroy_active()/_disc are touched, not after. The old shape
+    // destroyed the old member and committed the new discriminant first,
+    // then risked the throw -- leaving _disc naming a case whose storage
+    // was never actually constructed.
+    try testing.expect(has(s,
+        \\::Var &::Var::operator=(const ::Var &other) {
+        \\        if (this != &other) {
+        \\            ::Var tmp(other);
+        \\            _destroy_active();
+        \\            _disc = tmp._disc;
+        \\            _move_construct_from(tmp);
+    ));
+    // The move into *this must use std::string's move ctor (noexcept),
+    // never its copy ctor (which can throw) -- that's what makes everything
+    // after the temporary's construction safe.
+    try testing.expect(has(s, "void ::Var::_move_construct_from(::Var &other) {"));
+    try testing.expect(has(s, "new (&(_u._s)) std::string(std::move(other._u._s));"));
 }
 
 test "cpp_backend: typedef scalar" {
