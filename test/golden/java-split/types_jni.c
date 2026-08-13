@@ -79,6 +79,8 @@ void zidl_java_release_listener_data(void *listener_data) {
 jobject zidl_java_box_Greeter(JNIEnv *env, void *handle);
 jobject zidl_java_box_AdvancedGreeter(JNIEnv *env, void *handle);
 
+static jobject Greeter_box_as_most_derived(JNIEnv *env, void *handle);
+
 static void *zidl_java_unbox_as_Greeter(JNIEnv *env, jobject obj);
 
 static void *zidl_java_unbox_as_Greeter(JNIEnv *env, jobject obj) {
@@ -264,6 +266,15 @@ jobject zidl_java_box_Greeter(JNIEnv *env, void *handle) {
         ctor = (*env)->GetMethodID(env, cls, "<init>", "(J)V");
     }
     return (*env)->NewObject(env, cls, ctor, (jlong)(intptr_t)handle);
+}
+
+static jobject Greeter_box_as_most_derived(JNIEnv *env, void *handle) {
+    if (handle == NULL) return NULL;
+    {
+        void *_v0 = Greeter_as_AdvancedGreeter(handle);
+        if (_v0 != NULL) return zidl_java_box_AdvancedGreeter(env, _v0);
+    }
+    return zidl_java_box_Greeter(env, handle);
 }
 
 

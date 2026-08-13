@@ -148,7 +148,8 @@ axis, separate from the caching tension, since a review might fix one without th
   interface/inheritance/boxing question, but it directly affects how verifiable any future
   review's own findings are, so worth naming.
 
-**Pre-review spike (2026-08-12): `zzdds-examples/python/spike/` — does the current C/C++/Java
+**Pre-review spike (2026-08-12): `zzdds-examples/spikes/python/` (relocated 2026-08-13, was
+`zzdds-examples/python/spike/`) — does the current C/C++/Java
 binding set actually cover future-binding usage patterns, before committing this review's
 scope?** Prompted by a direct question about whether C#/Python/Rust/Go/Haskell (all sketched
 elsewhere in this roadmap, see their own sections below) would surface anything genuinely new
@@ -234,7 +235,7 @@ rather than reason about them. Full writeup in the spike's own `README.md`; summ
   order. But that machinery is purely internal Zig-side bookkeeping with **no C-ABI-visible
   signal at all**, confirmed by reading the same file — so a binding relying on
   `attach_condition()` implicitly keeping a reference alive gets no error, nothing.
-  Confirmed via `zzdds-examples/python/spike/probe4_condition_ownership.py`: `--vanish`
+  Confirmed via `zzdds-examples/spikes/python/probe4_condition_ownership.py`: `--vanish`
   wraps a `GuardCondition` handle in a class whose `__del__` destroys it (the natural,
   RAII-shaped thing a binding author would plausibly write), attaches it, drops the only
   reference, and shows the condition silently vanishes from `WaitSet.get_conditions()` —
@@ -287,7 +288,7 @@ on the list would need, before this review locks in scope? Same throwaway-probe 
 throughout (hand-declared FFI against zzdds's existing C-ABI, no real bindings, no codegen).
 Full detail in each spike's own README; summary per language:
 
-- **Go** (`go/spike/`) — picked over C# specifically because CPython's non-moving,
+- **Go** (`zzdds-examples/spikes/go/`) — picked over C# specifically because CPython's non-moving,
   refcounted heap (which every Python finding implicitly relies on) is not a guarantee Go's
   runtime shares; worth checking directly rather than assuming Python's findings generalize.
   `probe1_attach`: no attach step needed (cgo's `//export` mechanism just works for a
@@ -307,7 +308,7 @@ Full detail in each spike's own README; summary per language:
   not confirmed either way: `cgocheck` is a boundary-crossing check, not an ongoing
   invariant — it cannot catch "C copied this pointer elsewhere and used it later," a
   narrower residual risk than initially assumed, not fully closed.
-- **Rust `zig-ffi`** (`rust/spike/`) — targets the specific question of whether zzdds's
+- **Rust `zig-ffi`** (`zzdds-examples/spikes/rust/`) — targets the specific question of whether zzdds's
   *existing* `take_loaned`/`return_loan` C-ABI contract (valid until an explicit release
   call) maps onto a real, borrow-checker-enforced Rust lifetime, deliberately independent of
   whether the loan is backed by real zero-copy yet (it isn't — see zzdds's own roadmap; the
@@ -327,7 +328,7 @@ Full detail in each spike's own README; summary per language:
   loan API; the two open items are narrower (fix/document the retcode inconsistency, and
   real zero-copy landing underneath is a separate, larger zzdds-core question this spike
   doesn't block on either way).
-- **Haskell** (`haskell/spike/`) — this roadmap's own Haskell section previously covered
+- **Haskell** (`zzdds-examples/spikes/haskell/`) — this roadmap's own Haskell section previously covered
   only the CDR/type-mapping layer, nothing about reaching the DCPS core at all; this spike
   fills that gap directly. A second real ABI bug found by running rather than reading:
   `zzdds_factory_is_nil` returns C `bool` (1 byte); declaring it `CInt` (4 bytes) in the FFI
@@ -911,7 +912,7 @@ spikes, neither related to the design questions above:
   (15 call sites), `java_runtime/zzdds_java_runtime.c` (2 call sites — Java's own `.take()`
   already abstracted the retcode into a `null`/`Sample` API, unaffected at the Java
   language level, but its native glue needed the same fix), the Rust spike
-  (`zzdds-examples/rust/spike/`, both the `ffi.rs` declaration and `loan.rs`'s consumer —
+  (`zzdds-examples/spikes/rust/`, both the `ffi.rs` declaration and `loan.rs`'s consumer —
   confirmed via a real `cargo run`, not just a type-check), and `zzdds-examples/c/
   hello_world/subscriber.c` (a **real regression this fix would otherwise have
   introduced** — its `if (rc != 0)` treated any nonzero as fatal, which used to be safe
@@ -1206,6 +1207,70 @@ its `get_trigger_value()` workaround replaced by `List.contains()` membership ch
 consecutive clean runs (two domains), including through `GuardCondition`'s registration
 path and `qcCond`'s `QueryCondition`-satisfies-`ReadCondition` identity (Java's own
 interface inheritance, no upcast needed unlike C/C++).
+
+**Update (2026-08-13), PR #39 Greptile review — two findings, one real fix + one corrected
+doc comment.** PR #39 (the C++/Java shared-family cache work above) drew a Confidence 4/5
+review with a MUST-FIX and a lower-priority follow-up.
+
+1. **MUST-FIX, confirmed real and fixed: single-value entity returns/attributes had no
+   most-derived box resolution.** The Java shared-family cache above is keyed on the raw
+   `void *` handle — correct for making repeated boxes of the *same* handle identity-equal,
+   but orthogonal to a different bug: `zidl_java_box_<C>` boxes a handle as whatever `C` the
+   call site's *declared* return type says, not the handle's real runtime type. Sequence
+   elements already handled this correctly (`SeqParamMarshalGenerator`'s
+   `_box_as_most_derived` dispatcher, built for `WaitSet::wait()`'s `ConditionSeq`), but a
+   bare (non-sequence) entity-typed op return or attribute getter — `StatusCondition::
+   get_entity()` being the concrete case that surfaced it — called `zidl_java_box_<C>`
+   directly. Consequence: the FIRST caller to box a given handle through the bare `Entity`
+   type permanently wins the cache slot for that handle, and a later caller expecting to
+   cast the result to the real derived type (`DataReader`, `Topic`, ...) gets a
+   `ClassCastException` — confirmed reachable by reading the generated
+   `Java_io_zzdds_dcps_StatusConditionImpl_n_1get_1entity` trampoline directly, not
+   speculative.
+
+   Fix: generalized the sequence-only dispatcher into a shared mechanism both call shapes
+   use. New free functions in `java.zig` — `collectDerivedSiblings` (every other known
+   entity interface with `target` as a transitive base, via `bases[0]`-and-beyond, i.e. the
+   full base chain, not just the primary one — a handle's *declared* type doesn't constrain
+   which of its real bases it might actually be), `mostDerivedBoxFnName` (names, doesn't
+   emit, the right function: `zidl_java_box_<C>` directly if `target` has no derived
+   sibling, else `<C>_box_as_most_derived`), and `emitBoxAsMostDerived` (extracted from
+   `SeqParamMarshalGenerator`, now free and reusable). `JniBridgeGenerator` now forward-
+   declares and unconditionally emits `<C>_box_as_most_derived` for every entity interface
+   that has a derived sibling — same "always emitted, not just when the current file happens
+   to use it" policy `zidl_java_box_<C>` itself already uses, so an unrelated file gaining a
+   new call site later doesn't need this file regenerated too. `emitJniBridgeOp`'s entity
+   op-return case and `emitJniBridgeAttr`'s entity attribute-getter case both now call
+   through `mostDerivedBoxFnName` instead of hardcoding `zidl_java_box_<C>`.
+
+   One golden fallout: `types.zig`'s `AdvancedGreeter : Greeter` now gets a
+   `Greeter_box_as_most_derived` dispatcher emitted (unused in that golden file specifically,
+   since nothing there returns a bare `Greeter` — emitted anyway per the unconditional
+   policy above). One test updated to match (`java: bare sequence<Entity> param... gets real
+   JNI marshaling` — `Entity_box_as_most_derived` is now expected to exist even though this
+   test's own `DataReaderSeq` call site doesn't use it, since `Entity` has `DataReader` as a
+   derived sibling in that test's IR). Verified: `zig build test` (1028 tests, all goldens)
+   and a direct regeneration against zzdds's real `dcps.idl` both clean.
+
+2. **Lower-priority follow-up, investigated and NOT fixed — the literal restriction as
+   documented was wrong, enforcing it would have broken zzdds's real IDL.** Greptile flagged
+   `hasSharedCAbiBox` (`src/ir/types.zig`) as having no enforcement of its documented
+   hierarchy restriction ("a secondary base... must not be annotated"). Implemented the
+   literal check (reject any interface using an `@shared_c_abi_box`-annotated interface as a
+   non-primary base) — and running it against zzdds's real `dcps.idl` immediately failed on
+   `Topic : Entity, TopicDescription`, where `TopicDescription` (Topic's secondary base) is
+   deliberately `@shared_c_abi_box`-annotated. Cross-checked against this same roadmap file:
+   already documented above (the C++ family-cache entry, "a secondary base like `Topic`'s
+   `TopicDescription` correctly stays out of it") and in the box-identity section ("Not
+   attempted, not scheduled: Topic's secondary-base (`TopicDescription`) view stays
+   independently cached, permanently") as an intentional, permanent, working design choice,
+   not a bug — every family-grouping walk (Zig's `CAbiViews` nesting, C++/Java's
+   `sharedCAbiBoxFamilyRoot`) only ever inspects `bases[0]`, so a secondary-base annotation
+   is inert (its own independent family), never silently mis-composed. The doc comment's
+   "must not be annotated" was simply overstated. Reverted the validation entirely and
+   rewrote `hasSharedCAbiBox`'s doc comment to describe the actual (harmless, intentional)
+   behavior instead of a false restriction. No enforcement added — there is no invalid state
+   left to reject once the doc comment matches reality.
 
 **PL_CDR (RTPS ParameterList) codegen in non-Zig backends — not planned, verified out of
 scope for all of them (C, C++, Java, and future Python/C#/Rust/Haskell alike).**
