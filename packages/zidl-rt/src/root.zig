@@ -46,6 +46,7 @@ pub const EntityBox = entity_box.EntityBox;
 pub const boxEntity = entity_box.boxEntity;
 pub const unboxEntity = entity_box.unboxEntity;
 pub const unboxAs = entity_box.unboxAs;
+pub const unboxAsView = entity_box.unboxAsView;
 pub const freeEntityBox = entity_box.freeEntityBox;
 
 pub const ZidlAllocator = allocator_mod.ZidlAllocator;

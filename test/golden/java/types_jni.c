@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdlib.h>
+#include <pthread.h>
 #include "types.h"
 
 /* Listener JNI upcall support: a global ref to the registered Java

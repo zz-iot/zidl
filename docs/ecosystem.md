@@ -192,13 +192,18 @@ pub export fn DDS_Publisher_create_datawriter(
     a_listener: ?*const DDS.DataWriterListener,
     mask: DDS.StatusMask,
 ) callconv(.c) *anyopaque {
-    const _self: DDS.Publisher = zidl_rt.unboxAs(DDS.Publisher, self);
+    const _self: DDS.Publisher = zidl_rt.unboxAsView(DDS.Publisher, self);
     const _r = _self.vtable.create_datawriter(
-        _self.ptr, zidl_rt.unboxAs(DDS.Topic, a_topic), qos, a_listener, mask,
+        _self.ptr, zidl_rt.unboxAsView(DDS.Topic, a_topic), qos, a_listener, mask,
     );
     return _r.vtable.get_c_abi_handle(_r.ptr);
 }
 ```
+
+(`unboxAsView`, not the plain `unboxAs` a non-annotated interface's wrapper would use — see
+below. Both `Publisher` and `Topic` here are `@shared_c_abi_box`-annotated, and the choice
+is made per unboxed type, not per enclosing operation: `a_topic`'s unboxing depends on
+`Topic`'s own annotation, independent of `self`'s.)
 
 Every entity interface is handled uniformly this way — there's no distinction
 in the generated code between an interface with exactly one real
@@ -220,6 +225,21 @@ used to build the returned handle is always whatever the native call actually
 returned — never a value assumed or hardcoded by generated code — a failed
 `create_*` call's nil-object result is boxed and unboxed correctly too, the
 same as any other value.
+
+**Cross-view identity (`@shared_c_abi_box`):** by default, "cache and reuse a handle" above
+is scoped per *interface view* — a concrete impl presenting two interfaces (e.g. `Topic`
+and its base `Entity`) caches two independent handles, one per view, since each pairs the
+same `ptr` with a different `vtable`. An interface marked `@shared_c_abi_box` in its IDL
+declaration opts into something stronger: every view a concrete impl of that interface
+presents shares *one* handle, so e.g. a `DataWriter` handle and the `Entity` handle
+obtained by upcasting it are `==`-comparable, not just independently self-consistent. This
+works by generating a second, boxing-only `CAbiViews` type per annotated interface
+(nesting the interface's primary base's own `CAbiViews`, `extern struct`-offset-0-composed
+so a leaf's box can be safely reinterpreted as any ancestor's) and routing that
+interface's unboxing through `zidl_rt.unboxAsView` instead of `unboxAs` — see
+`zidl/docs/roadmap.md` "Binding design review: decision" for the full design and why it's
+opt-in per interface rather than automatic (it isn't safe for a *secondary* base of a
+multiply-inherited interface, e.g. `Topic`'s `TopicDescription`).
 
 For **listener interfaces** (`@callback` annotated): user code passes a
 `?*const XxxListener` pointer directly; no adapter struct is generated. Entity

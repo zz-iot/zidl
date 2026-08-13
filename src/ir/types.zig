@@ -317,6 +317,26 @@ pub fn isCallbackInterface(iface: *const Interface) bool {
     return std.mem.endsWith(u8, iface.name, "Listener");
 }
 
+/// True for `@shared_c_abi_box`-annotated interfaces — concrete implementations
+/// of these share one C-ABI box (one `CachedCAbiHandle`-style cache) across
+/// every interface view they present, instead of one box per view. Backends
+/// that support this generate a nested `CAbiViews` type per such interface
+/// (see the Zig backend's `emitInterface`) and route `self`/entity-parameter
+/// unboxing at the C-ABI boundary through it instead of the plain per-view
+/// `Vtable` reinterpretation `zidl_rt.unboxAs` normally does.
+///
+/// Only meaningful for a chain reachable by always following an interface's
+/// *first* declared base (see `zidl/docs/roadmap.md`'s "Binding design
+/// review: decision" for why only the primary base is safe here) — a
+/// secondary base of a multiply-inherited interface must not be annotated,
+/// since its `CAbiViews` would not compose correctly with a leaf's.
+pub fn hasSharedCAbiBox(iface: *const Interface) bool {
+    for (iface.raw) |ann| {
+        if (std.mem.eql(u8, ann.name, "shared_c_abi_box")) return true;
+    }
+    return false;
+}
+
 pub const Operation = struct {
     name: []const u8,
     span: ast.Span,

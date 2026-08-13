@@ -298,13 +298,13 @@ const Builder = struct {
 
     /// Undo `buildDefinitions`'s fill for every non-`@callback` interface
     /// reachable from `scope` (called only on an imported unit's own scope,
-    /// after that unit's fill pass — see `buildImpl`), *except* `.bases`.
-    /// Only `@callback` interface flattening needs a cross-module base's
-    /// real operations — filling those in for entity interfaces would grow
-    /// hand-written Zig vtable literals and flattened member lists that
+    /// after that unit's fill pass — see `buildImpl`), *except* `.bases` and
+    /// `.raw`. Only `@callback` interface flattening needs a cross-module
+    /// base's real operations — filling those in for entity interfaces would
+    /// grow hand-written Zig vtable literals and flattened member lists that
     /// nothing asked for, so `.operations`/`.attributes`/`.type_decls`/
-    /// `.consts`/`.raw` are reset back to the empty Pass-1 skeleton here, same
-    /// as before.
+    /// `.consts` are reset back to the empty Pass-1 skeleton here, same as
+    /// before.
     ///
     /// `.bases` is deliberately spared: it's pure structural inheritance
     /// info, not member content, and per-backend logic that walks a chain of
@@ -325,6 +325,25 @@ const Builder = struct {
     /// becomes flattenable via the now-visible `.bases` — a base with real
     /// `.bases` but always-empty `.operations` contributes no new members to
     /// walk, only the extra structural hop `nativeHandleBase` needs.
+    ///
+    /// `.raw` is spared for the identical reason, added later
+    /// (binding-design-review Phase 2, 2026-08-12): interface-level
+    /// annotations like `@shared_c_abi_box` are classification metadata
+    /// about the interface, not flattenable member content, and
+    /// `zig.zig`'s `hasSharedCAbiBox` needs the *real* answer for a
+    /// cross-module base the same way `nativeHandleBase` needs real
+    /// `.bases` — e.g. `ZZDDS::DataReader : DDS::DataReader` (`zzdds.idl`)
+    /// needs to see that `DDS::DataReader` (`dcps.idl`) is really annotated
+    /// to nest its own `CAbiViews` correctly; before this fix it always
+    /// looked unannotated across the module boundary, silently degrading
+    /// `ZZDDS.DataReader.CAbiViews` to a root (un-nested) shape with no
+    /// error — confirmed by inspecting real generated output, not just
+    /// reasoned about. `@callback`'s own reset (`isCallbackInterface` is
+    /// checked *before* this function is ever called for a given interface,
+    /// gating whether it's reached at all — see the call site) is
+    /// unaffected: nothing here changes which interfaces get callback
+    /// treatment, only what a *non*-callback interface's own `.raw` reads
+    /// back as.
     fn resetNonCallbackInterfaces(self: *Builder, scope: *const Scope, qpath: []const u8) void {
         var it = scope.symbols.iterator();
         while (it.next()) |entry| {
@@ -341,13 +360,12 @@ const Builder = struct {
                         if (!ir.isCallbackInterface(iface)) {
                             // Reset to the Pass-1 skeleton shape for every
                             // field `collectInterfaceMembers`-style flattening
-                            // reads — except `.bases` (kept real; see doc
-                            // comment above).
+                            // reads — except `.bases` and `.raw` (kept real;
+                            // see doc comment above).
                             iface.operations = &.{};
                             iface.attributes = &.{};
                             iface.type_decls = &.{};
                             iface.consts = &.{};
-                            iface.raw = &.{};
                         }
                     } else |_| {}
                     if (sym.scope) |iface_scope| self.resetNonCallbackInterfaces(iface_scope, qname);

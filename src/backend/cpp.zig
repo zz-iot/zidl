@@ -523,10 +523,10 @@ const Generator = struct {
         try self.write("        bool active_ = false;\n");
         try self.write("    };\n");
         try self.print("    explicit {s}DataReader(DDS_DataReader reader) : reader_(reader) {{}}\n", .{class_name});
-        try self.write("    int take(Sample& out, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n");
-        try self.write("    int read(Sample& out, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n");
-        try self.write("    int take_next_instance(Sample& out, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n");
-        try self.write("    int read_next_instance(Sample& out, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n");
+        try self.write("    DDS_ReturnCode_t take(Sample& out, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n");
+        try self.write("    DDS_ReturnCode_t read(Sample& out, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n");
+        try self.write("    DDS_ReturnCode_t take_next_instance(Sample& out, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n");
+        try self.write("    DDS_ReturnCode_t read_next_instance(Sample& out, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n");
         try self.print("    int get_key_value(DDS_InstanceHandle_t handle, {s}& key_out);\n", .{cpp_qname});
         try self.print("    DDS_InstanceHandle_t lookup_instance(const {s}& key);\n", .{cpp_qname});
         try self.print("    int take_n({s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{cpp_qname});
@@ -537,7 +537,7 @@ const Generator = struct {
         try self.print("    int read_w_condition(DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max);\n", .{cpp_qname});
         try self.print("    int take_next_instance_w_condition(DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max);\n", .{cpp_qname});
         try self.print("    int read_next_instance_w_condition(DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max);\n", .{cpp_qname});
-        try self.write("    int take_loaned(Loan& out);\n");
+        try self.write("    DDS_ReturnCode_t take_loaned(Loan& out);\n");
         try self.write("private:\n");
         try self.write("    DDS_DataReader reader_;\n");
         try self.write("};\n\n");
@@ -2212,36 +2212,36 @@ const CdrGenerator = struct {
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader::take(Sample& out, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{class_name});
-        try self.writeI("int _n = zzdds_take_one_raw(reader_, buf, buf_size, cdr_len_out, &out.info);\n");
-        try self.writeI("if (_n != 1) return _n;\n");
+        try self.print("DDS_ReturnCode_t {s}DataReader::take(Sample& out, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{class_name});
+        try self.writeI("DDS_ReturnCode_t _n = zzdds_take_one_raw(reader_, buf, buf_size, cdr_len_out, &out.info);\n");
+        try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
         try self.writeI("if (_rc) return _rc;\n");
         try self.printI("return out.info.valid_data ? {s}_deserialize(&_r, &out.value) : {s}_deserialize_key(&_r, &out.value);\n", .{ c_name, c_name });
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader::read(Sample& out, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{class_name});
-        try self.writeI("int _n = zzdds_read_one_raw(reader_, buf, buf_size, cdr_len_out, &out.info);\n");
-        try self.writeI("if (_n != 1) return _n;\n");
+        try self.print("DDS_ReturnCode_t {s}DataReader::read(Sample& out, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{class_name});
+        try self.writeI("DDS_ReturnCode_t _n = zzdds_read_one_raw(reader_, buf, buf_size, cdr_len_out, &out.info);\n");
+        try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
         try self.writeI("if (_rc) return _rc;\n");
         try self.printI("return out.info.valid_data ? {s}_deserialize(&_r, &out.value) : {s}_deserialize_key(&_r, &out.value);\n", .{ c_name, c_name });
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader::take_next_instance(Sample& out, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{class_name});
-        try self.writeI("int _n = zzdds_take_one_raw_instance(reader_, prev, buf, buf_size, cdr_len_out, &out.info);\n");
-        try self.writeI("if (_n != 1) return _n;\n");
+        try self.print("DDS_ReturnCode_t {s}DataReader::take_next_instance(Sample& out, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{class_name});
+        try self.writeI("DDS_ReturnCode_t _n = zzdds_take_one_raw_instance(reader_, prev, buf, buf_size, cdr_len_out, &out.info);\n");
+        try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
         try self.writeI("if (_rc) return _rc;\n");
         try self.printI("return out.info.valid_data ? {s}_deserialize(&_r, &out.value) : {s}_deserialize_key(&_r, &out.value);\n", .{ c_name, c_name });
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader::read_next_instance(Sample& out, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{class_name});
-        try self.writeI("int _n = zzdds_read_one_raw_instance(reader_, prev, buf, buf_size, cdr_len_out, &out.info);\n");
-        try self.writeI("if (_n != 1) return _n;\n");
+        try self.print("DDS_ReturnCode_t {s}DataReader::read_next_instance(Sample& out, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{class_name});
+        try self.writeI("DDS_ReturnCode_t _n = zzdds_read_one_raw_instance(reader_, prev, buf, buf_size, cdr_len_out, &out.info);\n");
+        try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
         try self.writeI("if (_rc) return _rc;\n");
@@ -2395,18 +2395,18 @@ const CdrGenerator = struct {
         try self.print("{s}_reader_next_instance_w_condition_impl(reader_, condition, prev, values, infos, max, false);\n", .{class_name});
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader::take_loaned(Loan& out) {{\n", .{class_name});
+        try self.print("DDS_ReturnCode_t {s}DataReader::take_loaned(Loan& out) {{\n", .{class_name});
         try self.writeI("zzdds_loaned_sample _loan{};\n");
         try self.writeI("Sample _sample{};\n");
-        try self.writeI("int _n = zzdds_take_loaned_raw(reader_, &_loan, &_sample.info);\n");
-        try self.writeI("if (_n != 1) return _n;\n");
+        try self.writeI("DDS_ReturnCode_t _n = zzdds_take_loaned_raw(reader_, &_loan, &_sample.info);\n");
+        try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _loan.data, _loan.data_len);\n");
         try self.writeI("if (_rc) { zzdds_return_loaned_raw(reader_, &_loan); return _rc; }\n");
         try self.printI("_rc = _sample.info.valid_data ? {s}_deserialize(&_r, &_sample.value) : {s}_deserialize_key(&_r, &_sample.value);\n", .{ c_name, c_name });
         try self.writeI("if (_rc) { zzdds_return_loaned_raw(reader_, &_loan); return _rc; }\n");
         try self.writeI("out = Loan(this, _loan, _sample);\n");
-        try self.writeI("return 1;\n");
+        try self.writeI("return DDS_RETCODE_OK;\n");
         try self.write("}\n\n");
 
         try self.print("void {s}DataReader::Loan::reset() {{\n", .{class_name});
@@ -3773,6 +3773,7 @@ pub fn generateConcreteImpl(
     defer gen.entity_base_ifaces.deinit(alloc);
     defer gen.wrapped_entities.deinit(alloc);
     defer interface.deinitBaseImplementors(alloc, &gen.base_implementors);
+    defer interface.deinitBaseImplementors(alloc, &gen.families);
     try gen.emit(spec);
 }
 
@@ -3798,6 +3799,28 @@ const ConcreteImplGenerator = struct {
     /// `TopicDescription`, implemented separately by `TopicDescriptionImpl`,
     /// `ContentFilteredTopicImpl`, and `MultiTopicImpl`).
     base_implementors: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(*const ir.Interface)) = .{},
+    /// Groups every non-callback interface under its
+    /// `interface.sharedCAbiBoxFamilyRoot`'s qualified name — see that
+    /// function's doc comment. A family with more than one member shares one
+    /// `_getOrCreate` identity cache (owned by the family's root class)
+    /// instead of each member keeping its own independent one; see
+    /// `familyOf`, `emitEntityImplDecl`, and `emitEntityImplMethods`.
+    families: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(*const ir.Interface)) = .{},
+
+    /// The `Family` a given interface belongs to: its shared-box root and
+    /// how many members are in that root's group. `size <= 1` means "no
+    /// sharing needed here" — `iface` keeps its own independent cache
+    /// exactly as it always has.
+    const Family = struct {
+        root: *const ir.Interface,
+        size: usize,
+    };
+
+    fn familyOf(self: *ConcreteImplGenerator, iface: *const ir.Interface) Family {
+        const root = interface.sharedCAbiBoxFamilyRoot(iface);
+        const size = if (self.families.get(root.qualified_name)) |members| members.items.len else 1;
+        return .{ .root = root, .size = size };
+    }
 
     fn hdrWrite(self: *ConcreteImplGenerator, s: []const u8) !void {
         try self.hdr.appendSlice(self.alloc, s);
@@ -3822,7 +3845,14 @@ const ConcreteImplGenerator = struct {
             .{self.opts.input_stem},
         );
         try self.hdrPrint(
-            "#include \"{s}.hpp\"\n#include \"{s}.h\"\n#include \"zzdds_c.h\"\n#include <memory>\n\n",
+            // <mutex>/<unordered_map> unconditionally, unlike the .cpp's own
+            // conditional include below: a shared-family root class (see
+            // familyOf/emitEntityImplDecl) declares its _familyMutex()/
+            // _familyCache() accessors' *return types* right here in the
+            // header, so std::mutex/std::unordered_map must already be
+            // complete types by the time this file's own class bodies are
+            // parsed -- not just by the time the .cpp implementing them is.
+            "#include \"{s}.hpp\"\n#include \"{s}.h\"\n#include \"zzdds_c.h\"\n#include <memory>\n#include <mutex>\n#include <unordered_map>\n\n",
             .{ self.opts.input_stem, self.opts.input_stem },
         );
         for (spec.imports) |import_name| {
@@ -3834,6 +3864,7 @@ const ConcreteImplGenerator = struct {
 
         try interface.collectEntityBaseNames(self.alloc, spec.items, &self.entity_base_ifaces);
         try interface.collectBaseImplementors(self.alloc, spec.items, &self.base_implementors);
+        try interface.collectSharedCAbiBoxFamilies(self.alloc, spec.items, &self.families);
 
         // Pre-scan: discover which entity interfaces are ever wrapped via
         // _getOrCreate (op return, attribute, sequence element, listener
@@ -4017,10 +4048,56 @@ const ConcreteImplGenerator = struct {
         // a type unconditionally would fail to compile even though nothing
         // ever calls it.
         if (self.wrapped_entities.contains(iface.qualified_name)) {
-            try self.hdrPrint(
-                "    static std::shared_ptr<{s}Impl> _getOrCreate({s} h);\n",
-                .{ iface.name, c_name },
-            );
+            const fam = self.familyOf(iface);
+            if (fam.size <= 1) {
+                try self.hdrPrint(
+                    "    static std::shared_ptr<{s}Impl> _getOrCreate({s} h);\n",
+                    .{ iface.name, c_name },
+                );
+            } else if (fam.root == iface) {
+                // Family root with real sibling implementors (e.g. Condition:
+                // GuardCondition/StatusCondition/ReadCondition/QueryCondition) --
+                // see `familyOf`'s doc comment. Returns the shared interface
+                // type, not this root's own concrete class: a cache hit may
+                // genuinely be a sibling object (constructed by ITS OWN
+                // _getOrCreate, viewed here through the one thing every family
+                // member actually inherits from), which this root's own
+                // concrete class can't represent. Every call site already
+                // immediately upcasts a _getOrCreate result into the
+                // corresponding interface type (an op's declared return type, a
+                // sequence element, a listener parameter) — none has ever
+                // needed the concrete class specifically, so this is a
+                // behavior-preserving signature change for every existing
+                // caller.
+                try self.hdrPrint(
+                    "    static std::shared_ptr<{s}> _getOrCreate({s} h);\n",
+                    .{ iface.name, c_name },
+                );
+                // Shared identity cache for the whole family, exposed so
+                // sibling *Impl classes (and hand-written glue for types with
+                // no _getOrCreate of their own, e.g. zzdds_cpp.hpp's
+                // GuardConditionSupport) can consult/populate the SAME cache
+                // this root's own _getOrCreate uses below -- see
+                // emitEntityImplMethods. Meyer's-singleton function-local
+                // statics rather than class-static data members: no
+                // out-of-line definition needed, and C++11 guarantees
+                // thread-safe lazy init.
+                try self.hdrPrint(
+                    "    static std::mutex& _familyMutex();\n" ++
+                        "    static std::unordered_map<{s}, std::weak_ptr<{s}>>& _familyCache();\n",
+                    .{ c_name, iface.name },
+                );
+            } else {
+                // Non-root family member: signature unchanged (still this
+                // member's own concrete class -- see `familyOf`'s doc comment
+                // for why a downcast-after-lookup is safe here but not for the
+                // root), only the body (emitEntityImplMethods) changes to
+                // consult the root's shared cache instead of its own.
+                try self.hdrPrint(
+                    "    static std::shared_ptr<{s}Impl> _getOrCreate({s} h);\n",
+                    .{ iface.name, c_name },
+                );
+            }
         }
         // Check for a qualifying ancestor FIRST, not iface's own eligibility:
         // an interface can be both "not excluded" (own-eligible) AND have an
@@ -4096,27 +4173,110 @@ const ConcreteImplGenerator = struct {
         if (self.wrapped_entities.contains(iface.qualified_name)) {
             const c_name = try cNameOf(self.alloc, iface.qualified_name);
             defer self.alloc.free(c_name);
-            try self.srcPrint(
-                "std::shared_ptr<{s}Impl> {s}Impl::_getOrCreate({s} h) {{\n" ++
-                    "    if (!h) return nullptr;\n" ++
-                    "    static std::mutex _mtx;\n" ++
-                    "    static std::unordered_map<{s}, std::weak_ptr<{s}Impl>> _cache;\n" ++
-                    "    std::lock_guard<std::mutex> _lock(_mtx);\n" ++
-                    "    auto _it = _cache.find(h);\n" ++
-                    "    if (_it != _cache.end()) {{\n" ++
-                    "        if (auto _sp = _it->second.lock()) return _sp;\n" ++
-                    "    }}\n" ++
-                    "    auto _sp = std::allocate_shared<{s}Impl>(\n" ++
-                    "        std::pmr::polymorphic_allocator<{s}Impl>(std::pmr::get_default_resource()), h);\n" ++
-                    "    if (_it != _cache.end()) {{\n" ++
-                    "        _it->second = _sp;\n" ++
-                    "    }} else {{\n" ++
-                    "        _cache.emplace(h, _sp);\n" ++
-                    "    }}\n" ++
-                    "    return _sp;\n" ++
-                    "}}\n\n",
-                .{ iface.name, iface.name, c_name, c_name, iface.name, iface.name, iface.name },
-            );
+            const fam = self.familyOf(iface);
+            if (fam.size <= 1) {
+                try self.srcPrint(
+                    "std::shared_ptr<{s}Impl> {s}Impl::_getOrCreate({s} h) {{\n" ++
+                        "    if (!h) return nullptr;\n" ++
+                        "    static std::mutex _mtx;\n" ++
+                        "    static std::unordered_map<{s}, std::weak_ptr<{s}Impl>> _cache;\n" ++
+                        "    std::lock_guard<std::mutex> _lock(_mtx);\n" ++
+                        "    auto _it = _cache.find(h);\n" ++
+                        "    if (_it != _cache.end()) {{\n" ++
+                        "        if (auto _sp = _it->second.lock()) return _sp;\n" ++
+                        "    }}\n" ++
+                        "    auto _sp = std::allocate_shared<{s}Impl>(\n" ++
+                        "        std::pmr::polymorphic_allocator<{s}Impl>(std::pmr::get_default_resource()), h);\n" ++
+                        "    if (_it != _cache.end()) {{\n" ++
+                        "        _it->second = _sp;\n" ++
+                        "    }} else {{\n" ++
+                        "        _cache.emplace(h, _sp);\n" ++
+                        "    }}\n" ++
+                        "    return _sp;\n" ++
+                        "}}\n\n",
+                    .{ iface.name, iface.name, c_name, c_name, iface.name, iface.name, iface.name },
+                );
+            } else if (fam.root == iface) {
+                // Family root: owns the one cache every sibling shares (see
+                // emitEntityImplDecl). Meyer's singletons -- thread-safe lazy
+                // init, no static-initialization-order concerns, no
+                // out-of-line data member definition needed.
+                try self.srcPrint(
+                    "std::mutex& {s}Impl::_familyMutex() {{\n" ++
+                        "    static std::mutex m;\n" ++
+                        "    return m;\n" ++
+                        "}}\n" ++
+                        "std::unordered_map<{s}, std::weak_ptr<{s}>>& {s}Impl::_familyCache() {{\n" ++
+                        "    static std::unordered_map<{s}, std::weak_ptr<{s}>> c;\n" ++
+                        "    return c;\n" ++
+                        "}}\n",
+                    .{ iface.name, c_name, iface.name, iface.name, c_name, iface.name },
+                );
+                // Cache hit may genuinely be a sibling object (constructed by
+                // its own _getOrCreate below) viewed through the shared
+                // interface type -- that's fine and correct, this root's
+                // return type is that interface, not its own concrete class
+                // (see emitEntityImplDecl). Miss falls back to constructing a
+                // real (if generically-typed) instance of this root's own
+                // class, exactly like the size<=1 case above.
+                try self.srcPrint(
+                    "std::shared_ptr<{s}> {s}Impl::_getOrCreate({s} h) {{\n" ++
+                        "    if (!h) return nullptr;\n" ++
+                        "    std::lock_guard<std::mutex> _lock(_familyMutex());\n" ++
+                        "    auto& _cache = _familyCache();\n" ++
+                        "    auto _it = _cache.find(h);\n" ++
+                        "    if (_it != _cache.end()) {{\n" ++
+                        "        if (auto _sp = _it->second.lock()) return _sp;\n" ++
+                        "    }}\n" ++
+                        "    auto _sp = std::allocate_shared<{s}Impl>(\n" ++
+                        "        std::pmr::polymorphic_allocator<{s}Impl>(std::pmr::get_default_resource()), h);\n" ++
+                        "    if (_it != _cache.end()) {{\n" ++
+                        "        _it->second = _sp;\n" ++
+                        "    }} else {{\n" ++
+                        "        _cache.emplace(h, _sp);\n" ++
+                        "    }}\n" ++
+                        "    return _sp;\n" ++
+                        "}}\n\n",
+                    .{ iface.name, iface.name, c_name, iface.name, iface.name },
+                );
+            } else {
+                // Non-root family member: consults/populates the ROOT's
+                // shared cache instead of one of its own. A cache hit is
+                // recovered via dynamic_pointer_cast back down to this
+                // member's own concrete class -- safe (not just hopeful)
+                // because the only thing that could ever have populated the
+                // shared cache with an object that's actually-at-runtime this
+                // class is this exact function, on a previous call for the
+                // same handle (every other family member constructs its OWN
+                // class, never this one's) -- so a hit here is always either
+                // this class or, in the defensive fallback below, treated as
+                // a fresh miss rather than trusted blindly.
+                const root_c_name = try cNameOf(self.alloc, fam.root.qualified_name);
+                defer self.alloc.free(root_c_name);
+                const root_impl = try std.fmt.allocPrint(self.alloc, "::{s}Impl", .{fam.root.qualified_name});
+                defer self.alloc.free(root_impl);
+                const key_expr = try self.handleExprForOwner(iface, fam.root, "h");
+                defer self.alloc.free(key_expr);
+                try self.srcPrint(
+                    "std::shared_ptr<{s}Impl> {s}Impl::_getOrCreate({s} h) {{\n" ++
+                        "    if (!h) return nullptr;\n" ++
+                        "    {s} _fh = {s};\n" ++
+                        "    std::lock_guard<std::mutex> _lock({s}::_familyMutex());\n" ++
+                        "    auto& _cache = {s}::_familyCache();\n" ++
+                        "    auto _it = _cache.find(_fh);\n" ++
+                        "    if (_it != _cache.end()) {{\n" ++
+                        "        if (auto _base = _it->second.lock()) {{\n" ++
+                        "            if (auto _sp = std::dynamic_pointer_cast<{s}Impl>(_base)) return _sp;\n" ++
+                        "        }}\n" ++
+                        "    }}\n" ++
+                        "    auto _sp = std::allocate_shared<{s}Impl>(\n" ++
+                        "        std::pmr::polymorphic_allocator<{s}Impl>(std::pmr::get_default_resource()), h);\n" ++
+                        "    _cache[_fh] = _sp;\n" ++
+                        "    return _sp;\n" ++
+                        "}}\n\n",
+                    .{ iface.name, iface.name, c_name, root_c_name, key_expr, root_impl, root_impl, iface.name, iface.name, iface.name },
+                );
+            }
         }
 
         const listener_tr = listenerTypeOf(ops.items);
@@ -7960,7 +8120,7 @@ test "cpp_backend cdr: zzdds wrapper implementations for keyed topic" {
     try testing.expect(has(s, "int TopicTypeSupport::register_type(DDS_DomainParticipant participant, const char *type_name) {"));
     try testing.expect(has(s, "static int Topic_write_kind(DDS_DataWriter writer, int xcdr_version, zzdds_write_kind kind, const ::Topic& value, bool key_only, DDS_InstanceHandle_t handle) {"));
     try testing.expect(has(s, "return Topic_write_kind(writer_, xcdr_version_, ZZDDS_WRITE_ALIVE, value, false, DDS_HANDLE_NIL);"));
-    try testing.expect(has(s, "int TopicDataReader::take_loaned(Loan& out) {"));
+    try testing.expect(has(s, "DDS_ReturnCode_t TopicDataReader::take_loaned(Loan& out) {"));
     try testing.expect(has(s, "out = Loan(this, _loan, _sample);"));
     try testing.expect(has(s, "void TopicDataReader::Loan::reset() {"));
 }

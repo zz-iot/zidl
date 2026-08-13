@@ -656,10 +656,10 @@ const Generator = struct {
         try self.print("{s}{s}int {s}DataWriter_get_key_value({s}DataWriter *self, DDS_InstanceHandle_t handle, {s} *key_out);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}DDS_InstanceHandle_t {s}DataWriter_lookup_instance({s}DataWriter *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}void {s}DataReader_init({s}DataReader *self, DDS_DataReader reader);\n", .{ em, sp, c_name, c_name });
-        try self.print("{s}{s}int {s}DataReader_take({s}DataReader *self, {s} *out, zzdds_sample_info *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}int {s}DataReader_read({s}DataReader *self, {s} *out, zzdds_sample_info *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}int {s}DataReader_take_next_instance({s}DataReader *self, {s} *out, zzdds_sample_info *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}int {s}DataReader_read_next_instance({s}DataReader *self, {s} *out, zzdds_sample_info *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}DDS_ReturnCode_t {s}DataReader_take({s}DataReader *self, {s} *out, zzdds_sample_info *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}DDS_ReturnCode_t {s}DataReader_read({s}DataReader *self, {s} *out, zzdds_sample_info *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}DDS_ReturnCode_t {s}DataReader_take_next_instance({s}DataReader *self, {s} *out, zzdds_sample_info *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}DDS_ReturnCode_t {s}DataReader_read_next_instance({s}DataReader *self, {s} *out, zzdds_sample_info *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataReader_get_key_value({s}DataReader *self, DDS_InstanceHandle_t handle, {s} *key_out);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}DDS_InstanceHandle_t {s}DataReader_lookup_instance({s}DataReader *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataReader_take_n({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
@@ -670,7 +670,7 @@ const Generator = struct {
         try self.print("{s}{s}int {s}DataReader_read_w_condition({s}DataReader *self, DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataReader_take_next_instance_w_condition({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataReader_read_next_instance_w_condition({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}int {s}DataReader_take_loaned({s}DataReader *self, {s} *out, zzdds_sample_info *info, zzdds_loaned_sample *loan);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}DDS_ReturnCode_t {s}DataReader_take_loaned({s}DataReader *self, {s} *out, zzdds_sample_info *info, zzdds_loaned_sample *loan);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}void {s}DataReader_return_loan({s}DataReader *self, zzdds_loaned_sample *loan);\n\n", .{ em, sp, c_name, c_name });
     }
 
@@ -2622,36 +2622,36 @@ const CdrGenerator = struct {
         try self.writeI("self->reader = reader;\n");
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader_take({s}DataReader *self, {s} *out, zzdds_sample_info *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("int _n = zzdds_take_one_raw(self->reader, buf, buf_size, cdr_len_out, info);\n");
-        try self.writeI("if (_n != 1) return _n;\n");
+        try self.print("DDS_ReturnCode_t {s}DataReader_take({s}DataReader *self, {s} *out, zzdds_sample_info *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("DDS_ReturnCode_t _n = zzdds_take_one_raw(self->reader, buf, buf_size, cdr_len_out, info);\n");
+        try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
         try self.writeI("if (_rc) return _rc;\n");
         try self.printI("return info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader_read({s}DataReader *self, {s} *out, zzdds_sample_info *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("int _n = zzdds_read_one_raw(self->reader, buf, buf_size, cdr_len_out, info);\n");
-        try self.writeI("if (_n != 1) return _n;\n");
+        try self.print("DDS_ReturnCode_t {s}DataReader_read({s}DataReader *self, {s} *out, zzdds_sample_info *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("DDS_ReturnCode_t _n = zzdds_read_one_raw(self->reader, buf, buf_size, cdr_len_out, info);\n");
+        try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
         try self.writeI("if (_rc) return _rc;\n");
         try self.printI("return info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader_take_next_instance({s}DataReader *self, {s} *out, zzdds_sample_info *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("int _n = zzdds_take_one_raw_instance(self->reader, prev, buf, buf_size, cdr_len_out, info);\n");
-        try self.writeI("if (_n != 1) return _n;\n");
+        try self.print("DDS_ReturnCode_t {s}DataReader_take_next_instance({s}DataReader *self, {s} *out, zzdds_sample_info *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("DDS_ReturnCode_t _n = zzdds_take_one_raw_instance(self->reader, prev, buf, buf_size, cdr_len_out, info);\n");
+        try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
         try self.writeI("if (_rc) return _rc;\n");
         try self.printI("return info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader_read_next_instance({s}DataReader *self, {s} *out, zzdds_sample_info *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("int _n = zzdds_read_one_raw_instance(self->reader, prev, buf, buf_size, cdr_len_out, info);\n");
-        try self.writeI("if (_n != 1) return _n;\n");
+        try self.print("DDS_ReturnCode_t {s}DataReader_read_next_instance({s}DataReader *self, {s} *out, zzdds_sample_info *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("DDS_ReturnCode_t _n = zzdds_read_one_raw_instance(self->reader, prev, buf, buf_size, cdr_len_out, info);\n");
+        try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
         try self.writeI("if (_rc) return _rc;\n");
@@ -2852,9 +2852,9 @@ const CdrGenerator = struct {
         try self.printI("return {s}DataReader_next_instance_w_condition_impl(self, condition, prev, values, infos, max, 0);\n", .{c_name});
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader_take_loaned({s}DataReader *self, {s} *out, zzdds_sample_info *info, zzdds_loaned_sample *loan) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("int _n = zzdds_take_loaned_raw(self->reader, loan, info);\n");
-        try self.writeI("if (_n != 1) return _n;\n");
+        try self.print("DDS_ReturnCode_t {s}DataReader_take_loaned({s}DataReader *self, {s} *out, zzdds_sample_info *info, zzdds_loaned_sample *loan) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("DDS_ReturnCode_t _n = zzdds_take_loaned_raw(self->reader, loan, info);\n");
+        try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, loan->data, loan->data_len);\n");
         try self.writeI("if (_rc) { zzdds_return_loaned_raw(self->reader, loan); return _rc; }\n");
@@ -5526,7 +5526,7 @@ test "c_backend: zzdds wrapper prototypes for keyed topic" {
     try testing.expect(has(s, "typedef struct TopicTypeSupport {"));
     try testing.expect(has(s, "DDS_DataWriter writer;"));
     try testing.expect(has(s, "int TopicTypeSupport_register(DDS_DomainParticipant participant, const char *type_name);"));
-    try testing.expect(has(s, "int TopicDataReader_take_loaned(TopicDataReader *self, Topic *out, zzdds_sample_info *info, zzdds_loaned_sample *loan);"));
+    try testing.expect(has(s, "DDS_ReturnCode_t TopicDataReader_take_loaned(TopicDataReader *self, Topic *out, zzdds_sample_info *info, zzdds_loaned_sample *loan);"));
 }
 
 test "c_backend cdr: header emits CDR prototypes after struct" {
@@ -5560,7 +5560,7 @@ test "c_backend cdr: zzdds wrapper implementations for keyed topic" {
     try testing.expect(has(s, "void TopicDataWriter_init(TopicDataWriter *self, DDS_DataWriter writer, int xcdr_version) {"));
     try testing.expect(has(s, "static int TopicDataWriter_write_kind(TopicDataWriter *self, zzdds_write_kind kind, const Topic *value, int key_only, DDS_InstanceHandle_t handle) {"));
     try testing.expect(has(s, "return TopicDataWriter_write_kind(self, ZZDDS_WRITE_ALIVE, value, 0, handle);"));
-    try testing.expect(has(s, "int TopicDataReader_take_loaned(TopicDataReader *self, Topic *out, zzdds_sample_info *info, zzdds_loaned_sample *loan) {"));
+    try testing.expect(has(s, "DDS_ReturnCode_t TopicDataReader_take_loaned(TopicDataReader *self, Topic *out, zzdds_sample_info *info, zzdds_loaned_sample *loan) {"));
     try testing.expect(has(s, "zzdds_return_loaned_raw(self->reader, loan);"));
 }
 

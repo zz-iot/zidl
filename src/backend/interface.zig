@@ -493,6 +493,12 @@ pub fn isCallbackInterface(iface: *const ir.Interface) bool {
     return ir.isCallbackInterface(iface);
 }
 
+/// Thin re-export of the canonical `ir.hasSharedCAbiBox`, for the same reason
+/// as `isCallbackInterface` above.
+pub fn hasSharedCAbiBox(iface: *const ir.Interface) bool {
+    return ir.hasSharedCAbiBox(iface);
+}
+
 /// Collect the qualified names of every (non-callback) interface that appears
 /// as a `base` of some other (non-callback) interface, anywhere in `items` —
 /// transitively, not just direct bases (see `collectBaseChain`).
@@ -656,6 +662,66 @@ pub fn deinitBaseImplementors(
     var it = map.valueIterator();
     while (it.next()) |list| list.deinit(alloc);
     map.deinit(alloc);
+}
+
+/// Walks `iface`'s *primary* base chain (`bases[0]` only, never a secondary
+/// base) upward for as long as each step is itself `@shared_c_abi_box`
+/// (`ir.hasSharedCAbiBox`), stopping at the last annotated ancestor — the
+/// interface every member of that chain shares one physical C-ABI box with.
+/// Mirrors the walk `zig.zig`'s `CAbiViews` nesting already does (`iface.bases[0]
+/// == .interface and hasSharedCAbiBox(iface.bases[0].interface)`), so this
+/// answers exactly "which interfaces did the Zig-side box-identity fix
+/// actually unify" — the grouping any backend-level identity cache (C++'s
+/// `_getOrCreate`, a future Java box cache) needs to mirror to stay
+/// consistent with it.
+///
+/// Returns `iface` itself if `iface` isn't `@shared_c_abi_box` at all, or has
+/// no annotated primary base — the trivial one-member-family case.
+pub fn sharedCAbiBoxFamilyRoot(iface: *const ir.Interface) *const ir.Interface {
+    if (!ir.hasSharedCAbiBox(iface)) return iface;
+    var cur = iface;
+    while (cur.bases.len > 0 and cur.bases[0] == .interface and ir.hasSharedCAbiBox(cur.bases[0].interface)) {
+        cur = cur.bases[0].interface;
+    }
+    return cur;
+}
+
+/// For every non-callback interface anywhere in `items`, groups it under its
+/// `sharedCAbiBoxFamilyRoot`'s qualified name. An interface that isn't
+/// `@shared_c_abi_box` (or has no annotated family) ends up alone in its own
+/// singleton group, keyed by its own qualified name — same shape as an
+/// un-annotated interface always had, so a caller can treat "family size 1"
+/// as "nothing to change here" without a separate check.
+///
+/// Unlike `collectBaseImplementors` (which records an implementor against
+/// *every* ancestor in its full base chain, primary or secondary), this only
+/// ever walks `bases[0]` — a secondary base (e.g. `Topic`'s `TopicDescription`)
+/// deliberately does NOT pull its implementors into the primary chain's
+/// family, matching the "known limitation" the box-identity design already
+/// calls out: secondary-base views keep their own independently-cached box,
+/// so they must also keep their own independent identity cache here.
+pub fn collectSharedCAbiBoxFamilies(
+    alloc: std.mem.Allocator,
+    items: []const ir.ModuleItem,
+    result: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged(*const ir.Interface)),
+) anyerror!void {
+    for (items) |item| {
+        switch (item) {
+            .module => |m| try collectSharedCAbiBoxFamilies(alloc, m.items, result),
+            .type_decl => |td| switch (td) {
+                .interface => |iface| {
+                    if (!isCallbackInterface(iface)) {
+                        const root = sharedCAbiBoxFamilyRoot(iface);
+                        const gop = try result.getOrPut(alloc, root.qualified_name);
+                        if (!gop.found_existing) gop.value_ptr.* = .empty;
+                        try gop.value_ptr.append(alloc, iface);
+                    }
+                },
+                else => {},
+            },
+            else => {},
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
