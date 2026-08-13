@@ -43,6 +43,33 @@ pub fn unboxAs(comptime T: type, handle: *anyopaque) T {
     return .{ .ptr = box.ptr, .vtable = @ptrCast(@alignCast(box.vtable)) };
 }
 
+/// Like `unboxAs`, but for `@shared_c_abi_box` interfaces (see
+/// `ir.hasSharedCAbiBox`'s doc comment in zidl), whose box holds a `T.CAbiViews`
+/// pointer instead of a bare `T.Vtable` pointer — one physical box shared
+/// across every interface view a concrete impl presents, rather than one box
+/// per view.
+///
+/// `T.CAbiViews` nests its primary base's own `CAbiViews` as its first field,
+/// recursively (`extern struct` guarantees first-field-at-offset-0, so this
+/// composes through arbitrary depth). That's what makes this safe: whatever
+/// the box's *actual* leaf type's `CAbiViews` looks like, reinterpreting its
+/// pointer as `*const T.CAbiViews` for any ancestor `T` reached by always
+/// following the primary base correctly lands on `T`'s own `flat_vtable`
+/// field — verified for the two-levels-deep case by a real Zig 0.16.0 spike
+/// (see zidl/docs/roadmap.md's "Binding design review: decision" section).
+///
+/// This is the whole fix for the C-ABI cross-view identity bug that section
+/// describes: since every ancestor view's `get_c_abi_handle` implementation
+/// shares one cache and passes the *same* `CAbiViews` pointer to it (see that
+/// section's Phase 1), two different interface views of the same concrete
+/// object now unbox from the *same* box address, not two independently
+/// allocated ones.
+pub fn unboxAsView(comptime T: type, handle: *anyopaque) T {
+    const box = unboxEntity(handle);
+    const views: *const T.CAbiViews = @ptrCast(@alignCast(box.vtable));
+    return .{ .ptr = box.ptr, .vtable = views.flat_vtable };
+}
+
 /// Free a box previously created by `boxEntity`. Does not touch whatever
 /// `box.ptr` refers to — that's the concrete entity implementation's own
 /// lifetime, freed separately by the native `deinit`/delete path.

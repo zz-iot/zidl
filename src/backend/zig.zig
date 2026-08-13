@@ -1527,6 +1527,38 @@ const Generator = struct {
         try self.ind();
         try self.write("    };\n\n");
 
+        // ── CAbiViews (`@shared_c_abi_box` interfaces only) ─────────────────
+        // A second, boxing-only indirection, orthogonal to `Vtable` above and
+        // never used for ordinary dispatch. Nests the primary base's own
+        // CAbiViews as the FIRST field, recursively — `extern struct`
+        // guarantees first-field-at-offset-0, so this composes: reinterpreting
+        // a leaf's CAbiViews pointer as any ancestor's CAbiViews type (as long
+        // as every intermediate step was reached via the *first* declared
+        // base) correctly recovers that ancestor's own `flat_vtable` field, no
+        // matter how deep the real concrete type's chain is. This is what
+        // lets a concrete impl share ONE C-ABI box across every interface
+        // view it presents instead of one per view — see zidl/docs/roadmap.md
+        // "Binding design review: decision" for the full rationale and the
+        // Zig-layout spike that confirmed this composition. Deliberately not
+        // generated for every interface: safe only for interfaces reachable
+        // via a chain of *primary* (first-listed) bases — see
+        // `hasSharedCAbiBox`'s own doc comment for why a secondary base must
+        // never be annotated.
+        if (hasSharedCAbiBox(iface)) {
+            try self.ind();
+            try self.write("    pub const CAbiViews = extern struct {\n");
+            if (iface.bases.len > 0 and iface.bases[0] == .interface and hasSharedCAbiBox(iface.bases[0].interface)) {
+                const base_zig_type = try self.typeRefToZig(.{ .named = iface.bases[0] });
+                defer self.alloc.free(base_zig_type);
+                try self.ind();
+                try self.print("        base: {s}.CAbiViews,\n", .{base_zig_type});
+            }
+            try self.ind();
+            try self.write("        flat_vtable: *const Vtable,\n");
+            try self.ind();
+            try self.write("    };\n\n");
+        }
+
         // ── Forwarding methods (idiomatic Zig types) ─────────────────────
         // These wrap the C-ABI vtable slots with ergonomic Zig types:
         // `[]const u8` strings, by-value QoS structs, optional callback structs.
@@ -1617,6 +1649,36 @@ const Generator = struct {
         try self.ind();
         try self.write("    }\n");
 
+        // Ergonomic `as_{Base}` convenience methods, one per direct declared
+        // base interface — mirrors the synthetic vtable slot emitted above
+        // (see its own doc comment for why upcasting can't be a raw pointer
+        // reinterpretation), giving pure Zig-native callers the same
+        // ergonomic upcast every other backend (C/C++/Java) already generates
+        // its own wrapper for. Previously missing: Zig-native code had to
+        // spell out `.vtable.as_{Base}(.ptr)` by hand — decided in
+        // zidl/docs/roadmap.md "Binding design review: decision".
+        // Blank-line separator goes *before* each method, not after: unlike
+        // ops/attrs above (always followed by `deinit`, so a trailing blank
+        // line is always just a separator from the next thing), this loop
+        // can be the last content in the struct body before the closing
+        // `};` (any interface with no nested type_decls/consts) -- ending
+        // each method with a trailing blank line left one sitting directly
+        // before `};` in that case, which `zig fmt` then strips on the next
+        // format pass, fighting `regen-goldens`. Mirrors `deinit`'s own
+        // single-newline close for exactly this reason.
+        for (iface.bases) |base| {
+            if (base != .interface) continue;
+            const base_zig_type = try self.typeRefToZig(.{ .named = base });
+            defer self.alloc.free(base_zig_type);
+            try self.write("\n");
+            try self.ind();
+            try self.print("    pub fn as_{s}(self: @This()) {s} {{\n", .{ base.interface.name, base_zig_type });
+            try self.ind();
+            try self.print("        return self.vtable.as_{s}(self.ptr);\n", .{base.interface.name});
+            try self.ind();
+            try self.write("    }\n");
+        }
+
         // Nested type decls and consts inside the interface body.
         if (iface.type_decls.len > 0 or iface.consts.len > 0) {
             try self.write("\n");
@@ -1666,20 +1728,25 @@ const Generator = struct {
         const qual_c_name = try self.cApiQualName(iface.qualified_name, pfx);
         defer self.alloc.free(qual_c_name);
 
+        // Which zidl_rt function reconstructs `self` from a boxed handle —
+        // same for every export below, computed once here since it only
+        // depends on `iface` itself, not on any one operation/attribute/base.
+        const self_unbox_fn = cAbiUnboxFnName(iface);
+
         // One trivial forwarder per operation.
         for (ops) |op| {
-            try self.emitCApiOp(qual_c_name, pfx, iface.name, &op);
+            try self.emitCApiOp(qual_c_name, pfx, iface.name, self_unbox_fn, &op);
         }
         // Getter + optional setter per attribute.
         for (attrs) |attr| {
-            try self.emitCApiAttr(qual_c_name, pfx, iface.name, &attr);
+            try self.emitCApiAttr(qual_c_name, pfx, iface.name, self_unbox_fn, &attr);
         }
 
         // One upcast forwarder per direct declared base interface, mirroring
         // the native `as_{Base}` vtable slot emitted in `emitInterface`.
         for (iface.bases) |base| {
             if (base != .interface) continue;
-            try self.emitCApiAsBase(qual_c_name, pfx, iface.name, base);
+            try self.emitCApiAsBase(qual_c_name, pfx, iface.name, self_unbox_fn, base);
         }
     }
 
@@ -1693,6 +1760,7 @@ const Generator = struct {
         c_name: []const u8,
         pfx: []const u8,
         iface_name: []const u8,
+        self_unbox_fn: []const u8,
         base: ir.TypeDecl,
     ) anyerror!void {
         const base_iface = base.interface;
@@ -1702,7 +1770,7 @@ const Generator = struct {
         try self.ind();
         try self.print("pub export fn {s}_as_{s}(self: *anyopaque) callconv(.c) *anyopaque {{\n", .{ c_name, base_qual_c_name });
         try self.ind();
-        try self.print("    const _self: {s}{s} = zidl_rt.unboxAs({s}{s}, self);\n", .{ pfx, iface_name, pfx, iface_name });
+        try self.print("    const _self: {s}{s} = {s}({s}{s}, self);\n", .{ pfx, iface_name, self_unbox_fn, pfx, iface_name });
         try self.ind();
         try self.print("    const _r = _self.vtable.as_{s}(_self.ptr);\n", .{base_iface.name});
         try self.ind();
@@ -1850,7 +1918,8 @@ const Generator = struct {
                 if (typeRefIsEntityInterface(p.type_ref)) {
                     const pzig = try self.typeRefToZig(p.type_ref);
                     defer self.alloc.free(pzig);
-                    try self.print(", zidl_rt.unboxAs({s}, _{s})", .{ pzig, p.name });
+                    const p_unbox_fn = cAbiUnboxFnName(typeRefEntityInterface(p.type_ref).?);
+                    try self.print(", {s}({s}, _{s})", .{ p_unbox_fn, pzig, p.name });
                     // Unbounded strings arrive as [*:0]const u8; Handlers expects []const u8.
                 } else if (is_unbounded_str) {
                     try self.print(", std.mem.span(_{s})", .{p.name});
@@ -1925,6 +1994,7 @@ const Generator = struct {
         c_name: []const u8,
         pfx: []const u8,
         iface_name: []const u8,
+        self_unbox_fn: []const u8,
         op: *const ir.Operation,
     ) anyerror!void {
         const c_ret = try self.cApiExportOptRetType(op.return_type);
@@ -1947,7 +2017,7 @@ const Generator = struct {
         try self.print(") callconv(.c) {s} {{\n", .{c_ret});
 
         try self.ind();
-        try self.print("    const _self: {s}{s} = zidl_rt.unboxAs({s}{s}, self);\n", .{ pfx, iface_name, pfx, iface_name });
+        try self.print("    const _self: {s}{s} = {s}({s}{s}, self);\n", .{ pfx, iface_name, self_unbox_fn, pfx, iface_name });
 
         // Entity-sequence params (DataReaderSeq, ConditionSeq, ...) need a
         // native-shaped temporary to call the vtable slot through -- its
@@ -2011,7 +2081,8 @@ const Generator = struct {
             } else if (typeRefIsEntityInterface(p.type_ref)) {
                 const pzig = try self.typeRefToZig(p.type_ref);
                 defer self.alloc.free(pzig);
-                try self.print(", zidl_rt.unboxAs({s}, {s})", .{ pzig, p.name });
+                const p_unbox_fn = cAbiUnboxFnName(typeRefEntityInterface(p.type_ref).?);
+                try self.print(", {s}({s}, {s})", .{ p_unbox_fn, pzig, p.name });
             } else if (p.mode == .in_ and std.mem.startsWith(u8, pt, "*const ")) {
                 // Substitute the type default when caller passes null.
                 try self.print(", {s} orelse &.{{}}", .{p.name});
@@ -2066,6 +2137,7 @@ const Generator = struct {
         c_name: []const u8,
         pfx: []const u8,
         iface_name: []const u8,
+        self_unbox_fn: []const u8,
         attr: *const ir.Attribute,
     ) anyerror!void {
         const c_at = try self.cApiExportRetType(attr.type_ref);
@@ -2075,7 +2147,7 @@ const Generator = struct {
         try self.ind();
         try self.print("pub export fn {s}_get_{s}(self: *anyopaque) callconv(.c) {s} {{\n", .{ c_name, attr.name, c_at });
         try self.ind();
-        try self.print("    const _self: {s}{s} = zidl_rt.unboxAs({s}{s}, self);\n", .{ pfx, iface_name, pfx, iface_name });
+        try self.print("    const _self: {s}{s} = {s}({s}{s}, self);\n", .{ pfx, iface_name, self_unbox_fn, pfx, iface_name });
         try self.ind();
         if (at_is_entity) {
             try self.print("    const _r = _self.vtable.get_{s}(_self.ptr);\n", .{attr.name});
@@ -2093,12 +2165,13 @@ const Generator = struct {
             try self.ind();
             try self.print("pub export fn {s}_set_{s}(self: *anyopaque, value: {s}) callconv(.c) void {{\n", .{ c_name, attr.name, c_param });
             try self.ind();
-            try self.print("    const _self: {s}{s} = zidl_rt.unboxAs({s}{s}, self);\n", .{ pfx, iface_name, pfx, iface_name });
+            try self.print("    const _self: {s}{s} = {s}({s}{s}, self);\n", .{ pfx, iface_name, self_unbox_fn, pfx, iface_name });
             try self.ind();
             if (at_is_entity) {
                 const at_zig = try self.typeRefToZig(attr.type_ref);
                 defer self.alloc.free(at_zig);
-                try self.print("    _self.vtable.set_{s}(_self.ptr, zidl_rt.unboxAs({s}, value));\n", .{ attr.name, at_zig });
+                const val_unbox_fn = cAbiUnboxFnName(typeRefEntityInterface(attr.type_ref).?);
+                try self.print("    _self.vtable.set_{s}(_self.ptr, {s}({s}, value));\n", .{ attr.name, val_unbox_fn, at_zig });
             } else {
                 try self.print("    _self.vtable.set_{s}(_self.ptr, value);\n", .{attr.name});
             }
@@ -2115,6 +2188,37 @@ const Generator = struct {
     /// yet been annotated — this fallback is deprecated and will be removed.
     fn isCallbackInterface(iface: *const ir.Interface) bool {
         return interface.isCallbackInterface(iface);
+    }
+
+    /// True for `@shared_c_abi_box` interfaces — see `ir.hasSharedCAbiBox`'s
+    /// doc comment. Drives both whether `emitInterface` generates a nested
+    /// `CAbiViews` type and which unboxing function (`cAbiUnboxFnName`)
+    /// generated C-ABI export wrappers call for a value of this type.
+    fn hasSharedCAbiBox(iface: *const ir.Interface) bool {
+        return interface.hasSharedCAbiBox(iface);
+    }
+
+    /// If `tr` names a non-callback (entity) interface, return its IR node;
+    /// else null. Like `typeRefIsEntityInterface` but returns the interface
+    /// itself instead of a bool, for callers (`cAbiUnboxFnName`'s callers)
+    /// that need to inspect it (e.g. `hasSharedCAbiBox`).
+    fn typeRefEntityInterface(tr: ir.TypeRef) ?*const ir.Interface {
+        return switch (tr) {
+            .named => |td| switch (td) {
+                .interface => |iface| if (!isCallbackInterface(iface)) iface else null,
+                else => null,
+            },
+            else => null,
+        };
+    }
+
+    /// Which `zidl_rt` function generated code should call to reconstruct a
+    /// native fat-pointer value of type `iface` from a boxed C-ABI handle:
+    /// the plain per-view `unboxAs` normally, or `unboxAsView` for
+    /// `@shared_c_abi_box` interfaces (see `ir.hasSharedCAbiBox`), whose
+    /// boxes hold a `CAbiViews` pointer instead of a bare `Vtable` pointer.
+    fn cAbiUnboxFnName(iface: *const ir.Interface) []const u8 {
+        return if (hasSharedCAbiBox(iface)) "zidl_rt.unboxAsView" else "zidl_rt.unboxAs";
     }
 
     /// If `tr` is a named typedef whose underlying type is a sequence, return that typedef.

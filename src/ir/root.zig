@@ -40,6 +40,7 @@ pub const Native = types.Native;
 pub const Exception = types.Exception;
 pub const Interface = types.Interface;
 pub const isCallbackInterface = types.isCallbackInterface;
+pub const hasSharedCAbiBox = types.hasSharedCAbiBox;
 pub const Operation = types.Operation;
 pub const Parameter = types.Parameter;
 pub const ParamMode = types.ParamMode;

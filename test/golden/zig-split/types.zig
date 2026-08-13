@@ -443,4 +443,8 @@ pub const AdvancedGreeter = extern struct {
     pub fn deinit(self: @This()) void {
         self.vtable.deinit(self.ptr);
     }
+
+    pub fn as_Greeter(self: @This()) Greeter {
+        return self.vtable.as_Greeter(self.ptr);
+    }
 }; // AdvancedGreeter

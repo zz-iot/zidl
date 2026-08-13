@@ -3767,6 +3767,199 @@ fn findConversionPath(
     return false;
 }
 
+/// Every OTHER interface in `all_entity_ifaces` that has `target` as a
+/// transitive base — i.e. every known concrete type a handle declared as
+/// `target`'s own interface could *really* be at runtime. Shared by every
+/// caller that needs to decide whether boxing `target` requires resolving
+/// the real runtime type first (`mostDerivedBoxFnName`) or can just box it
+/// as `target` directly (empty result: `target` has no more-derived known
+/// sibling, so there's nothing to disambiguate).
+fn collectDerivedSiblings(
+    alloc: std.mem.Allocator,
+    all_entity_ifaces: []const *const ir.Interface,
+    target: *const ir.Interface,
+) !std.ArrayListUnmanaged(*const ir.Interface) {
+    var derived = std.ArrayListUnmanaged(*const ir.Interface).empty;
+    for (all_entity_ifaces) |candidate| {
+        if (candidate == target) continue;
+        if (interfaceHasBaseTransitively(candidate, target)) try derived.append(alloc, candidate);
+    }
+    return derived;
+}
+
+/// The box function name any call site returning/attributing a bare
+/// `target`-typed entity value should use: `zidl_java_box_<target_c>`
+/// directly if `target` has no known derived sibling in `all_entity_ifaces`
+/// (nothing to disambiguate — e.g. `DataReader`), or `<target_c>_box_as_
+/// most_derived` if it does (`Condition`, `Entity`, ... — a handle declared
+/// as this interface's own type could really be a more-derived one, and
+/// boxing it as the bare declared type instead loses that: the cached
+/// wrapper for a handle is whichever concrete type's box helper populated
+/// it *first*, and every OTHER family member's box helper — including this
+/// one, on a cache hit — just returns that same object as-is, so a caller
+/// expecting to cast the result to a specific derived type gets a
+/// `ClassCastException` the moment the first-ever box of that handle
+/// happened to go through the bare interface type instead of the real one).
+/// `target_c` must be `target`'s own flat C name (not a sequence typedef's,
+/// for a sequence-element caller) — the dispatcher is one per *element
+/// type*, reusable by every call site that needs it, not one per use site.
+/// Does not emit anything; callers needing the dispatcher *defined* (not
+/// just named) use `emitMostDerivedDispatcherIfNeeded`, which computes the
+/// identical `derived` set to decide whether to emit one at all.
+///
+/// `target` must itself be a member of `all_entity_ifaces` (i.e. locally
+/// declared in the file being generated) for a dispatcher name to be
+/// returned at all — falls back to the plain `zidl_java_box_<target_c>` name
+/// otherwise, even if `target` genuinely has derived siblings. Reachable
+/// cross-file: `all_entity_ifaces` only ever lists the *current* file's own
+/// entities (`JniBridgeGenerator.emitSource`'s forward-declare loop, which
+/// this must stay consistent with — see `emitMostDerivedDispatcherIfNeeded`),
+/// so a cross-file `target` — e.g. zzdds.idl's extension ops/attrs returning
+/// a bare `DDS::DomainParticipant`/`DDS::Topic`/`DDS::TopicDescription`,
+/// declared in dcps.idl — would otherwise compute "has derived siblings"
+/// using zzdds.idl's own local subclasses (`zzdds::DomainParticipant`, ...)
+/// while the dispatcher itself never gets defined in *either* file: not in
+/// dcps.idl (which has no idea about zzdds.idl's additional derived
+/// siblings, so may see zero locally and skip emitting one), and not in
+/// zzdds.idl (whose forward-declare loop only emits dispatchers for its OWN
+/// locally-declared entities, never an imported `target`) — an undeclared-
+/// function compile error, caught by actually rebuilding zzdds's Java
+/// binding, not by `zig build test`'s own single-file golden/unit tests.
+/// Same known limitation as `familyOf`'s cross-file guard for the shared
+/// box-identity cache (`local_entity_names`): falls back to the safe,
+/// pre-existing per-view behavior rather than crossing a file boundary.
+fn mostDerivedBoxFnName(
+    alloc: std.mem.Allocator,
+    all_entity_ifaces: []const *const ir.Interface,
+    target_c: []const u8,
+    target: *const ir.Interface,
+) ![]u8 {
+    var is_local = false;
+    for (all_entity_ifaces) |candidate| {
+        if (candidate == target) {
+            is_local = true;
+            break;
+        }
+    }
+    if (is_local) {
+        var derived = try collectDerivedSiblings(alloc, all_entity_ifaces, target);
+        defer derived.deinit(alloc);
+        if (derived.items.len > 0) {
+            return std.fmt.allocPrint(alloc, "{s}_box_as_most_derived", .{target_c});
+        }
+    }
+    return std.fmt.allocPrint(alloc, "zidl_java_box_{s}", .{target_c});
+}
+
+/// Emits `<target_c>_box_as_most_derived(JNIEnv *env, void *handle)`: tries
+/// each entry in `derived`, MOST-DERIVED FIRST (a genuine `QueryCondition`
+/// handle also satisfies the checked conversion to the shallower
+/// `ReadCondition` — it IS one — so checking depth-first is required to box
+/// it as `QueryConditionImpl`, not the merely-compatible `ReadConditionImpl`),
+/// falling back to `zidl_java_box_<target_c>` if none match. Each entry's
+/// "downward hop" chain (`target` → … → that entry) is derived by reversing
+/// `findConversionPath`'s own upward-hop output — dcps.h's checked
+/// *narrowing* conversions, like the widening ones, only exist for *direct*
+/// inheritance edges, so a two-level descendant needs two chained calls
+/// (e.g. `Condition_as_ReadCondition` then `ReadCondition_as_QueryCondition`),
+/// each checked for NULL before proceeding to the next.
+///
+/// Free function (not bound to either generator struct): needed identically
+/// by `SeqParamMarshalGenerator` (sequence element fill-back) and
+/// `JniBridgeGenerator` (a bare entity op-return or attribute getter — see
+/// `mostDerivedBoxFnName`'s own doc comment for why a single-value box call
+/// site needs this exactly as much as a sequence one does, not just for
+/// symmetry).
+fn emitBoxAsMostDerived(
+    alloc: std.mem.Allocator,
+    opts: interface.Options,
+    out: *std.ArrayList(u8),
+    target_c: []const u8,
+    target: *const ir.Interface,
+    derived: []const *const ir.Interface,
+) !void {
+    const W = struct {
+        alloc: std.mem.Allocator,
+        out: *std.ArrayList(u8),
+        fn write(self: @This(), s: []const u8) !void {
+            try self.out.appendSlice(self.alloc, s);
+        }
+        fn print(self: @This(), comptime fmt: []const u8, args: anytype) !void {
+            const s = try std.fmt.allocPrint(self.alloc, fmt, args);
+            defer self.alloc.free(s);
+            try self.out.appendSlice(self.alloc, s);
+        }
+    };
+    const w = W{ .alloc = alloc, .out = out };
+
+    const Entry = struct { hops: std.ArrayListUnmanaged(*const ir.Interface) };
+    var entries = std.ArrayListUnmanaged(Entry).empty;
+    defer {
+        for (entries.items) |*e| e.hops.deinit(alloc);
+        entries.deinit(alloc);
+    }
+    for (derived) |d| {
+        var up_path = std.ArrayListUnmanaged(*const ir.Interface).empty;
+        defer up_path.deinit(alloc);
+        _ = try findConversionPath(alloc, d, target, &up_path);
+        var down_hops = std.ArrayListUnmanaged(*const ir.Interface).empty;
+        var i: usize = up_path.items.len;
+        while (i > 1) {
+            i -= 1;
+            try down_hops.append(alloc, up_path.items[i - 1]);
+        }
+        try down_hops.append(alloc, d);
+        try entries.append(alloc, .{ .hops = down_hops });
+    }
+    std.mem.sort(Entry, entries.items, {}, struct {
+        fn lessThan(_: void, a: Entry, b: Entry) bool {
+            return a.hops.items.len > b.hops.items.len;
+        }
+    }.lessThan);
+
+    try w.print("static jobject {s}_box_as_most_derived(JNIEnv *env, void *handle) {{\n", .{target_c});
+    try w.write("    if (handle == NULL) return NULL;\n");
+    for (entries.items) |e| {
+        var indent = std.ArrayListUnmanaged(u8).empty;
+        defer indent.deinit(alloc);
+        try indent.appendSlice(alloc, "    ");
+        try w.print("{s}{{\n", .{indent.items});
+        try indent.appendSlice(alloc, "    ");
+
+        var prev_c = try alloc.dupe(u8, target_c);
+        defer alloc.free(prev_c);
+
+        for (e.hops.items, 0..) |hop, i| {
+            const hop_c = try interface.prefixedCNameFromQualified(alloc, hop.qualified_name, opts.type_prefix);
+            defer alloc.free(hop_c);
+            if (i == 0) {
+                try w.print("{s}void *_v{d} = {s}_as_{s}(handle);\n", .{ indent.items, i, prev_c, hop_c });
+            } else {
+                try w.print("{s}void *_v{d} = {s}_as_{s}(_v{d});\n", .{ indent.items, i, prev_c, hop_c, i - 1 });
+            }
+            alloc.free(prev_c);
+            prev_c = try alloc.dupe(u8, hop_c);
+
+            if (i == e.hops.items.len - 1) {
+                try w.print("{s}if (_v{d} != NULL) return zidl_java_box_{s}(env, _v{d});\n", .{ indent.items, i, hop_c, i });
+            } else {
+                try w.print("{s}if (_v{d} != NULL) {{\n", .{ indent.items, i });
+                try indent.appendSlice(alloc, "    ");
+            }
+        }
+        var closes: usize = e.hops.items.len - 1;
+        while (closes > 0) {
+            indent.items.len -= 4;
+            try w.print("{s}}}\n", .{indent.items});
+            closes -= 1;
+        }
+        indent.items.len -= 4;
+        try w.print("{s}}}\n", .{indent.items});
+    }
+    try w.print("    return zidl_java_box_{s}(env, handle);\n", .{target_c});
+    try w.write("}\n\n");
+}
+
 /// Free-function core of `JniBridgeGenerator.entityUnboxFnName` — shared with
 /// `SeqParamMarshalGenerator.emitSeqEntity`, which needs the exact same
 /// "does this target have derived siblings in `all_entity_ifaces`" decision
@@ -3825,6 +4018,8 @@ pub fn generateJniSource(
     out: *std.ArrayList(u8),
 ) !void {
     var gen = JniBridgeGenerator{ .alloc = alloc, .opts = opts, .out = out };
+    defer interface.deinitBaseImplementors(alloc, &gen.families);
+    defer gen.local_entity_names.deinit(alloc);
     try gen.emitSource(spec);
 }
 
@@ -4256,6 +4451,55 @@ const JniBridgeGenerator = struct {
     /// Default-empty: every type reference resolves as local to the current
     /// file, today's behavior.
     cross_file: CrossFileResolver = .{},
+    /// Groups every LOCAL non-callback interface under its
+    /// `interface.sharedCAbiBoxFamilyRoot`'s qualified name — see that
+    /// function's doc comment (shared with the C++ backend's identical
+    /// grouping).
+    families: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(*const ir.Interface)) = .{},
+    /// Qualified names of every non-callback interface actually DECLARED in
+    /// this file's own spec (set once at the top of `emitSource`, alongside
+    /// `all_entity_ifaces`). `familyOf` requires a family's root to be a
+    /// member of this set before treating the family as shared — NOT simply
+    /// "does `families` have >1 entries for this root," which undercounts
+    /// nothing but can OVERcount: e.g. zzdds.idl's `DomainParticipant`/
+    /// `Topic`/`DataWriter`/`DataReader` all walk up into dcps.idl's
+    /// `Entity` (a root this file never declares), and among themselves
+    /// alone already number >1 -- so `families["DDS::Entity"].len` is >1 in
+    /// BOTH dcps.idl's own generation pass (7 local members) AND zzdds.idl's
+    /// (4 different local members), independently. Emitting the shared cache
+    /// infra in both would give two non-`static` definitions of the same
+    /// symbol names, colliding at link time the moment both `.c` files land
+    /// in the same shared library (confirmed via a real `ld.lld: duplicate
+    /// symbol` failure before this check existed). Requiring the root itself
+    /// to be locally declared means only the file that actually owns the
+    /// root ever defines its shared infra; a family whose root is foreign
+    /// (like zzdds.idl's case here) falls back to size 1 for every local
+    /// member — each keeps its own independent, unshared identity, exactly
+    /// today's pre-existing behavior. Not a full fix for that case (mirrors
+    /// zzdds_cpp.hpp's own hand-written glue needing separate treatment for
+    /// the analogous C++ cross-file cases — see zzdds's docs/roadmap.md);
+    /// closing it for real would need extern-linkage plumbing across the two
+    /// separately-generated translation units, not attempted here.
+    local_entity_names: std.StringHashMapUnmanaged(void) = .{},
+
+    /// The `Family` a given interface belongs to: its shared-box root and how
+    /// many members are in that root's LOCAL group. `size <= 1` means "no
+    /// sharing needed here" — `iface` keeps its own independent box-helper
+    /// identity behavior exactly as it always has (which today is "none":
+    /// every `zidl_java_box_<c_name>` call constructs a fresh Java object).
+    const Family = struct {
+        root: *const ir.Interface,
+        size: usize,
+    };
+
+    fn familyOf(self: *JniBridgeGenerator, iface: *const ir.Interface) Family {
+        const root = interface.sharedCAbiBoxFamilyRoot(iface);
+        const size = if (self.local_entity_names.contains(root.qualified_name))
+            (if (self.families.get(root.qualified_name)) |members| members.items.len else 1)
+        else
+            1;
+        return .{ .root = root, .size = size };
+    }
 
     fn write(self: *JniBridgeGenerator, s: []const u8) !void {
         try self.out.appendSlice(self.alloc, s);
@@ -4280,6 +4524,12 @@ const JniBridgeGenerator = struct {
         try self.write("#include <stdbool.h>\n");
         try self.write("#include <string.h>\n");
         try self.write("#include <stdlib.h>\n");
+        // Backs the shared-family box-identity cache's mutex — see
+        // emitSharedFamilyCache. Included unconditionally (like the others
+        // above) rather than gated on whether this file actually has a
+        // multi-member family: cheap, header-only until something actually
+        // declares a pthread_mutex_t.
+        try self.write("#include <pthread.h>\n");
         // Pulls in the real zzdds/zidl C ABI (opaque entity typedefs, QoS/status
         // structs, listener structs) generated by `zidl -b c --generate-interfaces`
         // against the same .idl — required to be generated/available alongside.
@@ -4395,12 +4645,53 @@ const JniBridgeGenerator = struct {
         for (ifaces.items) |iface| {
             if (interface.isCallbackInterface(iface)) continue;
             try entity_ifaces.append(self.alloc, iface);
+            try self.local_entity_names.put(self.alloc, iface.qualified_name, {});
             const c_name = try interface.prefixedCNameFromQualified(self.alloc, iface.qualified_name, self.opts.type_prefix);
             defer self.alloc.free(c_name);
             try self.print("jobject zidl_java_box_{s}(JNIEnv *env, void *handle);\n", .{c_name});
         }
         self.all_entity_ifaces = entity_ifaces.items;
         try self.write("\n");
+
+        // Forward-declare every entity interface's "most derived" box
+        // dispatcher up front too, same reasoning as the plain box helpers
+        // just above: `SeqParamMarshalGenerator.emitSeqEntity` (which runs
+        // before this file's own per-interface pass below) references one
+        // by name for any bare `sequence<Entity>` element type that needs
+        // it, before `emitMostDerivedDispatcherIfNeeded` (called per
+        // interface, alongside `emitBoxHelper`) actually defines it. `static`
+        // (unlike the box helpers): the dispatcher exists purely to resolve
+        // *this file's own* runtime-type ambiguity before boxing, so unlike
+        // `zidl_java_box_<C>` a different, importing file never needs to
+        // call it directly -- it always goes through that file's own copy
+        // of the same logic for its own locally-known derived siblings.
+        for (entity_ifaces.items) |iface| {
+            var derived = try collectDerivedSiblings(self.alloc, self.all_entity_ifaces, iface);
+            defer derived.deinit(self.alloc);
+            if (derived.items.len == 0) continue;
+            const c_name = try interface.prefixedCNameFromQualified(self.alloc, iface.qualified_name, self.opts.type_prefix);
+            defer self.alloc.free(c_name);
+            try self.print("static jobject {s}_box_as_most_derived(JNIEnv *env, void *handle);\n", .{c_name});
+        }
+        try self.write("\n");
+
+        try interface.collectSharedCAbiBoxFamilies(self.alloc, spec.items, &self.families);
+        // Shared box-identity cache infra for every LOCAL family with more
+        // than one member (see `familyOf`'s doc comment) — struct, mutex,
+        // and lookup/insert functions, all self-contained and independent of
+        // per-interface emission order, so emitted once up front rather than
+        // tied to whichever interface happens to be the family's root.
+        {
+            var emitted_roots = std.StringHashMapUnmanaged(void).empty;
+            defer emitted_roots.deinit(self.alloc);
+            for (entity_ifaces.items) |iface| {
+                const fam = self.familyOf(iface);
+                if (fam.size <= 1) continue;
+                if (emitted_roots.contains(fam.root.qualified_name)) continue;
+                try emitted_roots.put(self.alloc, fam.root.qualified_name, {});
+                try self.emitSharedFamilyCache(fam.root);
+            }
+        }
 
         // Cross-file references (e.g. `create_participant_ex` taking/returning
         // `DDS::DomainParticipant`/`DDS::DomainParticipantQos`/
@@ -4554,6 +4845,7 @@ const JniBridgeGenerator = struct {
         const is_callback = interface.isCallbackInterface(iface);
         if (!is_callback) {
             try self.emitBoxHelper(iface, c_name);
+            try self.emitMostDerivedDispatcherIfNeeded(iface, c_name);
         } else {
             try self.emitListenerTrampolines(iface);
         }
@@ -4681,19 +4973,154 @@ const JniBridgeGenerator = struct {
         try self.write("}\n\n");
     }
 
+    /// Emits the shared box-identity cache for `root`'s whole family: a
+    /// singly-linked list of `{handle, jweak}` nodes (not a hash table —
+    /// realistic family sizes are small; simplicity and auditability win
+    /// over raw lookup speed here) protected by one mutex, plus a
+    /// lock-already-held lookup function every family member's box helper
+    /// (see `emitBoxHelper`) consults before constructing a new object.
+    /// Keyed directly on the raw `void *` handle with no per-view conversion
+    /// needed — unlike the C++ backend, this file's `zidl_java_box_<c>`
+    /// functions already take a bare `void *`, and `@shared_c_abi_box`
+    /// guarantees that value is numerically identical across every view of
+    /// the same object (see `interface.sharedCAbiBoxFamilyRoot`'s doc
+    /// comment).
+    ///
+    /// `_lookup_locked` only ever removes a node for lock-holding-caller's
+    /// own use, never inserts — insertion is a separate, deliberately
+    /// distinct step (see `emitBoxHelper`'s double-checked-locking comment
+    /// for why: a Java constructor can run arbitrary code, including
+    /// re-entering this file's own native methods, so nothing holds the
+    /// mutex across the `NewObject` call that constructs the object being
+    /// inserted).
+    fn emitSharedFamilyCache(self: *JniBridgeGenerator, root: *const ir.Interface) !void {
+        const root_c = try interface.prefixedCNameFromQualified(self.alloc, root.qualified_name, self.opts.type_prefix);
+        defer self.alloc.free(root_c);
+        try self.print(
+            "/* Shared box-identity cache for the {s} family. */\n" ++
+                "typedef struct _zidl_family_{s}_node {{\n" ++
+                "    void *handle;\n" ++
+                "    jweak ref;\n" ++
+                "    struct _zidl_family_{s}_node *next;\n" ++
+                "}} _zidl_family_{s}_node;\n" ++
+                "static pthread_mutex_t _zidl_family_{s}_mtx = PTHREAD_MUTEX_INITIALIZER;\n" ++
+                "static _zidl_family_{s}_node *_zidl_family_{s}_head = NULL;\n" ++
+                "\n" ++
+                "/* Caller must hold _zidl_family_{s}_mtx. Returns a NEW LOCAL ref for\n" ++
+                " * `handle` if a live one is cached, else NULL (reclaiming the node\n" ++
+                " * first if its weak ref has expired -- a GC'd Java object). */\n" ++
+                "static jobject _zidl_family_{s}_lookup_locked(JNIEnv *env, void *handle) {{\n" ++
+                "    _zidl_family_{s}_node **pp = &_zidl_family_{s}_head;\n" ++
+                "    while (*pp != NULL) {{\n" ++
+                "        _zidl_family_{s}_node *n = *pp;\n" ++
+                "        if (n->handle == handle) {{\n" ++
+                "            if (!(*env)->IsSameObject(env, n->ref, NULL)) {{\n" ++
+                "                jobject local = (*env)->NewLocalRef(env, n->ref);\n" ++
+                "                if (local != NULL) return local;\n" ++
+                "            }}\n" ++
+                "            *pp = n->next;\n" ++
+                "            (*env)->DeleteWeakGlobalRef(env, n->ref);\n" ++
+                "            free(n);\n" ++
+                "            return NULL;\n" ++
+                "        }}\n" ++
+                "        pp = &n->next;\n" ++
+                "    }}\n" ++
+                "    return NULL;\n" ++
+                "}}\n" ++
+                "\n" ++
+                "/* Caller must hold _zidl_family_{s}_mtx and must already have\n" ++
+                " * re-checked _lookup_locked found nothing since `obj` was\n" ++
+                " * constructed (double-checked locking). */\n" ++
+                "static void _zidl_family_{s}_insert_locked(JNIEnv *env, void *handle, jobject obj) {{\n" ++
+                "    _zidl_family_{s}_node *n = (_zidl_family_{s}_node *)malloc(sizeof(_zidl_family_{s}_node));\n" ++
+                "    if (n == NULL) return; /* best-effort: OOM just means no caching for this handle */\n" ++
+                "    n->handle = handle;\n" ++
+                "    n->ref = (*env)->NewWeakGlobalRef(env, obj);\n" ++
+                "    n->next = _zidl_family_{s}_head;\n" ++
+                "    _zidl_family_{s}_head = n;\n" ++
+                "}}\n" ++
+                "\n" ++
+                "/* Registers `obj` as the cached identity for `handle`, for hand-written\n" ++
+                " * glue that constructs a Java wrapper directly instead of going through\n" ++
+                " * zidl_java_box_<c_name> -- e.g. an app-instantiated type with no\n" ++
+                " * factory operation, so nothing in generated code ever calls box for it\n" ++
+                " * (GuardCondition is a real example: see zzdds's docs/roadmap.md). If a\n" ++
+                " * still-live registration for the same handle already exists, `obj` is\n" ++
+                " * simply not registered -- the caller's own `obj` reference remains\n" ++
+                " * perfectly valid to use either way; this only affects what FUTURE\n" ++
+                " * zidl_java_box_* / lookup calls for this handle see, and a type with no\n" ++
+                " * factory operation to race against never hits that case in practice.\n" ++
+                " * Non-static and forward-declared nowhere in this file on purpose: the\n" ++
+                " * only expected callers are hand-written, in a different translation\n" ++
+                " * unit within the same linked library, which must declare it `extern`\n" ++
+                " * themselves. */\n" ++
+                "void _zidl_family_{s}_register_external(JNIEnv *env, void *handle, jobject obj) {{\n" ++
+                "    if (handle == NULL || obj == NULL) return;\n" ++
+                "    pthread_mutex_lock(&_zidl_family_{s}_mtx);\n" ++
+                "    jobject existing = _zidl_family_{s}_lookup_locked(env, handle);\n" ++
+                "    if (existing != NULL) {{\n" ++
+                "        pthread_mutex_unlock(&_zidl_family_{s}_mtx);\n" ++
+                "        (*env)->DeleteLocalRef(env, existing);\n" ++
+                "        return;\n" ++
+                "    }}\n" ++
+                "    _zidl_family_{s}_insert_locked(env, handle, obj);\n" ++
+                "    pthread_mutex_unlock(&_zidl_family_{s}_mtx);\n" ++
+                "}}\n\n",
+            .{
+                root.qualified_name, root_c, root_c, root_c, root_c, root_c, root_c,
+                root_c,              root_c, root_c, root_c, root_c, root_c, root_c,
+                root_c,              root_c, root_c, root_c, root_c, root_c, root_c,
+                root_c,              root_c, root_c, root_c,
+            },
+        );
+    }
+
     /// Emits the `zidl_java_box_<c_name>` helper that constructs a new
     /// `<c_name>Impl` Java object wrapping a native entity handle, caching
     /// the resolved `jclass`/`jmethodID` in function-local statics (benign
     /// race: `FindClass`/`GetMethodID` are idempotent, so a redundant lookup
     /// from a concurrent first call is harmless).
+    ///
+    /// For an interface belonging to a multi-member family (`familyOf`), a
+    /// found identity is returned as-is (not re-typed): the cached object's
+    /// REAL runtime class already implements whatever this function's own
+    /// declared return type needs, since it's a `jobject` either way — no
+    /// analog of the C++ backend's `dynamic_pointer_cast` recovery is needed
+    /// here.
     fn emitBoxHelper(self: *JniBridgeGenerator, iface: *const ir.Interface, c_name: []const u8) !void {
         const bin_class = try self.implBinaryClassName(iface);
         defer self.alloc.free(bin_class);
+        const fam = self.familyOf(iface);
+        if (fam.size <= 1) {
+            try self.print(
+                "jobject zidl_java_box_{s}(JNIEnv *env, void *handle) {{\n" ++
+                    "    static jclass cls = NULL;\n" ++
+                    "    static jmethodID ctor = NULL;\n" ++
+                    "    if (handle == NULL) return NULL;\n" ++
+                    "    if (cls == NULL) {{\n" ++
+                    "        jclass local = (*env)->FindClass(env, \"{s}\");\n" ++
+                    "        if (local == NULL) return NULL;\n" ++
+                    "        cls = (jclass)(*env)->NewGlobalRef(env, local);\n" ++
+                    "        (*env)->DeleteLocalRef(env, local);\n" ++
+                    "        ctor = (*env)->GetMethodID(env, cls, \"<init>\", \"(J)V\");\n" ++
+                    "    }}\n" ++
+                    "    return (*env)->NewObject(env, cls, ctor, (jlong)(intptr_t)handle);\n" ++
+                    "}}\n\n",
+                .{ c_name, bin_class },
+            );
+            return;
+        }
+        const root_c = try interface.prefixedCNameFromQualified(self.alloc, fam.root.qualified_name, self.opts.type_prefix);
+        defer self.alloc.free(root_c);
         try self.print(
             "jobject zidl_java_box_{s}(JNIEnv *env, void *handle) {{\n" ++
                 "    static jclass cls = NULL;\n" ++
                 "    static jmethodID ctor = NULL;\n" ++
                 "    if (handle == NULL) return NULL;\n" ++
+                "    pthread_mutex_lock(&_zidl_family_{s}_mtx);\n" ++
+                "    jobject cached = _zidl_family_{s}_lookup_locked(env, handle);\n" ++
+                "    pthread_mutex_unlock(&_zidl_family_{s}_mtx);\n" ++
+                "    if (cached != NULL) return cached;\n" ++
                 "    if (cls == NULL) {{\n" ++
                 "        jclass local = (*env)->FindClass(env, \"{s}\");\n" ++
                 "        if (local == NULL) return NULL;\n" ++
@@ -4701,10 +5128,56 @@ const JniBridgeGenerator = struct {
                 "        (*env)->DeleteLocalRef(env, local);\n" ++
                 "        ctor = (*env)->GetMethodID(env, cls, \"<init>\", \"(J)V\");\n" ++
                 "    }}\n" ++
-                "    return (*env)->NewObject(env, cls, ctor, (jlong)(intptr_t)handle);\n" ++
+                "    jobject obj = (*env)->NewObject(env, cls, ctor, (jlong)(intptr_t)handle);\n" ++
+                "    if (obj == NULL) return NULL;\n" ++
+                "    pthread_mutex_lock(&_zidl_family_{s}_mtx);\n" ++
+                "    {{\n" ++
+                "        jobject winner = _zidl_family_{s}_lookup_locked(env, handle);\n" ++
+                "        if (winner != NULL) {{\n" ++
+                "            pthread_mutex_unlock(&_zidl_family_{s}_mtx);\n" ++
+                "            (*env)->DeleteLocalRef(env, obj);\n" ++
+                "            return winner;\n" ++
+                "        }}\n" ++
+                "    }}\n" ++
+                "    _zidl_family_{s}_insert_locked(env, handle, obj);\n" ++
+                "    pthread_mutex_unlock(&_zidl_family_{s}_mtx);\n" ++
+                "    return obj;\n" ++
                 "}}\n\n",
-            .{ c_name, bin_class },
+            .{ c_name, root_c, root_c, root_c, bin_class, root_c, root_c, root_c, root_c, root_c },
         );
+    }
+
+    /// Emits `<c_name>_box_as_most_derived` iff `iface` has any known
+    /// derived sibling in `self.all_entity_ifaces` — unconditionally, once
+    /// per entity interface (mirrors `emitBoxHelper`'s own unconditional
+    /// per-entity emission), *not* only when a sequence-of-`iface` happens
+    /// to exist. Without this, only `WaitSet::wait()`-style sequence returns
+    /// got most-derived resolution; a bare single-value return or attribute
+    /// of the same interface type (`StatusCondition::get_entity()`, which
+    /// returns a plain `Entity`) boxed via `zidl_java_box_<C>` directly
+    /// instead — a real bug, not just an inconsistency: the shared
+    /// box-identity cache (`emitBoxHelper`, above) returns whatever object
+    /// *first* got cached for a handle, verbatim, from every family
+    /// member's own box helper — so if the generic root's box helper ever
+    /// ran first for a handle that's really a more-derived type, a later
+    /// caller expecting (and casting to) that specific type gets a
+    /// `ClassCastException`, since Java has no way to "recover" a
+    /// more-derived object from an already-constructed, unrelated generic
+    /// one the way `dynamic_pointer_cast` can in C++. Resolving the real
+    /// type *before* ever touching the box helper (exactly like the
+    /// sequence path already did) means the family's shared cache only ever
+    /// gets populated with the correctly-specific object in the first
+    /// place, for every path that can reach a given handle, not just this
+    /// one — see `mostDerivedBoxFnName`'s own doc comment for the full
+    /// reasoning, and its (identical) `derived` computation for why this is
+    /// unconditional rather than only-when-actually-needed: cheap to check,
+    /// and the alternative (some call site skips the cascade because a
+    /// pre-scan missed it) is exactly the bug this closes.
+    fn emitMostDerivedDispatcherIfNeeded(self: *JniBridgeGenerator, iface: *const ir.Interface, c_name: []const u8) !void {
+        var derived = try collectDerivedSiblings(self.alloc, self.all_entity_ifaces, iface);
+        defer derived.deinit(self.alloc);
+        if (derived.items.len == 0) return;
+        try emitBoxAsMostDerived(self.alloc, self.opts, self.out, c_name, iface, derived.items);
     }
 
     /// Distinct cross-file types referenced (as a param, return, or attr
@@ -5353,7 +5826,10 @@ const JniBridgeGenerator = struct {
         }
 
         if (ret_is_entity) {
-            try self.print("    return zidl_java_box_{s}(env, _h);\n", .{ret_c_name.?});
+            const ret_iface = resolveToNamedDecl(op.return_type.?).interface;
+            const box_fn = try mostDerivedBoxFnName(self.alloc, self.all_entity_ifaces, ret_c_name.?, ret_iface);
+            defer self.alloc.free(box_fn);
+            try self.print("    return {s}(env, _h);\n", .{box_fn});
         } else if (ret_is_callback) {
             try self.write("    return _l.listener_data != NULL ? ((zidl_java_listener_ctx *)_l.listener_data)->ref : NULL;\n");
         } else if (ret_is_string) {
@@ -5382,12 +5858,15 @@ const JniBridgeGenerator = struct {
         const get_jni = try self.buildJniFnName(jni_class_prefix, get_name);
         defer self.alloc.free(get_jni);
         if (is_entity) {
+            const attr_iface = resolveToNamedDecl(attr.type_ref).interface;
+            const box_fn = try mostDerivedBoxFnName(self.alloc, self.all_entity_ifaces, at_c, attr_iface);
+            defer self.alloc.free(box_fn);
             try self.print(
                 "JNIEXPORT {s} JNICALL {s}(\n    JNIEnv *env, jobject self, jlong ptr)\n{{\n" ++
                     "    (void)self;\n" ++
                     "    void *_h = (void *){s}_get_{s}((void *)(intptr_t)ptr);\n" ++
-                    "    return zidl_java_box_{s}(env, _h);\n}}\n\n",
-                .{ at_jni, get_jni, c_name, attr.name, at_c },
+                    "    return {s}(env, _h);\n}}\n\n",
+                .{ at_jni, get_jni, c_name, attr.name, box_fn },
             );
         } else if (is_string) {
             // See emitJniBridgeOp's ret_is_string handling: a `const char *`
@@ -6380,21 +6859,22 @@ const SeqParamMarshalGenerator = struct {
             .{ .c = c_name, .unbox = unbox_fn },
         );
 
-        var derived = std.ArrayListUnmanaged(*const ir.Interface).empty;
-        defer derived.deinit(self.alloc);
-        for (self.all_entity_ifaces) |candidate| {
-            if (candidate == element_iface) continue;
-            if (interfaceHasBaseTransitively(candidate, element_iface)) try derived.append(self.alloc, candidate);
-        }
         // The ELEMENT interface's own flat C name (e.g. "Condition"), not
-        // the sequence typedef's (e.g. "ConditionSeq") -- this names both
-        // the C-ABI conversion/box calls (`Condition_as_...`,
-        // `zidl_java_box_Condition`) and the dispatcher function itself,
-        // which is conceptually per-element-type and would be equally
-        // reusable by any other sequence-of-Condition, were one to exist.
+        // the sequence typedef's (e.g. "ConditionSeq") -- names both the
+        // C-ABI conversion/box calls (`Condition_as_...`,
+        // `zidl_java_box_Condition`) and (if needed) the dispatcher
+        // function, which is per-element-type and equally reusable by any
+        // other sequence-of-Condition, were one to exist. The dispatcher
+        // itself, if `element_iface` needs one, is emitted unconditionally
+        // once per entity interface by `JniBridgeGenerator`'s own pass (see
+        // `emitMostDerivedDispatcherIfNeeded`) -- not here, so a bare
+        // (non-sequence) op return or attribute getter for the same
+        // interface (`StatusCondition::get_entity()`, say) can share the
+        // exact same dispatcher instead of risking a second, differently
+        // -triggered emission racing this one for the same function name.
         const elem_c = try self.cName(element_iface.qualified_name);
         defer self.alloc.free(elem_c);
-        const box_fn = try self.emitBoxAsMostDerived(elem_c, element_iface, derived.items);
+        const box_fn = try mostDerivedBoxFnName(self.alloc, self.all_entity_ifaces, elem_c, element_iface);
         defer self.alloc.free(box_fn);
 
         try self.print(
@@ -6409,119 +6889,6 @@ const SeqParamMarshalGenerator = struct {
                 "    }}\n}}\n\n",
             .{ .c = c_name, .box = box_fn },
         );
-    }
-
-    /// Returns the name of the function to call to box a native handle of
-    /// `target`'s C type as its most-derived known Java class: plain
-    /// `zidl_java_box_<target_c>` if `derived` is empty (no known concrete
-    /// descendant — e.g. `DataReader`), or a generated
-    /// `<target_c>_box_as_most_derived` dispatcher otherwise. `elem_c` must
-    /// be `target`'s OWN flat C name (e.g. "Condition"), not the calling
-    /// sequence typedef's — the dispatcher is conceptually per-element-type,
-    /// not per-sequence-type. Called once per bare `sequence<Entity>` param
-    /// type that needs it (`SeqParamMarshalGenerator.collect` dedups by
-    /// *sequence* type, not by element type — if two distinct sequence
-    /// typedefs ever shared the same entity element, e.g. two different
-    /// `sequence<Condition>` aliases, this would emit `<target_c>_box_as_
-    /// most_derived` twice, a duplicate-symbol link error; not a real
-    /// concern for dcps.idl/zzdds.idl today, where each entity element type
-    /// only ever has one bare-sequence typedef, but worth knowing if this
-    /// is ever extended).
-    ///
-    /// The dispatcher tries each entry in `derived`, MOST-DERIVED FIRST: a
-    /// genuine `QueryCondition` handle also satisfies the checked
-    /// conversion to the shallower `ReadCondition` (it IS one), so checking
-    /// depth-first is required to box it as `QueryConditionImpl`, not the
-    /// merely-compatible `ReadConditionImpl`. Each entry's "downward hop"
-    /// chain (`target` → … → that entry) is derived by reversing
-    /// `findConversionPath`'s own upward-hop output — dcps.h's checked
-    /// narrowing conversions, like the widening ones, only exist for
-    /// *direct* inheritance edges, so a two-level descendant needs two
-    /// chained calls (e.g. `Condition_as_ReadCondition` then
-    /// `ReadCondition_as_QueryCondition`), each checked for NULL before
-    /// proceeding to the next.
-    fn emitBoxAsMostDerived(
-        self: *SeqParamMarshalGenerator,
-        elem_c: []const u8,
-        target: *const ir.Interface,
-        derived: []const *const ir.Interface,
-    ) ![]u8 {
-        if (derived.len == 0) {
-            return std.fmt.allocPrint(self.alloc, "zidl_java_box_{s}", .{elem_c});
-        }
-
-        const Entry = struct { hops: std.ArrayListUnmanaged(*const ir.Interface) };
-        var entries = std.ArrayListUnmanaged(Entry).empty;
-        defer {
-            for (entries.items) |*e| e.hops.deinit(self.alloc);
-            entries.deinit(self.alloc);
-        }
-        for (derived) |d| {
-            var up_path = std.ArrayListUnmanaged(*const ir.Interface).empty;
-            defer up_path.deinit(self.alloc);
-            _ = try findConversionPath(self.alloc, d, target, &up_path);
-            // up_path = [hop1, hop2, ..., target] (from d up to target).
-            // The downward sequence (target -> ... -> d) is this reversed,
-            // dropping the trailing `target` entry (already the starting
-            // point below), with `d` itself appended at the end.
-            var down_hops = std.ArrayListUnmanaged(*const ir.Interface).empty;
-            var i: usize = up_path.items.len;
-            while (i > 1) {
-                i -= 1;
-                try down_hops.append(self.alloc, up_path.items[i - 1]);
-            }
-            try down_hops.append(self.alloc, d);
-            try entries.append(self.alloc, .{ .hops = down_hops });
-        }
-        std.mem.sort(Entry, entries.items, {}, struct {
-            fn lessThan(_: void, a: Entry, b: Entry) bool {
-                return a.hops.items.len > b.hops.items.len;
-            }
-        }.lessThan);
-
-        const fn_name = try std.fmt.allocPrint(self.alloc, "{s}_box_as_most_derived", .{elem_c});
-        try self.print("static jobject {s}(JNIEnv *env, void *handle) {{\n", .{fn_name});
-        try self.write("    if (handle == NULL) return NULL;\n");
-        for (entries.items) |e| {
-            var indent = std.ArrayListUnmanaged(u8).empty;
-            defer indent.deinit(self.alloc);
-            try indent.appendSlice(self.alloc, "    ");
-            try self.print("{s}{{\n", .{indent.items});
-            try indent.appendSlice(self.alloc, "    ");
-
-            var prev_c = try self.alloc.dupe(u8, elem_c);
-            defer self.alloc.free(prev_c);
-
-            for (e.hops.items, 0..) |hop, i| {
-                const hop_c = try self.cName(hop.qualified_name);
-                defer self.alloc.free(hop_c);
-                if (i == 0) {
-                    try self.print("{s}void *_v{d} = {s}_as_{s}(handle);\n", .{ indent.items, i, prev_c, hop_c });
-                } else {
-                    try self.print("{s}void *_v{d} = {s}_as_{s}(_v{d});\n", .{ indent.items, i, prev_c, hop_c, i - 1 });
-                }
-                self.alloc.free(prev_c);
-                prev_c = try self.alloc.dupe(u8, hop_c);
-
-                if (i == e.hops.items.len - 1) {
-                    try self.print("{s}if (_v{d} != NULL) return zidl_java_box_{s}(env, _v{d});\n", .{ indent.items, i, hop_c, i });
-                } else {
-                    try self.print("{s}if (_v{d} != NULL) {{\n", .{ indent.items, i });
-                    try indent.appendSlice(self.alloc, "    ");
-                }
-            }
-            var closes: usize = e.hops.items.len - 1;
-            while (closes > 0) {
-                indent.items.len -= 4;
-                try self.print("{s}}}\n", .{indent.items});
-                closes -= 1;
-            }
-            indent.items.len -= 4;
-            try self.print("{s}}}\n", .{indent.items});
-        }
-        try self.print("    return zidl_java_box_{s}(env, handle);\n", .{elem_c});
-        try self.write("}\n\n");
-        return fn_name;
     }
 };
 
@@ -8475,9 +8842,17 @@ test "java: bare sequence<Entity> param (DataReaderSeq-shaped, no multi-implemen
     try testing.expect(std.mem.indexOf(u8, c, "void DataReaderSeq_from_java(JNIEnv *env, jobject list, DataReaderSeq *out) {") != null);
     try testing.expect(std.mem.indexOf(u8, c, "out->_buffer[_i] = zidl_java_unbox(env, _el);") != null);
     try testing.expect(std.mem.indexOf(u8, c, "void DataReaderSeq_fill_java(JNIEnv *env, const DataReaderSeq *in, jobject list) {") != null);
-    // No multi-implementor cascade needed for a plain, subclass-free entity.
+    // No multi-implementor cascade needed for a plain, subclass-free entity:
+    // DataReader itself has no derived sibling, so the sequence element box
+    // call goes straight to zidl_java_box_DataReader, not a dispatcher.
     try testing.expect(std.mem.indexOf(u8, c, "jobject _el = zidl_java_box_DataReader(env, in->_buffer[_i]);") != null);
-    try testing.expect(std.mem.indexOf(u8, c, "box_as_most_derived") == null);
+    try testing.expect(std.mem.indexOf(u8, c, "DataReader_box_as_most_derived") == null);
+    // Entity itself DOES have a derived sibling (DataReader) in this IR, so
+    // its dispatcher is still emitted unconditionally -- every entity with a
+    // known derived sibling gets one, regardless of whether any call site in
+    // this particular file happens to box a bare `Entity`-typed value (see
+    // mostDerivedBoxFnName's doc comment).
+    try testing.expect(std.mem.indexOf(u8, c, "static jobject Entity_box_as_most_derived(JNIEnv *env, void *handle) {") != null);
 }
 
 test "java: bare sequence<Entity> param with multiple concrete descendants (ConditionSeq-shaped) boxes most-derived-first" {
