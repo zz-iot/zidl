@@ -3328,11 +3328,20 @@ fn emitZzddsDataReaderFile(
         \\    /** Result of a single {[c]s}DataReader take()/read(): the sample
         \\     * (valid iff {{@link #validData}}) plus its instance handle. */
         \\    public static final class Sample {{
+        \\        /** {{@link #instanceState}} sentinel used by the batch take/read
+        \\         * methods below ({{@code take_n}}/{{@code take_instance}}/
+        \\         * {{@code take_w_condition}}/etc.) -- their native calls don't
+        \\         * report per-sample instance_state (a separate, larger
+        \\         * native-signature change not made yet), unlike the single-sample
+        \\         * {{@link #take()}}/{{@link #read()}}/{{@link #take_next_instance}}/
+        \\         * {{@link #read_next_instance}} family, which do. */
+        \\        public static final int UNKNOWN_INSTANCE_STATE = -1;
         \\        public final {[t]s} data;
         \\        public final long instanceHandle;
         \\        public final boolean validData;
-        \\        Sample({[t]s} data, long instanceHandle, boolean validData) {{
-        \\            this.data = data; this.instanceHandle = instanceHandle; this.validData = validData;
+        \\        public final int instanceState;
+        \\        Sample({[t]s} data, long instanceHandle, boolean validData, int instanceState) {{
+        \\            this.data = data; this.instanceHandle = instanceHandle; this.validData = validData; this.instanceState = instanceState;
         \\        }}
         \\    }}
         \\
@@ -3346,27 +3355,29 @@ fn emitZzddsDataReaderFile(
         \\        throw new IllegalArgumentException("zidl: unsupported CDR encapsulation id 0x" + Integer.toHexString(_id));
         \\    }}
         \\
-        \\    private static Sample fromPayload(byte[] payload, long[] handleOut, boolean[] validOut) {{
+        \\    private static Sample fromPayload(byte[] payload, long[] handleOut, boolean[] validOut, int[] stateOut) {{
         \\        if (payload == null) return null;
         \\        java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
         \\        int _xcdrVersion = xcdrVersionOf(payload);
         \\        _buf.position(4);
         \\        {[t]s} _data = validOut[0] ? {[t]s}.deserializeFrom(_buf, 4, _xcdrVersion) : {[t]s}.deserializeKey(_buf, 4, _xcdrVersion);
-        \\        return new Sample(_data, handleOut[0], validOut[0]);
+        \\        return new Sample(_data, handleOut[0], validOut[0], stateOut[0]);
         \\    }}
         \\
         \\    public Sample take(int maxSampleSize) {{
         \\        long[] _handle = new long[1];
         \\        boolean[] _valid = new boolean[1];
-        \\        byte[] _payload = io.zzdds.runtime.ZzddsRuntime.takeRaw(reader, maxSampleSize, _handle, _valid);
-        \\        return fromPayload(_payload, _handle, _valid);
+        \\        int[] _state = new int[1];
+        \\        byte[] _payload = io.zzdds.runtime.ZzddsRuntime.takeRaw(reader, maxSampleSize, _handle, _valid, _state);
+        \\        return fromPayload(_payload, _handle, _valid, _state);
         \\    }}
         \\
         \\    public Sample read(int maxSampleSize) {{
         \\        long[] _handle = new long[1];
         \\        boolean[] _valid = new boolean[1];
-        \\        byte[] _payload = io.zzdds.runtime.ZzddsRuntime.readRaw(reader, maxSampleSize, _handle, _valid);
-        \\        return fromPayload(_payload, _handle, _valid);
+        \\        int[] _state = new int[1];
+        \\        byte[] _payload = io.zzdds.runtime.ZzddsRuntime.readRaw(reader, maxSampleSize, _handle, _valid, _state);
+        \\        return fromPayload(_payload, _handle, _valid, _state);
         \\    }}
         \\
         \\    public Sample take() {{ return take(65536); }}
@@ -3378,24 +3389,30 @@ fn emitZzddsDataReaderFile(
         \\    public Sample take_next_instance(long prevHandle, int maxSampleSize) {{
         \\        long[] _handle = new long[1];
         \\        boolean[] _valid = new boolean[1];
-        \\        byte[] _payload = io.zzdds.runtime.ZzddsRuntime.takeNextInstanceRaw(reader, prevHandle, maxSampleSize, _handle, _valid);
-        \\        return fromPayload(_payload, _handle, _valid);
+        \\        int[] _state = new int[1];
+        \\        byte[] _payload = io.zzdds.runtime.ZzddsRuntime.takeNextInstanceRaw(reader, prevHandle, maxSampleSize, _handle, _valid, _state);
+        \\        return fromPayload(_payload, _handle, _valid, _state);
         \\    }}
         \\
         \\    public Sample read_next_instance(long prevHandle, int maxSampleSize) {{
         \\        long[] _handle = new long[1];
         \\        boolean[] _valid = new boolean[1];
-        \\        byte[] _payload = io.zzdds.runtime.ZzddsRuntime.readNextInstanceRaw(reader, prevHandle, maxSampleSize, _handle, _valid);
-        \\        return fromPayload(_payload, _handle, _valid);
+        \\        int[] _state = new int[1];
+        \\        byte[] _payload = io.zzdds.runtime.ZzddsRuntime.readNextInstanceRaw(reader, prevHandle, maxSampleSize, _handle, _valid, _state);
+        \\        return fromPayload(_payload, _handle, _valid, _state);
         \\    }}
         \\
         \\    public Sample take_next_instance(long prevHandle) {{ return take_next_instance(prevHandle, 65536); }}
         \\    public Sample read_next_instance(long prevHandle) {{ return read_next_instance(prevHandle, 65536); }}
         \\
+        \\    /** instanceState on every returned Sample is
+        \\     * {{@link Sample#UNKNOWN_INSTANCE_STATE}} -- see that field's own doc
+        \\     * comment for why the batch native calls this feeds from don't have a
+        \\     * real value to give it. */
         \\    private static Sample[] fromPayloads(byte[][] payloads, long[] handles, boolean[] valids) {{
         \\        Sample[] _out = new Sample[payloads.length];
         \\        for (int _i = 0; _i < payloads.length; _i++) {{
-        \\            _out[_i] = fromPayload(payloads[_i], new long[]{{ handles[_i] }}, new boolean[]{{ valids[_i] }});
+        \\            _out[_i] = fromPayload(payloads[_i], new long[]{{ handles[_i] }}, new boolean[]{{ valids[_i] }}, new int[]{{ Sample.UNKNOWN_INSTANCE_STATE }});
         \\        }}
         \\        return _out;
         \\    }}
@@ -7824,9 +7841,9 @@ test "java: --generate-zzdds-wrappers DataReader gets take_next_instance/read_ne
     // take_next_instance/read_next_instance: single-sample, instance-scoped,
     // same shape as take()/read() plus a prevHandle param.
     try testing.expect(std.mem.indexOf(u8, r, "public Sample take_next_instance(long prevHandle, int maxSampleSize) {") != null);
-    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.takeNextInstanceRaw(reader, prevHandle, maxSampleSize, _handle, _valid)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.takeNextInstanceRaw(reader, prevHandle, maxSampleSize, _handle, _valid, _state)") != null);
     try testing.expect(std.mem.indexOf(u8, r, "public Sample read_next_instance(long prevHandle, int maxSampleSize) {") != null);
-    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.readNextInstanceRaw(reader, prevHandle, maxSampleSize, _handle, _valid)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.readNextInstanceRaw(reader, prevHandle, maxSampleSize, _handle, _valid, _state)") != null);
     try testing.expect(std.mem.indexOf(u8, r, "public Sample take_next_instance(long prevHandle) { return take_next_instance(prevHandle, 65536); }") != null);
 
     // take_n/read_n: bulk, mask-filtered, returning Sample[] whose length is

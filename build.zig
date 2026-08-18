@@ -137,6 +137,56 @@ pub fn build(b: *std.Build) void {
     const run_zig_integration = b.addRunArtifact(zig_integration_tests);
     test_step.dependOn(&run_zig_integration.step);
 
+    // ── Zig "dds module adapter contract" compile check ────────────────────────
+    // getFieldFromCdr and the FooDataWriter/FooDataReader wrappers are only
+    // emitted with --generate-zzdds-wrappers, which no golden output above
+    // uses; their own regression tests (in src/backend/zig.zig) only
+    // substring-match generated source text, so they could pass even if Zig
+    // rejected the generated code outright (see zidl PR #40 review). This
+    // section actually compiles fresh --generate-zzdds-wrappers output
+    // against fake_middleware.zig's synthetic contract implementation (see
+    // that file's doc comment for why it isn't a zzdds mirror) so a codegen
+    // regression here is a real `zig build test` failure, not just a
+    // stale-looking substring match.
+    {
+        const gen_wrapper_fixture = b.addRunArtifact(exe);
+        gen_wrapper_fixture.addArgs(&.{ "-b", "zig", "--generate-zzdds-wrappers", "-o" });
+        const wrapper_fixture_dir = gen_wrapper_fixture.addOutputDirectoryArg("zig-wrapper-contract-gen");
+        gen_wrapper_fixture.addFileArg(b.path("test/integration/zig_wrapper_contract/fixture.idl"));
+
+        const fake_middleware_mod = b.createModule(.{
+            .root_source_file = b.path("test/integration/zig_wrapper_contract/fake_middleware.zig"),
+            .target = target,
+            .sanitize_thread = sanitize_thread,
+        });
+
+        const wrapper_fixture_mod = b.createModule(.{
+            .root_source_file = wrapper_fixture_dir.path(b, "fixture.zig"),
+            .target = target,
+            .sanitize_thread = sanitize_thread,
+            .imports = &.{
+                .{ .name = "zidl_rt", .module = zidl_rt_mod },
+                .{ .name = "zzdds", .module = fake_middleware_mod },
+            },
+        });
+
+        const wrapper_contract_tests = b.addTest(.{
+            .name = "zidl-wrapper-contract",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("test/integration/zig_wrapper_contract/test.zig"),
+                .target = target,
+                .sanitize_thread = sanitize_thread,
+                .imports = &.{
+                    .{ .name = "zidl_rt", .module = zidl_rt_mod },
+                    .{ .name = "fixture", .module = wrapper_fixture_mod },
+                    .{ .name = "zzdds", .module = fake_middleware_mod },
+                },
+            }),
+        });
+        const run_wrapper_contract = b.addRunArtifact(wrapper_contract_tests);
+        test_step.dependOn(&run_wrapper_contract.step);
+    }
+
     // ── check_goldens tool ────────────────────────────────────────────────────
     // Bidirectional directory comparison; replaces `diff -rq` and works on all
     // platforms.  Always compiled for the host so it can run during the build.

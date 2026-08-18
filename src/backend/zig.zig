@@ -3154,6 +3154,16 @@ const Generator = struct {
                 try self.write("        const _dh = try writer.reserveDheaderMaybe();\n");
                 try self.ind();
                 try self.write("        writer.patchDheaderMaybe(_dh);\n");
+            } else {
+                // Non-appendable keyless struct: no DHEADER, so `writer` is
+                // genuinely unreferenced -- same "conditionally discard,
+                // don't assume" class of bug as emitGetFieldFromCdr's
+                // `field`/`scratch` fix (found by the compile-check in
+                // test/integration/zig_wrapper_contract, which actually
+                // compiles generated --generate-zzdds-wrappers output
+                // instead of only substring-matching it).
+                try self.ind();
+                try self.write("        _ = writer;\n");
             }
             try self.ind();
             try self.write("    }\n");
@@ -3180,6 +3190,10 @@ const Generator = struct {
             if (appendable) {
                 try self.ind();
                 try self.write("        try reader.skipDheaderIfXcdr2();\n");
+            } else {
+                // See serializeKey's matching comment above.
+                try self.ind();
+                try self.write("        _ = reader;\n");
             }
             try self.ind();
             try self.write("    }\n");
@@ -3447,6 +3461,41 @@ const Generator = struct {
         try self.write("\n");
         try self.ind();
         try self.write("    pub fn getFieldFromCdr(ctx: *anyopaque, payload: []const u8, field: []const u8, scratch: []u8) ?_zzdds.dcps.filter.FilterValue {\n");
+        // `field`/`scratch` are only referenced inside the per-member
+        // branches emitted below (string_like members reference both;
+        // int_like/float_like reference only `field`). A struct with no
+        // filterable members at all (every member `.skip` -- arrays/complex
+        // types only) or with no string_like member specifically leaves one
+        // or both genuinely unreferenced, which Zig rejects as an unused
+        // function parameter -- a real, live bug found building
+        // zzdds-examples' `presence` example against a single-int-field
+        // struct. Pre-scan first to decide whether either discard is
+        // actually needed: Zig equally rejects `_ = x;` as a "pointless
+        // discard" when `x` genuinely *is* used later, so an unconditional
+        // discard isn't a safe blanket fix here the way it is in
+        // deserializeInto/serializeKey/etc. above -- it has to match reality
+        // in both directions.
+        var has_field_use = false;
+        var has_scratch_use = false;
+        for (s.members) |m| {
+            if (m.dimensions.len > 0) continue;
+            switch (classifyFilterFieldKind(m.type_ref)) {
+                .skip => continue,
+                .int_like, .float_like => has_field_use = true,
+                .string_like => {
+                    has_field_use = true;
+                    has_scratch_use = true;
+                },
+            }
+        }
+        if (!has_field_use) {
+            try self.ind();
+            try self.write("        _ = field;\n");
+        }
+        if (!has_scratch_use) {
+            try self.ind();
+            try self.write("        _ = scratch;\n");
+        }
         try self.ind();
         try self.write("        const allocator: *const std.mem.Allocator = @ptrCast(@alignCast(ctx));\n");
         try self.ind();
@@ -8402,6 +8451,44 @@ test "zig_backend: getFieldFromCdr emitted for keyless struct too" {
     const s = out.items;
     try testing.expect(has(s, "pub fn getFieldFromCdr(ctx: *anyopaque, payload: []const u8, field: []const u8, scratch: []u8) ?_zzdds.dcps.filter.FilterValue {"));
     try testing.expect(has(s, "if (std.mem.eql(u8, field, \"x\")) return .{ .int = @intCast(_v.x) };"));
+}
+
+test "zig_backend: getFieldFromCdr discards scratch when no string member exists" {
+    // Regression test: a struct with zero string_like members left `scratch`
+    // completely unreferenced in the generated body (it's only used inside
+    // the string_like branch), which Zig's compiler rejects as an unused
+    // function parameter -- a real, live bug found building zzdds-examples'
+    // `presence` example against a single-int-field struct, not caught by
+    // this file's other getFieldFromCdr tests since none of them actually
+    // compile the generated output (see the fix commit for the full trail).
+    // `field` itself IS used here (there's an int_like member), so it must
+    // NOT be discarded -- Zig equally rejects a discard of something that's
+    // genuinely used later ("pointless discard").
+    var out = try testGenOpts(
+        \\@appendable struct IntOnly { long seq_num; };
+    , "intonly", .{ .generate_zzdds_wrappers = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "pub fn getFieldFromCdr(ctx: *anyopaque, payload: []const u8, field: []const u8, scratch: []u8) ?_zzdds.dcps.filter.FilterValue {"));
+    try testing.expect(has(s, "_ = scratch;"));
+    try testing.expect(!has(s, "_ = field;"));
+    try testing.expect(has(s, "if (std.mem.eql(u8, field, \"seq_num\")) return .{ .int = @intCast(_v.seq_num) };"));
+    // no string_like member -- scratch is never actually written into
+    try testing.expect(!has(s, "scratch[0.."));
+}
+
+test "zig_backend: getFieldFromCdr discards both field and scratch when no filterable member exists" {
+    // The other half of the same bug class: a struct with only array/
+    // complex members (every member `.skip`) leaves `field` unreferenced
+    // too, not just `scratch`.
+    var out = try testGenOpts(
+        \\struct Inner { long z; };
+        \\@appendable struct OnlyComplex { sequence<long> values; Inner nested; };
+    , "onlycomplex", .{ .generate_zzdds_wrappers = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "_ = field;"));
+    try testing.expect(has(s, "_ = scratch;"));
 }
 
 test "zig_backend: no getFieldFromCdr without --generate-zzdds-wrappers" {
