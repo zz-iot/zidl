@@ -1,0 +1,36 @@
+// Purpose-built fixture for the "dds module adapter contract" compile-check
+// (see fake_middleware.zig in this directory) -- deliberately separate from
+// the shared test/golden/types.idl golden-output suite, since this fixture
+// is generated with --generate-zzdds-wrappers (which none of the golden
+// output uses) and compiled for real, not just substring-matched.
+//
+// Reading is a "normal" keyed struct with a string member, exercising the
+// full --generate-zzdds-wrappers surface (DataWriter/DataReader,
+// register_instance/get_key_value/lookup_instance, the take/read family)
+// broadly. IntOnly and OnlyComplex are the two getFieldFromCdr edge cases
+// found while building zzdds-examples' `presence` example (see zig.zig's
+// emitGetFieldFromCdr doc comment): a struct with no string_like member
+// (scratch must be discarded, field must not) and a struct with no
+// filterable member at all (both must be discarded).
+
+@appendable
+struct Reading {
+    @key unsigned long sensor_id;
+    string label;
+    long value;
+};
+
+@appendable
+struct IntOnly {
+    long seq_num;
+};
+
+struct Inner {
+    long z;
+};
+
+@appendable
+struct OnlyComplex {
+    sequence<long> values;
+    Inner nested;
+};

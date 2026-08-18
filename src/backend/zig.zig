@@ -3154,6 +3154,16 @@ const Generator = struct {
                 try self.write("        const _dh = try writer.reserveDheaderMaybe();\n");
                 try self.ind();
                 try self.write("        writer.patchDheaderMaybe(_dh);\n");
+            } else {
+                // Non-appendable keyless struct: no DHEADER, so `writer` is
+                // genuinely unreferenced -- same "conditionally discard,
+                // don't assume" class of bug as emitGetFieldFromCdr's
+                // `field`/`scratch` fix (found by the compile-check in
+                // test/integration/zig_wrapper_contract, which actually
+                // compiles generated --generate-zzdds-wrappers output
+                // instead of only substring-matching it).
+                try self.ind();
+                try self.write("        _ = writer;\n");
             }
             try self.ind();
             try self.write("    }\n");
@@ -3180,6 +3190,10 @@ const Generator = struct {
             if (appendable) {
                 try self.ind();
                 try self.write("        try reader.skipDheaderIfXcdr2();\n");
+            } else {
+                // See serializeKey's matching comment above.
+                try self.ind();
+                try self.write("        _ = reader;\n");
             }
             try self.ind();
             try self.write("    }\n");
