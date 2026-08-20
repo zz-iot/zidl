@@ -2507,6 +2507,15 @@ const Generator = struct {
                 // corrupt sequence length, etc). Start from the type default
                 // instead, same as `.in_`'s "null means default" fallback.
                 try self.print("    var _mir_{s}: {s} = .{{}};\n", .{ p.name, inner });
+                // The post-call write-back below calls `{Name}ToCAbi`, whose
+                // own generated body frees `v`'s *existing* contents first
+                // (the same "free old, write new" contract `inout` needs)
+                // -- but `v` is that same uninitialized caller storage, so
+                // freeing it as-is would scan/free garbage pointers. Reset
+                // it to the mirror type's zero value first so that free is
+                // a safe no-op, same reasoning as `_mir_{name}` just above.
+                try self.ind();
+                try self.print("    {s}.* = .{{}};\n", .{p.name});
             }
             if (try self.cApiMirrorInternalNeedsDeinit(p.type_ref)) {
                 try self.ind();
@@ -9479,6 +9488,41 @@ test "zig_backend: C-ABI mirror clones sequence fields instead of shallow-copyin
     try testing.expect(has(s, "out.nums.deinit(std.heap.c_allocator);"));
 }
 
+test "zig_backend: C-ABI mirror struct containing another mirror-needing struct converts recursively" {
+    // A mirror-needing struct's field can itself be a struct that needs
+    // its own mirror (e.g. a real dcps.idl builtin-topic-data struct
+    // nesting a QoS policy that happened to grow an unbounded string) --
+    // this is the one path where a bug (skipping the nested conversion,
+    // double-freeing the nested struct, dropping its own _present bits)
+    // wouldn't be caught by any of the single-level tests above, since
+    // they all use flat structs. No existing zzdds.idl/dcps.idl struct
+    // actually nests two mirror-needing structs today, but the generator
+    // must still be correct for one that does.
+    var out = try testGenOpts(
+        \\struct Inner { string label; };
+        \\struct Outer { Inner inner; string name; };
+    , "t", .{ .zig_generate_c_api = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+
+    // Both structs get their own mirror -- Inner because of its own
+    // string field, Outer both for its own `name` and for containing Inner.
+    try testing.expect(has(s, "pub const InnerCAbi = extern struct {"));
+    try testing.expect(has(s, "pub const OuterCAbi = extern struct {"));
+    // Outer's mirror field for `inner` is InnerCAbi, not the internal Inner
+    // type -- otherwise OuterCAbi wouldn't be a genuinely extern-compatible
+    // struct (Inner's own `[]const u8 label` field isn't C-ABI-safe).
+    try testing.expect(has(s, "inner: InnerCAbi = .{},"));
+
+    // All three directions recurse through Inner's own conversion
+    // functions -- never a raw field copy (which would either not compile,
+    // for InnerCAbi vs Inner type mismatch, or alias/double-free Inner's
+    // owned string across the two sides).
+    try testing.expect(has(s, "out.inner = InnerFromCAbi(&c.inner);"));
+    try testing.expect(has(s, "InnerToCAbi(&v.inner, &out.inner);"));
+    try testing.expect(has(s, "InnerCAbiFree(&out.inner);"));
+}
+
 test "zig_backend: --zig-generate-c-api struct in/inout params route through the C-ABI mirror" {
     var out = try testGenOpts(
         \\struct Named { string name; };
@@ -9531,6 +9575,13 @@ test "zig_backend: --zig-generate-c-api struct out mirror param starts from the 
     try testing.expect(has(s, "pub export fn Iface_get_val(self: *anyopaque, v: *NamedCAbi) callconv(.c) void {"));
     try testing.expect(has(s, "var _mir_v: Named = .{};"));
     try testing.expect(!has(s, "var _mir_v: Named = NamedFromCAbi(v);"));
+    // The post-call write-back (`NamedToCAbi(&_mir_v, v)`) frees `v`'s
+    // *existing* contents first, internally -- but `v` is the same
+    // uninitialized caller storage `_mir_v` above was built to avoid
+    // reading. It must be reset to the mirror type's zero value before
+    // that write-back runs, so freeing it is a safe no-op instead of
+    // scanning/freeing garbage pointers.
+    try testing.expect(has(s, "v.* = .{};"));
     try testing.expect(has(s, "_self.vtable.get_val(_self.ptr, &_mir_v);"));
     try testing.expect(has(s, "NamedToCAbi(&_mir_v, v);"));
 }
