@@ -6384,46 +6384,102 @@ const StructMarshalGenerator = struct {
 
         try self.print("void {s}_from_java(JNIEnv *env, jobject obj, {s} *out) {{\n", .{ c_name, c_name });
         try self.write("    jclass cls = (*env)->GetObjectClass(env, obj);\n");
-        for (s.members) |m| try self.emitMemberFromJava(&m);
+        {
+            var opt_bit: u32 = 0;
+            for (s.members) |m| {
+                try self.emitMemberFromJava(&m, opt_bit);
+                if (m.annotations.is_optional) opt_bit += 1;
+            }
+        }
         try self.write("}\n\n");
 
         try self.print("void {s}_fill_java(JNIEnv *env, const {s} *in, jobject obj) {{\n", .{ c_name, c_name });
         try self.write("    jclass cls = (*env)->GetObjectClass(env, obj);\n");
-        for (s.members) |m| try self.emitMemberFillJava(&m);
+        {
+            var opt_bit: u32 = 0;
+            for (s.members) |m| {
+                try self.emitMemberFillJava(&m, opt_bit);
+                if (m.annotations.is_optional) opt_bit += 1;
+            }
+        }
         try self.write("}\n\n");
     }
 
     // ── Java → C ────────────────────────────────────────────────────────────
 
-    fn emitMemberFromJava(self: *StructMarshalGenerator, m: *const ir.StructMember) !void {
+    /// `opt_bit` is this member's bit position in `out->_present` if it's
+    /// `@optional` (ignored otherwise) — see `_present`'s own definition in
+    /// the C backend (`optBitIdxForMember`): sequential index among optional
+    /// members only, not `s.members` at large. Only the `.scalar` shape
+    /// handles `@optional` today — matches every `@optional` member that
+    /// currently exists in the spec (`UdpConfig`'s port/participant-id
+    /// fields); a `@optional` string/nested/seq member would need the same
+    /// boxed-null-check treatment extended to its own branch below, not
+    /// implemented since nothing exercises it yet.
+    fn emitMemberFromJava(self: *StructMarshalGenerator, m: *const ir.StructMember, opt_bit: u32) !void {
         if (m.dimensions.len > 0) return self.emitArrayFromJava(m);
 
         switch (resolveMemberShape(m.type_ref)) {
             .scalar => {
                 const b = resolveScalarBase(m.type_ref);
-                try self.print(
-                    "    {{ jmethodID mid = (*env)->GetMethodID(env, cls, \"get_{[name]s}\", \"(){[desc]s}\"); out->{[name]s} = (*env)->Call{[acc]s}Method(env, obj, mid); }}\n",
-                    .{ .name = m.name, .desc = try self.descriptor(m.type_ref), .acc = jniAccessorName(b) },
-                );
+                if (m.annotations.is_optional) {
+                    // The Java getter returns a boxed wrapper (nullable) for an
+                    // @optional scalar (see memberJavaType) -- using the plain
+                    // primitive descriptor/CallXMethod here (as the non-optional
+                    // branch does) looks up a method that doesn't exist, so
+                    // GetMethodID silently returns NULL and the subsequent call
+                    // crashes. Confirmed via a real JVM SIGSEGV inside
+                    // zzdds_UdpConfig_from_java, the first real exercise of this
+                    // path (get_default_participant_config's Java JNI glue).
+                    try self.print(
+                        "    {{ jmethodID mid = (*env)->GetMethodID(env, cls, \"get_{[name]s}\", \"()L{[boxed]s};\");\n" ++
+                            "       jobject _b = (*env)->CallObjectMethod(env, obj, mid);\n" ++
+                            "       if (_b != NULL) {{\n" ++
+                            "           jclass _bc = (*env)->GetObjectClass(env, _b);\n" ++
+                            "           jmethodID _uv = (*env)->GetMethodID(env, _bc, \"{[unbox]s}Value\", \"(){[ch]c}\");\n" ++
+                            "           out->{[name]s} = (*env)->Call{[acc]s}Method(env, _b, _uv);\n" ++
+                            "           out->_present |= (1ULL << {[bit]d}u);\n" ++
+                            "       }} }}\n",
+                        .{
+                            .name = m.name,
+                            .boxed = boxedClassName(b),
+                            .unbox = unboxMethodName(b),
+                            .ch = jniTypeDescriptorChar(b),
+                            .acc = jniAccessorName(b),
+                            .bit = opt_bit,
+                        },
+                    );
+                } else {
+                    const desc = try self.descriptor(m.type_ref);
+                    defer self.alloc.free(desc);
+                    try self.print(
+                        "    {{ jmethodID mid = (*env)->GetMethodID(env, cls, \"get_{[name]s}\", \"(){[desc]s}\"); out->{[name]s} = (*env)->Call{[acc]s}Method(env, obj, mid); }}\n",
+                        .{ .name = m.name, .desc = desc, .acc = jniAccessorName(b) },
+                    );
+                }
             },
             .enum_ => {
+                const desc = try self.descriptor(m.type_ref);
+                defer self.alloc.free(desc);
                 try self.print(
                     "    {{ jmethodID mid = (*env)->GetMethodID(env, cls, \"get_{[name]s}\", \"(){[desc]s}\");\n" ++
                         "       jobject _e = (*env)->CallObjectMethod(env, obj, mid);\n" ++
                         "       jclass _ecls = (*env)->GetObjectClass(env, _e);\n" ++
                         "       jmethodID _gv = (*env)->GetMethodID(env, _ecls, \"getValue\", \"()I\");\n" ++
                         "       out->{[name]s} = (*env)->CallIntMethod(env, _e, _gv); }}\n",
-                    .{ .name = m.name, .desc = try self.descriptor(m.type_ref) },
+                    .{ .name = m.name, .desc = desc },
                 );
             },
             .nested_struct => {
                 const nested_c = try self.cName(ir.typeDeclQualifiedName(resolveToNamedDecl(m.type_ref)));
                 defer self.alloc.free(nested_c);
+                const desc = try self.descriptor(m.type_ref);
+                defer self.alloc.free(desc);
                 try self.print(
                     "    {{ jmethodID mid = (*env)->GetMethodID(env, cls, \"get_{[name]s}\", \"(){[desc]s}\");\n" ++
                         "       jobject _m = (*env)->CallObjectMethod(env, obj, mid);\n" ++
                         "       {[nested]s}_from_java(env, _m, &out->{[name]s}); }}\n",
-                    .{ .name = m.name, .desc = try self.descriptor(m.type_ref), .nested = nested_c },
+                    .{ .name = m.name, .desc = desc, .nested = nested_c },
                 );
             },
             .string_ => {
@@ -6515,16 +6571,50 @@ const StructMarshalGenerator = struct {
 
     // ── C → Java (fills an existing Java object's fields in place) ──────────
 
-    fn emitMemberFillJava(self: *StructMarshalGenerator, m: *const ir.StructMember) !void {
+    /// `opt_bit` -- see emitMemberFromJava's doc comment; same scope limits
+    /// (`.scalar` only) apply here.
+    fn emitMemberFillJava(self: *StructMarshalGenerator, m: *const ir.StructMember, opt_bit: u32) !void {
         if (m.dimensions.len > 0) return self.emitArrayFillJava(m);
 
         switch (resolveMemberShape(m.type_ref)) {
             .scalar => {
                 const b = resolveScalarBase(m.type_ref);
-                try self.print(
-                    "    {{ jmethodID mid = (*env)->GetMethodID(env, cls, \"set_{[name]s}\", \"({[desc]s})V\"); (*env)->Call{[acc]s}Method(env, obj, mid, in->{[name]s}); }}\n",
-                    .{ .name = m.name, .desc = try self.descriptor(m.type_ref), .acc = jniAccessorName(b) },
-                );
+                if (m.annotations.is_optional) {
+                    // Mirrors emitMemberFromJava's optional branch: box the
+                    // native value and call the boxed-typed setter when the
+                    // bit is set in `_present`; otherwise pass a null boxed
+                    // reference. `obj` may be a reused Java object (an
+                    // `inout` caller-supplied instance, or one filled
+                    // repeatedly in a loop), not always a freshly `new`'d
+                    // one -- explicitly clearing to null when absent is what
+                    // makes this correct in that case too, not just when the
+                    // field already happened to default to null.
+                    try self.print(
+                        "    {{ jmethodID mid = (*env)->GetMethodID(env, cls, \"set_{[name]s}\", \"(L{[boxed]s};)V\");\n" ++
+                            "       jobject _b = NULL;\n" ++
+                            "       if (in->_present & (1ULL << {[bit]d}u)) {{\n" ++
+                            "           jclass _bc = (*env)->FindClass(env, \"{[boxed]s}\");\n" ++
+                            "           jmethodID _vo = (*env)->GetStaticMethodID(env, _bc, \"valueOf\", \"({[ch]c})L{[boxed]s};\");\n" ++
+                            "           _b = (*env)->CallStaticObjectMethod(env, _bc, _vo, ({[jt]s})in->{[name]s});\n" ++
+                            "       }}\n" ++
+                            "       (*env)->CallVoidMethod(env, obj, mid, _b);\n" ++
+                            "    }}\n",
+                        .{
+                            .bit = opt_bit,
+                            .boxed = boxedClassName(b),
+                            .ch = jniTypeDescriptorChar(b),
+                            .jt = jniTypeForBase(b),
+                            .name = m.name,
+                        },
+                    );
+                } else {
+                    const desc = try self.descriptor(m.type_ref);
+                    defer self.alloc.free(desc);
+                    try self.print(
+                        "    {{ jmethodID mid = (*env)->GetMethodID(env, cls, \"set_{[name]s}\", \"({[desc]s})V\"); (*env)->Call{[acc]s}Method(env, obj, mid, in->{[name]s}); }}\n",
+                        .{ .name = m.name, .desc = desc, .acc = jniAccessorName(b) },
+                    );
+                }
             },
             .enum_ => {
                 const bin = try self.binClass(ir.typeDeclQualifiedName(resolveToNamedDecl(m.type_ref)));
@@ -8765,6 +8855,52 @@ test "java: cross-file value_struct param gets extern marshaling declarations, n
     try testing.expect(std.mem.indexOf(u8, s, "void DDS_DomainParticipantQos_from_java(JNIEnv *env, jobject obj, DDS_DomainParticipantQos *out) {") == null);
     // The actual call site must still use it correctly.
     try testing.expect(std.mem.indexOf(u8, s, "DDS_DomainParticipantQos_from_java(env, qos, &_c_qos);") != null);
+}
+
+test "java: @optional scalar struct member gets boxed-type JNI marshaling in StructMarshalGenerator" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc,
+        \\module ext {
+        \\    struct Config {
+        \\        @optional unsigned long participant_id;
+        \\        unsigned long lease_duration_ms;
+        \\    };
+        \\    interface Factory {
+        \\        long configure(in Config cfg);
+        \\    };
+        \\};
+    );
+    defer ir_spec.deinit();
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    const opts = interface.Options{ .input_stem = "ext" };
+    try generateJniSource(alloc, &ir_spec, opts, &out);
+    const s = out.items;
+
+    // The Java getter/setter for an @optional scalar is boxed (Integer), not
+    // primitive (see memberJavaType) -- using the plain "()I"/"(I)V"
+    // descriptor here (as the non-optional branch does) looks up a method
+    // that doesn't exist; GetMethodID silently returns NULL and the next
+    // call crashes on it. Confirmed via a real JVM SIGSEGV inside
+    // zzdds_UdpConfig_from_java (get_default_participant_config's JNI glue),
+    // the first real exercise of this path.
+    try testing.expect(std.mem.indexOf(u8, s, "\"get_participant_id\", \"()Ljava/lang/Integer;\"") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "\"set_participant_id\", \"(Ljava/lang/Integer;)V\"") != null);
+    // Non-optional field still takes the plain primitive path.
+    try testing.expect(std.mem.indexOf(u8, s, "\"get_lease_duration_ms\", \"()I\"") != null);
+    // The presence bit must actually be threaded through (sequential index
+    // among optional members only), not hardcoded/omitted.
+    try testing.expect(std.mem.indexOf(u8, s, "out->_present |= (1ULL << 0u);") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "in->_present & (1ULL << 0u)") != null);
+    // Regression guard: `obj` may be a reused Java object (an `inout`
+    // caller-supplied instance, or one filled repeatedly in a loop), not
+    // always a freshly `new`'d one -- when the native side reports the
+    // field absent, `_fill_java` must explicitly pass a null boxed
+    // reference to the setter so a stale prior value doesn't survive,
+    // rather than silently skipping the call.
+    try testing.expect(std.mem.indexOf(u8, s, "jobject _b = NULL;") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "(*env)->CallVoidMethod(env, obj, mid, _b);") != null);
 }
 
 test "java: bare sequence<T> params get real JNI marshaling, not a stub throw" {
