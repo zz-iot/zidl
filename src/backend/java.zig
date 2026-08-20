@@ -6581,17 +6581,22 @@ const StructMarshalGenerator = struct {
                 const b = resolveScalarBase(m.type_ref);
                 if (m.annotations.is_optional) {
                     // Mirrors emitMemberFromJava's optional branch: box the
-                    // native value and call the boxed-typed setter only when
-                    // the bit is actually set in `_present`. When absent,
-                    // leave the Java field alone (a freshly `new`'d config
-                    // object already defaults every @optional field to null,
-                    // matching "absent" -- see memberDefault).
+                    // native value and call the boxed-typed setter when the
+                    // bit is set in `_present`; otherwise pass a null boxed
+                    // reference. `obj` may be a reused Java object (an
+                    // `inout` caller-supplied instance, or one filled
+                    // repeatedly in a loop), not always a freshly `new`'d
+                    // one -- explicitly clearing to null when absent is what
+                    // makes this correct in that case too, not just when the
+                    // field already happened to default to null.
                     try self.print(
-                        "    if (in->_present & (1ULL << {[bit]d}u)) {{\n" ++
-                            "       jclass _bc = (*env)->FindClass(env, \"{[boxed]s}\");\n" ++
-                            "       jmethodID _vo = (*env)->GetStaticMethodID(env, _bc, \"valueOf\", \"({[ch]c})L{[boxed]s};\");\n" ++
-                            "       jobject _b = (*env)->CallStaticObjectMethod(env, _bc, _vo, ({[jt]s})in->{[name]s});\n" ++
-                            "       jmethodID mid = (*env)->GetMethodID(env, cls, \"set_{[name]s}\", \"(L{[boxed]s};)V\");\n" ++
+                        "    {{ jmethodID mid = (*env)->GetMethodID(env, cls, \"set_{[name]s}\", \"(L{[boxed]s};)V\");\n" ++
+                            "       jobject _b = NULL;\n" ++
+                            "       if (in->_present & (1ULL << {[bit]d}u)) {{\n" ++
+                            "           jclass _bc = (*env)->FindClass(env, \"{[boxed]s}\");\n" ++
+                            "           jmethodID _vo = (*env)->GetStaticMethodID(env, _bc, \"valueOf\", \"({[ch]c})L{[boxed]s};\");\n" ++
+                            "           _b = (*env)->CallStaticObjectMethod(env, _bc, _vo, ({[jt]s})in->{[name]s});\n" ++
+                            "       }}\n" ++
                             "       (*env)->CallVoidMethod(env, obj, mid, _b);\n" ++
                             "    }}\n",
                         .{
@@ -8888,6 +8893,14 @@ test "java: @optional scalar struct member gets boxed-type JNI marshaling in Str
     // among optional members only), not hardcoded/omitted.
     try testing.expect(std.mem.indexOf(u8, s, "out->_present |= (1ULL << 0u);") != null);
     try testing.expect(std.mem.indexOf(u8, s, "in->_present & (1ULL << 0u)") != null);
+    // Regression guard: `obj` may be a reused Java object (an `inout`
+    // caller-supplied instance, or one filled repeatedly in a loop), not
+    // always a freshly `new`'d one -- when the native side reports the
+    // field absent, `_fill_java` must explicitly pass a null boxed
+    // reference to the setter so a stale prior value doesn't survive,
+    // rather than silently skipping the call.
+    try testing.expect(std.mem.indexOf(u8, s, "jobject _b = NULL;") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "(*env)->CallVoidMethod(env, obj, mid, _b);") != null);
 }
 
 test "java: bare sequence<T> params get real JNI marshaling, not a stub throw" {

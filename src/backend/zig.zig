@@ -2498,8 +2498,15 @@ const Generator = struct {
             try self.ind();
             if (p.mode == .in_) {
                 try self.print("    var _mir_{s}: {s} = if ({s}) |_m| {s}FromCAbi(_m) else .{{}};\n", .{ p.name, inner, p.name, inner });
-            } else {
+            } else if (p.mode == .inout) {
                 try self.print("    var _mir_{s}: {s} = {s}FromCAbi({s});\n", .{ p.name, inner, inner, p.name });
+            } else {
+                // `.out`: the caller's storage is uninitialized/write-only by
+                // IDL convention -- FromCAbi-ing it would read garbage as if
+                // it were a valid mirror value (a bad string pointer, a
+                // corrupt sequence length, etc). Start from the type default
+                // instead, same as `.in_`'s "null means default" fallback.
+                try self.print("    var _mir_{s}: {s} = .{{}};\n", .{ p.name, inner });
             }
             if (try self.cApiMirrorInternalNeedsDeinit(p.type_ref)) {
                 try self.ind();
@@ -2508,6 +2515,8 @@ const Generator = struct {
         }
 
         const ret_is_entity = if (op.return_type) |rt| typeRefIsEntityInterface(rt) else false;
+        const ret_mirror_name = if (op.return_type) |rt| try self.cApiMirrorTypeName(rt) else null;
+        defer if (ret_mirror_name) |mn| self.alloc.free(mn);
         var has_entity_seq_param = false;
         for (op.params) |p| {
             if (typeRefIsEntitySequence(p.type_ref)) {
@@ -2528,15 +2537,15 @@ const Generator = struct {
                 break;
             }
         }
-        // A plain (non-entity, non-void) return can't be inlined into the
-        // call statement as `return _self.vtable.foo(...)` here: the boxing
-        // loop below still needs to run afterward, and a `return` already
-        // exits the function. Capture it instead and return it for real once
-        // boxing is done.
-        const defer_plain_return = (has_entity_seq_param or has_mirror_out_param) and !ret_is_entity and !is_void_ret;
+        // A plain (non-entity, non-void, non-mirror-return) return can't be
+        // inlined into the call statement as `return _self.vtable.foo(...)`
+        // here: the boxing loop below still needs to run afterward, and a
+        // `return` already exits the function. Capture it instead and
+        // return it for real once boxing is done.
+        const defer_plain_return = (has_entity_seq_param or has_mirror_out_param) and !ret_is_entity and ret_mirror_name == null and !is_void_ret;
 
         try self.ind();
-        if (ret_is_entity) {
+        if (ret_is_entity or ret_mirror_name != null) {
             try self.write("    const _r = ");
         } else if (defer_plain_return) {
             try self.write("    const _ret_status = ");
@@ -2615,6 +2624,19 @@ const Generator = struct {
         if (ret_is_entity) {
             try self.ind();
             try self.write("    return _r.vtable.get_c_abi_handle(_r.ptr);\n");
+        } else if (ret_mirror_name) |mn| {
+            const inner = try self.typeRefToZig(op.return_type.?);
+            defer self.alloc.free(inner);
+            try self.ind();
+            try self.print("    var _mir_ret: {s} = .{{}};\n", .{mn});
+            try self.ind();
+            try self.print("    {s}ToCAbi(&_r, &_mir_ret);\n", .{inner});
+            if (try self.cApiMirrorInternalNeedsDeinit(op.return_type.?)) {
+                try self.ind();
+                try self.write("    _r.deinit(std.heap.c_allocator);\n");
+            }
+            try self.ind();
+            try self.write("    return _mir_ret;\n");
         } else if (defer_plain_return) {
             try self.ind();
             try self.write("    return _ret_status;\n");
@@ -2799,6 +2821,14 @@ const Generator = struct {
 
     fn cApiExportRetType(self: *Generator, ret: ir.TypeRef) ![]u8 {
         if (typeRefIsEntityInterface(ret)) return self.alloc.dupe(u8, "*anyopaque");
+        // A by-value return of a plain struct needing a C-ABI mirror (see
+        // that section's doc comment) must use the mirror's own type here
+        // too, not just for params -- otherwise the exported function's
+        // return type disagrees with what the independently-generated `-b
+        // c` header declares for the same struct, the same mismatch this
+        // whole mechanism exists to close. `emitCApiOp` builds and converts
+        // the returned value.
+        if (try self.cApiMirrorTypeName(ret)) |mirror_name| return mirror_name;
         return self.cApiRetType(ret);
     }
 
@@ -9449,12 +9479,12 @@ test "zig_backend: C-ABI mirror clones sequence fields instead of shallow-copyin
     try testing.expect(has(s, "out.nums.deinit(std.heap.c_allocator);"));
 }
 
-test "zig_backend: --zig-generate-c-api struct in/out params route through the C-ABI mirror" {
+test "zig_backend: --zig-generate-c-api struct in/inout params route through the C-ABI mirror" {
     var out = try testGenOpts(
         \\struct Named { string name; };
         \\interface Iface {
         \\    void set_val(in Named v);
-        \\    void get_val(out Named v);
+        \\    void update_val(inout Named v);
         \\};
     , "f", .{
         .generate_interfaces = true,
@@ -9470,10 +9500,72 @@ test "zig_backend: --zig-generate-c-api struct in/out params route through the C
     try testing.expect(has(s, "var _mir_v: Named = if (v) |_m| NamedFromCAbi(_m) else .{};"));
     try testing.expect(has(s, "_self.vtable.set_val(_self.ptr, &_mir_v);"));
 
-    try testing.expect(has(s, "pub export fn Iface_get_val(self: *anyopaque, v: *NamedCAbi) callconv(.c) void {"));
+    // `inout`: the caller's value is a real, meaningful input (read then
+    // overwritten), so it's converted via FromCAbi same as `in`.
+    try testing.expect(has(s, "pub export fn Iface_update_val(self: *anyopaque, v: *NamedCAbi) callconv(.c) void {"));
     try testing.expect(has(s, "var _mir_v: Named = NamedFromCAbi(v);"));
+    try testing.expect(has(s, "_self.vtable.update_val(_self.ptr, &_mir_v);"));
+    try testing.expect(has(s, "NamedToCAbi(&_mir_v, v);"));
+}
+
+test "zig_backend: --zig-generate-c-api struct out mirror param starts from the type default, not FromCAbi'd garbage" {
+    // Regression guard: a plain `out` param's caller-supplied storage is
+    // uninitialized/write-only by IDL convention -- the callee doesn't need
+    // to read it. FromCAbi-ing it anyway (as `inout` correctly does) would
+    // interpret garbage bytes as a valid mirror value: a bad string
+    // pointer scanned by std.mem.span, a corrupt sequence length driving an
+    // out-of-bounds clone, etc.
+    var out = try testGenOpts(
+        \\struct Named { string name; };
+        \\interface Iface {
+        \\    void get_val(out Named v);
+        \\};
+    , "f", .{
+        .generate_interfaces = true,
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+        .zig_generate_c_api = true,
+    });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "pub export fn Iface_get_val(self: *anyopaque, v: *NamedCAbi) callconv(.c) void {"));
+    try testing.expect(has(s, "var _mir_v: Named = .{};"));
+    try testing.expect(!has(s, "var _mir_v: Named = NamedFromCAbi(v);"));
     try testing.expect(has(s, "_self.vtable.get_val(_self.ptr, &_mir_v);"));
     try testing.expect(has(s, "NamedToCAbi(&_mir_v, v);"));
+}
+
+test "zig_backend: --zig-generate-c-api by-value struct return routes through the C-ABI mirror" {
+    // Regression guard: cApiExportRetType previously fell through to the
+    // internal (non-mirror) type for any non-entity return, leaving the
+    // exported function's return type disagreeing with what `-b c`
+    // independently declares for the same struct -- the exact mismatch
+    // this whole mechanism exists to close, just on the return path
+    // instead of a param. No real zzdds.idl/dcps.idl operation returns a
+    // mirror-needing struct by value today (all six real cases pass it via
+    // `inout`), but the generator must still be correct for one that does.
+    var out = try testGenOpts(
+        \\struct Named { string name; };
+        \\interface Iface {
+        \\    Named get_val();
+        \\};
+    , "f", .{
+        .generate_interfaces = true,
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+        .zig_generate_c_api = true,
+    });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "pub export fn Iface_get_val(self: *anyopaque) callconv(.c) NamedCAbi {"));
+    try testing.expect(has(s, "const _r = _self.vtable.get_val(_self.ptr);"));
+    try testing.expect(has(s, "var _mir_ret: NamedCAbi = .{};"));
+    try testing.expect(has(s, "NamedToCAbi(&_r, &_mir_ret);"));
+    try testing.expect(has(s, "return _mir_ret;"));
+    // Named has a string field, so structNeedsCleanup(Named) is true --
+    // the internal by-value return must be freed after conversion, since
+    // ToCAbi only reads it (converts into a fresh mirror copy).
+    try testing.expect(has(s, "_r.deinit(std.heap.c_allocator);"));
 }
 
 // ── --zig-generate-toml-config ────────────────────────────────────────────────
