@@ -75,16 +75,24 @@ extern "C" {
 /**
  * CDR writer state.
  *
- * Two modes:
+ * Three modes:
  *   - Dynamic (malloc-backed): init with zidl_cdr_writer_init().  Buffer
  *     grows automatically.  Must call zidl_cdr_writer_deinit() when done.
  *   - Fixed: init with zidl_cdr_writer_init_fixed().  Writes into caller-
  *     supplied buf[0..cap]; returns ZIDL_CDR_OVERFLOW if full.  No deinit.
+ *   - Counting: init with zidl_cdr_writer_init_counting().  buf == NULL;
+ *     every write advances len/pos exactly as it would in the other modes
+ *     but performs no memcpy/store, since there's no buffer to write into.
+ *     Used to size a write-loan buffer before allocating it: run a
+ *     generated {Type}_serialize() once in counting mode to get the byte
+ *     count, then again in fixed mode against the real (loaned) buffer of
+ *     that size. No deinit required.
  *
  * Fields (treat as opaque; access only via API functions):
- *   buf  — write buffer
- *   cap  — total buffer capacity in bytes
- *   len  — bytes written (includes the 4-byte encap header)
+ *   buf  — write buffer; NULL in counting mode
+ *   cap  — total buffer capacity in bytes; unused (0) in counting mode
+ *   len  — bytes written (includes the 4-byte encap header) — in counting
+ *           mode, this is the running total byte count, not a real offset
  *   pos  — CDR payload byte count used for alignment; resets to 0 after
  *           zidl_cdr_write_encap() so alignment is from the start of the
  *           CDR payload (not the start of the buffer)
@@ -96,7 +104,8 @@ typedef struct ZidlCdrWriter {
     size_t   pos;
     int      xcdr_version;
     int      byte_order;
-    /** Non-NULL → dynamic mode: called to grow buf.  NULL → fixed mode. */
+    /** Non-NULL → dynamic mode: called to grow buf.  NULL → fixed or
+     *  counting mode (distinguished by whether buf is NULL). */
     int    (*grow_fn)(struct ZidlCdrWriter *w, size_t needed);
 } ZidlCdrWriter;
 
@@ -104,6 +113,8 @@ typedef struct ZidlCdrWriter {
 int  zidl_cdr_writer_init      (ZidlCdrWriter *w, int xcdr_version);
 /** Init a fixed-buffer writer.  No deinit required. */
 void zidl_cdr_writer_init_fixed(ZidlCdrWriter *w, uint8_t *buf, size_t cap, int xcdr_version);
+/** Init a counting writer: no buffer, writes only advance len/pos.  No deinit required. */
+void zidl_cdr_writer_init_counting(ZidlCdrWriter *w, int xcdr_version);
 /** Free a malloc-backed writer's buffer.  No-op for fixed-buffer writers. */
 void zidl_cdr_writer_deinit    (ZidlCdrWriter *w);
 /** Set writer byte order. Defaults to ZIDL_CDR_LE. */

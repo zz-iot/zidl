@@ -407,6 +407,12 @@ const Generator = struct {
         // For named struct/exception element types, emit a forward typedef so
         // `ElemType *_buffer` compiles before the full struct definition appears.
         try self.emitForwardDeclIfStruct(elem);
+        // Likewise for a typedef-to-sequence element (e.g. `octet_seq` used
+        // as `sequence<octet_seq>`'s element): its own `typedef` line's
+        // normal emission point (`emitTypedef`, via the per-item walk) runs
+        // after this whole pre-scan pass -- too late for the guarded outer
+        // sequence struct below, which references it by name.
+        try self.emitForwardDeclIfSeqTypedef(elem);
 
         const seq_name = try std.fmt.allocPrint(self.alloc, "{s}_seq", .{key});
         defer self.alloc.free(seq_name);
@@ -656,22 +662,28 @@ const Generator = struct {
         try self.print("{s}{s}int {s}DataWriter_get_key_value({s}DataWriter *self, DDS_InstanceHandle_t handle, {s} *key_out);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}DDS_InstanceHandle_t {s}DataWriter_lookup_instance({s}DataWriter *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}void {s}DataReader_init({s}DataReader *self, DDS_DataReader reader);\n", .{ em, sp, c_name, c_name });
-        try self.print("{s}{s}DDS_ReturnCode_t {s}DataReader_take({s}DataReader *self, {s} *out, zzdds_sample_info *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}DDS_ReturnCode_t {s}DataReader_read({s}DataReader *self, {s} *out, zzdds_sample_info *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}DDS_ReturnCode_t {s}DataReader_take_next_instance({s}DataReader *self, {s} *out, zzdds_sample_info *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}DDS_ReturnCode_t {s}DataReader_read_next_instance({s}DataReader *self, {s} *out, zzdds_sample_info *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}DDS_ReturnCode_t {s}DataReader_take({s}DataReader *self, {s} *out, DDS_SampleInfo *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}DDS_ReturnCode_t {s}DataReader_read({s}DataReader *self, {s} *out, DDS_SampleInfo *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}DDS_ReturnCode_t {s}DataReader_take_next_instance({s}DataReader *self, {s} *out, DDS_SampleInfo *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}DDS_ReturnCode_t {s}DataReader_read_next_instance({s}DataReader *self, {s} *out, DDS_SampleInfo *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}int {s}DataReader_get_key_value({s}DataReader *self, DDS_InstanceHandle_t handle, {s} *key_out);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}DDS_InstanceHandle_t {s}DataReader_lookup_instance({s}DataReader *self, const {s} *key);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}int {s}DataReader_take_n({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}int {s}DataReader_read_n({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}int {s}DataReader_take_instance({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}int {s}DataReader_read_instance({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}int {s}DataReader_take_w_condition({s}DataReader *self, DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}int {s}DataReader_read_w_condition({s}DataReader *self, DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}int {s}DataReader_take_next_instance_w_condition({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}int {s}DataReader_read_next_instance_w_condition({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}DDS_ReturnCode_t {s}DataReader_take_loaned({s}DataReader *self, {s} *out, zzdds_sample_info *info, zzdds_loaned_sample *loan);\n", .{ em, sp, c_name, c_name, c_name });
-        try self.print("{s}{s}void {s}DataReader_return_loan({s}DataReader *self, zzdds_loaned_sample *loan);\n\n", .{ em, sp, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_take_n({s}DataReader *self, {s} *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_read_n({s}DataReader *self, {s} *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_take_instance({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_read_instance({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_take_w_condition({s}DataReader *self, DDS_ReadCondition condition, {s} *values, DDS_SampleInfo *infos, int max);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_read_w_condition({s}DataReader *self, DDS_ReadCondition condition, {s} *values, DDS_SampleInfo *infos, int max);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_take_next_instance_w_condition({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, DDS_SampleInfo *infos, int max);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}int {s}DataReader_read_next_instance_w_condition({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, DDS_SampleInfo *infos, int max);\n", .{ em, sp, c_name, c_name, c_name });
+        // take_loaned/return_loan's own signature deliberately changed here:
+        // the caller now owns a DDS_OctetSeqSeq/DDS_SampleInfoSeq pair
+        // (zero-initialize before first use, e.g. `= {0}`) instead of the
+        // old hand-written zzdds_loaned_sample -- it's what carries the
+        // open loan between the two calls, matching the raw ops' own
+        // caller-owned-storage convention instead of a separate ad hoc type.
+        try self.print("{s}{s}DDS_ReturnCode_t {s}DataReader_take_loaned({s}DataReader *self, {s} *out, DDS_SampleInfo *info, DDS_OctetSeqSeq *loan_payloads, DDS_SampleInfoSeq *loan_infos);\n", .{ em, sp, c_name, c_name, c_name });
+        try self.print("{s}{s}void {s}DataReader_return_loan({s}DataReader *self, DDS_OctetSeqSeq *loan_payloads, DDS_SampleInfoSeq *loan_infos);\n\n", .{ em, sp, c_name, c_name });
     }
 
     // ── Union ─────────────────────────────────────────────────────────────────
@@ -794,15 +806,25 @@ const Generator = struct {
         const c_type = try self.typeRefToC(t.type_ref);
         defer self.alloc.free(c_type);
 
-        if (t.dimensions.len == 0) {
-            try self.print("typedef {s}{s}{s};\n\n", .{ c_type, ptrSep(c_type), c_name });
-        } else {
-            // Array typedef: `typedef int32_t Matrix[2][4];`
-            try self.print("typedef {s}{s}{s}", .{ c_type, ptrSep(c_type), c_name });
-            for (t.dimensions) |d| {
-                try self.print("[{d}]", .{d});
+        // A typedef-to-sequence used as another sequence's element already
+        // had this exact line emitted early by `emitForwardDeclIfSeqTypedef`
+        // (see there) -- skip re-emitting it here; re-emitting an identical
+        // typedef is illegal under this project's `-std=c99 -Werror`. The
+        // `_free` declaration below is independent and must still run.
+        const already_forward_typedef = t.dimensions.len == 0 and
+            self.forward_decl_emitted.get(c_name) != null;
+
+        if (!already_forward_typedef) {
+            if (t.dimensions.len == 0) {
+                try self.print("typedef {s}{s}{s};\n\n", .{ c_type, ptrSep(c_type), c_name });
+            } else {
+                // Array typedef: `typedef int32_t Matrix[2][4];`
+                try self.print("typedef {s}{s}{s}", .{ c_type, ptrSep(c_type), c_name });
+                for (t.dimensions) |d| {
+                    try self.print("[{d}]", .{d});
+                }
+                try self.write(";\n\n");
             }
-            try self.write(";\n\n");
         }
 
         // Unbounded sequence typedefs need a _free declaration so C++ bindings
@@ -1018,6 +1040,47 @@ const Generator = struct {
             },
             else => {},
         }
+    }
+
+    /// A `.named .typedef` element whose own type is a sequence (e.g.
+    /// `typedef sequence<octet> octet_seq;`, used as `sequence<octet_seq>`'s
+    /// element) needs its plain `typedef {rhs} {c_name};` line emitted early,
+    /// same reasoning as `emitForwardDeclIfStruct` above: the guarded outer
+    /// sequence struct `ensureSeqTypedef` is about to emit references this
+    /// name, but the element's own typedef normally isn't written out until
+    /// `emitTypedef` reaches it in the later per-item walk. Registers into
+    /// the same `forward_decl_emitted` set `emitForwardDeclIfStruct` uses (no
+    /// namespace collision -- struct and typedef qualified names can never
+    /// coincide in valid IDL) so `emitTypedef` can skip re-emitting the same
+    /// line as a duplicate, which `-std=c99 -Werror` (this project's C
+    /// standard, see build.zig) does not tolerate even when the redeclared
+    /// typedef is identical -- unlike the struct case, a plain typedef has no
+    /// "forward-declare incomplete, complete it later" split to exploit, so
+    /// the later emission must be suppressed outright rather than reshaped.
+    fn emitForwardDeclIfSeqTypedef(self: *Generator, tr: ir.TypeRef) !void {
+        const td = switch (tr) {
+            .named => |td| td,
+            else => return,
+        };
+        const t = switch (td) {
+            .typedef => |t| t,
+            else => return,
+        };
+        if (t.dimensions.len != 0) return; // array typedef: not a bare alias, not this case
+        switch (t.type_ref) {
+            .sequence => {},
+            else => return,
+        }
+        const c_name = try self.prefixedCName(t.qualified_name);
+        defer self.alloc.free(c_name);
+        if (self.forward_decl_emitted.get(c_name) != null) return;
+        const k = try self.alloc.dupe(u8, c_name);
+        errdefer self.alloc.free(k);
+        try self.forward_decl_emitted.put(self.alloc, k, {});
+
+        const c_type = try self.typeRefToC(t.type_ref);
+        defer self.alloc.free(c_type);
+        try self.print("typedef {s}{s}{s};\n\n", .{ c_type, ptrSep(c_type), c_name });
     }
 
     /// Pre-scan pass 2: emit full callback struct definitions for listener interfaces.
@@ -2530,7 +2593,7 @@ const CdrGenerator = struct {
         try self.writeI("self->xcdr_version = xcdr_version;\n");
         try self.write("}\n\n");
 
-        try self.print("static int {s}DataWriter_write_kind({s}DataWriter *self, zzdds_write_kind kind, const {s} *value, int key_only, DDS_InstanceHandle_t handle) {{\n", .{ c_name, c_name, c_name });
+        try self.print("static int {s}DataWriter_write_kind_w_timestamp({s}DataWriter *self, DDS_WriteKind kind, const {s} *value, int key_only, DDS_InstanceHandle_t handle, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
         try self.writeI("ZidlCdrWriter _w;\n");
         try self.writeI("uint8_t _hash[16];\n");
         // zidl_cdr_writer_init routes its internal growth through
@@ -2542,21 +2605,62 @@ const CdrGenerator = struct {
         try self.writeI("_rc = zidl_cdr_write_encap(&_w);\n");
         try self.writeI("if (!_rc) _rc = key_only ? ");
         try self.print("{s}_serialize_key(&_w, value) : {s}_serialize(&_w, value);\n", .{ c_name, c_name });
-        try self.writeI("if (!_rc) _rc = ");
-        try self.print("{s}_compute_key_hash(value, _hash);\n", .{c_name});
-        try self.writeI("if (!_rc) _rc = zzdds_write_raw_kind(self->writer, kind, _hash, handle, _w.buf, _w.len);\n");
+        try self.printI("if (!_rc) _rc = {s}_compute_key_hash(value, _hash);\n", .{c_name});
+        try self.writeI("if (!_rc) {\n");
+        self.indent_depth += 1;
+        try self.writeI("DDS_OctetSeq _c_hash = { 16, 16, _hash, false };\n");
+        try self.writeI("DDS_OctetSeq _c_payload = { (uint32_t)_w.len, (uint32_t)_w.len, _w.buf, false };\n");
+        try self.writeI("_rc = DDS_DataWriter_write_raw(self->writer, &_c_hash, handle, &_c_payload, kind, &timestamp);\n");
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
         try self.writeI("zidl_cdr_writer_deinit(&_w);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
+        // Non-timestamp write_kind uses the count-then-loan path (Phase D's
+        // counting-mode ZidlCdrWriter sizes a loan_raw() buffer exactly,
+        // then serializes directly into it -- no malloc/realloc growth, and
+        // the buffer comes from zzdds's own write-loan pool instead of
+        // libc). write_kind_w_timestamp above can't use this path:
+        // DDS_DataWriter_publish_loan_raw has no source_timestamp parameter
+        // (see dcps.idl's raw/loaned write operations) -- only the
+        // "use current time" case can route through a loan.
+        try self.print("static int {s}DataWriter_write_kind({s}DataWriter *self, DDS_WriteKind kind, const {s} *value, int key_only, DDS_InstanceHandle_t handle) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("uint8_t _hash[16];\n");
+        try self.printI("int _rc = {s}_compute_key_hash(value, _hash);\n", .{c_name});
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.writeI("ZidlCdrWriter _cw;\n");
+        try self.writeI("zidl_cdr_writer_init_counting(&_cw, self->xcdr_version);\n");
+        try self.writeI("_rc = zidl_cdr_write_encap(&_cw);\n");
+        try self.writeI("if (!_rc) _rc = key_only ? ");
+        try self.print("{s}_serialize_key(&_cw, value) : {s}_serialize(&_cw, value);\n", .{ c_name, c_name });
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.writeI("DDS_OctetSeq _c_payload = {0};\n");
+        try self.writeI("_rc = DDS_DataWriter_loan_raw(self->writer, (uint32_t)_cw.len, &_c_payload);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.writeI("ZidlCdrWriter _w;\n");
+        try self.writeI("zidl_cdr_writer_init_fixed(&_w, _c_payload._buffer, _c_payload._maximum, self->xcdr_version);\n");
+        try self.writeI("_rc = zidl_cdr_write_encap(&_w);\n");
+        try self.writeI("if (!_rc) _rc = key_only ? ");
+        try self.print("{s}_serialize_key(&_w, value) : {s}_serialize(&_w, value);\n", .{ c_name, c_name });
+        try self.writeI("if (_rc) {\n");
+        self.indent_depth += 1;
+        try self.writeI("DDS_DataWriter_return_loan_raw(self->writer, &_c_payload);\n");
+        try self.writeI("return _rc;\n");
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.writeI("DDS_OctetSeq _c_hash = { 16, 16, _hash, false };\n");
+        try self.writeI("return DDS_DataWriter_publish_loan_raw(self->writer, &_c_payload, &_c_hash, handle, kind);\n");
+        try self.write("}\n\n");
+
         try self.print("int {s}DataWriter_write({s}DataWriter *self, const {s} *value, DDS_InstanceHandle_t handle) {{\n", .{ c_name, c_name, c_name });
-        try self.printI("return {s}DataWriter_write_kind(self, ZZDDS_WRITE_ALIVE, value, 0, handle);\n", .{c_name});
+        try self.printI("return {s}DataWriter_write_kind(self, DDS_WriteKind_ALIVE_WRITE_KIND, value, 0, handle);\n", .{c_name});
         try self.write("}\n\n");
         try self.print("int {s}DataWriter_dispose({s}DataWriter *self, const {s} *key, DDS_InstanceHandle_t handle) {{\n", .{ c_name, c_name, c_name });
-        try self.printI("return {s}DataWriter_write_kind(self, ZZDDS_WRITE_DISPOSE, key, 1, handle);\n", .{c_name});
+        try self.printI("return {s}DataWriter_write_kind(self, DDS_WriteKind_DISPOSE_WRITE_KIND, key, 1, handle);\n", .{c_name});
         try self.write("}\n\n");
         try self.print("int {s}DataWriter_unregister({s}DataWriter *self, const {s} *key, DDS_InstanceHandle_t handle) {{\n", .{ c_name, c_name, c_name });
-        try self.printI("return {s}DataWriter_write_kind(self, ZZDDS_WRITE_UNREGISTER, key, 1, handle);\n", .{c_name});
+        try self.printI("return {s}DataWriter_write_kind(self, DDS_WriteKind_UNREGISTER_WRITE_KIND, key, 1, handle);\n", .{c_name});
         try self.write("}\n\n");
 
         try self.print("DDS_InstanceHandle_t {s}DataWriter_register_instance({s}DataWriter *self, const {s} *key) {{\n", .{ c_name, c_name, c_name });
@@ -2577,28 +2681,18 @@ const CdrGenerator = struct {
         try self.printI("return {s}DataWriter_register_instance(self, key);\n", .{c_name});
         try self.write("}\n\n");
 
-        try self.print("static int {s}DataWriter_write_kind_w_timestamp({s}DataWriter *self, zzdds_write_kind kind, const {s} *value, int key_only, DDS_InstanceHandle_t handle, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("ZidlCdrWriter _w;\n");
-        try self.writeI("uint8_t _hash[16];\n");
-        try self.writeI("int _rc = zidl_cdr_writer_init(&_w, self->xcdr_version);\n");
-        try self.writeI("if (_rc) return _rc;\n");
-        try self.writeI("_rc = zidl_cdr_write_encap(&_w);\n");
-        try self.writeI("if (!_rc) _rc = key_only ? ");
-        try self.print("{s}_serialize_key(&_w, value) : {s}_serialize(&_w, value);\n", .{ c_name, c_name });
-        try self.printI("if (!_rc) _rc = {s}_compute_key_hash(value, _hash);\n", .{c_name});
-        try self.writeI("if (!_rc) _rc = zzdds_write_raw_w_timestamp(self->writer, kind, _hash, handle, _w.buf, _w.len, timestamp);\n");
-        try self.writeI("zidl_cdr_writer_deinit(&_w);\n");
-        try self.writeI("return _rc;\n");
-        try self.write("}\n\n");
-
+        // write_kind_w_timestamp itself is already defined above (right
+        // after DataWriter_init) -- write/dispose/unregister_w_timestamp
+        // just call straight through to it, same as write/dispose/unregister
+        // do via the non-timestamp write_kind wrapper above.
         try self.print("int {s}DataWriter_write_w_timestamp({s}DataWriter *self, const {s} *value, DDS_InstanceHandle_t handle, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
-        try self.printI("return {s}DataWriter_write_kind_w_timestamp(self, ZZDDS_WRITE_ALIVE, value, 0, handle, timestamp);\n", .{c_name});
+        try self.printI("return {s}DataWriter_write_kind_w_timestamp(self, DDS_WriteKind_ALIVE_WRITE_KIND, value, 0, handle, timestamp);\n", .{c_name});
         try self.write("}\n\n");
         try self.print("int {s}DataWriter_dispose_w_timestamp({s}DataWriter *self, const {s} *key, DDS_InstanceHandle_t handle, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
-        try self.printI("return {s}DataWriter_write_kind_w_timestamp(self, ZZDDS_WRITE_DISPOSE, key, 1, handle, timestamp);\n", .{c_name});
+        try self.printI("return {s}DataWriter_write_kind_w_timestamp(self, DDS_WriteKind_DISPOSE_WRITE_KIND, key, 1, handle, timestamp);\n", .{c_name});
         try self.write("}\n\n");
         try self.print("int {s}DataWriter_unregister_w_timestamp({s}DataWriter *self, const {s} *key, DDS_InstanceHandle_t handle, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
-        try self.printI("return {s}DataWriter_write_kind_w_timestamp(self, ZZDDS_WRITE_UNREGISTER, key, 1, handle, timestamp);\n", .{c_name});
+        try self.printI("return {s}DataWriter_write_kind_w_timestamp(self, DDS_WriteKind_UNREGISTER_WRITE_KIND, key, 1, handle, timestamp);\n", .{c_name});
         try self.write("}\n\n");
 
         try self.print("int {s}DataWriter_get_key_value({s}DataWriter *self, DDS_InstanceHandle_t handle, {s} *key_out) {{\n", .{ c_name, c_name, c_name });
@@ -2622,40 +2716,76 @@ const CdrGenerator = struct {
         try self.writeI("self->reader = reader;\n");
         try self.write("}\n\n");
 
-        try self.print("DDS_ReturnCode_t {s}DataReader_take({s}DataReader *self, {s} *out, zzdds_sample_info *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("DDS_ReturnCode_t _n = zzdds_take_one_raw(self->reader, buf, buf_size, cdr_len_out, info);\n");
+        try self.print("DDS_ReturnCode_t {s}DataReader_take({s}DataReader *self, {s} *out, DDS_SampleInfo *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("(void)buf; (void)buf_size;\n");
+        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 1, 0, NULL, false };\n");
+        try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
+        try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
+        try self.writeI("DDS_ReturnCode_t _n = DDS_DataReader_take_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, DDS_HANDLE_NIL, NULL, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, 1);\n");
+        try self.writeI("DDS_OctetSeq_free(&_c_hashes);\n");
         try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
+        try self.writeI("if (_c_payloads._length == 0) return DDS_RETCODE_NO_DATA;\n");
+        try self.writeI("if (cdr_len_out) *cdr_len_out = _c_payloads._buffer[0]._length;\n");
+        try self.writeI("*info = _c_infos._buffer[0];\n");
         try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
-        try self.writeI("if (_rc) return _rc;\n");
-        try self.printI("return info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length);\n");
+        try self.printI("if (!_rc) _rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        try self.writeI("DDS_DataReader_return_loan_raw(self->reader, &_c_payloads, &_c_infos);\n");
+        try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
-        try self.print("DDS_ReturnCode_t {s}DataReader_read({s}DataReader *self, {s} *out, zzdds_sample_info *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("DDS_ReturnCode_t _n = zzdds_read_one_raw(self->reader, buf, buf_size, cdr_len_out, info);\n");
+        try self.print("DDS_ReturnCode_t {s}DataReader_read({s}DataReader *self, {s} *out, DDS_SampleInfo *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("(void)buf; (void)buf_size;\n");
+        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 1, 0, NULL, false };\n");
+        try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
+        try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
+        try self.writeI("DDS_ReturnCode_t _n = DDS_DataReader_read_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, DDS_HANDLE_NIL, NULL, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, 1);\n");
+        try self.writeI("DDS_OctetSeq_free(&_c_hashes);\n");
         try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
+        try self.writeI("if (_c_payloads._length == 0) return DDS_RETCODE_NO_DATA;\n");
+        try self.writeI("if (cdr_len_out) *cdr_len_out = _c_payloads._buffer[0]._length;\n");
+        try self.writeI("*info = _c_infos._buffer[0];\n");
         try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
-        try self.writeI("if (_rc) return _rc;\n");
-        try self.printI("return info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length);\n");
+        try self.printI("if (!_rc) _rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        try self.writeI("DDS_DataReader_return_loan_raw(self->reader, &_c_payloads, &_c_infos);\n");
+        try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
-        try self.print("DDS_ReturnCode_t {s}DataReader_take_next_instance({s}DataReader *self, {s} *out, zzdds_sample_info *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("DDS_ReturnCode_t _n = zzdds_take_one_raw_instance(self->reader, prev, buf, buf_size, cdr_len_out, info);\n");
+        try self.print("DDS_ReturnCode_t {s}DataReader_take_next_instance({s}DataReader *self, {s} *out, DDS_SampleInfo *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("(void)buf; (void)buf_size;\n");
+        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 1, 0, NULL, false };\n");
+        try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
+        try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
+        try self.writeI("DDS_ReturnCode_t _n = DDS_DataReader_take_next_instance_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, prev, NULL, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, 1);\n");
+        try self.writeI("DDS_OctetSeq_free(&_c_hashes);\n");
         try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
+        try self.writeI("if (_c_payloads._length == 0) return DDS_RETCODE_NO_DATA;\n");
+        try self.writeI("if (cdr_len_out) *cdr_len_out = _c_payloads._buffer[0]._length;\n");
+        try self.writeI("*info = _c_infos._buffer[0];\n");
         try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
-        try self.writeI("if (_rc) return _rc;\n");
-        try self.printI("return info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length);\n");
+        try self.printI("if (!_rc) _rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        try self.writeI("DDS_DataReader_return_loan_raw(self->reader, &_c_payloads, &_c_infos);\n");
+        try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
-        try self.print("DDS_ReturnCode_t {s}DataReader_read_next_instance({s}DataReader *self, {s} *out, zzdds_sample_info *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("DDS_ReturnCode_t _n = zzdds_read_one_raw_instance(self->reader, prev, buf, buf_size, cdr_len_out, info);\n");
+        try self.print("DDS_ReturnCode_t {s}DataReader_read_next_instance({s}DataReader *self, {s} *out, DDS_SampleInfo *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("(void)buf; (void)buf_size;\n");
+        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 1, 0, NULL, false };\n");
+        try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
+        try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
+        try self.writeI("DDS_ReturnCode_t _n = DDS_DataReader_read_next_instance_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, prev, NULL, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, 1);\n");
+        try self.writeI("DDS_OctetSeq_free(&_c_hashes);\n");
         try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
+        try self.writeI("if (_c_payloads._length == 0) return DDS_RETCODE_NO_DATA;\n");
+        try self.writeI("if (cdr_len_out) *cdr_len_out = _c_payloads._buffer[0]._length;\n");
+        try self.writeI("*info = _c_infos._buffer[0];\n");
         try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, buf, *cdr_len_out);\n");
-        try self.writeI("if (_rc) return _rc;\n");
-        try self.printI("return info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length);\n");
+        try self.printI("if (!_rc) _rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        try self.writeI("DDS_DataReader_return_loan_raw(self->reader, &_c_payloads, &_c_infos);\n");
+        try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
         try self.print("int {s}DataReader_get_key_value({s}DataReader *self, DDS_InstanceHandle_t handle, {s} *key_out) {{\n", .{ c_name, c_name, c_name });
@@ -2675,19 +2805,20 @@ const CdrGenerator = struct {
         try self.writeI("return zzdds_lookup_instance_reader(self->reader, _hash);\n");
         try self.write("}\n\n");
 
-        try self.print("static int {s}DataReader_n_impl({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is, int destructive) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("zzdds_raw_sample_array _arr = {NULL, 0, 0};\n");
-        try self.writeI("int _n = destructive ?\n");
+        // Decodes a copy-mode take_raw/read_raw-family batch result
+        // (_payloads/_infos, already populated by the caller's own raw-op
+        // call) into values/infos, releasing the batch via
+        // DDS_DataReader_return_loan_raw either way -- the shared tail of
+        // every batch reader op below (take_n/read_n, take_instance/
+        // read_instance, take_w_condition/read_w_condition,
+        // take_next_instance_w_condition/read_next_instance_w_condition),
+        // which otherwise only differ in which raw op produces the batch.
+        try self.print("static int {s}DataReader_decode_batch({s}DataReader *self, DDS_OctetSeqSeq *_payloads, DDS_SampleInfoSeq *_infos, {s} *values, DDS_SampleInfo *infos) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("for (uint32_t _i = 0; _i < _payloads->_length; _i++) {\n");
         self.indent_depth += 1;
-        try self.writeI("zzdds_take_n_raw(self->reader, ss, vs, is, max, &_arr) :\n");
-        try self.writeI("zzdds_read_n_raw(self->reader, ss, vs, is, max, &_arr);\n");
-        self.indent_depth -= 1;
-        try self.writeI("if (_n <= 0) return _n;\n");
-        try self.writeI("for (int _i = 0; _i < _n; _i++) {\n");
-        self.indent_depth += 1;
-        try self.writeI("infos[_i] = _arr.samples[_i].info;\n");
+        try self.writeI("infos[_i] = _infos->_buffer[_i];\n");
         try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _arr.samples[_i].data, _arr.samples[_i].data_len);\n");
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _payloads->_buffer[_i]._buffer, _payloads->_buffer[_i]._length);\n");
         if (structHasSequenceFields(s)) {
             // Zero values[_i] before attempting to decode into it, so that
             // IF decoding fails partway through, every field it never
@@ -2723,8 +2854,8 @@ const CdrGenerator = struct {
             // state -- never indeterminate caller-supplied memory.
             try self.writeI("if (_rc) {\n");
             self.indent_depth += 1;
-            try self.printI("for (int _j = 0; _j <= _i; _j++) {s}_free(&values[_j]);\n", .{c_name});
-            try self.writeI("zzdds_return_raw_samples(self->reader, &_arr);\n");
+            try self.printI("for (uint32_t _j = 0; _j <= _i; _j++) {s}_free(&values[_j]);\n", .{c_name});
+            try self.writeI("DDS_DataReader_return_loan_raw(self->reader, _payloads, _infos);\n");
             try self.writeI("return _rc;\n");
             self.indent_depth -= 1;
             try self.writeI("}\n");
@@ -2736,135 +2867,121 @@ const CdrGenerator = struct {
             // (its dcps.idl/zzdds.idl generation never passes
             // --generate-zzdds-wrappers), but kept correct rather than
             // silently broken for anyone else who does combine them.
-            try self.writeI("if (_rc) { zzdds_return_raw_samples(self->reader, &_arr); return _rc; }\n");
+            try self.writeI("if (_rc) { DDS_DataReader_return_loan_raw(self->reader, _payloads, _infos); return _rc; }\n");
         }
         self.indent_depth -= 1;
         try self.writeI("}\n");
-        try self.writeI("zzdds_return_raw_samples(self->reader, &_arr);\n");
+        try self.writeI("int _n = (int)_payloads->_length;\n");
+        try self.writeI("DDS_DataReader_return_loan_raw(self->reader, _payloads, _infos);\n");
         try self.writeI("return _n;\n");
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader_take_n({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, c_name, c_name });
+        try self.print("static int {s}DataReader_n_impl({s}DataReader *self, {s} *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is, int destructive) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 1, 0, NULL, false };\n");
+        try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
+        try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
+        try self.writeI("DDS_ReturnCode_t _rc0 = destructive ?\n");
+        self.indent_depth += 1;
+        try self.writeI("DDS_DataReader_take_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, DDS_HANDLE_NIL, NULL, ss, vs, is, max) :\n");
+        try self.writeI("DDS_DataReader_read_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, DDS_HANDLE_NIL, NULL, ss, vs, is, max);\n");
+        self.indent_depth -= 1;
+        try self.writeI("DDS_OctetSeq_free(&_c_hashes);\n");
+        try self.writeI("if (_rc0 != DDS_RETCODE_OK) return -1;\n");
+        try self.printI("return {s}DataReader_decode_batch(self, &_c_payloads, &_c_infos, values, infos);\n", .{c_name});
+        try self.write("}\n\n");
+
+        try self.print("int {s}DataReader_take_n({s}DataReader *self, {s} *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, c_name, c_name });
         try self.printI("return {s}DataReader_n_impl(self, values, infos, max, ss, vs, is, 1);\n", .{c_name});
         try self.write("}\n\n");
-        try self.print("int {s}DataReader_read_n({s}DataReader *self, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, c_name, c_name });
+        try self.print("int {s}DataReader_read_n({s}DataReader *self, {s} *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, c_name, c_name });
         try self.printI("return {s}DataReader_n_impl(self, values, infos, max, ss, vs, is, 0);\n", .{c_name});
         try self.write("}\n\n");
 
-        // Decodes zzdds_raw_sample_array `_arr` into `values`/`infos`, freeing
-        // `_arr` either way -- the shared tail of every batch reader op below
-        // (take_instance/read_instance, take_w_condition/read_w_condition,
-        // take_next_instance_w_condition/read_next_instance_w_condition),
-        // which otherwise only differ in which zzdds_*_raw call produces `_arr`.
-        try self.print("static int {s}DataReader_decode_arr({s}DataReader *self, zzdds_raw_sample_array *_arr, {s} *values, zzdds_sample_info *infos) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("for (size_t _i = 0; _i < _arr->count; _i++) {\n");
+        try self.print("static int {s}DataReader_n_instance_impl({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is, int destructive) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 1, 0, NULL, false };\n");
+        try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
+        try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
+        try self.writeI("DDS_ReturnCode_t _rc0 = destructive ?\n");
         self.indent_depth += 1;
-        try self.writeI("infos[_i] = _arr->samples[_i].info;\n");
-        try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _arr->samples[_i].data, _arr->samples[_i].data_len);\n");
-        if (structHasSequenceFields(s)) {
-            // See DataReader_n_impl's matching comment above: zero
-            // values[_i] before decoding into it so a partial failure
-            // leaves only real allocations or well-defined NULL/empty
-            // fields -- never indeterminate caller-supplied memory -- for
-            // the _free() cleanup below to touch.
-            try self.writeI("memset(&values[_i], 0, sizeof(values[_i]));\n");
-        }
-        try self.writeI("if (!_rc) _rc = infos[_i].valid_data ?\n");
-        self.indent_depth += 1;
-        try self.printI("{s}_deserialize(&_r, &values[_i]) :\n", .{c_name});
-        try self.printI("{s}_deserialize_key(&_r, &values[_i]);\n", .{c_name});
+        try self.writeI("DDS_DataReader_take_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, instance_handle, NULL, ss, vs, is, max) :\n");
+        try self.writeI("DDS_DataReader_read_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, instance_handle, NULL, ss, vs, is, max);\n");
         self.indent_depth -= 1;
-        if (structHasSequenceFields(s)) {
-            // `_j <= _i`, matching DataReader_n_impl's own fix above: the
-            // *current*, partially-decoded element must be freed too, not
-            // just the ones before it -- see that function's comment for
-            // the full safety argument.
-            try self.writeI("if (_rc) {\n");
-            self.indent_depth += 1;
-            try self.printI("for (size_t _j = 0; _j <= _i; _j++) {s}_free(&values[_j]);\n", .{c_name});
-            try self.writeI("zzdds_return_raw_samples(self->reader, _arr);\n");
-            try self.writeI("return _rc;\n");
-            self.indent_depth -= 1;
-            try self.writeI("}\n");
-        } else {
-            // See the matching --c-no-free comment in DataReader_n_impl above.
-            try self.writeI("if (_rc) { zzdds_return_raw_samples(self->reader, _arr); return _rc; }\n");
-        }
-        self.indent_depth -= 1;
-        try self.writeI("}\n");
-        try self.writeI("int _n = (int)_arr->count;\n");
-        try self.writeI("zzdds_return_raw_samples(self->reader, _arr);\n");
-        try self.writeI("return _n;\n");
+        try self.writeI("DDS_OctetSeq_free(&_c_hashes);\n");
+        try self.writeI("if (_rc0 != DDS_RETCODE_OK) return -1;\n");
+        try self.printI("return {s}DataReader_decode_batch(self, &_c_payloads, &_c_infos, values, infos);\n", .{c_name});
         try self.write("}\n\n");
 
-        try self.print("static int {s}DataReader_n_instance_impl({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is, int destructive) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("zzdds_raw_sample_array _arr = {NULL, 0, 0};\n");
-        try self.writeI("int _n = destructive ?\n");
-        self.indent_depth += 1;
-        try self.writeI("zzdds_take_n_instance_raw(self->reader, instance_handle, ss, vs, is, max, &_arr) :\n");
-        try self.writeI("zzdds_read_n_instance_raw(self->reader, instance_handle, ss, vs, is, max, &_arr);\n");
-        self.indent_depth -= 1;
-        try self.writeI("if (_n <= 0) return _n;\n");
-        try self.printI("return {s}DataReader_decode_arr(self, &_arr, values, infos);\n", .{c_name});
-        try self.write("}\n\n");
-
-        try self.print("int {s}DataReader_take_instance({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, c_name, c_name });
+        try self.print("int {s}DataReader_take_instance({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, c_name, c_name });
         try self.printI("return {s}DataReader_n_instance_impl(self, instance_handle, values, infos, max, ss, vs, is, 1);\n", .{c_name});
         try self.write("}\n\n");
-        try self.print("int {s}DataReader_read_instance({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, c_name, c_name });
+        try self.print("int {s}DataReader_read_instance({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ c_name, c_name, c_name });
         try self.printI("return {s}DataReader_n_instance_impl(self, instance_handle, values, infos, max, ss, vs, is, 0);\n", .{c_name});
         try self.write("}\n\n");
 
-        try self.print("static int {s}DataReader_w_condition_impl({s}DataReader *self, DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max, int destructive) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("zzdds_raw_sample_array _arr = {NULL, 0, 0};\n");
-        try self.writeI("int _n = destructive ?\n");
+        try self.print("static int {s}DataReader_w_condition_impl({s}DataReader *self, DDS_ReadCondition condition, {s} *values, DDS_SampleInfo *infos, int max, int destructive) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 1, 0, NULL, false };\n");
+        try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
+        try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
+        try self.writeI("DDS_ReturnCode_t _rc0 = destructive ?\n");
         self.indent_depth += 1;
-        try self.writeI("zzdds_take_w_condition_raw(self->reader, condition, max, &_arr) :\n");
-        try self.writeI("zzdds_read_w_condition_raw(self->reader, condition, max, &_arr);\n");
+        try self.writeI("DDS_DataReader_take_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, DDS_HANDLE_NIL, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max) :\n");
+        try self.writeI("DDS_DataReader_read_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, DDS_HANDLE_NIL, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max);\n");
         self.indent_depth -= 1;
-        try self.writeI("if (_n <= 0) return _n;\n");
-        try self.printI("return {s}DataReader_decode_arr(self, &_arr, values, infos);\n", .{c_name});
+        try self.writeI("DDS_OctetSeq_free(&_c_hashes);\n");
+        try self.writeI("if (_rc0 != DDS_RETCODE_OK) return -1;\n");
+        try self.printI("return {s}DataReader_decode_batch(self, &_c_payloads, &_c_infos, values, infos);\n", .{c_name});
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader_take_w_condition({s}DataReader *self, DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max) {{\n", .{ c_name, c_name, c_name });
+        try self.print("int {s}DataReader_take_w_condition({s}DataReader *self, DDS_ReadCondition condition, {s} *values, DDS_SampleInfo *infos, int max) {{\n", .{ c_name, c_name, c_name });
         try self.printI("return {s}DataReader_w_condition_impl(self, condition, values, infos, max, 1);\n", .{c_name});
         try self.write("}\n\n");
-        try self.print("int {s}DataReader_read_w_condition({s}DataReader *self, DDS_ReadCondition condition, {s} *values, zzdds_sample_info *infos, int max) {{\n", .{ c_name, c_name, c_name });
+        try self.print("int {s}DataReader_read_w_condition({s}DataReader *self, DDS_ReadCondition condition, {s} *values, DDS_SampleInfo *infos, int max) {{\n", .{ c_name, c_name, c_name });
         try self.printI("return {s}DataReader_w_condition_impl(self, condition, values, infos, max, 0);\n", .{c_name});
         try self.write("}\n\n");
 
-        try self.print("static int {s}DataReader_next_instance_w_condition_impl({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max, int destructive) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("zzdds_raw_sample_array _arr = {NULL, 0, 0};\n");
-        try self.writeI("int _n = destructive ?\n");
+        try self.print("static int {s}DataReader_next_instance_w_condition_impl({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, DDS_SampleInfo *infos, int max, int destructive) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 1, 0, NULL, false };\n");
+        try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
+        try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
+        try self.writeI("DDS_ReturnCode_t _rc0 = destructive ?\n");
         self.indent_depth += 1;
-        try self.writeI("zzdds_take_next_instance_w_condition_raw(self->reader, condition, prev, max, &_arr) :\n");
-        try self.writeI("zzdds_read_next_instance_w_condition_raw(self->reader, condition, prev, max, &_arr);\n");
+        try self.writeI("DDS_DataReader_take_next_instance_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, prev, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max) :\n");
+        try self.writeI("DDS_DataReader_read_next_instance_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, prev, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max);\n");
         self.indent_depth -= 1;
-        try self.writeI("if (_n <= 0) return _n;\n");
-        try self.printI("return {s}DataReader_decode_arr(self, &_arr, values, infos);\n", .{c_name});
+        try self.writeI("DDS_OctetSeq_free(&_c_hashes);\n");
+        try self.writeI("if (_rc0 != DDS_RETCODE_OK) return -1;\n");
+        try self.printI("return {s}DataReader_decode_batch(self, &_c_payloads, &_c_infos, values, infos);\n", .{c_name});
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader_take_next_instance_w_condition({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max) {{\n", .{ c_name, c_name, c_name });
+        try self.print("int {s}DataReader_take_next_instance_w_condition({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, DDS_SampleInfo *infos, int max) {{\n", .{ c_name, c_name, c_name });
         try self.printI("return {s}DataReader_next_instance_w_condition_impl(self, condition, prev, values, infos, max, 1);\n", .{c_name});
         try self.write("}\n\n");
-        try self.print("int {s}DataReader_read_next_instance_w_condition({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, zzdds_sample_info *infos, int max) {{\n", .{ c_name, c_name, c_name });
+        try self.print("int {s}DataReader_read_next_instance_w_condition({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, DDS_SampleInfo *infos, int max) {{\n", .{ c_name, c_name, c_name });
         try self.printI("return {s}DataReader_next_instance_w_condition_impl(self, condition, prev, values, infos, max, 0);\n", .{c_name});
         try self.write("}\n\n");
 
-        try self.print("DDS_ReturnCode_t {s}DataReader_take_loaned({s}DataReader *self, {s} *out, zzdds_sample_info *info, zzdds_loaned_sample *loan) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("DDS_ReturnCode_t _n = zzdds_take_loaned_raw(self->reader, loan, info);\n");
+        // take_loaned/return_loan's signature deliberately changed -- see
+        // the matching prototype comment above. loan_payloads/loan_infos
+        // must be zero-initialized by the caller before the first use
+        // (e.g. `DDS_OctetSeqSeq p = {0}; DDS_SampleInfoSeq i = {0};`), same
+        // convention as every other caller-owned inout sequence in this API.
+        try self.print("DDS_ReturnCode_t {s}DataReader_take_loaned({s}DataReader *self, {s} *out, DDS_SampleInfo *info, DDS_OctetSeqSeq *loan_payloads, DDS_SampleInfoSeq *loan_infos) {{\n", .{ c_name, c_name, c_name });
+        try self.writeI("loan_payloads->_maximum = 0;\n");
+        try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
+        try self.writeI("DDS_ReturnCode_t _n = DDS_DataReader_take_raw(self->reader, loan_payloads, &_c_hashes, loan_infos, DDS_HANDLE_NIL, NULL, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, 1);\n");
+        try self.writeI("DDS_OctetSeq_free(&_c_hashes);\n");
         try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
+        try self.writeI("if (loan_payloads->_length == 0) return DDS_RETCODE_NO_DATA;\n");
+        try self.writeI("*info = loan_infos->_buffer[0];\n");
         try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, loan->data, loan->data_len);\n");
-        try self.writeI("if (_rc) { zzdds_return_loaned_raw(self->reader, loan); return _rc; }\n");
-        try self.printI("_rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
-        try self.writeI("if (_rc) zzdds_return_loaned_raw(self->reader, loan);\n");
+        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, loan_payloads->_buffer[0]._buffer, loan_payloads->_buffer[0]._length);\n");
+        try self.printI("if (!_rc) _rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        try self.writeI("if (_rc) DDS_DataReader_return_loan_raw(self->reader, loan_payloads, loan_infos);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
-        try self.print("void {s}DataReader_return_loan({s}DataReader *self, zzdds_loaned_sample *loan) {{\n", .{ c_name, c_name });
-        try self.writeI("zzdds_return_loaned_raw(self->reader, loan);\n");
+        try self.print("void {s}DataReader_return_loan({s}DataReader *self, DDS_OctetSeqSeq *loan_payloads, DDS_SampleInfoSeq *loan_infos) {{\n", .{ c_name, c_name });
+        try self.writeI("DDS_DataReader_return_loan_raw(self->reader, loan_payloads, loan_infos);\n");
         try self.write("}\n\n");
     }
 
@@ -4861,6 +4978,42 @@ test "c_backend: forward-declared sequence element is not typedef-redeclared" {
     try testing.expect(!has(s, "} SampleInfo;"));
 }
 
+test "c_backend: sequence-of-sequence element's typedef is forward-declared, not duplicated" {
+    // Regression for a real compile error: a typedef-to-sequence element
+    // (octet_seq) used as another sequence's element (octet_seq_seq) had its
+    // own `typedef` line emitted only at its *normal* position (after every
+    // guarded sequence-struct block, including octet_seq_seq's own, which
+    // references it by name) -- a forward-reference to an undeclared type
+    // name, illegal in C. See raw/loan API implementation notes.
+    var out = try testGen(
+        \\typedef sequence<octet> octet_seq;
+        \\typedef sequence<octet_seq> octet_seq_seq;
+        \\struct Holder { octet_seq_seq payloads; };
+    , "nest");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+
+    const early_typedef_pos = std.mem.indexOf(u8, s, "typedef uint8_t_seq octet_seq;") orelse
+        return error.NotFound;
+    const outer_struct_pos = std.mem.indexOf(u8, s, "octet_seq *_buffer;") orelse
+        return error.NotFound;
+    try testing.expect(early_typedef_pos < outer_struct_pos);
+
+    // Exactly one occurrence of the element's typedef line -- not
+    // re-emitted at its normal (now-too-late) position.
+    var count: usize = 0;
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, s, pos, "typedef uint8_t_seq octet_seq;")) |i| {
+        count += 1;
+        pos = i + 1;
+    }
+    try testing.expectEqual(@as(usize, 1), count);
+
+    // The independent `_free` declaration (unrelated to the typedef-line
+    // suppression above) must still be emitted exactly once.
+    try testing.expect(has(s, "void octet_seq_free(octet_seq *v);"));
+}
+
 test "c_backend: struct in module" {
     var out = try testGen(
         \\module Sensor { struct Reading { double value; }; };
@@ -5526,7 +5679,7 @@ test "c_backend: zzdds wrapper prototypes for keyed topic" {
     try testing.expect(has(s, "typedef struct TopicTypeSupport {"));
     try testing.expect(has(s, "DDS_DataWriter writer;"));
     try testing.expect(has(s, "int TopicTypeSupport_register(DDS_DomainParticipant participant, const char *type_name);"));
-    try testing.expect(has(s, "DDS_ReturnCode_t TopicDataReader_take_loaned(TopicDataReader *self, Topic *out, zzdds_sample_info *info, zzdds_loaned_sample *loan);"));
+    try testing.expect(has(s, "DDS_ReturnCode_t TopicDataReader_take_loaned(TopicDataReader *self, Topic *out, DDS_SampleInfo *info, DDS_OctetSeqSeq *loan_payloads, DDS_SampleInfoSeq *loan_infos);"));
 }
 
 test "c_backend cdr: header emits CDR prototypes after struct" {
@@ -5558,10 +5711,10 @@ test "c_backend cdr: zzdds wrapper implementations for keyed topic" {
     try testing.expect(has(s, "#include \"zzdds_c.h\""));
     try testing.expect(has(s, "int TopicTypeSupport_register(DDS_DomainParticipant participant, const char *type_name) {"));
     try testing.expect(has(s, "void TopicDataWriter_init(TopicDataWriter *self, DDS_DataWriter writer, int xcdr_version) {"));
-    try testing.expect(has(s, "static int TopicDataWriter_write_kind(TopicDataWriter *self, zzdds_write_kind kind, const Topic *value, int key_only, DDS_InstanceHandle_t handle) {"));
-    try testing.expect(has(s, "return TopicDataWriter_write_kind(self, ZZDDS_WRITE_ALIVE, value, 0, handle);"));
-    try testing.expect(has(s, "DDS_ReturnCode_t TopicDataReader_take_loaned(TopicDataReader *self, Topic *out, zzdds_sample_info *info, zzdds_loaned_sample *loan) {"));
-    try testing.expect(has(s, "zzdds_return_loaned_raw(self->reader, loan);"));
+    try testing.expect(has(s, "static int TopicDataWriter_write_kind(TopicDataWriter *self, DDS_WriteKind kind, const Topic *value, int key_only, DDS_InstanceHandle_t handle) {"));
+    try testing.expect(has(s, "return TopicDataWriter_write_kind(self, DDS_WriteKind_ALIVE_WRITE_KIND, value, 0, handle);"));
+    try testing.expect(has(s, "DDS_ReturnCode_t TopicDataReader_take_loaned(TopicDataReader *self, Topic *out, DDS_SampleInfo *info, DDS_OctetSeqSeq *loan_payloads, DDS_SampleInfoSeq *loan_infos) {"));
+    try testing.expect(has(s, "DDS_DataReader_return_loan_raw(self->reader, loan_payloads, loan_infos);"));
 }
 
 test "c_backend cdr: A1 — namespaced struct uses IDL-scoped type name in TypeSupport_register" {
@@ -5588,8 +5741,8 @@ test "c_backend cdr: _n_impl cleans up partial samples when struct has sequence 
     // `_j <= _i`: the current, partially-decoded element must be freed too
     // (a real leak Greptile caught in review — see the generator's own
     // comment for the safety argument), not just the ones before it.
-    try testing.expect(has(s, "for (int _j = 0; _j <= _i; _j++) Msg_free(&values[_j]);"));
-    try testing.expect(has(s, "zzdds_return_raw_samples(self->reader, &_arr);"));
+    try testing.expect(has(s, "for (uint32_t _j = 0; _j <= _i; _j++) Msg_free(&values[_j]);"));
+    try testing.expect(has(s, "DDS_DataReader_return_loan_raw(self->reader, _payloads, _infos);"));
     // values[_i] must be zeroed *before* the decode attempt -- otherwise
     // _free() above could touch indeterminate caller-supplied memory for
     // whatever fields a partial decode never reached (a second real bug
@@ -5607,7 +5760,7 @@ test "c_backend cdr: _n_impl has no cleanup loop or memset when struct has no se
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(!has(s, "Msg_free(&values[_j])"));
-    try testing.expect(has(s, "if (_rc) { zzdds_return_raw_samples(self->reader, &_arr); return _rc; }"));
+    try testing.expect(has(s, "if (_rc) { DDS_DataReader_return_loan_raw(self->reader, _payloads, _infos); return _rc; }"));
     // No _free() is ever called on values[_i] for a struct with no
     // sequence/string fields, so there's nothing for the memset to protect
     // -- must not be emitted.
@@ -5635,12 +5788,12 @@ test "c_backend: zzdds wrapper prototypes declare the _w_condition family, batch
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "DDS_InstanceHandle_t TopicDataWriter_register_instance_w_timestamp(TopicDataWriter *self, const Topic *key, DDS_Time_t timestamp);"));
-    try testing.expect(has(s, "int TopicDataReader_take_instance(TopicDataReader *self, DDS_InstanceHandle_t instance_handle, Topic *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);"));
-    try testing.expect(has(s, "int TopicDataReader_read_instance(TopicDataReader *self, DDS_InstanceHandle_t instance_handle, Topic *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);"));
-    try testing.expect(has(s, "int TopicDataReader_take_w_condition(TopicDataReader *self, DDS_ReadCondition condition, Topic *values, zzdds_sample_info *infos, int max);"));
-    try testing.expect(has(s, "int TopicDataReader_read_w_condition(TopicDataReader *self, DDS_ReadCondition condition, Topic *values, zzdds_sample_info *infos, int max);"));
-    try testing.expect(has(s, "int TopicDataReader_take_next_instance_w_condition(TopicDataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, Topic *values, zzdds_sample_info *infos, int max);"));
-    try testing.expect(has(s, "int TopicDataReader_read_next_instance_w_condition(TopicDataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, Topic *values, zzdds_sample_info *infos, int max);"));
+    try testing.expect(has(s, "int TopicDataReader_take_instance(TopicDataReader *self, DDS_InstanceHandle_t instance_handle, Topic *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);"));
+    try testing.expect(has(s, "int TopicDataReader_read_instance(TopicDataReader *self, DDS_InstanceHandle_t instance_handle, Topic *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);"));
+    try testing.expect(has(s, "int TopicDataReader_take_w_condition(TopicDataReader *self, DDS_ReadCondition condition, Topic *values, DDS_SampleInfo *infos, int max);"));
+    try testing.expect(has(s, "int TopicDataReader_read_w_condition(TopicDataReader *self, DDS_ReadCondition condition, Topic *values, DDS_SampleInfo *infos, int max);"));
+    try testing.expect(has(s, "int TopicDataReader_take_next_instance_w_condition(TopicDataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, Topic *values, DDS_SampleInfo *infos, int max);"));
+    try testing.expect(has(s, "int TopicDataReader_read_next_instance_w_condition(TopicDataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, Topic *values, DDS_SampleInfo *infos, int max);"));
 }
 
 test "c_backend cdr: register_instance_w_timestamp ignores its timestamp and delegates to register_instance" {
@@ -5664,13 +5817,13 @@ test "c_backend cdr: take_instance/read_instance call the instance-scoped raw op
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "zzdds_take_n_instance_raw(self->reader, instance_handle, ss, vs, is, max, &_arr) :"));
-    try testing.expect(has(s, "zzdds_read_n_instance_raw(self->reader, instance_handle, ss, vs, is, max, &_arr);"));
-    try testing.expect(has(s, "int TopicDataReader_take_instance(TopicDataReader *self, DDS_InstanceHandle_t instance_handle, Topic *values, zzdds_sample_info *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {"));
+    try testing.expect(has(s, "DDS_DataReader_take_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, instance_handle, NULL, ss, vs, is, max) :"));
+    try testing.expect(has(s, "DDS_DataReader_read_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, instance_handle, NULL, ss, vs, is, max);"));
+    try testing.expect(has(s, "int TopicDataReader_take_instance(TopicDataReader *self, DDS_InstanceHandle_t instance_handle, Topic *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {"));
     try testing.expect(has(s, "return TopicDataReader_n_instance_impl(self, instance_handle, values, infos, max, ss, vs, is, 1);"));
 }
 
-test "c_backend cdr: take_w_condition/read_w_condition call zzdds_take_w_condition_raw/zzdds_read_w_condition_raw" {
+test "c_backend cdr: take_w_condition/read_w_condition call the condition-scoped raw ops" {
     var out = try testGenCdrOpts(
         "@appendable struct Topic { @key long id; };",
         "topic",
@@ -5678,9 +5831,9 @@ test "c_backend cdr: take_w_condition/read_w_condition call zzdds_take_w_conditi
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "zzdds_take_w_condition_raw(self->reader, condition, max, &_arr) :"));
-    try testing.expect(has(s, "zzdds_read_w_condition_raw(self->reader, condition, max, &_arr);"));
-    try testing.expect(has(s, "int TopicDataReader_take_w_condition(TopicDataReader *self, DDS_ReadCondition condition, Topic *values, zzdds_sample_info *infos, int max) {"));
+    try testing.expect(has(s, "DDS_DataReader_take_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, DDS_HANDLE_NIL, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max) :"));
+    try testing.expect(has(s, "DDS_DataReader_read_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, DDS_HANDLE_NIL, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max);"));
+    try testing.expect(has(s, "int TopicDataReader_take_w_condition(TopicDataReader *self, DDS_ReadCondition condition, Topic *values, DDS_SampleInfo *infos, int max) {"));
     try testing.expect(has(s, "return TopicDataReader_w_condition_impl(self, condition, values, infos, max, 1);"));
 }
 
@@ -5692,12 +5845,12 @@ test "c_backend cdr: take_next_instance_w_condition/read_next_instance_w_conditi
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "zzdds_take_next_instance_w_condition_raw(self->reader, condition, prev, max, &_arr) :"));
-    try testing.expect(has(s, "zzdds_read_next_instance_w_condition_raw(self->reader, condition, prev, max, &_arr);"));
-    try testing.expect(has(s, "int TopicDataReader_take_next_instance_w_condition(TopicDataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, Topic *values, zzdds_sample_info *infos, int max) {"));
+    try testing.expect(has(s, "DDS_DataReader_take_next_instance_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, prev, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max) :"));
+    try testing.expect(has(s, "DDS_DataReader_read_next_instance_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, prev, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max);"));
+    try testing.expect(has(s, "int TopicDataReader_take_next_instance_w_condition(TopicDataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, Topic *values, DDS_SampleInfo *infos, int max) {"));
 }
 
-test "c_backend cdr: _decode_arr cleans up partial samples when struct has sequence fields" {
+test "c_backend cdr: _decode_batch cleans up partial samples when struct has sequence fields" {
     var out = try testGenCdrOpts(
         "@appendable struct Msg { @key long id; sequence<octet> data; };",
         "msg",
@@ -5705,8 +5858,8 @@ test "c_backend cdr: _decode_arr cleans up partial samples when struct has seque
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "for (size_t _j = 0; _j <= _i; _j++) Msg_free(&values[_j]);"));
-    try testing.expect(has(s, "static int MsgDataReader_decode_arr(MsgDataReader *self, zzdds_raw_sample_array *_arr, Msg *values, zzdds_sample_info *infos) {"));
+    try testing.expect(has(s, "for (uint32_t _j = 0; _j <= _i; _j++) Msg_free(&values[_j]);"));
+    try testing.expect(has(s, "static int MsgDataReader_decode_batch(MsgDataReader *self, DDS_OctetSeqSeq *_payloads, DDS_SampleInfoSeq *_infos, Msg *values, DDS_SampleInfo *infos) {"));
     try testing.expect(has(s, "memset(&values[_i], 0, sizeof(values[_i]));"));
 }
 

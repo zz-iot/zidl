@@ -1385,6 +1385,11 @@ const Generator = struct {
 
         // Operations
         for (iface.operations) |op| {
+            if (isWriteLoanBufferOp(iface.name, op.name)) {
+                try self.ind();
+                try self.emitWriteLoanBufferInterfaceOp(&op);
+                continue;
+            }
             try self.ind();
             if (op.return_type) |ret| {
                 const ret_java = try self.typeRefToJava(ret, &.{});
@@ -1417,6 +1422,34 @@ const Generator = struct {
         self.depth -= 1;
         try self.ind();
         try self.print("}} // interface {s}{s}\n\n", .{ pfx, iface.name });
+    }
+
+    /// Interface-method declaration for one of `isWriteLoanBufferOp`'s three
+    /// ops -- see that function's doc comment for why these need a
+    /// hand-written `java.nio.ByteBuffer` shape instead of the generic
+    /// `List<Byte>` one every other `OctetSeq` param gets. `loan_raw`'s
+    /// `inout OctetSeq cdr_payload` becomes a real return value (Java has no
+    /// way to grow/replace a `List` into a *fresh* direct buffer through an
+    /// `inout` parameter the way it can keep mutating the same `List`
+    /// object in place) -- every other param keeps its normal generated
+    /// Java type via `typeRefToJava`.
+    fn emitWriteLoanBufferInterfaceOp(self: *Generator, op: *const ir.Operation) !void {
+        if (std.mem.eql(u8, op.name, "loan_raw")) {
+            try self.write("java.nio.ByteBuffer loan_raw(int size);\n");
+            return;
+        }
+        try self.print("int {s}(", .{op.name});
+        for (op.params, 0..) |p, i| {
+            if (i > 0) try self.write(", ");
+            if (std.mem.eql(u8, p.name, "cdr_payload")) {
+                try self.print("java.nio.ByteBuffer {s}", .{p.name});
+                continue;
+            }
+            const pt = try self.typeRefToJava(p.type_ref, &.{});
+            defer self.alloc.free(pt);
+            try self.print("{s} {s}", .{ pt, p.name });
+        }
+        try self.write(");\n");
     }
 
     // ── Const ─────────────────────────────────────────────────────────────────
@@ -3140,6 +3173,14 @@ fn generateZzddsWrapperFiles(
         defer alloc.free(reader_iface);
         const read_condition_iface = try zzddsDcpsQualifiedName(alloc, opts, "DDS::ReadCondition");
         defer alloc.free(read_condition_iface);
+        const write_kind_iface = try zzddsDcpsQualifiedName(alloc, opts, "DDS::WriteKind");
+        defer alloc.free(write_kind_iface);
+        const time_t_iface = try zzddsDcpsQualifiedName(alloc, opts, "DDS::Time_t");
+        defer alloc.free(time_t_iface);
+        const retcode_oor_qname = try zzddsDcpsQualifiedName(alloc, opts, "DDS::RETCODE_OUT_OF_RESOURCES");
+        defer alloc.free(retcode_oor_qname);
+        const sample_info_iface = try zzddsDcpsQualifiedName(alloc, opts, "DDS::SampleInfo");
+        defer alloc.free(sample_info_iface);
 
         var buf = std.ArrayList(u8).empty;
         defer buf.deinit(alloc);
@@ -3151,13 +3192,13 @@ fn generateZzddsWrapperFiles(
         try writeOutputFile(alloc, io, opts, ts_filename, buf.items);
 
         buf.clearRetainingCapacity();
-        try emitZzddsDataWriterFile(alloc, opts, &buf, c_name, type_java, writer_iface);
+        try emitZzddsDataWriterFile(alloc, opts, &buf, c_name, type_java, writer_iface, write_kind_iface, time_t_iface, retcode_oor_qname);
         const writer_filename = try std.fmt.allocPrint(alloc, "{s}DataWriter.java", .{c_name});
         defer alloc.free(writer_filename);
         try writeOutputFile(alloc, io, opts, writer_filename, buf.items);
 
         buf.clearRetainingCapacity();
-        try emitZzddsDataReaderFile(alloc, opts, &buf, c_name, type_java, reader_iface, read_condition_iface);
+        try emitZzddsDataReaderFile(alloc, opts, &buf, c_name, type_java, reader_iface, read_condition_iface, sample_info_iface);
         const reader_filename = try std.fmt.allocPrint(alloc, "{s}DataReader.java", .{c_name});
         defer alloc.free(reader_filename);
         try writeOutputFile(alloc, io, opts, reader_filename, buf.items);
@@ -3204,6 +3245,9 @@ fn emitZzddsDataWriterFile(
     c_name: []const u8,
     type_java: []const u8,
     writer_iface: []const u8,
+    write_kind_iface: []const u8,
+    time_t_iface: []const u8,
+    retcode_oor_qname: []const u8,
 ) !void {
     try emitZzddsPackageHeader(opts, out, alloc);
     const s = try std.fmt.allocPrint(alloc,
@@ -3237,30 +3281,59 @@ fn emitZzddsDataWriterFile(
         \\        }}
         \\    }}
         \\
+        \\    private static java.util.List<Byte> toByteList(byte[] b) {{
+        \\        java.util.ArrayList<Byte> _l = new java.util.ArrayList<>(b.length);
+        \\        for (byte _x : b) _l.add(_x);
+        \\        return _l;
+        \\    }}
+        \\
+        \\    /** {{@code TIME_INVALID_SEC}}/{{@code TIME_INVALID_NSEC}} -- "use the
+        \\     * current time", same sentinel as DDS_TIME_INVALID_SEC/NSEC in C/C++. */
+        \\    private static {[tt]s} nowTimestamp() {{ return new {[tt]s}(-1, 0xffffffff); }}
+        \\
+        \\    /** Serializes straight into a loan_raw()-borrowed buffer (sized
+        \\     * exactly to {{@code payload.length}}, so publish_loan_raw's whole
+        \\     * buffer is always the populated part -- no partial-write
+        \\     * bookkeeping needed) and publishes it, instead of write_raw's
+        \\     * generic path (which dups the bytes into a second, freshly
+        \\     * allocated native buffer). loan_raw() returns null on failure
+        \\     * (e.g. resource limits) with no more specific code available --
+        \\     * matches C/C++'s own count-then-loan write path, which likewise
+        \\     * just propagates loan_raw's own return code rather than falling
+        \\     * back to a different write mechanism. Only the non-timestamped
+        \\     * path can do this: publish_loan_raw has no source_timestamp
+        \\     * parameter (see dcps.idl), so write_w_timestamp/
+        \\     * dispose_w_timestamp/unregister_w_timestamp below keep using
+        \\     * write_raw directly. */
+        \\    private int writeViaLoan(byte[] payload, byte[] keyHash, long handle, {[wk]s} kind) {{
+        \\        java.nio.ByteBuffer _loan = writer.loan_raw(payload.length);
+        \\        if (_loan == null) return (int) {[oor]s}.value;
+        \\        _loan.put(payload);
+        \\        return writer.publish_loan_raw(_loan, toByteList(keyHash), (int) handle, kind);
+        \\    }}
+        \\
         \\    public int write({[t]s} value, long handle) {{
-        \\        return io.zzdds.runtime.ZzddsRuntime.writeRaw(writer, 0, value.computeKeyHash(), handle, toPayload(value, false));
+        \\        return writeViaLoan(toPayload(value, false), value.computeKeyHash(), handle, {[wk]s}.ALIVE_WRITE_KIND);
         \\    }}
         \\
         \\    public int dispose({[t]s} key, long handle) {{
-        \\        return io.zzdds.runtime.ZzddsRuntime.writeRaw(writer, 1, key.computeKeyHash(), handle, toPayload(key, true));
+        \\        return writeViaLoan(toPayload(key, true), key.computeKeyHash(), handle, {[wk]s}.DISPOSE_WRITE_KIND);
         \\    }}
         \\
         \\    public int unregister({[t]s} key, long handle) {{
-        \\        return io.zzdds.runtime.ZzddsRuntime.writeRaw(writer, 2, key.computeKeyHash(), handle, toPayload(key, true));
+        \\        return writeViaLoan(toPayload(key, true), key.computeKeyHash(), handle, {[wk]s}.UNREGISTER_WRITE_KIND);
         \\    }}
         \\
-        \\    /** DDS_Time_t's sec/nanosec fields, passed separately -- JNI can't
-        \\     * marshal a C struct by value. */
         \\    public int write_w_timestamp({[t]s} value, long handle, int sec, int nanosec) {{
-        \\        return io.zzdds.runtime.ZzddsRuntime.writeRawWTimestamp(writer, 0, value.computeKeyHash(), handle, toPayload(value, false), sec, nanosec);
+        \\        return writer.write_raw(toByteList(value.computeKeyHash()), (int) handle, toByteList(toPayload(value, false)), {[wk]s}.ALIVE_WRITE_KIND, new {[tt]s}(sec, nanosec));
         \\    }}
         \\
         \\    public int dispose_w_timestamp({[t]s} key, long handle, int sec, int nanosec) {{
-        \\        return io.zzdds.runtime.ZzddsRuntime.writeRawWTimestamp(writer, 1, key.computeKeyHash(), handle, toPayload(key, true), sec, nanosec);
+        \\        return writer.write_raw(toByteList(key.computeKeyHash()), (int) handle, toByteList(toPayload(key, true)), {[wk]s}.DISPOSE_WRITE_KIND, new {[tt]s}(sec, nanosec));
         \\    }}
         \\
         \\    public int unregister_w_timestamp({[t]s} key, long handle, int sec, int nanosec) {{
-        \\        return io.zzdds.runtime.ZzddsRuntime.writeRawWTimestamp(writer, 2, key.computeKeyHash(), handle, toPayload(key, true), sec, nanosec);
+        \\        return writer.write_raw(toByteList(key.computeKeyHash()), (int) handle, toByteList(toPayload(key, true)), {[wk]s}.UNREGISTER_WRITE_KIND, new {[tt]s}(sec, nanosec));
         \\    }}
         \\
         \\    /** Computes the deterministic instance handle for {{@code key}} --
@@ -3304,7 +3377,7 @@ fn emitZzddsDataWriterFile(
         \\    }}
         \\}}
         \\
-    , .{ .c = c_name, .t = type_java, .wi = writer_iface });
+    , .{ .c = c_name, .t = type_java, .wi = writer_iface, .wk = write_kind_iface, .tt = time_t_iface, .oor = retcode_oor_qname });
     defer alloc.free(s);
     try out.appendSlice(alloc, s);
 }
@@ -3317,31 +3390,35 @@ fn emitZzddsDataReaderFile(
     type_java: []const u8,
     reader_iface: []const u8,
     read_condition_iface: []const u8,
+    sample_info_iface: []const u8,
 ) !void {
     try emitZzddsPackageHeader(opts, out, alloc);
     const s = try std.fmt.allocPrint(alloc,
         \\public final class {[c]s}DataReader {{
         \\    private final {[ri]s} reader;
         \\
+        \\    /** {{@code ANY_SAMPLE_STATE}}/{{@code ANY_VIEW_STATE}}/{{@code ANY_INSTANCE_STATE}}
+        \\     * (0xffff each) and {{@code HANDLE_NIL}} (0), from dcps.idl -- used
+        \\     * internally below wherever a call site isn't filtering on that axis. */
+        \\    private static final int _ANY_STATE = 0xffff;
+        \\    private static final int _HANDLE_NIL = 0;
+        \\
         \\    public {[c]s}DataReader({[ri]s} reader) {{ this.reader = reader; }}
         \\
         \\    /** Result of a single {[c]s}DataReader take()/read(): the sample
-        \\     * (valid iff {{@link #validData}}) plus its instance handle. */
+        \\     * (valid iff {{@link #validData}}) plus the full DDS {{@link #info}}
+        \\     * (instance/view/sample state, timestamps, generation counts, etc). */
         \\    public static final class Sample {{
-        \\        /** {{@link #instanceState}} sentinel used by the batch take/read
-        \\         * methods below ({{@code take_n}}/{{@code take_instance}}/
-        \\         * {{@code take_w_condition}}/etc.) -- their native calls don't
-        \\         * report per-sample instance_state (a separate, larger
-        \\         * native-signature change not made yet), unlike the single-sample
-        \\         * {{@link #take()}}/{{@link #read()}}/{{@link #take_next_instance}}/
-        \\         * {{@link #read_next_instance}} family, which do. */
-        \\        public static final int UNKNOWN_INSTANCE_STATE = -1;
         \\        public final {[t]s} data;
+        \\        public final {[si]s} info;
         \\        public final long instanceHandle;
         \\        public final boolean validData;
         \\        public final int instanceState;
-        \\        Sample({[t]s} data, long instanceHandle, boolean validData, int instanceState) {{
-        \\            this.data = data; this.instanceHandle = instanceHandle; this.validData = validData; this.instanceState = instanceState;
+        \\        Sample({[t]s} data, {[si]s} info) {{
+        \\            this.data = data; this.info = info;
+        \\            this.instanceHandle = info.get_instance_handle();
+        \\            this.validData = info.get_valid_data();
+        \\            this.instanceState = info.get_instance_state();
         \\        }}
         \\    }}
         \\
@@ -3355,29 +3432,47 @@ fn emitZzddsDataReaderFile(
         \\        throw new IllegalArgumentException("zidl: unsupported CDR encapsulation id 0x" + Integer.toHexString(_id));
         \\    }}
         \\
-        \\    private static Sample fromPayload(byte[] payload, long[] handleOut, boolean[] validOut, int[] stateOut) {{
-        \\        if (payload == null) return null;
+        \\    private static byte[] fromByteList(java.util.List<Byte> l) {{
+        \\        byte[] _out = new byte[l.size()];
+        \\        for (int _i = 0; _i < _out.length; _i++) _out[_i] = l.get(_i);
+        \\        return _out;
+        \\    }}
+        \\
+        \\    private static Sample fromPayload(byte[] payload, {[si]s} info) {{
         \\        java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
         \\        int _xcdrVersion = xcdrVersionOf(payload);
         \\        _buf.position(4);
-        \\        {[t]s} _data = validOut[0] ? {[t]s}.deserializeFrom(_buf, 4, _xcdrVersion) : {[t]s}.deserializeKey(_buf, 4, _xcdrVersion);
-        \\        return new Sample(_data, handleOut[0], validOut[0], stateOut[0]);
+        \\        boolean _valid = info.get_valid_data();
+        \\        {[t]s} _data = _valid ? {[t]s}.deserializeFrom(_buf, 4, _xcdrVersion) : {[t]s}.deserializeKey(_buf, 4, _xcdrVersion);
+        \\        return new Sample(_data, info);
         \\    }}
         \\
+        \\    private static Sample[] fromPayloads(java.util.List<java.util.List<Byte>> payloads, java.util.List<{[si]s}> infos) {{
+        \\        Sample[] _out = new Sample[payloads.size()];
+        \\        for (int _i = 0; _i < payloads.size(); _i++) {{
+        \\            _out[_i] = fromPayload(fromByteList(payloads.get(_i)), infos.get(_i));
+        \\        }}
+        \\        return _out;
+        \\    }}
+        \\
+        \\    /** {{@code maxSampleSize}} is accepted for source compatibility and is
+        \\     * genuinely unused -- the raw op underneath sizes its own buffer. */
         \\    public Sample take(int maxSampleSize) {{
-        \\        long[] _handle = new long[1];
-        \\        boolean[] _valid = new boolean[1];
-        \\        int[] _state = new int[1];
-        \\        byte[] _payload = io.zzdds.runtime.ZzddsRuntime.takeRaw(reader, maxSampleSize, _handle, _valid, _state);
-        \\        return fromPayload(_payload, _handle, _valid, _state);
+        \\        java.util.List<java.util.List<Byte>> _payloads = new java.util.ArrayList<>();
+        \\        java.util.List<Byte> _hashes = new java.util.ArrayList<>();
+        \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
+        \\        reader.take_raw(_payloads, _hashes, _infos, _HANDLE_NIL, null, _ANY_STATE, _ANY_STATE, _ANY_STATE, 1);
+        \\        if (_payloads.isEmpty()) return null;
+        \\        return fromPayload(fromByteList(_payloads.get(0)), _infos.get(0));
         \\    }}
         \\
         \\    public Sample read(int maxSampleSize) {{
-        \\        long[] _handle = new long[1];
-        \\        boolean[] _valid = new boolean[1];
-        \\        int[] _state = new int[1];
-        \\        byte[] _payload = io.zzdds.runtime.ZzddsRuntime.readRaw(reader, maxSampleSize, _handle, _valid, _state);
-        \\        return fromPayload(_payload, _handle, _valid, _state);
+        \\        java.util.List<java.util.List<Byte>> _payloads = new java.util.ArrayList<>();
+        \\        java.util.List<Byte> _hashes = new java.util.ArrayList<>();
+        \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
+        \\        reader.read_raw(_payloads, _hashes, _infos, _HANDLE_NIL, null, _ANY_STATE, _ANY_STATE, _ANY_STATE, 1);
+        \\        if (_payloads.isEmpty()) return null;
+        \\        return fromPayload(fromByteList(_payloads.get(0)), _infos.get(0));
         \\    }}
         \\
         \\    public Sample take() {{ return take(65536); }}
@@ -3385,37 +3480,29 @@ fn emitZzddsDataReaderFile(
         \\
         \\    /** Drains the instance identified by {{@code prevHandle}} (0 to
         \\     * start at the first instance) before moving to the next --
-        \\     * unlike {{@link #take()}}/{{@link #read()}}, which are plain FIFO. */
+        \\     * unlike {{@link #take()}}/{{@link #read()}}, which are plain FIFO.
+        \\     * {{@code maxSampleSize}} is accepted for source compatibility and is
+        \\     * genuinely unused, same as {{@link #take(int)}}. */
         \\    public Sample take_next_instance(long prevHandle, int maxSampleSize) {{
-        \\        long[] _handle = new long[1];
-        \\        boolean[] _valid = new boolean[1];
-        \\        int[] _state = new int[1];
-        \\        byte[] _payload = io.zzdds.runtime.ZzddsRuntime.takeNextInstanceRaw(reader, prevHandle, maxSampleSize, _handle, _valid, _state);
-        \\        return fromPayload(_payload, _handle, _valid, _state);
+        \\        java.util.List<java.util.List<Byte>> _payloads = new java.util.ArrayList<>();
+        \\        java.util.List<Byte> _hashes = new java.util.ArrayList<>();
+        \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
+        \\        reader.take_next_instance_raw(_payloads, _hashes, _infos, (int) prevHandle, null, _ANY_STATE, _ANY_STATE, _ANY_STATE, 1);
+        \\        if (_payloads.isEmpty()) return null;
+        \\        return fromPayload(fromByteList(_payloads.get(0)), _infos.get(0));
         \\    }}
         \\
         \\    public Sample read_next_instance(long prevHandle, int maxSampleSize) {{
-        \\        long[] _handle = new long[1];
-        \\        boolean[] _valid = new boolean[1];
-        \\        int[] _state = new int[1];
-        \\        byte[] _payload = io.zzdds.runtime.ZzddsRuntime.readNextInstanceRaw(reader, prevHandle, maxSampleSize, _handle, _valid, _state);
-        \\        return fromPayload(_payload, _handle, _valid, _state);
+        \\        java.util.List<java.util.List<Byte>> _payloads = new java.util.ArrayList<>();
+        \\        java.util.List<Byte> _hashes = new java.util.ArrayList<>();
+        \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
+        \\        reader.read_next_instance_raw(_payloads, _hashes, _infos, (int) prevHandle, null, _ANY_STATE, _ANY_STATE, _ANY_STATE, 1);
+        \\        if (_payloads.isEmpty()) return null;
+        \\        return fromPayload(fromByteList(_payloads.get(0)), _infos.get(0));
         \\    }}
         \\
         \\    public Sample take_next_instance(long prevHandle) {{ return take_next_instance(prevHandle, 65536); }}
         \\    public Sample read_next_instance(long prevHandle) {{ return read_next_instance(prevHandle, 65536); }}
-        \\
-        \\    /** instanceState on every returned Sample is
-        \\     * {{@link Sample#UNKNOWN_INSTANCE_STATE}} -- see that field's own doc
-        \\     * comment for why the batch native calls this feeds from don't have a
-        \\     * real value to give it. */
-        \\    private static Sample[] fromPayloads(byte[][] payloads, long[] handles, boolean[] valids) {{
-        \\        Sample[] _out = new Sample[payloads.length];
-        \\        for (int _i = 0; _i < payloads.length; _i++) {{
-        \\            _out[_i] = fromPayload(payloads[_i], new long[]{{ handles[_i] }}, new boolean[]{{ valids[_i] }}, new int[]{{ Sample.UNKNOWN_INSTANCE_STATE }});
-        \\        }}
-        \\        return _out;
-        \\    }}
         \\
         \\    /** Batch take/read of up to {{@code max}} samples matching the given
         \\     * sample/view/instance state masks (e.g. {{@code Dcps.DDS.ANY_SAMPLE_STATE.value}})
@@ -3423,17 +3510,19 @@ fn emitZzddsDataReaderFile(
         \\     * history for {{@code take_n}}, same as C/C++'s equivalents. The
         \\     * returned array's length is the true count (<= max). */
         \\    public Sample[] take_n(int max, int sampleStates, int viewStates, int instanceStates) {{
-        \\        long[] _handles = new long[max];
-        \\        boolean[] _valids = new boolean[max];
-        \\        byte[][] _payloads = io.zzdds.runtime.ZzddsRuntime.takeNRaw(reader, max, sampleStates, viewStates, instanceStates, _handles, _valids);
-        \\        return fromPayloads(_payloads, _handles, _valids);
+        \\        java.util.List<java.util.List<Byte>> _payloads = new java.util.ArrayList<>();
+        \\        java.util.List<Byte> _hashes = new java.util.ArrayList<>();
+        \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
+        \\        reader.take_raw(_payloads, _hashes, _infos, _HANDLE_NIL, null, sampleStates, viewStates, instanceStates, max);
+        \\        return fromPayloads(_payloads, _infos);
         \\    }}
         \\
         \\    public Sample[] read_n(int max, int sampleStates, int viewStates, int instanceStates) {{
-        \\        long[] _handles = new long[max];
-        \\        boolean[] _valids = new boolean[max];
-        \\        byte[][] _payloads = io.zzdds.runtime.ZzddsRuntime.readNRaw(reader, max, sampleStates, viewStates, instanceStates, _handles, _valids);
-        \\        return fromPayloads(_payloads, _handles, _valids);
+        \\        java.util.List<java.util.List<Byte>> _payloads = new java.util.ArrayList<>();
+        \\        java.util.List<Byte> _hashes = new java.util.ArrayList<>();
+        \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
+        \\        reader.read_raw(_payloads, _hashes, _infos, _HANDLE_NIL, null, sampleStates, viewStates, instanceStates, max);
+        \\        return fromPayloads(_payloads, _infos);
         \\    }}
         \\
         \\    /** Batch take/read restricted to one instance, same semantics as
@@ -3441,17 +3530,19 @@ fn emitZzddsDataReaderFile(
         \\     * must be a real instance handle, not {{@code DDS_HANDLE_NIL}} (there
         \\     * is no "no filter" sentinel here, unlike {{@link #take_n}}). */
         \\    public Sample[] take_instance(long instanceHandle, int max, int sampleStates, int viewStates, int instanceStates) {{
-        \\        long[] _handles = new long[max];
-        \\        boolean[] _valids = new boolean[max];
-        \\        byte[][] _payloads = io.zzdds.runtime.ZzddsRuntime.takeNInstanceRaw(reader, instanceHandle, max, sampleStates, viewStates, instanceStates, _handles, _valids);
-        \\        return fromPayloads(_payloads, _handles, _valids);
+        \\        java.util.List<java.util.List<Byte>> _payloads = new java.util.ArrayList<>();
+        \\        java.util.List<Byte> _hashes = new java.util.ArrayList<>();
+        \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
+        \\        reader.take_raw(_payloads, _hashes, _infos, (int) instanceHandle, null, sampleStates, viewStates, instanceStates, max);
+        \\        return fromPayloads(_payloads, _infos);
         \\    }}
         \\
         \\    public Sample[] read_instance(long instanceHandle, int max, int sampleStates, int viewStates, int instanceStates) {{
-        \\        long[] _handles = new long[max];
-        \\        boolean[] _valids = new boolean[max];
-        \\        byte[][] _payloads = io.zzdds.runtime.ZzddsRuntime.readNInstanceRaw(reader, instanceHandle, max, sampleStates, viewStates, instanceStates, _handles, _valids);
-        \\        return fromPayloads(_payloads, _handles, _valids);
+        \\        java.util.List<java.util.List<Byte>> _payloads = new java.util.ArrayList<>();
+        \\        java.util.List<Byte> _hashes = new java.util.ArrayList<>();
+        \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
+        \\        reader.read_raw(_payloads, _hashes, _infos, (int) instanceHandle, null, sampleStates, viewStates, instanceStates, max);
+        \\        return fromPayloads(_payloads, _infos);
         \\    }}
         \\
         \\    /** Batch take/read restricted to a {{@code ReadCondition}} (or a
@@ -3461,17 +3552,19 @@ fn emitZzddsDataReaderFile(
         \\     * (and, for a QueryCondition, the query filter) come from
         \\     * {{@code condition}} itself. */
         \\    public Sample[] take_w_condition({[rc]s} condition, int max) {{
-        \\        long[] _handles = new long[max];
-        \\        boolean[] _valids = new boolean[max];
-        \\        byte[][] _payloads = io.zzdds.runtime.ZzddsRuntime.takeWConditionRaw(reader, condition, max, _handles, _valids);
-        \\        return fromPayloads(_payloads, _handles, _valids);
+        \\        java.util.List<java.util.List<Byte>> _payloads = new java.util.ArrayList<>();
+        \\        java.util.List<Byte> _hashes = new java.util.ArrayList<>();
+        \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
+        \\        reader.take_raw(_payloads, _hashes, _infos, _HANDLE_NIL, condition, _ANY_STATE, _ANY_STATE, _ANY_STATE, max);
+        \\        return fromPayloads(_payloads, _infos);
         \\    }}
         \\
         \\    public Sample[] read_w_condition({[rc]s} condition, int max) {{
-        \\        long[] _handles = new long[max];
-        \\        boolean[] _valids = new boolean[max];
-        \\        byte[][] _payloads = io.zzdds.runtime.ZzddsRuntime.readWConditionRaw(reader, condition, max, _handles, _valids);
-        \\        return fromPayloads(_payloads, _handles, _valids);
+        \\        java.util.List<java.util.List<Byte>> _payloads = new java.util.ArrayList<>();
+        \\        java.util.List<Byte> _hashes = new java.util.ArrayList<>();
+        \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
+        \\        reader.read_raw(_payloads, _hashes, _infos, _HANDLE_NIL, condition, _ANY_STATE, _ANY_STATE, _ANY_STATE, max);
+        \\        return fromPayloads(_payloads, _infos);
         \\    }}
         \\
         \\    /** Batch take/read restricted to {{@code condition}} AND scoped to the
@@ -3479,17 +3572,19 @@ fn emitZzddsDataReaderFile(
         \\     * itself is restricted to instances with a matching sample, not just
         \\     * the next instance with any sample at all. */
         \\    public Sample[] take_next_instance_w_condition({[rc]s} condition, long prev, int max) {{
-        \\        long[] _handles = new long[max];
-        \\        boolean[] _valids = new boolean[max];
-        \\        byte[][] _payloads = io.zzdds.runtime.ZzddsRuntime.takeNextInstanceWConditionRaw(reader, condition, prev, max, _handles, _valids);
-        \\        return fromPayloads(_payloads, _handles, _valids);
+        \\        java.util.List<java.util.List<Byte>> _payloads = new java.util.ArrayList<>();
+        \\        java.util.List<Byte> _hashes = new java.util.ArrayList<>();
+        \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
+        \\        reader.take_next_instance_raw(_payloads, _hashes, _infos, (int) prev, condition, _ANY_STATE, _ANY_STATE, _ANY_STATE, max);
+        \\        return fromPayloads(_payloads, _infos);
         \\    }}
         \\
         \\    public Sample[] read_next_instance_w_condition({[rc]s} condition, long prev, int max) {{
-        \\        long[] _handles = new long[max];
-        \\        boolean[] _valids = new boolean[max];
-        \\        byte[][] _payloads = io.zzdds.runtime.ZzddsRuntime.readNextInstanceWConditionRaw(reader, condition, prev, max, _handles, _valids);
-        \\        return fromPayloads(_payloads, _handles, _valids);
+        \\        java.util.List<java.util.List<Byte>> _payloads = new java.util.ArrayList<>();
+        \\        java.util.List<Byte> _hashes = new java.util.ArrayList<>();
+        \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
+        \\        reader.read_next_instance_raw(_payloads, _hashes, _infos, (int) prev, condition, _ANY_STATE, _ANY_STATE, _ANY_STATE, max);
+        \\        return fromPayloads(_payloads, _infos);
         \\    }}
         \\
         \\    /** Returns the stored key-only fields for {{@code handle}}, or null
@@ -3510,7 +3605,7 @@ fn emitZzddsDataReaderFile(
         \\    }}
         \\}}
         \\
-    , .{ .c = c_name, .t = type_java, .ri = reader_iface, .rc = read_condition_iface });
+    , .{ .c = c_name, .t = type_java, .ri = reader_iface, .rc = read_condition_iface, .si = sample_info_iface });
     defer alloc.free(s);
     try out.appendSlice(alloc, s);
 }
@@ -4121,7 +4216,68 @@ const ImplFileGenerator = struct {
     /// of silently doing the wrong thing.
     const unsupported_msg = "QoS/status struct and listener marshaling are not yet implemented in the Java binding";
 
+    /// See `isWriteLoanBufferOp`'s doc comment -- these three DataWriter ops
+    /// get a hand-written concrete override + native decl using
+    /// `java.nio.ByteBuffer` for `cdr_payload`, not the generic per-param
+    /// `typeRefToJava`-driven emission the rest of `emitForwardingOp`/
+    /// `emitNativeDecl` use. `loan_raw`'s `cdr_payload` param is dropped
+    /// entirely (it becomes the return value, not an input) -- see
+    /// `emitWriteLoanBufferInterfaceOp`'s doc comment for why.
+    fn writeLoanBufferParamNames(self: *ImplFileGenerator, op: *const ir.Operation, leading_ptr: bool) !void {
+        const is_loan = std.mem.eql(u8, op.name, "loan_raw");
+        var first = true;
+        if (leading_ptr) {
+            try self.write("ptr_");
+            first = false;
+        }
+        for (op.params) |p| {
+            if (is_loan and std.mem.eql(u8, p.name, "cdr_payload")) continue;
+            if (!first) try self.write(", ");
+            first = false;
+            try self.print("{s}", .{p.name});
+        }
+    }
+
+    fn writeLoanBufferParamDecls(self: *ImplFileGenerator, op: *const ir.Operation, leading_ptr_type: ?[]const u8) !void {
+        const is_loan = std.mem.eql(u8, op.name, "loan_raw");
+        var first = true;
+        if (leading_ptr_type) |lt| {
+            try self.print("{s} ptr", .{lt});
+            first = false;
+        }
+        for (op.params) |p| {
+            if (is_loan and std.mem.eql(u8, p.name, "cdr_payload")) continue;
+            if (!first) try self.write(", ");
+            first = false;
+            if (std.mem.eql(u8, p.name, "cdr_payload")) {
+                try self.print("java.nio.ByteBuffer {s}", .{p.name});
+                continue;
+            }
+            const pt = try self.typeRefToJava(p.type_ref);
+            defer self.alloc.free(pt);
+            try self.print("{s} {s}", .{ pt, p.name });
+        }
+    }
+
+    fn emitWriteLoanBufferForwardingOp(self: *ImplFileGenerator, op: *const ir.Operation) !void {
+        const ret_java = if (std.mem.eql(u8, op.name, "loan_raw")) "java.nio.ByteBuffer" else "int";
+        try self.write("    @Override\n");
+        try self.print("    public {s} {s}(", .{ ret_java, op.name });
+        try self.writeLoanBufferParamDecls(op, null);
+        try self.print(") {{\n        return n_{s}(", .{op.name});
+        try self.writeLoanBufferParamNames(op, true);
+        try self.write(");\n    }\n");
+    }
+
+    fn emitWriteLoanBufferNativeDecl(self: *ImplFileGenerator, op: *const ir.Operation) !void {
+        const ret_java = if (std.mem.eql(u8, op.name, "loan_raw")) "java.nio.ByteBuffer" else "int";
+        try self.print("    private native {s} n_{s}(", .{ ret_java, op.name });
+        try self.writeLoanBufferParamDecls(op, "long");
+        try self.write(");\n");
+    }
+
     fn emitForwardingOp(self: *ImplFileGenerator, op: *const ir.Operation) !void {
+        if (isWriteLoanBufferOp(self.iface.name, op.name)) return self.emitWriteLoanBufferForwardingOp(op);
         const ret_java = if (op.return_type) |rt|
             try self.typeRefToJava(rt)
         else
@@ -4188,6 +4344,7 @@ const ImplFileGenerator = struct {
     }
 
     fn emitNativeDecl(self: *ImplFileGenerator, op: *const ir.Operation) !void {
+        if (isWriteLoanBufferOp(self.iface.name, op.name)) return self.emitWriteLoanBufferNativeDecl(op);
         const ret_java = if (op.return_type) |rt|
             try self.typeRefToJava(rt)
         else
@@ -4363,17 +4520,22 @@ fn classifyTypeRef(tr: ir.TypeRef) JniCategory {
 ///     generated marshaling functions need a name to hang off of, and a
 ///     genuinely anonymous inline `sequence<T>` param (no typedef) has none
 ///     — see `SeqParamMarshalGenerator.collect`.
-///   - `MemberShape.seq_struct` whose element is itself `.entity`
-///     (`ConditionSeq`, `DataReaderSeq`, …): a bare `sequence<EntityInterface>`
-///     param, handled by `SeqParamMarshalGenerator.emitSeqEntity` — per-
-///     element box/unbox via the same machinery single-entity params already
-///     use (`entityUnboxFnName`/`emitUnboxAsDispatcher` for unbox; a
-///     box-as-most-derived cascade through the target's known concrete
-///     descendants, mirroring `emitUnboxAsDispatcher` but inverted, for box —
-///     see `emitSeqEntity`'s own doc comment). A `.seq_struct` whose element
-///     is a plain struct/enum stays unsupported: no operation in dcps.idl/
-///     zzdds.idl needs one as a bare param today, and it would need real
-///     struct-sequence marshaling this generator doesn't have.
+///   - `MemberShape.seq_struct` whose element is `.entity` (`ConditionSeq`,
+///     `DataReaderSeq`, …), a plain struct (`SampleInfoSeq`, …), or itself a
+///     sequence (`sequence<octet_seq>`, …) — see `seqStructElemKind` and
+///     `SeqParamMarshalGenerator.emitSeqEntity`/`emitSeqPlainStruct`/
+///     `emitSeqNested`. Entity elements box/unbox via the same machinery
+///     single-entity params already use (`entityUnboxFnName`/
+///     `emitUnboxAsDispatcher` for unbox; a box-as-most-derived cascade
+///     through the target's known concrete descendants, mirroring
+///     `emitUnboxAsDispatcher` but inverted, for box — see `emitSeqEntity`'s
+///     own doc comment). A plain-struct element reuses that struct's own
+///     `_from_java`/`_fill_java` (`StructMarshalGenerator` emits these
+///     unconditionally for every struct in the spec, regardless of whether
+///     it's ever used as a bare param). A `.seq_struct` whose element is an
+///     enum stays unsupported: no operation in dcps.idl/zzdds.idl needs one
+///     as a bare param today, and it would need real enum-sequence
+///     marshaling this generator doesn't have.
 /// Ops with an unsupported param stay in the "not yet supported" stub bucket.
 fn paramIsSupportedValueStruct(tr: ir.TypeRef) bool {
     return switch (resolveMemberShape(tr)) {
@@ -4383,7 +4545,7 @@ fn paramIsSupportedValueStruct(tr: ir.TypeRef) bool {
             else => false,
         },
         .seq_struct => switch (tr) {
-            .named => classifyTypeRef(seqElementOf(tr)) == .entity,
+            .named => seqStructElemKind(tr) != .unsupported,
             else => false,
         },
         else => false,
@@ -4400,6 +4562,31 @@ fn isGetListenerOp(op: *const ir.Operation) bool {
     if (!std.mem.eql(u8, op.name, "get_listener")) return false;
     const rt = op.return_type orelse return false;
     return classifyTypeRef(rt) == .callback;
+}
+
+/// `DDS::DataWriter`'s `loan_raw`/`publish_loan_raw`/`return_loan_raw` --
+/// unlike every other `inout OctetSeq` param in this project's IDL (which
+/// maps generically to `List<Byte>`, a fresh copy on every JNI call
+/// boundary), these three ops need the *same* buffer identity to survive
+/// from `loan_raw()`'s return through to `publish_loan_raw()`/
+/// `return_loan_raw()`'s call -- the underlying zzdds core frees/publishes
+/// whatever native pointer it's handed, with no way to recover a lost one.
+/// A `List<Byte>` copy loses that identity every time (confirmed via a real
+/// generated-and-inspected JNI bridge: `n_loan_raw` copies the loaned
+/// buffer into a fresh Java `List`, then discards the native pointer with
+/// no leak-tracking reference kept -- a real, if never-yet-exercised, native
+/// buffer + outstanding-loan-count leak). These three ops get a fully
+/// hand-written emission at every layer (interface, impl, JNI bridge)
+/// instead, using `java.nio.ByteBuffer` (backed by `NewDirectByteBuffer`,
+/// whose `GetDirectBufferAddress` reliably returns the exact same native
+/// address back for the same Java object) to preserve that identity, and
+/// to let generated typed-wrapper code serialize straight into the loaned
+/// buffer instead of through an extra copy.
+fn isWriteLoanBufferOp(iface_name: []const u8, op_name: []const u8) bool {
+    if (!std.mem.eql(u8, iface_name, "DataWriter")) return false;
+    return std.mem.eql(u8, op_name, "loan_raw") or
+        std.mem.eql(u8, op_name, "publish_loan_raw") or
+        std.mem.eql(u8, op_name, "return_loan_raw");
 }
 
 fn opIsJniSupported(op: *const ir.Operation) bool {
@@ -4829,7 +5016,7 @@ const JniBridgeGenerator = struct {
         // its own "before the per-interface bridges" placement, which call
         // into both for `value_struct`-categorized params (see
         // `opIsJniSupported`/`paramIsSupportedValueStruct`).
-        var seq_gen = SeqParamMarshalGenerator{ .alloc = self.alloc, .opts = self.opts, .out = self.out, .cross_file = self.cross_file, .all_entity_ifaces = self.all_entity_ifaces };
+        var seq_gen = SeqParamMarshalGenerator{ .alloc = self.alloc, .opts = self.opts, .out = self.out, .cross_file = self.cross_file, .all_entity_ifaces = self.all_entity_ifaces, .stem_class = stem_class };
         try seq_gen.emitSource(spec);
 
         try self.emitItems(spec.items);
@@ -5268,11 +5455,16 @@ const JniBridgeGenerator = struct {
                         try out.listeners.append(self.alloc, target);
                     },
                     .value_struct => switch (resolveMemberShape(tr)) {
-                        .seq_scalar, .seq_string => {
+                        .seq_scalar, .seq_string, .seq_struct => {
                             // A bare named-sequence-typedef param
-                            // (`StringSeq`, `InstanceHandleSeq`, …) —
-                            // handled by `SeqParamMarshalGenerator`, keyed by
-                            // the typedef's OWN qualified name (not resolved
+                            // (`StringSeq`, `InstanceHandleSeq`, …, and —
+                            // since `SeqParamMarshalGenerator` was extended
+                            // to support sequence-of-plain-struct and
+                            // sequence-of-sequence elements too —
+                            // `seq_struct`-shaped ones like `OctetSeqSeq`/
+                            // `SampleInfoSeq`) — handled by
+                            // `SeqParamMarshalGenerator`, keyed by the
+                            // typedef's OWN qualified name (not resolved
                             // further into the anonymous `.sequence` it
                             // aliases, which has no name of its own — unlike
                             // the struct case below, there's no chain to
@@ -5295,10 +5487,9 @@ const JniBridgeGenerator = struct {
                             if (!already) try out.seqs.append(self.alloc, td);
                         },
                         else => {
-                            // An honest struct/enum/etc — or a `seq_struct`/
-                            // anonymous sequence/fixed_pt/map that never gets
-                            // real JNI marshaling generated for it anyway
-                            // (see
+                            // An honest struct/enum/etc — or an anonymous
+                            // sequence/fixed_pt/map that never gets real JNI
+                            // marshaling generated for it anyway (see
                             // `paramIsSupportedValueStruct`/`opIsJniSupported`),
                             // so skip via the non-panicking resolver.
                             const td = tryResolveToNamedDecl(tr) orelse continue;
@@ -5576,6 +5767,118 @@ const JniBridgeGenerator = struct {
         };
     }
 
+    /// See `isWriteLoanBufferOp`'s doc comment. `loan_raw`/`publish_loan_raw`/
+    /// `return_loan_raw` are always declared directly on `DDS::DataWriter`
+    /// itself (never inherited from a cross-file base), so the plain
+    /// `(void *)(intptr_t)ptr` self-expression `resolveCallTarget` would
+    /// also return for this case is used directly, without the general
+    /// machinery.
+    ///
+    /// `loan_raw`: wraps the loaned native buffer in a `NewDirectByteBuffer`
+    /// instead of copying it into a `List<Byte>` -- returns NULL on failure
+    /// (mirrors this codebase's existing "sentinel return, not an
+    /// exception" convention for a native op that can fail, e.g.
+    /// `registerInstanceRaw` returning 0/HANDLE_NIL).
+    ///
+    /// `publish_loan_raw`/`return_loan_raw`: recover the *same* native
+    /// buffer via `GetDirectBufferAddress` on the Java `ByteBuffer` object
+    /// the caller passed back in -- reliable exactly because that call
+    /// returns the identical address `NewDirectByteBuffer` was given,
+    /// provided (as here) the caller passes the same object rather than a
+    /// `.slice()`/`.duplicate()` of it. The populated length comes from the
+    /// buffer's `position()` (relative `put()` calls, the normal way to
+    /// fill a `ByteBuffer`, advance it) -- not its capacity, so a caller
+    /// that loans more than it ends up writing doesn't publish trailing
+    /// garbage.
+    fn emitWriteLoanBufferJniOp(
+        self: *JniBridgeGenerator,
+        iface: *const ir.Interface,
+        c_name: []const u8,
+        jni_class_prefix: []const u8,
+        op: *const ir.Operation,
+    ) !void {
+        const native_name = try std.fmt.allocPrint(self.alloc, "n_{s}", .{op.name});
+        defer self.alloc.free(native_name);
+        const jni_fn = try self.buildJniFnName(jni_class_prefix, native_name);
+        defer self.alloc.free(jni_fn);
+
+        // These three ops are declared directly on DDS::DataWriter, but
+        // this function also runs when generating a *derived* interface's
+        // own JNI bridge (e.g. zzdds::DataWriter : DDS::DataWriter) that
+        // inherits them cross-file -- resolveCallTarget gives the real
+        // declaring interface's C symbol + the right `self` conversion
+        // expression in that case, exactly like the generic emitJniBridgeOp
+        // path above uses for every other inherited op. A hardcoded
+        // `{c_name}_loan_raw`-style call (this function's first draft) is
+        // wrong whenever `iface` isn't DDS::DataWriter itself -- confirmed
+        // by a real `-Djava-binding=true` build failure (undeclared
+        // `zzdds_DataWriter_loan_raw`) when this generates for
+        // zzdds::DataWriter.
+        const call_target = try self.resolveCallTarget(iface, c_name, op.name);
+        defer call_target.deinit(self.alloc);
+        const cc = call_target.c_name;
+        const se = call_target.self_expr;
+
+        if (std.mem.eql(u8, op.name, "loan_raw")) {
+            try self.print(
+                "JNIEXPORT jobject JNICALL {[fname]s}(\n" ++
+                    "    JNIEnv *env, jobject self, jlong ptr, jint size)\n" ++
+                    "{{\n" ++
+                    "    (void)self;\n" ++
+                    "    DDS_OctetSeq _c_cdr_payload; memset(&_c_cdr_payload, 0, sizeof(_c_cdr_payload));\n" ++
+                    "    jint _ret = (jint){[c]s}_loan_raw({[se]s}, (int32_t)size, &_c_cdr_payload);\n" ++
+                    "    if (_ret != DDS_RETCODE_OK || _c_cdr_payload._buffer == NULL) return NULL;\n" ++
+                    "    return (*env)->NewDirectByteBuffer(env, _c_cdr_payload._buffer, (jlong)_c_cdr_payload._maximum);\n" ++
+                    "}}\n\n",
+                .{ .fname = jni_fn, .c = cc, .se = se },
+            );
+            return;
+        }
+        if (std.mem.eql(u8, op.name, "return_loan_raw")) {
+            try self.print(
+                "JNIEXPORT jint JNICALL {[fname]s}(\n" ++
+                    "    JNIEnv *env, jobject self, jlong ptr, jobject cdr_payload)\n" ++
+                    "{{\n" ++
+                    "    (void)self;\n" ++
+                    "    if (cdr_payload == NULL) return DDS_RETCODE_BAD_PARAMETER;\n" ++
+                    "    void *_buf = (*env)->GetDirectBufferAddress(env, cdr_payload);\n" ++
+                    "    jlong _cap = (*env)->GetDirectBufferCapacity(env, cdr_payload);\n" ++
+                    "    if (_buf == NULL || _cap < 0) return DDS_RETCODE_BAD_PARAMETER;\n" ++
+                    "    DDS_OctetSeq _c_cdr_payload = {{ (uint32_t)_cap, (uint32_t)_cap, (uint8_t *)_buf, false }};\n" ++
+                    "    return (jint){[c]s}_return_loan_raw({[se]s}, &_c_cdr_payload);\n" ++
+                    "}}\n\n",
+                .{ .fname = jni_fn, .c = cc, .se = se },
+            );
+            return;
+        }
+        // publish_loan_raw(inout OctetSeq cdr_payload, in OctetSeq key_hash,
+        // in InstanceHandle_t handle, in WriteKind kind)
+        try self.print(
+            "JNIEXPORT jint JNICALL {[fname]s}(\n" ++
+                "    JNIEnv *env, jobject self, jlong ptr, jobject cdr_payload, jobject key_hash, jint handle, jobject kind)\n" ++
+                "{{\n" ++
+                "    (void)self;\n" ++
+                "    if (cdr_payload == NULL) return DDS_RETCODE_BAD_PARAMETER;\n" ++
+                "    void *_buf = (*env)->GetDirectBufferAddress(env, cdr_payload);\n" ++
+                "    jlong _cap = (*env)->GetDirectBufferCapacity(env, cdr_payload);\n" ++
+                "    if (_buf == NULL || _cap < 0) return DDS_RETCODE_BAD_PARAMETER;\n" ++
+                "    jclass _bbcls = (*env)->GetObjectClass(env, cdr_payload);\n" ++
+                "    jmethodID _posm = (*env)->GetMethodID(env, _bbcls, \"position\", \"()I\");\n" ++
+                "    jint _pos = (*env)->CallIntMethod(env, cdr_payload, _posm);\n" ++
+                "    DDS_OctetSeq _c_cdr_payload = {{ (uint32_t)_cap, (uint32_t)_pos, (uint8_t *)_buf, false }};\n" ++
+                "    DDS_OctetSeq _c_key_hash; const DDS_OctetSeq *_p_key_hash = NULL;\n" ++
+                "    if (key_hash != NULL) {{ memset(&_c_key_hash, 0, sizeof(_c_key_hash)); DDS_OctetSeq_from_java(env, key_hash, &_c_key_hash); _p_key_hash = &_c_key_hash; }}\n" ++
+                "    jclass _ecls_kind = (*env)->GetObjectClass(env, kind);\n" ++
+                "    jmethodID _gv_kind = (*env)->GetMethodID(env, _ecls_kind, \"getValue\", \"()I\");\n" ++
+                "    jint _n_kind = (*env)->CallIntMethod(env, kind, _gv_kind);\n" ++
+                "    jint _ret = (jint){[c]s}_publish_loan_raw({[se]s}, &_c_cdr_payload, _p_key_hash, (DDS_InstanceHandle_t)handle, (DDS_WriteKind)_n_kind);\n" ++
+                "    if (_p_key_hash) DDS_OctetSeq_free(&_c_key_hash);\n" ++
+                "    return _ret;\n" ++
+                "}}\n\n",
+            .{ .fname = jni_fn, .c = cc, .se = se },
+        );
+    }
+
     fn emitJniBridgeOp(
         self: *JniBridgeGenerator,
         iface: *const ir.Interface,
@@ -5583,6 +5886,7 @@ const JniBridgeGenerator = struct {
         jni_class_prefix: []const u8,
         op: *const ir.Operation,
     ) !void {
+        if (isWriteLoanBufferOp(iface.name, op.name)) return self.emitWriteLoanBufferJniOp(iface, c_name, jni_class_prefix, op);
         const jni_ret = if (op.return_type) |rt| jniType(rt) else "void";
         const native_name = try std.fmt.allocPrint(self.alloc, "n_{s}", .{op.name});
         defer self.alloc.free(native_name);
@@ -5719,7 +6023,27 @@ const JniBridgeGenerator = struct {
                         ),
                     }
                 },
-                else => {},
+                // `classifyTypeRef` lumps a bare enum/bitmask param into
+                // `.scalar` ("a plain scalar on both sides of the boundary"),
+                // but `jniType` actually gives it `jobject` (a real Java enum
+                // *object*, matching how a struct-field enum member is
+                // represented elsewhere in this file, e.g.
+                // `emitMemberFromJava`'s `.enum_` case) — a bare `int`/`long`
+                // scalar needs no prep at all, but an enum needs unboxing via
+                // its `getValue()` method first, the same pattern
+                // `emitMemberFromJava` already uses. Nothing triggered this
+                // before: no operation anywhere in this project's IDL corpus
+                // had a bare enum-typed *parameter* until now (every other
+                // enum usage is a struct field, handled by a completely
+                // different code path).
+                .scalar => if (resolveMemberShape(p.type_ref) == .enum_) {
+                    try self.print(
+                        "    jclass _ecls_{[name]s} = (*env)->GetObjectClass(env, {[name]s});\n" ++
+                            "    jmethodID _gv_{[name]s} = (*env)->GetMethodID(env, _ecls_{[name]s}, \"getValue\", \"()I\");\n" ++
+                            "    jint _n_{[name]s} = (*env)->CallIntMethod(env, {[name]s}, _gv_{[name]s});\n",
+                        .{ .name = p.name },
+                    );
+                },
             }
         }
 
@@ -5767,7 +6091,13 @@ const JniBridgeGenerator = struct {
                 else => {
                     const ct = try self.typeRefToC(p.type_ref);
                     defer self.alloc.free(ct);
-                    try self.print(", ({s}){s}", .{ ct, p.name });
+                    // Mirror the prep loop's `.scalar` + enum special case:
+                    // pass the unboxed `jint` local, not the raw `jobject`.
+                    if (resolveMemberShape(p.type_ref) == .enum_) {
+                        try self.print(", ({s})_n_{s}", .{ ct, p.name });
+                    } else {
+                        try self.print(", ({s}){s}", .{ ct, p.name });
+                    }
                 },
             }
         }
@@ -6204,6 +6534,23 @@ fn resolveToNamedDecl(tr: ir.TypeRef) ir.TypeDecl {
             else => td,
         },
         else => unreachable,
+    };
+}
+
+/// What kind of element a `MemberShape.seq_struct`-shaped `sequence<T>`
+/// actually has — `resolveMemberShape` lumps these three (plus a genuinely
+/// unsupported case, e.g. `sequence<SomeEnum>`) together under one shape
+/// since none of them are `.scalar`/`.string_`; `SeqParamMarshalGenerator`
+/// needs the finer distinction to pick the right marshaling strategy.
+const SeqStructElemKind = enum { entity, plain_struct, nested_seq, unsupported };
+
+fn seqStructElemKind(tr: ir.TypeRef) SeqStructElemKind {
+    const elem = seqElementOf(tr);
+    if (classifyTypeRef(elem) == .entity) return .entity;
+    return switch (resolveMemberShape(elem)) {
+        .nested_struct => .plain_struct,
+        .seq_scalar, .seq_string, .seq_struct => .nested_seq,
+        .scalar, .string_, .enum_ => .unsupported, // e.g. sequence<SomeEnum> -- not needed today
     };
 }
 
@@ -6765,6 +7112,10 @@ const SeqParamMarshalGenerator = struct {
     /// bare (non-sequence) entity param; always populated from
     /// `JniBridgeGenerator.all_entity_ifaces`.
     all_entity_ifaces: []const *const ir.Interface = &.{},
+    /// Needed by `binClass` (`emitSeqPlainStruct`'s `_fill_java` direction,
+    /// to `FindClass` a fresh element instance) — same purpose as
+    /// `StructMarshalGenerator.stem_class`, unused before that case existed.
+    stem_class: []const u8 = "",
 
     fn write(self: *SeqParamMarshalGenerator, s: []const u8) !void {
         try self.out.appendSlice(self.alloc, s);
@@ -6774,6 +7125,10 @@ const SeqParamMarshalGenerator = struct {
         const s = try std.fmt.allocPrint(self.alloc, fmt, args);
         defer self.alloc.free(s);
         try self.out.appendSlice(self.alloc, s);
+    }
+
+    fn binClass(self: *SeqParamMarshalGenerator, qualified_name: []const u8) ![]u8 {
+        return dataTypeBinaryClassName(self.alloc, self.opts, self.stem_class, self.cross_file, qualified_name);
     }
 
     fn cName(self: *SeqParamMarshalGenerator, qualified_name: []const u8) ![]u8 {
@@ -6839,7 +7194,21 @@ const SeqParamMarshalGenerator = struct {
         if (classifyTypeRef(tr) != .value_struct) return;
         switch (resolveMemberShape(tr)) {
             .seq_scalar, .seq_string => {},
-            .seq_struct => if (classifyTypeRef(seqElementOf(tr)) != .entity) return,
+            .seq_struct => switch (seqStructElemKind(tr)) {
+                .unsupported => return,
+                .nested_seq => {
+                    // The inner sequence type has its own `_from_java`/
+                    // `_fill_java` pair (same as any bare sequence<T> param)
+                    // -- ensure it's collected too, even if it's never used
+                    // as a bare op param anywhere else in this file (e.g. a
+                    // batch-only `sequence<octet_seq>` whose `octet_seq`
+                    // element type happens not to appear standalone).
+                    // Recurses naturally to arbitrary nesting depth; `seen`
+                    // guards against duplicate emission either way.
+                    try self.maybeCollect(seqElementOf(tr), seen, out);
+                },
+                .entity, .plain_struct => {},
+            },
             else => return,
         }
         const td = switch (tr) {
@@ -6859,8 +7228,13 @@ const SeqParamMarshalGenerator = struct {
         switch (resolveMemberShape(tr)) {
             .seq_scalar => try self.emitSeqScalar(c_name, resolveScalarBase(seqElementOf(tr))),
             .seq_string => try self.emitSeqString(c_name),
-            .seq_struct => try self.emitSeqEntity(c_name, resolveToNamedDecl(seqElementOf(tr)).interface),
-            else => unreachable, // collect() only appends seq_scalar/seq_string/seq_struct-of-entity
+            .seq_struct => switch (seqStructElemKind(tr)) {
+                .entity => try self.emitSeqEntity(c_name, resolveToNamedDecl(seqElementOf(tr)).interface),
+                .plain_struct => try self.emitSeqPlainStruct(c_name, resolveToNamedDecl(seqElementOf(tr)).struct_),
+                .nested_seq => try self.emitSeqNested(c_name, seqElementOf(tr)),
+                .unsupported => unreachable, // collect() never appends an unsupported .seq_struct element
+            },
+            else => unreachable, // collect() only appends seq_scalar/seq_string/seq_struct
         }
     }
 
@@ -6995,6 +7369,91 @@ const SeqParamMarshalGenerator = struct {
                 "        (*env)->CallBooleanMethod(env, list, _add, _el);\n" ++
                 "    }}\n}}\n\n",
             .{ .c = c_name, .box = box_fn },
+        );
+    }
+
+    /// `sequence<T>` op param whose element `T` is a plain (non-entity)
+    /// struct, e.g. `SampleInfoSeq` (`sequence<SampleInfo>`) — reuses `T`'s
+    /// own `_from_java`/`_fill_java`, unconditionally emitted for every
+    /// struct in the spec by `StructMarshalGenerator` regardless of whether
+    /// `T` is ever used as a bare param anywhere (confirmed by reading
+    /// `StructMarshalGenerator.emitSource`'s `collectStructs` call, which
+    /// walks every struct type_decl in the spec, not just referenced ones).
+    fn emitSeqPlainStruct(self: *SeqParamMarshalGenerator, c_name: []const u8, s: *const ir.Struct) !void {
+        const elem_c = try self.cName(s.qualified_name);
+        defer self.alloc.free(elem_c);
+        try self.emitSeqElementFromJava(c_name, elem_c);
+        const bin = try self.binClass(s.qualified_name);
+        defer self.alloc.free(bin);
+        try self.emitSeqElementFillJava(c_name, elem_c, bin);
+    }
+
+    /// `sequence<T>` op param whose element `T` is itself a sequence typedef
+    /// (nested), e.g. `sequence<octet_seq>` — reuses `T`'s own bare
+    /// `_from_java`/`_fill_java` pair (`maybeCollect` ensures `T` is
+    /// collected and emitted too, even if never used as a bare param on its
+    /// own). Java-side, `T` crosses as `java.util.List` regardless of its
+    /// own element shape, so the OUT-direction element class is always
+    /// `java/util/ArrayList` (`T`'s own `_fill_java` only needs an existing
+    /// `List` to `clear()`+`add()` into, same convention every bare sequence
+    /// param already follows — a freshly `NewObject`'d empty `ArrayList`
+    /// satisfies that trivially).
+    fn emitSeqNested(self: *SeqParamMarshalGenerator, c_name: []const u8, elem_tr: ir.TypeRef) !void {
+        const elem_c = try self.cName(ir.typeDeclQualifiedName(elem_tr.named));
+        defer self.alloc.free(elem_c);
+        try self.emitSeqElementFromJava(c_name, elem_c);
+        try self.emitSeqElementFillJava(c_name, elem_c, "java/util/ArrayList");
+    }
+
+    /// Shared Java→C direction for `emitSeqPlainStruct`/`emitSeqNested`:
+    /// identical shape to `emitSeqEntity`'s own `_from_java` (loop over the
+    /// incoming `List`, call the element's own marshaling function per
+    /// entry) — the element is already a fully-constructed Java object
+    /// either way, so unlike the C→Java direction below, no `NewObject` is
+    /// needed here regardless of what kind of element this is.
+    fn emitSeqElementFromJava(self: *SeqParamMarshalGenerator, c_name: []const u8, elem_c: []const u8) !void {
+        try self.print(
+            "void {[c]s}_from_java(JNIEnv *env, jobject list, {[c]s} *out) {{\n" ++
+                "    jclass _lc = (*env)->GetObjectClass(env, list);\n" ++
+                "    jmethodID _sz = (*env)->GetMethodID(env, _lc, \"size\", \"()I\");\n" ++
+                "    jmethodID _get = (*env)->GetMethodID(env, _lc, \"get\", \"(I)Ljava/lang/Object;\");\n" ++
+                "    int32_t _n = (*env)->CallIntMethod(env, list, _sz);\n" ++
+                "    out->_buffer = _n > 0 ? malloc(_n * sizeof(*out->_buffer)) : NULL;\n" ++
+                "    out->_length = _n; out->_maximum = _n; out->_release = _n > 0;\n" ++
+                "    for (int32_t _i = 0; _i < _n; _i++) {{\n" ++
+                "        jobject _el = (*env)->CallObjectMethod(env, list, _get, _i);\n" ++
+                "        {[elem]s}_from_java(env, _el, &out->_buffer[_i]);\n" ++
+                "    }}\n}}\n\n",
+            .{ .c = c_name, .elem = elem_c },
+        );
+    }
+
+    /// Shared C→Java direction for `emitSeqPlainStruct`/`emitSeqNested`:
+    /// unlike an entity element (whose box function atomically returns a
+    /// ready-made object) a struct/nested-sequence element's own
+    /// `_fill_java` only fills an *existing* object's state in place, so a
+    /// fresh instance must be constructed first — same
+    /// `FindClass`+`<init>`+`NewObject` shape `StructMarshalGenerator.
+    /// emitSeqStructFillJava` already uses for the equivalent struct-*field*
+    /// case, adapted here to `clear()`+`add()` directly into the passed-in
+    /// `list` instead of calling a `set_x()` setter on a containing object
+    /// (mirrors `emitSeqEntity`'s own `_fill_java` convention for that same
+    /// reason — a bare param has no containing object to call a setter on).
+    fn emitSeqElementFillJava(self: *SeqParamMarshalGenerator, c_name: []const u8, elem_c: []const u8, elem_bin: []const u8) !void {
+        try self.print(
+            "void {[c]s}_fill_java(JNIEnv *env, const {[c]s} *in, jobject list) {{\n" ++
+                "    jclass _lc = (*env)->GetObjectClass(env, list);\n" ++
+                "    jmethodID _clear = (*env)->GetMethodID(env, _lc, \"clear\", \"()V\");\n" ++
+                "    (*env)->CallVoidMethod(env, list, _clear);\n" ++
+                "    jmethodID _add = (*env)->GetMethodID(env, _lc, \"add\", \"(Ljava/lang/Object;)Z\");\n" ++
+                "    jclass _ec = (*env)->FindClass(env, \"{[bin]s}\");\n" ++
+                "    jmethodID _ector = (*env)->GetMethodID(env, _ec, \"<init>\", \"()V\");\n" ++
+                "    for (int32_t _i = 0; _i < in->_length; _i++) {{\n" ++
+                "        jobject _el = (*env)->NewObject(env, _ec, _ector);\n" ++
+                "        {[elem]s}_fill_java(env, &in->_buffer[_i], _el);\n" ++
+                "        (*env)->CallBooleanMethod(env, list, _add, _el);\n" ++
+                "    }}\n}}\n\n",
+            .{ .c = c_name, .elem = elem_c, .bin = elem_bin },
         );
     }
 };
@@ -7931,18 +8390,18 @@ test "java: --generate-zzdds-wrappers DataReader gets take_next_instance/read_ne
     // take_next_instance/read_next_instance: single-sample, instance-scoped,
     // same shape as take()/read() plus a prevHandle param.
     try testing.expect(std.mem.indexOf(u8, r, "public Sample take_next_instance(long prevHandle, int maxSampleSize) {") != null);
-    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.takeNextInstanceRaw(reader, prevHandle, maxSampleSize, _handle, _valid, _state)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "reader.take_next_instance_raw(_payloads, _hashes, _infos, (int) prevHandle, null, _ANY_STATE, _ANY_STATE, _ANY_STATE, 1)") != null);
     try testing.expect(std.mem.indexOf(u8, r, "public Sample read_next_instance(long prevHandle, int maxSampleSize) {") != null);
-    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.readNextInstanceRaw(reader, prevHandle, maxSampleSize, _handle, _valid, _state)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "reader.read_next_instance_raw(_payloads, _hashes, _infos, (int) prevHandle, null, _ANY_STATE, _ANY_STATE, _ANY_STATE, 1)") != null);
     try testing.expect(std.mem.indexOf(u8, r, "public Sample take_next_instance(long prevHandle) { return take_next_instance(prevHandle, 65536); }") != null);
 
     // take_n/read_n: bulk, mask-filtered, returning Sample[] whose length is
     // the true count (not necessarily `max`).
     try testing.expect(std.mem.indexOf(u8, r, "public Sample[] take_n(int max, int sampleStates, int viewStates, int instanceStates) {") != null);
-    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.takeNRaw(reader, max, sampleStates, viewStates, instanceStates, _handles, _valids)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "reader.take_raw(_payloads, _hashes, _infos, _HANDLE_NIL, null, sampleStates, viewStates, instanceStates, max)") != null);
     try testing.expect(std.mem.indexOf(u8, r, "public Sample[] read_n(int max, int sampleStates, int viewStates, int instanceStates) {") != null);
-    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.readNRaw(reader, max, sampleStates, viewStates, instanceStates, _handles, _valids)") != null);
-    try testing.expect(std.mem.indexOf(u8, r, "private static Sample[] fromPayloads(byte[][] payloads, long[] handles, boolean[] valids) {") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "reader.read_raw(_payloads, _hashes, _infos, _HANDLE_NIL, null, sampleStates, viewStates, instanceStates, max)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "private static Sample[] fromPayloads(java.util.List<java.util.List<Byte>> payloads, java.util.List<Dcps.DDS.SampleInfo> infos) {") != null);
 }
 
 test "java: --generate-zzdds-wrappers DataWriter gets register_instance, _w_timestamp family, and get_key_value/lookup_instance" {
@@ -7976,11 +8435,11 @@ test "java: --generate-zzdds-wrappers DataWriter gets register_instance, _w_time
     try testing.expect(std.mem.indexOf(u8, w, "return register_instance(key);") != null);
 
     try testing.expect(std.mem.indexOf(u8, w, "public int write_w_timestamp(Foo value, long handle, int sec, int nanosec) {") != null);
-    try testing.expect(std.mem.indexOf(u8, w, "ZzddsRuntime.writeRawWTimestamp(writer, 0, value.computeKeyHash(), handle, toPayload(value, false), sec, nanosec)") != null);
+    try testing.expect(std.mem.indexOf(u8, w, "writer.write_raw(toByteList(value.computeKeyHash()), (int) handle, toByteList(toPayload(value, false)), Dcps.DDS.WriteKind.ALIVE_WRITE_KIND, new Dcps.DDS.Time_t(sec, nanosec))") != null);
     try testing.expect(std.mem.indexOf(u8, w, "public int dispose_w_timestamp(Foo key, long handle, int sec, int nanosec) {") != null);
-    try testing.expect(std.mem.indexOf(u8, w, "ZzddsRuntime.writeRawWTimestamp(writer, 1, key.computeKeyHash(), handle, toPayload(key, true), sec, nanosec)") != null);
+    try testing.expect(std.mem.indexOf(u8, w, "writer.write_raw(toByteList(key.computeKeyHash()), (int) handle, toByteList(toPayload(key, true)), Dcps.DDS.WriteKind.DISPOSE_WRITE_KIND, new Dcps.DDS.Time_t(sec, nanosec))") != null);
     try testing.expect(std.mem.indexOf(u8, w, "public int unregister_w_timestamp(Foo key, long handle, int sec, int nanosec) {") != null);
-    try testing.expect(std.mem.indexOf(u8, w, "ZzddsRuntime.writeRawWTimestamp(writer, 2, key.computeKeyHash(), handle, toPayload(key, true), sec, nanosec)") != null);
+    try testing.expect(std.mem.indexOf(u8, w, "writer.write_raw(toByteList(key.computeKeyHash()), (int) handle, toByteList(toPayload(key, true)), Dcps.DDS.WriteKind.UNREGISTER_WRITE_KIND, new Dcps.DDS.Time_t(sec, nanosec))") != null);
 
     try testing.expect(std.mem.indexOf(u8, w, "public Foo get_key_value(long handle) {") != null);
     try testing.expect(std.mem.indexOf(u8, w, "ZzddsRuntime.getKeyValueWriterRaw(writer, handle)") != null);
@@ -8015,22 +8474,22 @@ test "java: --generate-zzdds-wrappers DataReader gets take_instance/read_instanc
     const r = reader_content;
 
     try testing.expect(std.mem.indexOf(u8, r, "public Sample[] take_instance(long instanceHandle, int max, int sampleStates, int viewStates, int instanceStates) {") != null);
-    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.takeNInstanceRaw(reader, instanceHandle, max, sampleStates, viewStates, instanceStates, _handles, _valids)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "reader.take_raw(_payloads, _hashes, _infos, (int) instanceHandle, null, sampleStates, viewStates, instanceStates, max)") != null);
     try testing.expect(std.mem.indexOf(u8, r, "public Sample[] read_instance(long instanceHandle, int max, int sampleStates, int viewStates, int instanceStates) {") != null);
-    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.readNInstanceRaw(reader, instanceHandle, max, sampleStates, viewStates, instanceStates, _handles, _valids)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "reader.read_raw(_payloads, _hashes, _infos, (int) instanceHandle, null, sampleStates, viewStates, instanceStates, max)") != null);
 
     // The condition parameter is typed as the real generated ReadCondition
     // interface (not a raw Object) -- a QueryCondition satisfies it directly
     // via Java interface inheritance, no as_ReadCondition() upcast needed.
     try testing.expect(std.mem.indexOf(u8, r, "public Sample[] take_w_condition(Dcps.DDS.ReadCondition condition, int max) {") != null);
-    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.takeWConditionRaw(reader, condition, max, _handles, _valids)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "reader.take_raw(_payloads, _hashes, _infos, _HANDLE_NIL, condition, _ANY_STATE, _ANY_STATE, _ANY_STATE, max)") != null);
     try testing.expect(std.mem.indexOf(u8, r, "public Sample[] read_w_condition(Dcps.DDS.ReadCondition condition, int max) {") != null);
-    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.readWConditionRaw(reader, condition, max, _handles, _valids)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "reader.read_raw(_payloads, _hashes, _infos, _HANDLE_NIL, condition, _ANY_STATE, _ANY_STATE, _ANY_STATE, max)") != null);
 
     try testing.expect(std.mem.indexOf(u8, r, "public Sample[] take_next_instance_w_condition(Dcps.DDS.ReadCondition condition, long prev, int max) {") != null);
-    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.takeNextInstanceWConditionRaw(reader, condition, prev, max, _handles, _valids)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "reader.take_next_instance_raw(_payloads, _hashes, _infos, (int) prev, condition, _ANY_STATE, _ANY_STATE, _ANY_STATE, max)") != null);
     try testing.expect(std.mem.indexOf(u8, r, "public Sample[] read_next_instance_w_condition(Dcps.DDS.ReadCondition condition, long prev, int max) {") != null);
-    try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.readNextInstanceWConditionRaw(reader, condition, prev, max, _handles, _valids)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "reader.read_next_instance_raw(_payloads, _hashes, _infos, (int) prev, condition, _ANY_STATE, _ANY_STATE, _ANY_STATE, max)") != null);
 
     try testing.expect(std.mem.indexOf(u8, r, "public Foo get_key_value(long handle) {") != null);
     try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.getKeyValueReaderRaw(reader, handle)") != null);
@@ -8857,6 +9316,78 @@ test "java: cross-file value_struct param gets extern marshaling declarations, n
     try testing.expect(std.mem.indexOf(u8, s, "DDS_DomainParticipantQos_from_java(env, qos, &_c_qos);") != null);
 }
 
+test "java: inherited cross-file op with a bare enum param unboxes it via getValue(), not a raw jobject cast" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpecWithImport(
+        alloc,
+        \\module DDS {
+        \\    enum Kind { A_KIND, B_KIND };
+        \\    interface Base { long op(in Kind k); };
+        \\};
+    ,
+        "DDS",
+        "dcps",
+        \\import "dcps.idl";
+        \\module ext {
+        \\    interface Derived : DDS::Base { };
+        \\};
+        ,
+    );
+    defer ir_spec.deinit();
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    const opts = interface.Options{ .input_stem = "ext" };
+    try generateJniSource(alloc, &ir_spec, opts, &out);
+    const s = out.items;
+
+    // `Kind`'s JNI param type is `jobject` (a real Java enum object, see
+    // jniType) -- must be unboxed via getValue() before the C-side call, not
+    // cast directly (a real compile error: "cast to smaller integer type
+    // from jobject"). Confirmed via a real zzdds build before this fix.
+    try testing.expect(std.mem.indexOf(u8, s, "GetMethodID(env, _ecls_k, \"getValue\", \"()I\")") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "jint _n_k = (*env)->CallIntMethod(env, k, _gv_k);") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "(DDS_Kind)_n_k") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "(DDS_Kind)k") == null);
+}
+
+test "java: inherited cross-file op with a sequence-of-struct param gets extern seq marshaling declarations" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpecWithImport(
+        alloc,
+        \\module DDS {
+        \\    struct Point { long x; long y; };
+        \\    typedef sequence<Point> PointSeq;
+        \\    interface Base { long op(inout PointSeq points); };
+        \\};
+    ,
+        "DDS",
+        "dcps",
+        \\import "dcps.idl";
+        \\module ext {
+        \\    interface Derived : DDS::Base { };
+        \\};
+        ,
+    );
+    defer ir_spec.deinit();
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    const opts = interface.Options{ .input_stem = "ext" };
+    try generateJniSource(alloc, &ir_spec, opts, &out);
+    const s = out.items;
+
+    // dcps.idl's own JNI bridge (a separate translation unit, linked into
+    // the same shared library) already defines these -- this file must only
+    // extern-declare them, not redefine (duplicate symbol at link time) or
+    // silently omit them (implicit-function-declaration compile error under
+    // -std=c99, confirmed via a real zzdds build before this fix).
+    try testing.expect(std.mem.indexOf(u8, s, "extern void DDS_PointSeq_from_java(JNIEnv *env, jobject list, DDS_PointSeq *out);") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "extern void DDS_PointSeq_fill_java(JNIEnv *env, const DDS_PointSeq *in, jobject list);") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "void DDS_PointSeq_from_java(JNIEnv *env, jobject list, DDS_PointSeq *out) {") == null);
+    try testing.expect(std.mem.indexOf(u8, s, "DDS_PointSeq_from_java(env, points, &_c_points);") != null);
+}
+
 test "java: @optional scalar struct member gets boxed-type JNI marshaling in StructMarshalGenerator" {
     const alloc = testing.allocator;
     var ir_spec = try buildIrSpec(alloc,
@@ -9082,6 +9613,90 @@ test "java: get_discovered_participants-shaped inout InstanceHandleSeq op is JNI
     defer ifaces.deinit(alloc);
     try collectInterfaces(alloc, ir_spec.items, &ifaces);
     try testing.expect(opIsJniSupported(&ifaces.items[0].operations[0]));
+}
+
+test "java: bare sequence<PlainStruct> param (SampleInfoSeq-shaped) gets real JNI marshaling, not a stub throw" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc,
+        \\struct Info { long x; long y; };
+        \\typedef sequence<Info> InfoSeq;
+        \\interface Reader {
+        \\    long take_raw(inout InfoSeq infos, in long max_samples);
+        \\};
+    );
+    defer ir_spec.deinit();
+
+    var ifaces = std.ArrayListUnmanaged(*const ir.Interface).empty;
+    defer ifaces.deinit(alloc);
+    try collectInterfaces(alloc, ir_spec.items, &ifaces);
+    try testing.expect(opIsJniSupported(&ifaces.items[0].operations[0]));
+
+    const stem_class = try stemToClassName(alloc, "widget");
+    defer alloc.free(stem_class);
+    var java_out = std.ArrayList(u8).empty;
+    defer java_out.deinit(alloc);
+    try generateImplFile(alloc, &ir_spec, ifaces.items[0], stem_class, .{ .input_stem = "widget" }, &java_out);
+    const j = java_out.items;
+    try testing.expect(std.mem.indexOf(u8, j, "n_take_raw(ptr_, infos, max_samples)") != null);
+    try testing.expect(std.mem.indexOf(u8, j, "throw new UnsupportedOperationException") == null);
+
+    var jni_out = std.ArrayList(u8).empty;
+    defer jni_out.deinit(alloc);
+    try generateJniSource(alloc, &ir_spec, .{ .input_stem = "widget" }, &jni_out);
+    const c = jni_out.items;
+    // Per-element loop calling Info's own (unconditionally-emitted) struct
+    // marshal functions, not a reinterpret-cast/unbox shortcut.
+    try testing.expect(std.mem.indexOf(u8, c, "void InfoSeq_from_java(JNIEnv *env, jobject list, InfoSeq *out) {") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "Info_from_java(env, _el, &out->_buffer[_i]);") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "void InfoSeq_fill_java(JNIEnv *env, const InfoSeq *in, jobject list) {") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "Info_fill_java(env, &in->_buffer[_i], _el);") != null);
+    // Fresh element instance constructed before filling it (unlike an
+    // entity's box function, which already returns a ready object).
+    try testing.expect(std.mem.indexOf(u8, c, "jmethodID _ector = (*env)->GetMethodID(env, _ec, \"<init>\", \"()V\");") != null);
+}
+
+test "java: nested sequence<octet_seq> param (batch-payload-shaped) gets real JNI marshaling, not a stub throw" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc,
+        \\typedef sequence<octet> OctetSeq;
+        \\typedef sequence<OctetSeq> OctetSeqSeq;
+        \\interface Reader {
+        \\    long take_raw(inout OctetSeqSeq payloads, in long max_samples);
+        \\};
+    );
+    defer ir_spec.deinit();
+
+    var ifaces = std.ArrayListUnmanaged(*const ir.Interface).empty;
+    defer ifaces.deinit(alloc);
+    try collectInterfaces(alloc, ir_spec.items, &ifaces);
+    try testing.expect(opIsJniSupported(&ifaces.items[0].operations[0]));
+
+    const stem_class = try stemToClassName(alloc, "widget");
+    defer alloc.free(stem_class);
+    var java_out = std.ArrayList(u8).empty;
+    defer java_out.deinit(alloc);
+    try generateImplFile(alloc, &ir_spec, ifaces.items[0], stem_class, .{ .input_stem = "widget" }, &java_out);
+    const j = java_out.items;
+    try testing.expect(std.mem.indexOf(u8, j, "java.util.List<java.util.List<Byte>> payloads") != null);
+    try testing.expect(std.mem.indexOf(u8, j, "throw new UnsupportedOperationException") == null);
+
+    var jni_out = std.ArrayList(u8).empty;
+    defer jni_out.deinit(alloc);
+    try generateJniSource(alloc, &ir_spec, .{ .input_stem = "widget" }, &jni_out);
+    const c = jni_out.items;
+    // The inner OctetSeq type gets its own bare _from_java/_fill_java too
+    // (it's never used as a bare param on its own in this spec -- collected
+    // solely because it's OctetSeqSeq's element).
+    try testing.expect(std.mem.indexOf(u8, c, "void OctetSeq_from_java(JNIEnv *env, jobject list, OctetSeq *out) {") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "void OctetSeq_fill_java(JNIEnv *env, const OctetSeq *in, jobject list) {") != null);
+    // The outer level calls the inner level's marshal functions per element.
+    try testing.expect(std.mem.indexOf(u8, c, "void OctetSeqSeq_from_java(JNIEnv *env, jobject list, OctetSeqSeq *out) {") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "OctetSeq_from_java(env, _el, &out->_buffer[_i]);") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "void OctetSeqSeq_fill_java(JNIEnv *env, const OctetSeqSeq *in, jobject list) {") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "OctetSeq_fill_java(env, &in->_buffer[_i], _el);") != null);
+    // Each nested-level element is a plain java.util.List -- no user-defined
+    // class to FindClass for it, just java/util/ArrayList.
+    try testing.expect(std.mem.indexOf(u8, c, "jclass _ec = (*env)->FindClass(env, \"java/util/ArrayList\");") != null);
 }
 
 test "java: cross-file listener param gets extern trampoline declarations, not duplicates" {

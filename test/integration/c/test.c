@@ -295,6 +295,88 @@ static void test_wire_bytes_beacon_key(void) {
     printf("  test_wire_bytes_beacon_key: OK\n");
 }
 
+/* ── counting-mode writer ────────────────────────────────────────────────── */
+
+/* A counting-mode pass must advance len/pos exactly as a real (fixed-mode)
+   pass would, for both @final (no DHEADER) and @appendable (DHEADER) types --
+   this is what a generated write()'s write-loan sizing pass relies on. */
+static void test_counting_mode_matches_fixed_length(void) {
+    uint8_t buf[1024];
+    ZidlCdrWriter fw;
+    zidl_cdr_writer_init_fixed(&fw, buf, sizeof(buf), ZIDL_XCDR2);
+    check(zidl_cdr_write_encap(&fw), "write_encap (fixed)");
+
+    Sample s;
+    memset(&s, 0, sizeof(s));
+    s.id      = 42;
+    s.str     = "hello world";
+    s.arr[0]  = 10; s.arr[1] = 20; s.arr[2] = 30;
+    s.clr     = Color_GREEN;
+    s.nested.x = 7; s.nested.y = -3;
+    check(Sample_serialize(&fw, &s), "Sample_serialize (fixed)");
+
+    ZidlCdrWriter cw;
+    zidl_cdr_writer_init_counting(&cw, ZIDL_XCDR2);
+    check(zidl_cdr_write_encap(&cw), "write_encap (counting)");
+    check(Sample_serialize(&cw, &s), "Sample_serialize (counting)");
+
+    assert(cw.buf == NULL);
+    assert(cw.len == fw.len);
+    assert(cw.pos == fw.pos);
+
+    Frame f;
+    memset(&f, 0, sizeof(f));
+    f.seq_num = 7;
+    f.topic   = "/sensors/imu";
+
+    ZidlCdrWriter fw2;
+    zidl_cdr_writer_init_fixed(&fw2, buf, sizeof(buf), ZIDL_XCDR2);
+    check(zidl_cdr_write_encap(&fw2), "write_encap (fixed, Frame)");
+    check(Frame_serialize(&fw2, &f), "Frame_serialize (fixed)");
+
+    ZidlCdrWriter cw2;
+    zidl_cdr_writer_init_counting(&cw2, ZIDL_XCDR2);
+    check(zidl_cdr_write_encap(&cw2), "write_encap (counting, Frame)");
+    check(Frame_serialize(&cw2, &f), "Frame_serialize (counting)");
+
+    assert(cw2.buf == NULL);
+    assert(cw2.len == fw2.len);
+    assert(cw2.pos == fw2.pos);
+
+    printf("  test_counting_mode_matches_fixed_length: OK\n");
+}
+
+/* Same check against the PL_CDR (parameter-list) writer path directly --
+   Sample/Frame are @final/@appendable, not @mutable, so there's no PL_CDR
+   golden type to serialize through the generated API; exercise
+   zidl_cdr_pl_* directly instead. */
+static void test_counting_mode_matches_fixed_length_pl_cdr(void) {
+    uint8_t buf[256];
+    ZidlCdrWriter fw;
+    zidl_cdr_writer_init_fixed(&fw, buf, sizeof(buf), ZIDL_PL_CDR);
+    check(zidl_cdr_pl_write_encap(&fw), "pl_write_encap (fixed)");
+    ZidlPlParamHandle fh;
+    check(zidl_cdr_pl_reserve_param(&fw, 0x0001, &fh), "pl_reserve_param (fixed)");
+    check(zidl_cdr_write_u32(&fw, 0xDEADBEEFu), "write_u32 (fixed)");
+    check(zidl_cdr_pl_patch_param(&fw, fh), "pl_patch_param (fixed)");
+    check(zidl_cdr_pl_write_sentinel(&fw), "pl_write_sentinel (fixed)");
+
+    ZidlCdrWriter cw;
+    zidl_cdr_writer_init_counting(&cw, ZIDL_PL_CDR);
+    check(zidl_cdr_pl_write_encap(&cw), "pl_write_encap (counting)");
+    ZidlPlParamHandle ch;
+    check(zidl_cdr_pl_reserve_param(&cw, 0x0001, &ch), "pl_reserve_param (counting)");
+    check(zidl_cdr_write_u32(&cw, 0xDEADBEEFu), "write_u32 (counting)");
+    check(zidl_cdr_pl_patch_param(&cw, ch), "pl_patch_param (counting)");
+    check(zidl_cdr_pl_write_sentinel(&cw), "pl_write_sentinel (counting)");
+
+    assert(cw.buf == NULL);
+    assert(cw.len == fw.len);
+    assert(cw.pos == fw.pos);
+
+    printf("  test_counting_mode_matches_fixed_length_pl_cdr: OK\n");
+}
+
 int main(void) {
     printf("C integration tests:\n");
     test_sample_roundtrip();
@@ -305,6 +387,8 @@ int main(void) {
     test_compute_key_hash_from_cdr();
     test_wire_bytes_sample_key();
     test_wire_bytes_beacon_key();
+    test_counting_mode_matches_fixed_length();
+    test_counting_mode_matches_fixed_length_pl_cdr();
     printf("All C integration tests passed.\n");
     return 0;
 }

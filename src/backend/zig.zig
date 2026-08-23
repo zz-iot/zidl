@@ -2444,7 +2444,12 @@ const Generator = struct {
             defer self.alloc.free(pt);
             // Struct in-params use ?*const T so C callers can pass null for defaults
             // (DDS convention: null QoS means "use entity-type default QoS").
-            if (p.mode == .in_ and std.mem.startsWith(u8, pt, "*const ")) {
+            // Entity-interface in-params are similarly nullable -- an optional
+            // filter/condition param (e.g. dcps.idl's raw op family's
+            // `a_condition`) may legitimately have no entity at all, unlike a
+            // receiver/required param; see the unboxing call site below for
+            // how a null one is reconstructed as a nil-sentinel native value.
+            if (p.mode == .in_ and (std.mem.startsWith(u8, pt, "*const ") or typeRefIsEntityInterface(p.type_ref))) {
                 try self.print(", {s}: ?{s}", .{ p.name, pt });
             } else {
                 try self.print(", {s}: {s}", .{ p.name, pt });
@@ -2573,7 +2578,20 @@ const Generator = struct {
                 const pzig = try self.typeRefToZig(p.type_ref);
                 defer self.alloc.free(pzig);
                 const p_unbox_fn = cAbiUnboxFnName(typeRefEntityInterface(p.type_ref).?);
-                try self.print(", {s}({s}, {s})", .{ p_unbox_fn, pzig, p.name });
+                if (p.mode == .in_) {
+                    // A NULL entity in-param means "no entity" (see the
+                    // signature-emission comment above) -- reconstruct it as
+                    // a nil-sentinel native value instead of unboxing a null
+                    // handle. `.vtable = undefined`: any well-behaved native
+                    // callee taking an optional entity param must check
+                    // `.ptr == zidl_rt.NIL_PTR` (zzdds's `nil.isNil` does)
+                    // before ever touching `.vtable` on a value that might be
+                    // nil, the same discipline already required for a nil
+                    // entity returned by a failed create_*.
+                    try self.print(", if ({s}) |_h| {s}({s}, _h) else .{{ .ptr = zidl_rt.NIL_PTR, .vtable = undefined }}", .{ p.name, p_unbox_fn, pzig });
+                } else {
+                    try self.print(", {s}({s}, {s})", .{ p_unbox_fn, pzig, p.name });
+                }
             } else if (try self.cApiMirrorTypeName(p.type_ref)) |mn| {
                 self.alloc.free(mn);
                 // `_mir_{name}` (declared above) is the real internal-typed
@@ -8062,11 +8080,15 @@ test "zig_backend: --zig-generate-c-api entity-typed param unboxes before dispat
     });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // Topic-typed param arrives as a boxed *anyopaque; must be unboxed to the
-    // native fat-pointer form before the vtable call, uniformly — regardless
-    // of whether the parameter's interface has one implementation or several.
-    try testing.expect(has(s, "pub export fn Publisher_create_writer(self: *anyopaque, a_topic: *anyopaque) callconv(.c) i32 {"));
-    try testing.expect(has(s, "return _self.vtable.create_writer(_self.ptr, zidl_rt.unboxAs(Topic, a_topic));"));
+    // Topic-typed param arrives as a boxed, nullable *anyopaque (an in-param
+    // entity interface may legitimately be absent, e.g. dcps.idl's raw op
+    // family's `a_condition` -- see entity_box.zig's `NIL_PTR`); must be
+    // unboxed to the native fat-pointer form before the vtable call,
+    // uniformly — regardless of whether the parameter's interface has one
+    // implementation or several. A null incoming pointer reconstructs as a
+    // nil-sentinel native value instead of dereferencing a null box.
+    try testing.expect(has(s, "pub export fn Publisher_create_writer(self: *anyopaque, a_topic: ?*anyopaque) callconv(.c) i32 {"));
+    try testing.expect(has(s, "return _self.vtable.create_writer(_self.ptr, if (a_topic) |_h| zidl_rt.unboxAs(Topic, _h) else .{ .ptr = zidl_rt.NIL_PTR, .vtable = undefined });"));
     // Native vtable slot keeps the real Topic fat-pointer param type.
     try testing.expect(has(s, "create_writer: *const fn (*anyopaque, a_topic: Topic) i32,"));
     try testing.expect(!has(s, "create_writer: *const fn (*anyopaque, a_topic: *anyopaque) i32,"));

@@ -5,6 +5,53 @@ For what is currently implemented, see [`features.md`](features.md).
 
 ---
 
+## Raw / loaned DataReader & DataWriter codegen — implemented (2026-08-22)
+
+Full design lived in `zzdds/docs/design/raw-loan-api.md` (and zzdds's own roadmap entry,
+2026-08-22) — recorded here because the actual codegen work spanned all four backends plus
+`zidl-cdr`, not just zzdds core. What landed, per highlight below:
+
+- `max_len == 0`-signals-loan branching for generated `take`/`read` (typed and the new raw
+  ops) landed, inferred structurally from parameter shape — no new annotation needed.
+  Retroactively fixed the existing `_w_condition`/`take_next_instance` family's spec
+  compliance too.
+- New raw ops (`take_raw`, `read_raw`, `take_next_instance_raw`, `read_next_instance_raw`,
+  `return_loan_raw` on `DataReader`; `write_raw`, `loan_raw`, `publish_loan_raw`,
+  `return_loan_raw` on `DataWriter`) landed as real `dcps.idl` operations, generated the
+  same way every other `DataReader`/`DataWriter` op is — not a hand-written per-binding
+  extension. Broader than the design doc's illustrative sketch (which only showed
+  `take_raw`'s unfiltered shape): `read_raw` and the `_next_instance` pair were added for
+  full parity with the old hand-written raw family's instance/condition-filtered variants,
+  and `write_raw` gained a `source_timestamp` parameter to cover the `_w_timestamp` family.
+- `zidl-cdr` got a third `ZidlCdrWriter` mode (`zidl_cdr_writer_init_counting` — `buf ==
+  NULL`, just advances `len`/`pos`) alongside the existing dynamic/fixed modes, for
+  client-side write-loan sizing — wired into the C and C++ backends' generated
+  non-timestamped `write`/`dispose`/`unregister` (count via the counting mode, then
+  `loan_raw` a buffer of exactly that size, then serialize into it via the existing fixed
+  mode). Not wired into Java: Java's generated serialization already produces an
+  exactly-sized `byte[]` via its own grow-and-retry `BufferOverflowException` loop, so the
+  Java typed wrapper reuses that length directly rather than needing a counting mode of its
+  own.
+- Java's write-loan buffer exposure did **not** end up as a new hand-written method in
+  zzdds's `zzdds_java_runtime.c`, contrary to what this entry originally predicted — it
+  landed as a `java.zig` codegen special case instead (`isWriteLoanBufferOp` in
+  `src/backend/java.zig`), generating a real `java.nio.ByteBuffer`-backed
+  `loan_raw`/`publish_loan_raw`/`return_loan_raw` for the base `DataWriter` interface
+  through `NewDirectByteBuffer`/`GetDirectBufferAddress`. `zzdds_java_runtime.c` needed no
+  changes. This surfaced a real, previously unexercised bug in the *generic* per-op JNI
+  marshaling these ops would otherwise have used: it copies through a fresh native buffer
+  on every JNI call boundary, losing the loaned buffer's identity between `loan_raw()` and
+  `publish_loan_raw()` — confirmed via a real re-break that published uninitialized memory
+  as sample data, not merely a resource leak. Fixed by special-casing these three ops
+  (interface, impl, and JNI-bridge emission) to preserve identity via `ByteBuffer` instead
+  of the generic `List<Byte>` copy-both-ways marshaling every other `OctetSeq` param uses.
+- Also fixed a real, live bug found along the way: C and C++'s entire typed reader family
+  carried an incomplete 3-field `zzdds_sample_info` instead of the real 12-field spec
+  `SampleInfo` (missing `source_timestamp` and every generation/rank field) — Java's
+  `Sample` class had the same gap inlined; only Zig was correct before this landed.
+
+---
+
 ## Plugin architecture — direction, not yet started
 
 **Not scheduled; recorded here so near-term flag additions don't quietly paint zidl into
@@ -2141,7 +2188,7 @@ hand-written.
 
 | Item | Notes |
 |---|---|
-| Typed DataReader/DataWriter spec completeness: `_w_condition` family + other gaps (all backends) | Discovered while fixing an unrelated race in `zzdds-examples/zig/waitset`: `zig/waitset` was the only binding with a `take_w_condition`-equivalent (a hand-written Zig-native raw op), which is *why* it alone needed a two-step "query take, then plain take" split the other three bindings never had the option to hit the same race in. Auditing all four backends' `--generate-zzdds-wrappers` output against the DDS 1.4 spec's full `FooDataReader`/`FooDataWriter` implicit-IDL operation set (confirmed directly against the OMG spec text, not just `dcps.idl`'s own comment) found the entire `read_w_condition`/`take_w_condition`/`read_next_instance_w_condition`/`take_next_instance_w_condition` family missing from *every* backend, plus: batch `read_instance`/`take_instance` missing from C/C++/Java (Zig already had it); Java missing `get_key_value`/`lookup_instance` (reader *and* writer) and `register_instance`/`write_w_timestamp`/`dispose_w_timestamp`/`unregister_w_timestamp` entirely, not just the `_w_timestamp` variants; `register_instance_w_timestamp` missing everywhere. Fixed across all four backends, backed by new zzdds-side core (`DataReaderImpl.takeNextInstanceFiltered`/`readNextInstanceFiltered`, instance-selection itself respecting the condition per spec §2.2.2.5.3.18-19, not just "the next instance with any sample") and C-ABI (`zzdds_take/read_w_condition_raw`, `zzdds_take/read_next_instance_w_condition_raw`, `zzdds_take/read_n_instance_raw`) additions — see zzdds's own roadmap for that half. Java needed genuinely new JNI native methods (`ZzddsRuntime`/`zzdds_java_runtime.c`), not just codegen, since the underlying capability didn't exist there at all for several of these. All four `zzdds-examples/{zig,c,cpp,java}/waitset` subscribers updated to use the real generated `take_w_condition` uniformly (closing the originating race everywhere, not just in Zig, and giving every binding's example the same core-interaction shape) and verified via the full 8-pair cross-binding smoke test. **Explicitly out of scope: loan variants** (`take_loaned_w_condition` etc., and extending `take_loaned`/`return_loan` to Zig/Java) — traced today's C/C++ loan API to a plain process-local heap allocation with no actual zero-copy/SHMEM behind it (SHMEM transport is explicitly "not planned for v1" elsewhere in this roadmap and zzdds's own), so building more surface area against that shape now risks throwaway work once real zero-copy design happens; recorded here rather than silently dropped. |
+| Typed DataReader/DataWriter spec completeness: `_w_condition` family + other gaps (all backends) | Discovered while fixing an unrelated race in `zzdds-examples/zig/waitset`: `zig/waitset` was the only binding with a `take_w_condition`-equivalent (a hand-written Zig-native raw op), which is *why* it alone needed a two-step "query take, then plain take" split the other three bindings never had the option to hit the same race in. Auditing all four backends' `--generate-zzdds-wrappers` output against the DDS 1.4 spec's full `FooDataReader`/`FooDataWriter` implicit-IDL operation set (confirmed directly against the OMG spec text, not just `dcps.idl`'s own comment) found the entire `read_w_condition`/`take_w_condition`/`read_next_instance_w_condition`/`take_next_instance_w_condition` family missing from *every* backend, plus: batch `read_instance`/`take_instance` missing from C/C++/Java (Zig already had it); Java missing `get_key_value`/`lookup_instance` (reader *and* writer) and `register_instance`/`write_w_timestamp`/`dispose_w_timestamp`/`unregister_w_timestamp` entirely, not just the `_w_timestamp` variants; `register_instance_w_timestamp` missing everywhere. Fixed across all four backends, backed by new zzdds-side core (`DataReaderImpl.takeNextInstanceFiltered`/`readNextInstanceFiltered`, instance-selection itself respecting the condition per spec §2.2.2.5.3.18-19, not just "the next instance with any sample") and C-ABI (`zzdds_take/read_w_condition_raw`, `zzdds_take/read_next_instance_w_condition_raw`, `zzdds_take/read_n_instance_raw`) additions — see zzdds's own roadmap for that half. Java needed genuinely new JNI native methods (`ZzddsRuntime`/`zzdds_java_runtime.c`), not just codegen, since the underlying capability didn't exist there at all for several of these. All four `zzdds-examples/{zig,c,cpp,java}/waitset` subscribers updated to use the real generated `take_w_condition` uniformly (closing the originating race everywhere, not just in Zig, and giving every binding's example the same core-interaction shape) and verified via the full 8-pair cross-binding smoke test. **Explicitly out of scope at the time: loan variants** (`take_loaned_w_condition` etc., and extending `take_loaned`/`return_loan` to Zig/Java) — traced the then-current C/C++ loan API to a plain process-local heap allocation with no actual zero-copy/SHMEM behind it (SHMEM transport is explicitly "not planned for v1" elsewhere in this roadmap and zzdds's own), so building more surface area against that shape then risked throwaway work once real zero-copy design happens; recorded here rather than silently dropped. **Superseded 2026-08-22**: the "Raw / loaned DataReader & DataWriter codegen" entry above replaced the whole hand-written `take_loaned`/`return_loan` family (C/C++-only) with real `dcps.idl` loan ops generated uniformly across all four bindings including the `_w_condition`/`_instance` filtered variants — not more throwaway surface area against the old shape, a full replacement of it. |
 | ContentFilteredTopic filtering: `get_field_from_cdr` (all backends) | Wires zzdds's `TypeSupport.get_field` hook, previously never emitted by any backend so CFT filtering silently never activated in any binding. See "ContentFilteredTopic filtering" above for the full writeup, including the Java bare-`sequence<T>`-param JNI marshaling fix it needed. |
 | C++ backend: entity-parameter `dynamic_cast` now tries every sibling concrete implementor | New `collectBaseImplementors` (`interface.zig`) lets the C-ABI adapter for an interface with multiple concrete implementors (e.g. `TopicDescription`: `Topic`/`ContentFilteredTopic`/`MultiTopic`) try each one instead of just the single class `entityImplName()` maps by name — see "C and C++ backends" above for the full writeup. Removed `zzdds-examples/cpp/custom-allocator`'s `lookup_topicdescription` workaround. |
 | `--zig-generate-c-api` bare `sequence<EntityInterface>` params: binary layout corruption fixed | Entity-sequence elements (`DataReaderSeq`, `ConditionSeq`, …) now boxed to the C ABI's single-opaque-pointer layout instead of passing the native 16-byte fat-pointer layout straight through — see "Zig backend" above for the full writeup. |
