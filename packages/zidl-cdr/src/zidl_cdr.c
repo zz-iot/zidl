@@ -63,6 +63,16 @@ void zidl_cdr_writer_init_fixed(ZidlCdrWriter *w, uint8_t *buf, size_t cap, int 
     w->grow_fn      = NULL;
 }
 
+void zidl_cdr_writer_init_counting(ZidlCdrWriter *w, int xcdr_version) {
+    w->buf          = NULL;
+    w->cap          = 0;
+    w->len          = 0;
+    w->pos          = 0;
+    w->xcdr_version = xcdr_version;
+    w->byte_order   = ZIDL_CDR_LE;
+    w->grow_fn      = NULL;
+}
+
 void zidl_cdr_writer_deinit(ZidlCdrWriter *w) {
     if (w->grow_fn == writer_grow_default) {
         zidl_cdr_free(w->buf, w->cap);
@@ -77,6 +87,8 @@ void zidl_cdr_writer_set_byte_order(ZidlCdrWriter *w, int byte_order) {
 }
 
 static int writer_ensure(ZidlCdrWriter *w, size_t n) {
+    /* Counting mode: no real buffer, nothing to overflow. */
+    if (!w->buf && !w->grow_fn) return ZIDL_CDR_OK;
     if (w->len + n <= w->cap) return ZIDL_CDR_OK;
     if (!w->grow_fn) return ZIDL_CDR_OVERFLOW;
     return w->grow_fn(w, n);
@@ -85,13 +97,16 @@ static int writer_ensure(ZidlCdrWriter *w, size_t n) {
 static int writer_write_bytes(ZidlCdrWriter *w, const uint8_t *bytes, size_t n) {
     int rc = writer_ensure(w, n);
     if (rc) return rc;
-    memcpy(w->buf + w->len, bytes, n);
+    if (w->buf) memcpy(w->buf + w->len, bytes, n);
     w->len += n;
     w->pos += n;
     return ZIDL_CDR_OK;
 }
 
 static void writer_store_u32_at(const ZidlCdrWriter *w, size_t offset, uint32_t v) {
+    /* Counting mode: no buffer to patch; the byte count already advanced
+     * when the placeholder was written, patching doesn't change len/pos. */
+    if (!w->buf) return;
     if (w->byte_order == ZIDL_CDR_BE) {
         w->buf[offset + 0] = (uint8_t)(v >> 24);
         w->buf[offset + 1] = (uint8_t)(v >> 16);
@@ -133,7 +148,7 @@ int zidl_cdr_write_encap(ZidlCdrWriter *w) {
     };
     int rc = writer_ensure(w, 4);
     if (rc) return rc;
-    memcpy(w->buf + w->len, hdr, 4);
+    if (w->buf) memcpy(w->buf + w->len, hdr, 4);
     w->len += 4;
     /* Reset CDR payload position: alignment is measured from payload start. */
     w->pos = 0;
@@ -914,7 +929,7 @@ int zidl_cdr_pl_write_encap(ZidlCdrWriter *w) {
     static const uint8_t hdr[4] = { 0x00u, 0x03u, 0x00u, 0x00u };
     int rc = writer_ensure(w, 4);
     if (rc) return rc;
-    memcpy(w->buf + w->len, hdr, 4);
+    if (w->buf) memcpy(w->buf + w->len, hdr, 4);
     w->len += 4;
     w->pos  = 0;
     return ZIDL_CDR_OK;
@@ -942,8 +957,10 @@ int zidl_cdr_pl_patch_param(ZidlCdrWriter *w, ZidlPlParamHandle handle) {
         if (rc) return rc;
     }
     uint16_t padded = (uint16_t)(raw_bytes + pad);
-    w->buf[handle.len_offset]     = (uint8_t)(padded & 0xFFu);
-    w->buf[handle.len_offset + 1] = (uint8_t)(padded >> 8);
+    if (w->buf) {
+        w->buf[handle.len_offset]     = (uint8_t)(padded & 0xFFu);
+        w->buf[handle.len_offset + 1] = (uint8_t)(padded >> 8);
+    }
     return ZIDL_CDR_OK;
 }
 
@@ -951,7 +968,7 @@ int zidl_cdr_pl_write_sentinel(ZidlCdrWriter *w) {
     static const uint8_t sentinel[4] = { 0x01u, 0x00u, 0x00u, 0x00u };
     int rc = writer_ensure(w, 4);
     if (rc) return rc;
-    memcpy(w->buf + w->len, sentinel, 4);
+    if (w->buf) memcpy(w->buf + w->len, sentinel, 4);
     w->len += 4;
     w->pos += 4;
     return ZIDL_CDR_OK;
