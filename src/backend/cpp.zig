@@ -2286,7 +2286,6 @@ const CdrGenerator = struct {
         try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
         try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
         try self.writeI("DDS_ReturnCode_t _n = DDS_DataReader_take_raw(reader_, &_c_payloads, &_c_hashes, &_c_infos, DDS_HANDLE_NIL, nullptr, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, 1);\n");
-        try self.writeI("DDS_OctetSeq_free(&_c_hashes);\n");
         try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
         try self.writeI("if (_c_payloads._length == 0) return DDS_RETCODE_NO_DATA;\n");
         try self.writeI("if (cdr_len_out) *cdr_len_out = _c_payloads._buffer[0]._length;\n");
@@ -2294,7 +2293,7 @@ const CdrGenerator = struct {
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length);\n");
         try self.printI("if (!_rc) _rc = out.info.valid_data ? {s}_deserialize(&_r, &out.value) : {s}_deserialize_key(&_r, &out.value);\n", .{ c_name, c_name });
-        try self.writeI("DDS_DataReader_return_loan_raw(reader_, &_c_payloads, &_c_infos);\n");
+        try self.writeI("DDS_DataReader_return_loan_raw(reader_, &_c_payloads, &_c_hashes, &_c_infos);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
@@ -2304,7 +2303,6 @@ const CdrGenerator = struct {
         try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
         try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
         try self.writeI("DDS_ReturnCode_t _n = DDS_DataReader_read_raw(reader_, &_c_payloads, &_c_hashes, &_c_infos, DDS_HANDLE_NIL, nullptr, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, 1);\n");
-        try self.writeI("DDS_OctetSeq_free(&_c_hashes);\n");
         try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
         try self.writeI("if (_c_payloads._length == 0) return DDS_RETCODE_NO_DATA;\n");
         try self.writeI("if (cdr_len_out) *cdr_len_out = _c_payloads._buffer[0]._length;\n");
@@ -2312,7 +2310,7 @@ const CdrGenerator = struct {
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length);\n");
         try self.printI("if (!_rc) _rc = out.info.valid_data ? {s}_deserialize(&_r, &out.value) : {s}_deserialize_key(&_r, &out.value);\n", .{ c_name, c_name });
-        try self.writeI("DDS_DataReader_return_loan_raw(reader_, &_c_payloads, &_c_infos);\n");
+        try self.writeI("DDS_DataReader_return_loan_raw(reader_, &_c_payloads, &_c_hashes, &_c_infos);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
@@ -2322,7 +2320,6 @@ const CdrGenerator = struct {
         try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
         try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
         try self.writeI("DDS_ReturnCode_t _n = DDS_DataReader_take_next_instance_raw(reader_, &_c_payloads, &_c_hashes, &_c_infos, prev, nullptr, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, 1);\n");
-        try self.writeI("DDS_OctetSeq_free(&_c_hashes);\n");
         try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
         try self.writeI("if (_c_payloads._length == 0) return DDS_RETCODE_NO_DATA;\n");
         try self.writeI("if (cdr_len_out) *cdr_len_out = _c_payloads._buffer[0]._length;\n");
@@ -2330,7 +2327,7 @@ const CdrGenerator = struct {
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length);\n");
         try self.printI("if (!_rc) _rc = out.info.valid_data ? {s}_deserialize(&_r, &out.value) : {s}_deserialize_key(&_r, &out.value);\n", .{ c_name, c_name });
-        try self.writeI("DDS_DataReader_return_loan_raw(reader_, &_c_payloads, &_c_infos);\n");
+        try self.writeI("DDS_DataReader_return_loan_raw(reader_, &_c_payloads, &_c_hashes, &_c_infos);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
@@ -2340,7 +2337,6 @@ const CdrGenerator = struct {
         try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
         try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
         try self.writeI("DDS_ReturnCode_t _n = DDS_DataReader_read_next_instance_raw(reader_, &_c_payloads, &_c_hashes, &_c_infos, prev, nullptr, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, 1);\n");
-        try self.writeI("DDS_OctetSeq_free(&_c_hashes);\n");
         try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
         try self.writeI("if (_c_payloads._length == 0) return DDS_RETCODE_NO_DATA;\n");
         try self.writeI("if (cdr_len_out) *cdr_len_out = _c_payloads._buffer[0]._length;\n");
@@ -2348,7 +2344,7 @@ const CdrGenerator = struct {
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length);\n");
         try self.printI("if (!_rc) _rc = out.info.valid_data ? {s}_deserialize(&_r, &out.value) : {s}_deserialize_key(&_r, &out.value);\n", .{ c_name, c_name });
-        try self.writeI("DDS_DataReader_return_loan_raw(reader_, &_c_payloads, &_c_infos);\n");
+        try self.writeI("DDS_DataReader_return_loan_raw(reader_, &_c_payloads, &_c_hashes, &_c_infos);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
@@ -2382,7 +2378,7 @@ const CdrGenerator = struct {
         // (std::vector/std::string members clean up themselves) -- unlike
         // the C backend's equivalent, there's no separate manual _free()
         // call needed here.
-        try self.print("static int {s}_reader_decode_batch(DDS_DataReader reader, DDS_OctetSeqSeq *_payloads, DDS_SampleInfoSeq *_infos, {s} *values, DDS_SampleInfo *infos) {{\n", .{ class_name, cpp_qname });
+        try self.print("static int {s}_reader_decode_batch(DDS_DataReader reader, DDS_OctetSeqSeq *_payloads, DDS_OctetSeq *_hashes, DDS_SampleInfoSeq *_infos, {s} *values, DDS_SampleInfo *infos) {{\n", .{ class_name, cpp_qname });
         try self.writeI("for (uint32_t _i = 0; _i < _payloads->_length; _i++) {\n");
         self.indent_depth += 1;
         try self.writeI("infos[_i] = _infos->_buffer[_i];\n");
@@ -2396,14 +2392,14 @@ const CdrGenerator = struct {
         try self.writeI("if (_rc) {\n");
         self.indent_depth += 1;
         try self.writeI("for (uint32_t _j = 0; _j <= _i; _j++) values[_j] = {};\n");
-        try self.writeI("DDS_DataReader_return_loan_raw(reader, _payloads, _infos);\n");
+        try self.writeI("DDS_DataReader_return_loan_raw(reader, _payloads, _hashes, _infos);\n");
         try self.writeI("return _rc;\n");
         self.indent_depth -= 1;
         try self.writeI("}\n");
         self.indent_depth -= 1;
         try self.writeI("}\n");
         try self.writeI("int _n = (int)_payloads->_length;\n");
-        try self.writeI("DDS_DataReader_return_loan_raw(reader, _payloads, _infos);\n");
+        try self.writeI("DDS_DataReader_return_loan_raw(reader, _payloads, _hashes, _infos);\n");
         try self.writeI("return _n;\n");
         try self.write("}\n\n");
 
@@ -2416,9 +2412,8 @@ const CdrGenerator = struct {
         try self.writeI("DDS_DataReader_take_raw(reader, &_c_payloads, &_c_hashes, &_c_infos, DDS_HANDLE_NIL, nullptr, ss, vs, is, max) :\n");
         try self.writeI("DDS_DataReader_read_raw(reader, &_c_payloads, &_c_hashes, &_c_infos, DDS_HANDLE_NIL, nullptr, ss, vs, is, max);\n");
         self.indent_depth -= 1;
-        try self.writeI("DDS_OctetSeq_free(&_c_hashes);\n");
         try self.writeI("if (_rc0 != DDS_RETCODE_OK) return -1;\n");
-        try self.printI("return {s}_reader_decode_batch(reader, &_c_payloads, &_c_infos, values, infos);\n", .{class_name});
+        try self.printI("return {s}_reader_decode_batch(reader, &_c_payloads, &_c_hashes, &_c_infos, values, infos);\n", .{class_name});
         try self.write("}\n\n");
 
         try self.print("int {s}DataReader::take_n({s} *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ class_name, cpp_qname });
@@ -2439,9 +2434,8 @@ const CdrGenerator = struct {
         try self.writeI("DDS_DataReader_take_raw(reader, &_c_payloads, &_c_hashes, &_c_infos, instance_handle, nullptr, ss, vs, is, max) :\n");
         try self.writeI("DDS_DataReader_read_raw(reader, &_c_payloads, &_c_hashes, &_c_infos, instance_handle, nullptr, ss, vs, is, max);\n");
         self.indent_depth -= 1;
-        try self.writeI("DDS_OctetSeq_free(&_c_hashes);\n");
         try self.writeI("if (_rc0 != DDS_RETCODE_OK) return -1;\n");
-        try self.printI("return {s}_reader_decode_batch(reader, &_c_payloads, &_c_infos, values, infos);\n", .{class_name});
+        try self.printI("return {s}_reader_decode_batch(reader, &_c_payloads, &_c_hashes, &_c_infos, values, infos);\n", .{class_name});
         try self.write("}\n\n");
 
         try self.print("int {s}DataReader::take_instance(DDS_InstanceHandle_t instance_handle, {s} *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {{\n", .{ class_name, cpp_qname });
@@ -2462,9 +2456,8 @@ const CdrGenerator = struct {
         try self.writeI("DDS_DataReader_take_raw(reader, &_c_payloads, &_c_hashes, &_c_infos, DDS_HANDLE_NIL, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max) :\n");
         try self.writeI("DDS_DataReader_read_raw(reader, &_c_payloads, &_c_hashes, &_c_infos, DDS_HANDLE_NIL, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max);\n");
         self.indent_depth -= 1;
-        try self.writeI("DDS_OctetSeq_free(&_c_hashes);\n");
         try self.writeI("if (_rc0 != DDS_RETCODE_OK) return -1;\n");
-        try self.printI("return {s}_reader_decode_batch(reader, &_c_payloads, &_c_infos, values, infos);\n", .{class_name});
+        try self.printI("return {s}_reader_decode_batch(reader, &_c_payloads, &_c_hashes, &_c_infos, values, infos);\n", .{class_name});
         try self.write("}\n\n");
 
         try self.print("int {s}DataReader::take_w_condition(DDS_ReadCondition condition, {s} *values, DDS_SampleInfo *infos, int max) {{\n", .{ class_name, cpp_qname });
@@ -2485,9 +2478,8 @@ const CdrGenerator = struct {
         try self.writeI("DDS_DataReader_take_next_instance_raw(reader, &_c_payloads, &_c_hashes, &_c_infos, prev, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max) :\n");
         try self.writeI("DDS_DataReader_read_next_instance_raw(reader, &_c_payloads, &_c_hashes, &_c_infos, prev, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max);\n");
         self.indent_depth -= 1;
-        try self.writeI("DDS_OctetSeq_free(&_c_hashes);\n");
         try self.writeI("if (_rc0 != DDS_RETCODE_OK) return -1;\n");
-        try self.printI("return {s}_reader_decode_batch(reader, &_c_payloads, &_c_infos, values, infos);\n", .{class_name});
+        try self.printI("return {s}_reader_decode_batch(reader, &_c_payloads, &_c_hashes, &_c_infos, values, infos);\n", .{class_name});
         try self.write("}\n\n");
 
         try self.print("int {s}DataReader::take_next_instance_w_condition(DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, DDS_SampleInfo *infos, int max) {{\n", .{ class_name, cpp_qname });
@@ -2509,14 +2501,21 @@ const CdrGenerator = struct {
         try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
         try self.writeI("Sample _sample{};\n");
         try self.writeI("DDS_ReturnCode_t _n = DDS_DataReader_take_raw(reader_, &_loan_payloads, &_c_hashes, &_loan_infos, DDS_HANDLE_NIL, nullptr, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, 1);\n");
-        try self.writeI("DDS_OctetSeq_free(&_c_hashes);\n");
+        // key_hashes is always a plain copy, independent of _loan_payloads'
+        // loan lifetime (see take_raw's own doc comment) -- released right
+        // away here rather than held for the Loan's lifetime. return_loan_raw
+        // is still the only correct way to release it (a generic free can't
+        // recover this reader's own allocator); passing zeroed payloads/infos
+        // locals limits this call to releasing only _c_hashes, leaving
+        // _loan_payloads/_loan_infos untouched.
+        try self.writeI("{ DDS_OctetSeqSeq _c_empty_payloads = {0}; DDS_SampleInfoSeq _c_empty_infos = {0}; DDS_DataReader_return_loan_raw(reader_, &_c_empty_payloads, &_c_hashes, &_c_empty_infos); }\n");
         try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
         try self.writeI("if (_loan_payloads._length == 0) return DDS_RETCODE_NO_DATA;\n");
         try self.writeI("_sample.info = _loan_infos._buffer[0];\n");
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _loan_payloads._buffer[0]._buffer, _loan_payloads._buffer[0]._length);\n");
         try self.printI("if (!_rc) _rc = _sample.info.valid_data ? {s}_deserialize(&_r, &_sample.value) : {s}_deserialize_key(&_r, &_sample.value);\n", .{ c_name, c_name });
-        try self.writeI("if (_rc) { DDS_DataReader_return_loan_raw(reader_, &_loan_payloads, &_loan_infos); return _rc; }\n");
+        try self.writeI("if (_rc) { DDS_OctetSeq _c_no_hashes = {0}; DDS_DataReader_return_loan_raw(reader_, &_loan_payloads, &_c_no_hashes, &_loan_infos); return _rc; }\n");
         try self.writeI("out = Loan(this, _loan_payloads, _loan_infos, _sample);\n");
         try self.writeI("return DDS_RETCODE_OK;\n");
         try self.write("}\n\n");
@@ -2524,7 +2523,10 @@ const CdrGenerator = struct {
         try self.print("void {s}DataReader::Loan::reset() {{\n", .{class_name});
         try self.writeI("if (active_ && reader_) {\n");
         self.indent_depth += 1;
-        try self.writeI("DDS_DataReader_return_loan_raw(reader_->reader_, &loan_payloads_, &loan_infos_);\n");
+        // See take_loaned's matching comment -- key_hashes was already
+        // released there, so this always passes an empty one.
+        try self.writeI("DDS_OctetSeq _c_no_hashes = {0};\n");
+        try self.writeI("DDS_DataReader_return_loan_raw(reader_->reader_, &loan_payloads_, &_c_no_hashes, &loan_infos_);\n");
         try self.writeI("active_ = false;\n");
         self.indent_depth -= 1;
         try self.writeI("}\n");
@@ -8308,7 +8310,7 @@ test "cpp_backend cdr: zzdds wrapper implementations for keyed topic" {
     try testing.expect(has(s, "DDS_ReturnCode_t TopicDataReader::take_loaned(Loan& out) {"));
     try testing.expect(has(s, "out = Loan(this, _loan_payloads, _loan_infos, _sample);"));
     try testing.expect(has(s, "void TopicDataReader::Loan::reset() {"));
-    try testing.expect(has(s, "DDS_DataReader_return_loan_raw(reader_->reader_, &loan_payloads_, &loan_infos_);"));
+    try testing.expect(has(s, "DDS_DataReader_return_loan_raw(reader_->reader_, &loan_payloads_, &_c_no_hashes, &loan_infos_);"));
 }
 
 test "cpp_backend cdr: _reader_decode_batch cleans up partial samples on deserialization failure" {
@@ -8320,7 +8322,7 @@ test "cpp_backend cdr: _reader_decode_batch cleans up partial samples on deseria
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "for (uint32_t _j = 0; _j <= _i; _j++) values[_j] = {};"));
-    try testing.expect(has(s, "DDS_DataReader_return_loan_raw(reader, _payloads, _infos);"));
+    try testing.expect(has(s, "DDS_DataReader_return_loan_raw(reader, _payloads, _hashes, _infos);"));
 }
 
 // ── _w_condition family / batch take_instance / register_instance_w_timestamp ──
@@ -8402,7 +8404,7 @@ test "cpp_backend cdr: _reader_decode_batch cleans up partial samples on deseria
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "static int Topic_reader_decode_batch(DDS_DataReader reader, DDS_OctetSeqSeq *_payloads, DDS_SampleInfoSeq *_infos, ::Topic *values, DDS_SampleInfo *infos) {"));
+    try testing.expect(has(s, "static int Topic_reader_decode_batch(DDS_DataReader reader, DDS_OctetSeqSeq *_payloads, DDS_OctetSeq *_hashes, DDS_SampleInfoSeq *_infos, ::Topic *values, DDS_SampleInfo *infos) {"));
     try testing.expect(has(s, "for (uint32_t _j = 0; _j <= _i; _j++) values[_j] = {};"));
 }
 
