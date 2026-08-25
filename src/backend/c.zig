@@ -1700,13 +1700,14 @@ fn baseToCType(b: ast.BaseTypeSpec) []const u8 {
 /// zig.zig's `FilterFieldKind`/`classifyFilterFieldKind`, but as a plain enum
 /// rather than a tagged union -- C's `string_like` carries no bound payload
 /// the way Zig's does, so there's nothing to union over.
-const CFilterFieldKind = enum { skip, int_like, float_like, string_like };
+const CFilterFieldKind = enum { skip, int_like, float32, float64, string_like };
 
 fn classifyFilterFieldKindC(tr: ir.TypeRef) CFilterFieldKind {
     return switch (tr) {
         .base => |b| switch (b) {
             .boolean, .octet, .uint8, .char, .wchar, .int8, .short, .int16, .long, .int32, .long_long, .int64, .unsigned_short, .uint16, .unsigned_long, .uint32, .unsigned_long_long, .uint64 => .int_like,
-            .float, .double, .long_double => .float_like,
+            .float => .float32,
+            .double, .long_double => .float64,
             .any, .object, .value_base => .skip,
         },
         .string => .string_like,
@@ -2553,8 +2554,9 @@ const CdrGenerator = struct {
                     try self.printI("_out->i = {s};\n", .{expr});
                     try self.writeI("_matched = true;\n");
                 },
-                .float_like => {
-                    try self.writeI("_out->kind = 1;\n");
+                .float32, .float64 => {
+                    const value_kind: u8 = if (kind == .float32) 3 else 1;
+                    try self.printI("_out->kind = {d};\n", .{value_kind});
                     try self.printI("_out->f = (double)(_v.{s});\n", .{m.name});
                     try self.writeI("_matched = true;\n");
                 },
@@ -5564,7 +5566,7 @@ test "c_backend: zzdds wrappers suppressed when no_typesupport" {
 test "c_backend: get_field_from_cdr generated for int/float/string members, skips nested" {
     var out = try testGenCdrOpts(
         "@appendable struct Inner { long z; };" ++
-            "@appendable struct Topic { @key long x; double y; string<16> color; Inner nested; sequence<long> seq; };",
+            "@appendable struct Topic { @key long x; float y32; double y64; string<16> color; Inner nested; sequence<long> seq; };",
         "topic",
         .{ .generate_zzdds_wrappers = true },
     );
@@ -5578,10 +5580,19 @@ test "c_backend: get_field_from_cdr generated for int/float/string members, skip
     try testing.expect(has(s, "if (_field_len == sizeof(\"x\") - 1 && memcmp(_field, \"x\", _field_len) == 0) {"));
     try testing.expect(has(s, "_out->kind = 0;"));
     try testing.expect(has(s, "_out->i = (int64_t)(_v.x);"));
-    // float-like member
-    try testing.expect(has(s, "} else if (_field_len == sizeof(\"y\") - 1 && memcmp(_field, \"y\", _field_len) == 0) {"));
-    try testing.expect(has(s, "_out->kind = 1;"));
-    try testing.expect(has(s, "_out->f = (double)(_v.y);"));
+    // float32 and float64 members retain distinct middleware discriminators
+    try testing.expect(has(
+        s,
+        "} else if (_field_len == sizeof(\"y32\") - 1 && memcmp(_field, \"y32\", _field_len) == 0) {\n" ++
+            "        _out->kind = 3;\n" ++
+            "        _out->f = (double)(_v.y32);",
+    ));
+    try testing.expect(has(
+        s,
+        "} else if (_field_len == sizeof(\"y64\") - 1 && memcmp(_field, \"y64\", _field_len) == 0) {\n" ++
+            "        _out->kind = 1;\n" ++
+            "        _out->f = (double)(_v.y64);",
+    ));
     // string-like member: scratch-buffer copy, not a raw pointer into _v
     try testing.expect(has(s, "} else if (_field_len == sizeof(\"color\") - 1 && memcmp(_field, \"color\", _field_len) == 0) {"));
     try testing.expect(has(s, "const char *_s = _v.color;"));
