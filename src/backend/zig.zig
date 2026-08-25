@@ -324,12 +324,21 @@ const Generator = struct {
     }
 
     /// Shared by every `{Struct}CAbi` mirror this file emits (see
-    /// `structNeedsCApiMirror`) -- always `std.heap.c_allocator`, matching
-    /// every other C-ABI-facing allocation already in this boundary's
-    /// contract (e.g. `emitStructCApiFree`'s own `v.deinit(std.heap.
-    /// c_allocator)`). Harmless if unused (a struct-less file, or one where
-    /// nothing actually needs a mirror) -- Zig doesn't warn on an unused
-    /// top-level `fn`. Called from all three top-level emission entry points
+    /// `structNeedsCApiMirror`) -- routed through `zidlCAbiFreeAllocator()`
+    /// (defined right below), the same process-wide-or-default resolver
+    /// every other C-ABI-facing allocation in this boundary now uses (e.g.
+    /// `emitStructCApiFree`'s own `v.deinit(zidlCAbiFreeAllocator())`).
+    /// Previously hardcoded `std.heap.c_allocator` directly -- reworked so a
+    /// caller-registered `zidl_cdr_set_allocator()` allocator is honored for
+    /// mirror-struct string fields too, not just plain value structs/
+    /// sequences. Every allocate site for a mirror field (here, and
+    /// `emitCApiMirrorFromCAbiField`/`ToCAbi` below) and its corresponding
+    /// free site route through this same resolver, so they stay matched --
+    /// see zzdds/docs/design/generated-class-lifecycle-design.md, Decisions
+    /// log item 3 (structural elimination) for the audit that found this.
+    /// Harmless if unused (a struct-less file, or one where nothing
+    /// actually needs a mirror) -- Zig doesn't warn on an unused top-level
+    /// `fn`. Called from all three top-level emission entry points
     /// (`emitFile`'s single-file path, and both halves of `--split-files`'
     /// per-module-file / root-stem-file paths) -- each is a separate output
     /// file with its own preamble, so each needs its own copy of these two
@@ -340,13 +349,29 @@ const Generator = struct {
         if (!self.opts.zig_generate_c_api) return;
         try self.write(
             \\fn zidlCAbiDupeCStr(s: []const u8) ?[*:0]const u8 {
-            \\    const buf = std.heap.c_allocator.allocSentinel(u8, s.len, 0) catch return null;
+            \\    const buf = zidlCAbiFreeAllocator().allocSentinel(u8, s.len, 0) catch return null;
             \\    @memcpy(buf, s);
             \\    return buf.ptr;
             \\}
             \\fn zidlCAbiFreeCStr(p: ?[*:0]const u8) void {
             \\    const ptr = p orelse return;
-            \\    std.heap.c_allocator.free(std.mem.span(ptr));
+            \\    zidlCAbiFreeAllocator().free(std.mem.span(ptr));
+            \\}
+            \\
+            \\// A generated release export (see emitStructCApiFree/emitTypedef) has no
+            \\// owning-entity parameter, so it cannot ask "which allocator produced
+            \\// this buffer" the way an entity-scoped op (e.g. return_loan_raw) can.
+            \\// Route through the same process-wide allocator zidl_cdr_set_allocator()
+            \\// lets an application register (already the source of truth for
+            \\// zidl-cdr's own decode-side allocations) instead of hardcoding a fixed
+            \\// choice here — see zzdds/docs/design/generated-class-lifecycle.md for
+            \\// the bug class this closes. Falls back to std.heap.c_allocator (== libc
+            \\// malloc/free, same as zidl_cdr's own unregistered-allocator default)
+            \\// when nothing is registered, so default behavior is unchanged.
+            \\extern fn zidl_cdr_get_allocator() callconv(.c) ?*const zidl_rt.ZidlAllocator;
+            \\fn zidlCAbiFreeAllocator() std.mem.Allocator {
+            \\    if (zidl_cdr_get_allocator()) |za| return zidl_rt.toAllocator(za);
+            \\    return std.heap.c_allocator;
             \\}
             \\
             \\
@@ -1407,12 +1432,12 @@ const Generator = struct {
                 };
                 if (is_entity_seq) {
                     try self.print(
-                        "pub export fn {s}_free(v: *{s}{s}) callconv(.c) void {{ if (v._release) {{ if (v._buffer) |_b| std.heap.c_allocator.free(@as([*]?*anyopaque, @ptrCast(_b))[0..v._maximum]); }} v.* = .{{}}; }}\n\n",
+                        "pub export fn {s}_free(v: *{s}{s}) callconv(.c) void {{ if (v._release) {{ if (v._buffer) |_b| zidlCAbiFreeAllocator().free(@as([*]?*anyopaque, @ptrCast(_b))[0..v._maximum]); }} v.* = .{{}}; }}\n\n",
                         .{ c_name, pfx, t.name },
                     );
                 } else {
                     try self.print(
-                        "pub export fn {s}_free(v: *{s}{s}) callconv(.c) void {{ v.deinit(std.heap.c_allocator); }}\n\n",
+                        "pub export fn {s}_free(v: *{s}{s}) callconv(.c) void {{ v.deinit(zidlCAbiFreeAllocator()); }}\n\n",
                         .{ c_name, pfx, t.name },
                     );
                 }
@@ -1572,6 +1597,18 @@ const Generator = struct {
         // which is what lets it preserve handle identity and avoid leaking a
         // box on every accessor call, without zidl needing to know or care.
         try self.write("        get_c_abi_handle: *const fn (*anyopaque) *anyopaque,\n");
+        try self.ind();
+        // Synthetic, like `get_c_abi_handle` above — not sourced from IDL-
+        // declared ops. Returns the allocator this specific instance was
+        // constructed with (`self.alloc`, universally present per
+        // allocator-strategy.md). Exists so C-ABI free/boxing codegen that
+        // has the *producing* entity in scope (e.g. `emitCApiOp`'s entity-
+        // sequence boxing) can release a buffer through the same allocator
+        // that produced it, instead of guessing at a process-wide default —
+        // see zzdds/docs/design/generated-class-lifecycle-design.md, "Open
+        // questions" item 5 (the per-entity allocator gap left by the
+        // ConditionSeq fix).
+        try self.write("        get_allocator: *const fn (*anyopaque) std.mem.Allocator,\n");
 
         // Synthetic `as_{Base}` slots, one per direct declared base interface
         // — lets a caller upcast to any IDL-declared base (Entity,
@@ -1958,7 +1995,7 @@ const Generator = struct {
             .string => |bound| if (bound == null) {
                 try self.ind();
                 try self.print(
-                    "    out.{s} = if (c.{s}) |_p| (std.heap.c_allocator.dupe(u8, std.mem.span(_p)) catch \"\") else \"\";\n",
+                    "    out.{s} = if (c.{s}) |_p| (zidlCAbiFreeAllocator().dupe(u8, std.mem.span(_p)) catch \"\") else \"\";\n",
                     .{ m.name, m.name },
                 );
                 return;
@@ -1982,7 +2019,7 @@ const Generator = struct {
             // moment either side's `deinit`/`CAbiFree` runs). `.clone()`
             // already exists on every sequence type for exactly this reason.
             try self.ind();
-            try self.print("    out.{s} = c.{s}.clone(std.heap.c_allocator) catch .{{}};\n", .{ m.name, m.name });
+            try self.print("    out.{s} = c.{s}.clone(zidlCAbiFreeAllocator()) catch .{{}};\n", .{ m.name, m.name });
             return;
         }
         try self.ind();
@@ -2028,7 +2065,7 @@ const Generator = struct {
             // used to hold, so this is safe to overwrite with an independent
             // clone (not a shallow copy of `v`'s own buffer).
             try self.ind();
-            try self.print("    out.{s} = v.{s}.clone(std.heap.c_allocator) catch .{{}};\n", .{ m.name, m.name });
+            try self.print("    out.{s} = v.{s}.clone(zidlCAbiFreeAllocator()) catch .{{}};\n", .{ m.name, m.name });
             return;
         }
         try self.ind();
@@ -2058,12 +2095,12 @@ const Generator = struct {
         }
         if (typeRefNeedsSeqDeinit(m.type_ref)) {
             try self.ind();
-            try self.print("    out.{s}.deinit(std.heap.c_allocator);\n", .{m.name});
+            try self.print("    out.{s}.deinit(zidlCAbiFreeAllocator());\n", .{m.name});
         }
     }
 
     /// Emits `{Struct}CAbi` (the mirror type itself), `{Struct}FromCAbi`
-    /// (mirror → internal, allocating via `std.heap.c_allocator`),
+    /// (mirror → internal, allocating via `zidlCAbiFreeAllocator()`),
     /// `{Struct}ToCAbi` (internal → mirror, freeing the mirror's prior
     /// content first — same "free old, write new" contract
     /// `factoryGetDefaultParticipantConfig`'s hand-written Zig already uses
@@ -2117,8 +2154,11 @@ const Generator = struct {
 
     /// Emit `pub export fn DDS_X_free(v: *X) callconv(.c) void` for structs that
     /// contain sequence fields allocated by the middleware (identified by _release).
-    /// The caller frees via the struct's generated `deinit` using std.heap.c_allocator,
-    /// which matches the allocator used by all C-ABI operations in zzdds.
+    /// The caller frees via the struct's generated `deinit`, routed through
+    /// `zidlCAbiFreeAllocator()` (the process-wide allocator registered via
+    /// `zidl_cdr_set_allocator`, falling back to std.heap.c_allocator when none is
+    /// registered) rather than a hardcoded allocator — this function has no
+    /// entity/owning-op in scope to ask "which allocator produced this value".
     fn emitStructCApiFree(self: *Generator, s: *const ir.Struct) !void {
         const pfx = self.opts.type_prefix;
         const c_name = try self.cApiQualName(s.qualified_name, pfx);
@@ -2144,7 +2184,7 @@ const Generator = struct {
             return;
         }
         try self.print(
-            "pub export fn {s}_free(v: *{s}{s}) callconv(.c) void {{ v.deinit(std.heap.c_allocator); }}\n\n",
+            "pub export fn {s}_free(v: *{s}{s}) callconv(.c) void {{ v.deinit(zidlCAbiFreeAllocator()); }}\n\n",
             .{ c_name, pfx, s.name },
         );
     }
@@ -2483,7 +2523,18 @@ const Generator = struct {
             try self.ind();
             try self.print("    const _cseq_{s}: *extern struct {{ _maximum: u32 = 0, _length: u32 = 0, _buffer: ?[*]?*anyopaque = null, _release: bool = false }} = @ptrCast(@alignCast({s}));\n", .{ p.name, p.name });
             try self.ind();
-            try self.print("    if (_cseq_{s}._release) {{ if (_cseq_{s}._buffer) |_ob| std.heap.c_allocator.free(_ob[0.._cseq_{s}._maximum]); }}\n", .{ p.name, p.name, p.name });
+            // The caller's prior buffer, if any, was itself boxed via this
+            // same function's zidlCAbiFreeAllocator()-routed allocation
+            // below -- free it the same way. Deliberately NOT routed through
+            // `_self.vtable.get_allocator()` even though `_self` is in scope
+            // here: this buffer is the *app-owned* boxed buffer (the same
+            // one `{Type}_free()` will eventually free -- see below), and
+            // that generated free has no entity parameter at all (the OMG C
+            // mapping's `_free(ConditionSeq*)` shape), so it can only ever
+            // use the process-wide allocator. This allocation must match
+            // that free, not the entity's own allocator, or a per-entity fix
+            // here would introduce a *new* mismatch instead of closing one.
+            try self.print("    if (_cseq_{s}._release) {{ if (_cseq_{s}._buffer) |_ob| zidlCAbiFreeAllocator().free(_ob[0.._cseq_{s}._maximum]); }}\n", .{ p.name, p.name, p.name });
             try self.ind();
             try self.print("    var _native_{s}: {s} = .{{}};\n", .{ p.name, native_ty });
         }
@@ -2524,7 +2575,15 @@ const Generator = struct {
             }
             if (try self.cApiMirrorInternalNeedsDeinit(p.type_ref)) {
                 try self.ind();
-                try self.print("    defer _mir_{s}.deinit(std.heap.c_allocator);\n", .{p.name});
+                // `_mir_{name}` is pure conversion scratch for the duration
+                // of this one call -- no entity involved (it's a param's
+                // C-ABI-mirror form converted to internal form, not
+                // anything an entity produced) -- so the process-wide
+                // resolver is the correct target, matching its own
+                // allocation via `{Type}FromCAbi` (see
+                // emitCApiMirrorFromCAbiField, also routed through
+                // zidlCAbiFreeAllocator() now).
+                try self.print("    defer _mir_{s}.deinit(zidlCAbiFreeAllocator());\n", .{p.name});
             }
         }
 
@@ -2625,9 +2684,39 @@ const Generator = struct {
         // Box each result element (native fat pointer -> single opaque C-ABI
         // handle, via the same `.vtable.get_c_abi_handle(.ptr)` convention
         // used everywhere else an entity crosses this boundary) and hand the
-        // caller back a C-ABI-shaped seq; free the native temporary's own
-        // buffer (allocated internally by the vtable call, via whatever
-        // allocator the entity is configured with).
+        // caller back a C-ABI-shaped seq.
+        //
+        // Two buffers here, two different allocator sources -- not a
+        // uniform choice, deliberately:
+        // - The **native temporary**'s own buffer (`_native_{name}._buffer`,
+        //   freed below) is allocated *internally* by the vtable call itself
+        //   (e.g. `WaitSet.wait()`'s real Zig implementation, via its own
+        //   `self.alloc`) and never leaves this function -- boxed into
+        //   `_bb`/`_boxed_{name}` and freed within this same call. Since the
+        //   real allocation is provably the receiver's own allocator, and
+        //   nothing else ever touches it, freeing it via
+        //   `_self.vtable.get_allocator(_self.ptr)` is both correct and
+        //   necessary -- this was the actual crash site the ConditionSeq fix
+        //   found (a `gdb bt`-traced mismatch when the entity's real
+        //   allocator differed from the process default). See
+        //   zzdds/docs/design/generated-class-lifecycle-design.md, Decisions
+        //   log item 5.
+        // - `_bb`/`_boxed_{name}` (allocated below, handed to the caller as
+        //   the returned seq's `_buffer`) is **app-owned** -- the caller
+        //   later frees it through the generated standalone `{Type}_free()`
+        //   export (emitTypedef's is_entity_seq branch), which has no
+        //   entity parameter at all (the OMG C mapping's
+        //   `_free(ConditionSeq*)` shape has nowhere to put one). That free
+        //   can only ever use the process-wide zidlCAbiFreeAllocator(), so
+        //   this allocation must match it -- routing it through the
+        //   entity's own allocator instead would swap one mismatch for
+        //   another. This is the specific, narrower limitation Decisions
+        //   log item 5 still leaves open: correct as long as an entity's
+        //   own configured allocator (`..._with_allocator`) matches whatever
+        //   is registered process-wide (`zidl_cdr_set_allocator`) -- true
+        //   for every existing example, not structurally enforced. Closing
+        //   it fully would need `{Type}_free()` itself to take an entity
+        //   parameter, a real C-ABI shape change out of scope here.
         for (op.params) |p| {
             if (!typeRefIsEntitySequence(p.type_ref)) continue;
             try self.ind();
@@ -2635,7 +2724,7 @@ const Generator = struct {
             try self.ind();
             try self.print("    if (_native_{s}._length > 0) {{\n", .{p.name});
             try self.ind();
-            try self.print("        const _bb = std.heap.c_allocator.alloc(?*anyopaque, _native_{s}._length) catch @panic(\"out of memory boxing entity sequence\");\n", .{p.name});
+            try self.print("        const _bb = zidlCAbiFreeAllocator().alloc(?*anyopaque, _native_{s}._length) catch @panic(\"out of memory boxing entity sequence\");\n", .{p.name});
             try self.ind();
             try self.print("        for (_native_{s}._buffer.?[0.._native_{s}._length], 0..) |_e, _i| {{ _bb[_i] = _e.vtable.get_c_abi_handle(_e.ptr); }}\n", .{ p.name, p.name });
             try self.ind();
@@ -2643,7 +2732,7 @@ const Generator = struct {
             try self.ind();
             try self.write("    }\n");
             try self.ind();
-            try self.print("    if (_native_{s}._release) {{ if (_native_{s}._buffer) |_ob| std.heap.c_allocator.free(_ob[0.._native_{s}._maximum]); }}\n", .{ p.name, p.name, p.name });
+            try self.print("    if (_native_{s}._release) {{ if (_native_{s}._buffer) |_ob| _self.vtable.get_allocator(_self.ptr).free(_ob[0.._native_{s}._maximum]); }}\n", .{ p.name, p.name, p.name });
             try self.ind();
             try self.print("    _cseq_{s}.* = .{{ ._maximum = _native_{s}._length, ._length = _native_{s}._length, ._buffer = _boxed_{s}, ._release = _native_{s}._length > 0 }};\n", .{ p.name, p.name, p.name, p.name, p.name });
         }
@@ -2660,7 +2749,24 @@ const Generator = struct {
             try self.print("    {s}ToCAbi(&_r, &_mir_ret);\n", .{inner});
             if (try self.cApiMirrorInternalNeedsDeinit(op.return_type.?)) {
                 try self.ind();
-                try self.write("    _r.deinit(std.heap.c_allocator);\n");
+                // Unlike `_mir_{name}` above, `_r` is NOT conversion scratch
+                // -- it's the direct result of `_self.vtable.{op}(_self.ptr,
+                // ...)`, i.e. the entity's own native operation return
+                // value. Per this codebase's allocator convention (every
+                // allocation traces to a `self.alloc` set at construction),
+                // any owned fields on it were allocated via the entity's
+                // own allocator, which can be a per-entity custom one
+                // (zzdds_create_factory_with_allocator). Freeing it via a
+                // hardcoded/process-wide allocator instead of the entity's
+                // own is the same bug class as the ConditionSeq fix's root
+                // cause -- `_self` is already in scope here and already
+                // carries `get_allocator` (see that fix's Decisions log item
+                // 5), so use it. No real dcps.idl/zzdds.idl operation
+                // returns a mirror-needing struct by value today (see this
+                // function's own test) -- found by design-review reading,
+                // not a crash report -- but the generator must still be
+                // correct for one that does.
+                try self.write("    _r.deinit(_self.vtable.get_allocator(_self.ptr));\n");
             }
             try self.ind();
             try self.write("    return _mir_ret;\n");
@@ -8125,7 +8231,7 @@ test "zig_backend: --zig-generate-c-api bare sequence<EntityInterface> param box
     // vtable through a native-shaped temporary (fat-pointer elements) --
     // never handing the caller's raw buffer straight to the vtable.
     try testing.expect(has(s, "const _cseq_readers: *extern struct { _maximum: u32 = 0, _length: u32 = 0, _buffer: ?[*]?*anyopaque = null, _release: bool = false } = @ptrCast(@alignCast(readers));"));
-    try testing.expect(has(s, "if (_cseq_readers._release) { if (_cseq_readers._buffer) |_ob| std.heap.c_allocator.free(_ob[0.._cseq_readers._maximum]); }"));
+    try testing.expect(has(s, "if (_cseq_readers._release) { if (_cseq_readers._buffer) |_ob| zidlCAbiFreeAllocator().free(_ob[0.._cseq_readers._maximum]); }"));
     try testing.expect(has(s, "var _native_readers: ReaderSeq = .{};"));
     // The plain (non-entity, non-void) return is captured, not inlined into
     // the call statement -- the boxing loop still has to run afterward.
@@ -9315,10 +9421,11 @@ test "zig_backend: struct with sequence field gets _free export under zig_genera
         \\struct Policy { sequence<octet> value; };
     , "t", .{ .zig_generate_c_api = true, .no_typesupport = true, .no_typeobject_support = true });
     defer h.deinit(testing.allocator);
-    // Export function uses C name (qualified) and calls deinit with c_allocator
+    // Export function uses C name (qualified) and frees via the process-wide
+    // registered allocator (falling back to c_allocator), not a hardcoded one.
     try testing.expect(has(h.items, "Policy_free"));
     try testing.expect(has(h.items, "callconv(.c)"));
-    try testing.expect(has(h.items, "v.deinit(std.heap.c_allocator)"));
+    try testing.expect(has(h.items, "v.deinit(zidlCAbiFreeAllocator())"));
 }
 
 test "zig_backend: struct without sequence fields has no _free export" {
@@ -9335,7 +9442,104 @@ test "zig_backend: sequence typedef gets _free export when zig_generate_c_api" {
     , "t", .{ .zig_generate_c_api = true, .no_typesupport = true, .no_typeobject_support = true });
     defer h.deinit(testing.allocator);
     try testing.expect(has(h.items, "pub export fn StringSeq_free("));
-    try testing.expect(has(h.items, "v.deinit(std.heap.c_allocator)"));
+    try testing.expect(has(h.items, "v.deinit(zidlCAbiFreeAllocator())"));
+}
+
+test "zig_backend: entity-sequence typedef _free routes through the registered allocator, not raw c_allocator" {
+    // Regression guard for the ConditionSeq bug (WaitSet::wait()'s boxed
+    // handle-sequence output): this branch previously hardcoded
+    // std.heap.c_allocator.free(), crashing under a per-entity custom
+    // allocator (zzdds_create_factory_with_allocator) with no way to know
+    // which allocator produced the buffer -- see
+    // zzdds/docs/design/generated-class-lifecycle.md.
+    var out = try testGenOpts(
+        \\interface Foo { void noop(); };
+        \\typedef sequence<Foo> FooSeq;
+    , "t", .{ .zig_generate_c_api = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "pub export fn FooSeq_free("));
+    try testing.expect(has(s, "zidlCAbiFreeAllocator().free(@as([*]?*anyopaque, @ptrCast(_b))[0..v._maximum])"));
+    try testing.expect(!has(s, "std.heap.c_allocator.free(@as([*]?*anyopaque"));
+}
+
+// ── Allocator hygiene: structural CI guard ──────────────────────────────────
+//
+// The `key_hashes`, `ConditionSeq`, and C-ABI-mirror-struct bugs (see
+// zzdds/docs/design/generated-class-lifecycle.md and
+// generated-class-lifecycle-design.md) all had the same shape: a generated
+// C-ABI free/allocation body hardcoded `std.heap.c_allocator` instead of
+// routing through `zidlCAbiFreeAllocator()` (no entity in scope) or
+// `_self.vtable.get_allocator(_self.ptr)` (entity in scope) -- and each was
+// found independently, by inspection or by crash, not by any structural
+// check. This test is that structural check: it reads this backend's own
+// source and fails if a NEW unconditional `std.heap.c_allocator` hardcode
+// shows up anywhere this file emits C-ABI-facing generated code, other than
+// the one documented, legitimate case (`zidlCAbiFreeAllocator()`'s own
+// fallback for "nothing registered"). Deliberately pure Zig (`@embedFile` +
+// string scanning), not a shell `grep` step, so it runs identically across
+// this repo's whole CI matrix (Linux/macOS/**Windows**, which has no `grep`)
+// via the same `zig build test` every platform already runs.
+//
+// Scope: this backend (`zig.zig`) only -- confirmed via a full audit this
+// session that `c.zig`'s generated C already routes free bodies through
+// `zidl_cdr_free_*` (Phase 5, allocator-strategy.md), `cpp.zig`'s only
+// `std.heap`-adjacent-looking hits are placement-`new` (unrelated to
+// allocator choice), and `java.zig`'s several `malloc()` calls are
+// transient per-call JNI marshaling scratch, explicitly out of this
+// project's C-ABI-allocator-injection scope (allocator-strategy.md scopes
+// that work to "the C and C++ gaps" only).
+test "allocator hygiene: this backend's only hardcoded-default-allocator line is the documented no-registration fallback" {
+    // Self-reference note: this test's own source unavoidably contains the
+    // needle string (as the thing it searches for, and in this comment) --
+    // scanning would trivially match itself. Fixed by only scanning source
+    // *before* this test's own `test "allocator hygiene..."` line, found via
+    // a distinctive marker below, rather than trying to heuristically
+    // exclude every mention of the needle within this function's own body.
+    const src = @embedFile("zig.zig");
+    const self_marker = "test \"allocator hygiene: this backend's";
+    const self_start = std.mem.indexOf(u8, src, self_marker) orelse
+        @panic("allocator hygiene guard: couldn't find its own marker -- did this test's name change? Update self_marker to match.");
+    const scanned = src[0..self_start];
+
+    var it = std.mem.splitScalar(u8, scanned, '\n');
+    var line_no: usize = 0;
+    var code_hits: usize = 0;
+    while (it.next()) |line| {
+        line_no += 1;
+        if (std.mem.indexOf(u8, line, "std.heap.c_allocator") == null) continue;
+        const trimmed = std.mem.trim(u8, line, " \t");
+        // Doc/line comments discussing the pattern in prose, not emitting
+        // it (e.g. a `///` explaining the fallback).
+        if (std.mem.startsWith(u8, trimmed, "///") or std.mem.startsWith(u8, trimmed, "//")) continue;
+        // A `\\`-continuation string line whose own payload is a `//`
+        // comment *emitted into generated code* (prose explaining the
+        // fallback to a reader of the generated file, not a hardcode this
+        // backend's own logic performs) -- e.g. `emitCApiMirrorPreamble`'s
+        // doc-comment-in-generated-output for `zidlCAbiFreeAllocator()`.
+        if (std.mem.startsWith(u8, trimmed, "\\\\//")) continue;
+        // Other tests' negative-assertion regression guards (e.g. the
+        // ConditionSeq test above) -- checking the *absence* of the old
+        // hardcode in generated output, not emitting a new one.
+        if (std.mem.indexOf(u8, line, "testing.expect") != null) continue;
+        code_hits += 1;
+        // The one allowed line: `zidlCAbiFreeAllocator()`'s own fallback,
+        // emitted verbatim inside `emitCApiMirrorPreamble`'s multiline
+        // string. Any other hit -- a new hardcode, or this exact line
+        // moved/reworded -- fails loudly rather than silently passing, so
+        // a deliberate change to the allow-list is required, not assumed.
+        if (!std.mem.eql(u8, trimmed, "\\\\    return std.heap.c_allocator;")) {
+            std.debug.print(
+                "allocator hygiene guard: unexpected hardcoded-default-allocator line at zig.zig:{d}: {s}\n" ++
+                    "  If this is a new, deliberately-hardcoded case, add it to this test's allow-list with\n" ++
+                    "  a comment explaining why it must never route through zidlCAbiFreeAllocator()/an entity's\n" ++
+                    "  own get_allocator() -- don't just widen the check to make it pass silently.\n",
+                .{ line_no, line },
+            );
+            return error.UnexpectedHardcodedAllocator;
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), code_hits);
 }
 
 test "zig_backend: sequence typedef has no _free export without zig_generate_c_api" {
@@ -9445,7 +9649,7 @@ test "zig_backend: C-ABI mirror generated for an unbounded-string struct without
     const s = out.items;
     try testing.expect(has(s, "pub const NamedCAbi = extern struct {"));
     try testing.expect(has(s, "name: ?[*:0]const u8 = null,"));
-    try testing.expect(has(s, "out.name = if (c.name) |_p| (std.heap.c_allocator.dupe(u8, std.mem.span(_p)) catch \"\") else \"\";"));
+    try testing.expect(has(s, "out.name = if (c.name) |_p| (zidlCAbiFreeAllocator().dupe(u8, std.mem.span(_p)) catch \"\") else \"\";"));
     try testing.expect(has(s, "out.name = zidlCAbiDupeCStr(v.name);"));
     try testing.expect(has(s, "zidlCAbiFreeCStr(out.name);"));
     try testing.expect(!has(s, "out._toml_applied = true;"));
@@ -9505,9 +9709,9 @@ test "zig_backend: C-ABI mirror clones sequence fields instead of shallow-copyin
     , "t", .{ .zig_generate_c_api = true, .no_typesupport = true, .no_typeobject_support = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "out.nums = c.nums.clone(std.heap.c_allocator) catch .{};"));
-    try testing.expect(has(s, "out.nums = v.nums.clone(std.heap.c_allocator) catch .{};"));
-    try testing.expect(has(s, "out.nums.deinit(std.heap.c_allocator);"));
+    try testing.expect(has(s, "out.nums = c.nums.clone(zidlCAbiFreeAllocator()) catch .{};"));
+    try testing.expect(has(s, "out.nums = v.nums.clone(zidlCAbiFreeAllocator()) catch .{};"));
+    try testing.expect(has(s, "out.nums.deinit(zidlCAbiFreeAllocator());"));
 }
 
 test "zig_backend: C-ABI mirror struct containing another mirror-needing struct converts recursively" {
@@ -9637,8 +9841,16 @@ test "zig_backend: --zig-generate-c-api by-value struct return routes through th
     try testing.expect(has(s, "return _mir_ret;"));
     // Named has a string field, so structNeedsCleanup(Named) is true --
     // the internal by-value return must be freed after conversion, since
-    // ToCAbi only reads it (converts into a fresh mirror copy).
-    try testing.expect(has(s, "_r.deinit(std.heap.c_allocator);"));
+    // ToCAbi only reads it (converts into a fresh mirror copy). `_r` is the
+    // entity's own operation return value (`_self.vtable.get_val(...)`
+    // above), not conversion scratch -- per this codebase's allocator
+    // convention, any owned fields on it were allocated via the entity's
+    // own (possibly per-entity-custom) allocator, so freeing it must go
+    // through that same entity's `get_allocator()`, not a hardcoded or
+    // process-wide one -- same bug class as the ConditionSeq fix's root
+    // cause, found here by design-review reading rather than a crash.
+    try testing.expect(has(s, "_r.deinit(_self.vtable.get_allocator(_self.ptr));"));
+    try testing.expect(!has(s, "_r.deinit(std.heap.c_allocator)"));
 }
 
 // ── --zig-generate-toml-config ────────────────────────────────────────────────

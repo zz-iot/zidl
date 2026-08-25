@@ -14,6 +14,7 @@ pub const cpp = @import("cpp.zig");
 pub const java = @import("java.zig");
 pub const zig = @import("zig.zig");
 pub const zig_typeobject_proto = @import("zig_typeobject_proto.zig");
+pub const lifecycle_audit = @import("lifecycle_audit.zig");
 
 pub const Backend = interface.Backend;
 pub const Options = interface.Options;

@@ -568,6 +568,10 @@ void zidl_cdr_set_allocator(const ZidlAllocator *allocator) {
     g_allocator = allocator;
 }
 
+const ZidlAllocator *zidl_cdr_get_allocator(void) {
+    return (const ZidlAllocator *)g_allocator;
+}
+
 void *zidl_cdr_alloc(size_t n) {
     if (g_allocator) return g_allocator->alloc(g_allocator->ctx, n, ZIDL_CDR_ALLOC_ALIGN);
     return malloc(n);

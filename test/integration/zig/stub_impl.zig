@@ -23,6 +23,7 @@ pub const GreeterStub = struct {
         .get_count = get_count,
         .deinit = deinit,
         .get_c_abi_handle = get_c_abi_handle,
+        .get_allocator = get_allocator,
     };
 
     // Vtable slots now use [*:0]const u8 (C-ABI) for strings.
@@ -54,5 +55,9 @@ pub const GreeterStub = struct {
             self.c_abi_handle = zidl_rt.boxEntity(std.testing.allocator, ptr, &vtable) catch @panic("oom");
         }
         return self.c_abi_handle.?;
+    }
+
+    fn get_allocator(_: *anyopaque) std.mem.Allocator {
+        return std.testing.allocator;
     }
 };

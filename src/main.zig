@@ -90,6 +90,7 @@ const Opts = struct {
     cpp_impl_includes: std.ArrayListUnmanaged([]const u8) = .empty,
     c_no_free: bool = false,
     preprocess_timestamp_seconds: ?u64 = null,
+    audit_lifecycle: bool = false,
     inputs: std.ArrayListUnmanaged([]const u8) = .empty,
 };
 
@@ -277,6 +278,14 @@ pub fn main(init: std.process.Init) !void {
             opts.pl_cdr = true;
         } else if (std.mem.eql(u8, arg, "--zig-generate-c-api")) {
             opts.zig_generate_c_api = true;
+        } else if (std.mem.eql(u8, arg, "--audit-lifecycle")) {
+            // Diagnostic-only: runs the generated-class-lifecycle
+            // classification sweep (see
+            // zzdds/docs/design/generated-class-lifecycle-design.md, queue
+            // item 4) against the built IR and prints a Markdown table
+            // instead of generating any backend output. `-b` is still
+            // required by argument parsing but its value is irrelevant here.
+            opts.audit_lifecycle = true;
         } else if (std.mem.eql(u8, arg, "--zig-idiomatic-enums")) {
             opts.zig_idiomatic_enums = true;
         } else if (std.mem.eql(u8, arg, "--zig-generate-toml-config")) {
@@ -623,6 +632,15 @@ fn processFile(
     for (ir_spec.warnings) |w| {
         try stderr.print("{s}\n", .{w});
         try stderr.flush();
+    }
+
+    // ── Phase 4a: lifecycle-classification audit (diagnostic, no codegen) ───
+    if (opts.audit_lifecycle) {
+        const findings = try zidl.backend.lifecycle_audit.sweep(alloc, &ir_spec);
+        defer alloc.free(findings);
+        try zidl.backend.lifecycle_audit.printMarkdownTable(stdout, findings);
+        try stdout.flush();
+        return;
     }
 
     // ── Phase 4b: XRCE profile validation ───────────────────────────────────
