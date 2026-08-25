@@ -1311,13 +1311,14 @@ fn mapTypeName(opts: interface.Options) []const u8 {
 /// `CFilterFieldKind`/`classifyFilterFieldKindC` (see there for the full
 /// rationale); duplicated rather than shared since the two backends'
 /// generators are separate types with no common base.
-const CppFilterFieldKind = enum { skip, int_like, float_like, string_like };
+const CppFilterFieldKind = enum { skip, int_like, float32, float64, string_like };
 
 fn classifyFilterFieldKindCpp(tr: ir.TypeRef) CppFilterFieldKind {
     return switch (tr) {
         .base => |b| switch (b) {
             .boolean, .octet, .uint8, .char, .wchar, .int8, .short, .int16, .long, .int32, .long_long, .int64, .unsigned_short, .uint16, .unsigned_long, .uint32, .unsigned_long_long, .uint64 => .int_like,
-            .float, .double, .long_double => .float_like,
+            .float => .float32,
+            .double, .long_double => .float64,
             .any, .object, .value_base => .skip,
         },
         .string => .string_like,
@@ -2057,8 +2058,9 @@ const CdrGenerator = struct {
                     try self.printI("_out->i = static_cast<int64_t>(_v.{s});\n", .{m.name});
                     try self.writeI("_matched = true;\n");
                 },
-                .float_like => {
-                    try self.writeI("_out->kind = 1;\n");
+                .float32, .float64 => {
+                    const value_kind: u8 = if (kind == .float32) 3 else 1;
+                    try self.printI("_out->kind = {d};\n", .{value_kind});
                     try self.printI("_out->f = static_cast<double>(_v.{s});\n", .{m.name});
                     try self.writeI("_matched = true;\n");
                 },
