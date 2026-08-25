@@ -140,6 +140,20 @@ pub const Options = struct {
     /// Named struct `in` parameters are accepted as `*const T` (pointer hides
     /// potential non-extern struct internals) and dereferenced for the vtable call.
     zig_generate_c_api: bool = false,
+    /// Zig backend only, requires `zig_generate_c_api`: route generated
+    /// `_free()`/mirror-conversion allocations through `zidl_cdr_get_allocator()`
+    /// (the process-wide allocator `zidl_cdr_set_allocator()` registers)
+    /// instead of hardcoding `std.heap.c_allocator`. Opt-in, default off,
+    /// same reasoning as `cpp_pmr_containers` below: it's a real new
+    /// dependency (linking `libzidl_cdr`) for a plain-`zig_generate_c_api`
+    /// consumer that wasn't there before, so it must not be forced on
+    /// anyone who doesn't ask for it. A consumer that already links
+    /// `libzidl_cdr` for its own reasons (e.g. zzdds, which needs it for
+    /// C/C++ CDR decode regardless) should pass this alongside
+    /// `zig_generate_c_api` to get allocator-correct generated frees; one
+    /// that doesn't link it gets the previous (unfixed but
+    /// dependency-free) behavior unless it opts in.
+    zig_generate_c_api_cdr_allocator: bool = false,
     /// Zig backend only: emit enum tags as lowercase snake_case (e.g.
     /// `durability_volatile`) instead of the raw IDL name (`DURABILITY_VOLATILE`).
     /// Zig keywords that collide after lowercasing gain a trailing `_` (e.g.

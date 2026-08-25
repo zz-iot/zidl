@@ -358,24 +358,52 @@ const Generator = struct {
             \\    zidlCAbiFreeAllocator().free(std.mem.span(ptr));
             \\}
             \\
-            \\// A generated release export (see emitStructCApiFree/emitTypedef) has no
-            \\// owning-entity parameter, so it cannot ask "which allocator produced
-            \\// this buffer" the way an entity-scoped op (e.g. return_loan_raw) can.
-            \\// Route through the same process-wide allocator zidl_cdr_set_allocator()
-            \\// lets an application register (already the source of truth for
-            \\// zidl-cdr's own decode-side allocations) instead of hardcoding a fixed
-            \\// choice here — see zzdds/docs/design/generated-class-lifecycle.md for
-            \\// the bug class this closes. Falls back to std.heap.c_allocator (== libc
-            \\// malloc/free, same as zidl_cdr's own unregistered-allocator default)
-            \\// when nothing is registered, so default behavior is unchanged.
-            \\extern fn zidl_cdr_get_allocator() callconv(.c) ?*const zidl_rt.ZidlAllocator;
-            \\fn zidlCAbiFreeAllocator() std.mem.Allocator {
-            \\    if (zidl_cdr_get_allocator()) |za| return zidl_rt.toAllocator(za);
-            \\    return std.heap.c_allocator;
-            \\}
-            \\
-            \\
         );
+        // A generated release export (see emitStructCApiFree/emitTypedef) has no
+        // owning-entity parameter, so it cannot ask "which allocator produced
+        // this buffer" the way an entity-scoped op (e.g. return_loan_raw) can.
+        // Ideally it would route through the same process-wide allocator
+        // zidl_cdr_set_allocator() lets an application register (already the
+        // source of truth for zidl-cdr's own decode-side allocations) instead
+        // of hardcoding a fixed choice here -- see
+        // zzdds/docs/design/generated-class-lifecycle.md for the bug class
+        // this closes.
+        //
+        // That requires calling zidl_cdr_get_allocator(), an extern fn
+        // implemented in libzidl_cdr -- a real, new native-library link
+        // requirement for *any* consumer of --zig-generate-c-api, not just
+        // one that already needs zidl-cdr for other reasons. Confirmed via a
+        // real link failure (Greptile review, zidl PR #45): a consumer
+        // linking only zidl_rt (a previously fully valid --zig-generate-c-api
+        // configuration -- zidl_rt itself has zero dependencies) gets
+        // "undefined symbol: zidl_cdr_get_allocator" the moment it calls any
+        // generated free function, since this preamble is gated only on
+        // zig_generate_c_api, unconditionally. So this routing is opt-in via
+        // --zig-generate-c-api-cdr-allocator (mirrors --cpp-pmr-containers'
+        // reasoning: a real dependency/compatibility cost, must not be forced
+        // on a consumer that didn't ask for it) -- a consumer that already
+        // links libzidl_cdr for its own reasons (e.g. zzdds, which needs it
+        // regardless for C/C++ CDR decode) should pass both flags together to
+        // get allocator-correct generated frees.
+        if (self.opts.zig_generate_c_api_cdr_allocator) {
+            try self.write(
+                \\extern fn zidl_cdr_get_allocator() callconv(.c) ?*const zidl_rt.ZidlAllocator;
+                \\fn zidlCAbiFreeAllocator() std.mem.Allocator {
+                \\    if (zidl_cdr_get_allocator()) |za| return zidl_rt.toAllocator(za);
+                \\    return std.heap.c_allocator;
+                \\}
+                \\
+                \\
+            );
+        } else {
+            try self.write(
+                \\fn zidlCAbiFreeAllocator() std.mem.Allocator {
+                \\    return std.heap.c_allocator;
+                \\}
+                \\
+                \\
+            );
+        }
     }
 
     // ── Item / declaration emission ───────────────────────────────────────────
@@ -6940,6 +6968,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
     generate_zzdds_wrappers: bool = false,
     zig_version: interface.ZigVersion = .@"0.16.0",
     zig_generate_c_api: bool = false,
+    zig_generate_c_api_cdr_allocator: bool = false,
     zig_idiomatic_enums: bool = false,
     zig_generate_toml_config: bool = false,
     /// Module names to inject as if they came from `import "file.idl";` directives.
@@ -6973,6 +7002,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
         .generate_zzdds_wrappers = extra_opts.generate_zzdds_wrappers,
         .zig_version = extra_opts.zig_version,
         .zig_generate_c_api = extra_opts.zig_generate_c_api,
+        .zig_generate_c_api_cdr_allocator = extra_opts.zig_generate_c_api_cdr_allocator,
         .zig_idiomatic_enums = extra_opts.zig_idiomatic_enums,
         .zig_generate_toml_config = extra_opts.zig_generate_toml_config,
     };
@@ -9463,6 +9493,53 @@ test "zig_backend: entity-sequence typedef _free routes through the registered a
     try testing.expect(!has(s, "std.heap.c_allocator.free(@as([*]?*anyopaque"));
 }
 
+test "zig_backend: --zig-generate-c-api-cdr-allocator opt-in flag gates zidl_cdr_get_allocator dependency" {
+    // Regression guard for a real link failure (Greptile review, zidl PR
+    // #45): --zig-generate-c-api's generated zidlCAbiFreeAllocator()
+    // unconditionally referenced zidl_cdr_get_allocator() (an extern fn
+    // implemented only in libzidl_cdr), making libzidl_cdr a new, previously
+    // nonexistent, undocumented link requirement for *any* consumer of
+    // --zig-generate-c-api -- including ones that only ever linked zidl_rt
+    // (a valid, dependency-free configuration before this). Confirmed via a
+    // real standalone repro: `zig build-exe` against generated output
+    // importing only zidl_rt failed with "error: undefined symbol:
+    // zidl_cdr_get_allocator" the moment a generated _free() was called.
+    //
+    // Fixed by making the zidl_cdr-routed behavior opt-in (this flag) rather
+    // than the zig_generate_c_api default -- mirrors --cpp-pmr-containers'
+    // reasoning (a real dependency/compatibility cost must not be forced on
+    // a consumer that didn't ask for it). Default (flag absent): identical
+    // to every consumer's pre-this-session behavior, zero new dependency.
+    // Opt-in (flag present): the allocator-correctness fix this whole
+    // session was about, for a consumer (e.g. zzdds) that already links
+    // libzidl_cdr for other reasons and wants generated frees to route
+    // through the same registered allocator.
+    var without_flag = try testGenOpts(
+        \\interface Foo { void noop(); };
+        \\typedef sequence<Foo> FooSeq;
+    , "t", .{ .zig_generate_c_api = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer without_flag.deinit(testing.allocator);
+    const s_off = without_flag.items;
+    try testing.expect(!has(s_off, "zidl_cdr_get_allocator"));
+    try testing.expect(has(s_off, "fn zidlCAbiFreeAllocator() std.mem.Allocator {\n    return std.heap.c_allocator;\n}"));
+
+    var with_flag = try testGenOpts(
+        \\interface Foo { void noop(); };
+        \\typedef sequence<Foo> FooSeq;
+    , "t", .{ .zig_generate_c_api = true, .zig_generate_c_api_cdr_allocator = true, .no_typesupport = true, .no_typeobject_support = true });
+    defer with_flag.deinit(testing.allocator);
+    const s_on = with_flag.items;
+    try testing.expect(has(s_on, "extern fn zidl_cdr_get_allocator() callconv(.c) ?*const zidl_rt.ZidlAllocator;"));
+    try testing.expect(has(s_on, "if (zidl_cdr_get_allocator()) |za| return zidl_rt.toAllocator(za);"));
+
+    // Both configurations still route generated free call *sites* through
+    // the same-named wrapper -- only zidlCAbiFreeAllocator()'s own
+    // definition (in the preamble) differs; every call site elsewhere in
+    // this file is unaffected by the flag, by construction.
+    try testing.expect(has(s_off, "zidlCAbiFreeAllocator().free(@as([*]?*anyopaque, @ptrCast(_b))[0..v._maximum])"));
+    try testing.expect(has(s_on, "zidlCAbiFreeAllocator().free(@as([*]?*anyopaque, @ptrCast(_b))[0..v._maximum])"));
+}
+
 // ── Allocator hygiene: structural CI guard ──────────────────────────────────
 //
 // The `key_hashes`, `ConditionSeq`, and C-ABI-mirror-struct bugs (see
@@ -9523,11 +9600,19 @@ test "allocator hygiene: this backend's only hardcoded-default-allocator line is
         // hardcode in generated output, not emitting a new one.
         if (std.mem.indexOf(u8, line, "testing.expect") != null) continue;
         code_hits += 1;
-        // The one allowed line: `zidlCAbiFreeAllocator()`'s own fallback,
-        // emitted verbatim inside `emitCApiMirrorPreamble`'s multiline
-        // string. Any other hit -- a new hardcode, or this exact line
-        // moved/reworded -- fails loudly rather than silently passing, so
-        // a deliberate change to the allow-list is required, not assumed.
+        // The two allowed lines, both inside `emitCApiMirrorPreamble`'s
+        // conditional `zidlCAbiFreeAllocator()` emission (see
+        // --zig-generate-c-api-cdr-allocator's doc comment): the
+        // no-registration fallback when the flag *is* passed (the same
+        // line this test originally allow-listed), and the entire function
+        // body when the flag is *not* passed (opt-in default: no
+        // zidl_cdr_get_allocator() dependency at all, matching every
+        // consumer's pre-this-session behavior -- see the Greptile
+        // link-failure finding this flag was added to fix, zidl PR #45).
+        // Any other hit -- a new hardcode, or either of these two exact
+        // lines moved/reworded -- fails loudly rather than silently
+        // passing, so a deliberate change to the allow-list is required,
+        // not assumed.
         if (!std.mem.eql(u8, trimmed, "\\\\    return std.heap.c_allocator;")) {
             std.debug.print(
                 "allocator hygiene guard: unexpected hardcoded-default-allocator line at zig.zig:{d}: {s}\n" ++
@@ -9539,7 +9624,7 @@ test "allocator hygiene: this backend's only hardcoded-default-allocator line is
             return error.UnexpectedHardcodedAllocator;
         }
     }
-    try testing.expectEqual(@as(usize, 1), code_hits);
+    try testing.expectEqual(@as(usize, 2), code_hits);
 }
 
 test "zig_backend: sequence typedef has no _free export without zig_generate_c_api" {
