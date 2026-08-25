@@ -391,6 +391,7 @@ pub const Greeter = extern struct {
         get_count: *const fn (*anyopaque) i32,
         deinit: *const fn (*anyopaque) void,
         get_c_abi_handle: *const fn (*anyopaque) *anyopaque,
+        get_allocator: *const fn (*anyopaque) std.mem.Allocator,
     };
 
     pub fn greet(self: @This(), name: [:0]const u8) []const u8 {
@@ -421,6 +422,7 @@ pub const AdvancedGreeter = extern struct {
         get_count: *const fn (*anyopaque) i32,
         deinit: *const fn (*anyopaque) void,
         get_c_abi_handle: *const fn (*anyopaque) *anyopaque,
+        get_allocator: *const fn (*anyopaque) std.mem.Allocator,
         as_Greeter: *const fn (*anyopaque) Greeter,
     };
 

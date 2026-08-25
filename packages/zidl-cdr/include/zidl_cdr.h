@@ -247,6 +247,18 @@ int zidl_cdr_read_fixed(ZidlCdrReader *r, uint8_t digits, uint8_t scale, double 
  */
 void zidl_cdr_set_allocator(const ZidlAllocator *allocator);
 
+/**
+ * Return the currently registered allocator, or NULL if none is registered
+ * (i.e. zidl-cdr is falling back to libc malloc/free). Lets a *different*
+ * C-ABI layer with no per-call allocator context of its own (e.g. a
+ * generated `_free()` export with no owning-entity parameter) route through
+ * the same process-wide choice `zidl_cdr_set_allocator` established, instead
+ * of hardcoding a fixed allocator of its own — see
+ * zzdds/docs/design/generated-class-lifecycle.md for the bug class this
+ * closes.
+ */
+const ZidlAllocator *zidl_cdr_get_allocator(void);
+
 /** Allocate `n` bytes via the registered allocator (malloc if none registered). */
 void *zidl_cdr_alloc(size_t n);
 

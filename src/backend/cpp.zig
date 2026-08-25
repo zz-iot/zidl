@@ -4198,9 +4198,24 @@ const ConcreteImplGenerator = struct {
                 // statics rather than class-static data members: no
                 // out-of-line definition needed, and C++11 guarantees
                 // thread-safe lazy init.
+                //
+                // std::pmr::unordered_map, not plain std::unordered_map: the
+                // *values* this cache stores are already routed through
+                // std::pmr::polymorphic_allocator(std::pmr::get_default_resource())
+                // below (same as _getOrCreate's own std::allocate_shared
+                // call), but the cache's own hash-table node allocations
+                // were not -- a real gap, not a hypothetical one: confirmed
+                // via an actual operator-new call under a noalloc-guarded
+                // custom-allocator example (zzdds-examples' cpp/custom-
+                // allocator, GuardCondition family) that otherwise routes
+                // every allocation through zidl::setCppAllocator. A bare
+                // `std::pmr::unordered_map<K,V> c;` static already
+                // default-constructs against std::pmr::get_default_resource()
+                // with no explicit allocator argument needed, matching every
+                // other pmr container in this codebase.
                 try self.hdrPrint(
                     "    static std::mutex& _familyMutex();\n" ++
-                        "    static std::unordered_map<{s}, std::weak_ptr<{s}>>& _familyCache();\n",
+                        "    static std::pmr::unordered_map<{s}, std::weak_ptr<{s}>>& _familyCache();\n",
                     .{ c_name, iface.name },
                 );
             } else {
@@ -4322,8 +4337,8 @@ const ConcreteImplGenerator = struct {
                         "    static std::mutex m;\n" ++
                         "    return m;\n" ++
                         "}}\n" ++
-                        "std::unordered_map<{s}, std::weak_ptr<{s}>>& {s}Impl::_familyCache() {{\n" ++
-                        "    static std::unordered_map<{s}, std::weak_ptr<{s}>> c;\n" ++
+                        "std::pmr::unordered_map<{s}, std::weak_ptr<{s}>>& {s}Impl::_familyCache() {{\n" ++
+                        "    static std::pmr::unordered_map<{s}, std::weak_ptr<{s}>> c;\n" ++
                         "    return c;\n" ++
                         "}}\n",
                     .{ iface.name, c_name, iface.name, iface.name, c_name, iface.name },
@@ -9145,6 +9160,45 @@ test "cpp_backend: entity return of an interface used as a base is still a plain
     // _getOrCreate) stays the plain form regardless of inheritance.
     try testing.expect(has(src, "if (!h) return nullptr;"));
     try testing.expect(!has(src, "if (!_h.ptr)"));
+}
+
+test "cpp_backend: family root's _familyCache is std::pmr::unordered_map, not plain std::unordered_map" {
+    // Regression guard for a real bug found this session, not a hypothetical
+    // one: this cache's *values* were already routed through the pmr
+    // allocator (std::allocate_shared with
+    // std::pmr::polymorphic_allocator(std::pmr::get_default_resource())),
+    // but the cache *container itself* was a plain std::unordered_map, so
+    // every hash-table node insertion still went through global operator
+    // new. Confirmed via a real, reproducible `operator new()` abort under
+    // zzdds-examples' cpp/custom-allocator noalloc guard (GuardCondition's
+    // family cache, Condition being the root here) before this fix — see
+    // zzdds/docs/design/generated-class-lifecycle-design.md's Decisions log
+    // for the fuller writeup.
+    //
+    // Family grouping is `@shared_c_abi_box`-driven (sharedCAbiBoxFamilyRoot
+    // in interface.zig), not plain IDL inheritance -- both the root AND the
+    // child need the annotation for familyOf() to actually group them
+    // (confirmed by trial: annotating only the child, or neither, produces
+    // two independent fam.size==1 interfaces instead, skipping the
+    // `fam.root == iface` branch that declares/defines _familyCache() at
+    // all). Matches the real Condition/GuardCondition/StatusCondition/
+    // ReadCondition/QueryCondition family in dcps.idl, where every member
+    // carries the annotation.
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    @shared_c_abi_box interface Bar {};
+        \\    @shared_c_abi_box interface Baz : Bar {};
+        \\    interface Foo { Bar get_bar(); Baz get_baz(); };
+        \\};
+    );
+    defer res.deinit();
+    const hdr = res.hdr.items;
+    const src = res.src.items;
+    try testing.expect(has(hdr, "static std::pmr::unordered_map<DDS_Bar, std::weak_ptr<Bar>>& _familyCache();"));
+    try testing.expect(has(src, "std::pmr::unordered_map<DDS_Bar, std::weak_ptr<Bar>>& BarImpl::_familyCache() {"));
+    try testing.expect(has(src, "static std::pmr::unordered_map<DDS_Bar, std::weak_ptr<Bar>> c;"));
+    try testing.expect(!has(hdr, "static std::unordered_map<DDS_Bar, std::weak_ptr<Bar>>& _familyCache();"));
+    try testing.expect(!has(src, "static std::unordered_map<DDS_Bar, std::weak_ptr<Bar>> c;"));
 }
 
 test "cpp_backend: simple-struct sequence field adapts out (no TODO)" {
