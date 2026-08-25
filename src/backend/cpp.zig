@@ -7059,7 +7059,7 @@ test "cpp_backend: zzdds wrappers suppressed when no_typesupport" {
 test "cpp_backend: get_field_from_cdr generated for int/float/string members, skips nested" {
     var out = try testGenCdrOpts(
         "@appendable struct Inner { long z; };" ++
-            "@appendable struct Topic { @key long x; double y; string<16> color; Inner nested; sequence<long> seq; };",
+            "@appendable struct Topic { @key long x; float y32; double y64; string<16> color; Inner nested; sequence<long> seq; };",
         "topic",
         .{ .generate_zzdds_wrappers = true },
     );
@@ -7072,10 +7072,19 @@ test "cpp_backend: get_field_from_cdr generated for int/float/string members, sk
     try testing.expect(has(s, "if (_field_len == sizeof(\"x\") - 1 && memcmp(_field, \"x\", _field_len) == 0) {"));
     try testing.expect(has(s, "_out->kind = 0;"));
     try testing.expect(has(s, "_out->i = static_cast<int64_t>(_v.x);"));
-    // float-like member
-    try testing.expect(has(s, "} else if (_field_len == sizeof(\"y\") - 1 && memcmp(_field, \"y\", _field_len) == 0) {"));
-    try testing.expect(has(s, "_out->kind = 1;"));
-    try testing.expect(has(s, "_out->f = static_cast<double>(_v.y);"));
+    // float32 and float64 members retain distinct middleware discriminators
+    try testing.expect(has(
+        s,
+        "} else if (_field_len == sizeof(\"y32\") - 1 && memcmp(_field, \"y32\", _field_len) == 0) {\n" ++
+            "        _out->kind = 3;\n" ++
+            "        _out->f = static_cast<double>(_v.y32);",
+    ));
+    try testing.expect(has(
+        s,
+        "} else if (_field_len == sizeof(\"y64\") - 1 && memcmp(_field, \"y64\", _field_len) == 0) {\n" ++
+            "        _out->kind = 1;\n" ++
+            "        _out->f = static_cast<double>(_v.y64);",
+    ));
     // string-like member: scratch-buffer copy via std::string's .data()/.size(),
     // not returning a pointer into _v (which is about to go out of scope)
     try testing.expect(has(s, "} else if (_field_len == sizeof(\"color\") - 1 && memcmp(_field, \"color\", _field_len) == 0) {"));
