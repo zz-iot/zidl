@@ -366,7 +366,7 @@ const Generator = struct {
         // zidl_cdr_set_allocator() lets an application register (already the
         // source of truth for zidl-cdr's own decode-side allocations) instead
         // of hardcoding a fixed choice here -- see
-        // zzdds/docs/design/generated-class-lifecycle.md for the bug class
+        // zzdds/docs/design/generated-class-lifecycle-design.md for the bug class
         // this closes.
         //
         // That requires calling zidl_cdr_get_allocator(), an extern fn
@@ -9481,7 +9481,7 @@ test "zig_backend: entity-sequence typedef _free routes through the registered a
     // std.heap.c_allocator.free(), crashing under a per-entity custom
     // allocator (zzdds_create_factory_with_allocator) with no way to know
     // which allocator produced the buffer -- see
-    // zzdds/docs/design/generated-class-lifecycle.md.
+    // zzdds/docs/design/generated-class-lifecycle-design.md.
     var out = try testGenOpts(
         \\interface Foo { void noop(); };
         \\typedef sequence<Foo> FooSeq;
@@ -9543,8 +9543,7 @@ test "zig_backend: --zig-generate-c-api-cdr-allocator opt-in flag gates zidl_cdr
 // ── Allocator hygiene: structural CI guard ──────────────────────────────────
 //
 // The `key_hashes`, `ConditionSeq`, and C-ABI-mirror-struct bugs (see
-// zzdds/docs/design/generated-class-lifecycle.md and
-// generated-class-lifecycle-design.md) all had the same shape: a generated
+// zzdds/docs/design/generated-class-lifecycle-design.md) all had the same shape: a generated
 // C-ABI free/allocation body hardcoded `std.heap.c_allocator` instead of
 // routing through `zidlCAbiFreeAllocator()` (no entity in scope) or
 // `_self.vtable.get_allocator(_self.ptr)` (entity in scope) -- and each was

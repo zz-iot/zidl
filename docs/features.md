@@ -151,7 +151,7 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 | `@optional`: more than 64 members per struct | Returns `error.TooManyOptionalMembers` at codegen time |
 | `@optional`: `_set_` macro omitted for array-backed members | Use direct field assignment + manual `_present` bit update |
 | `@default` on non-optional members | Returns `error.DefaultOnNonOptionalNotSupportedInCBackend` at codegen time |
-| User-supplied allocator for strings/sequences | Not yet implemented — `zidl_cdr_read_string` and sequence reads use `malloc`; a `ZidlCdrAllocator` interface is planned |
+| User-supplied allocator for strings/sequences | Implemented (`ZidlAllocator` + `zidl_cdr_set_allocator`); process-wide only, no per-type / per-reader / per-call override |
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
 | `--generate-interfaces`: full DDS object/resource adaptation | Opaque handle typedefs + free function declarations are generated; richer DDS object binding semantics remain runtime-specific future work |
 
@@ -248,7 +248,6 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 
 | Feature | Status |
 |---|---|
-| `bitset` CDR serialization | Emits `// TODO: bitset` (no standard Java mapping defined) |
 | `any` / `object` / `value_base` member access | Emits `// TODO: any/object` |
 | Sequence element CDR deserialization (non-primitive elements) | Emits `// TODO: seq elem deserialize` stub |
 

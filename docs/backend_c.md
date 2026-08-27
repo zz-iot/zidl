@@ -146,7 +146,7 @@ The generated `.c` file includes `zidl_cdr.h` and uses the following from `zidl-
 |---|---|
 | `ZidlCdrWriter` | Write buffer with position tracking |
 | `ZidlCdrReader` | Read buffer with position tracking |
-| `ZidlCdrAllocator` | **Planned, not yet implemented.** Unbounded strings and sequences currently allocate via `malloc` inside `zidl_cdr_read_string` / `zidl_cdr_read_seq_*`; callers must `free` them. A user-supplied allocator interface (`ZidlCdrAllocator`) is intended for targets where heap allocation is unavailable or must be controlled. |
+| `ZidlAllocator` (`zidl_allocator.h`) | User-supplied allocator for unbounded strings/sequences. Register once at startup via `zidl_cdr_set_allocator`; all `zidl_cdr_read_string` / `zidl_cdr_read_seq_*` allocations then route through it (libc `malloc` is the fallback when none is registered). Free decoded values via `zidl_cdr_free_str` / `zidl_cdr_free_wstr` / `zidl_cdr_free`, not `free()`. **Process-wide only** — a single global, set once; no per-type / per-reader / per-call override (see `docs/roadmap.md` "Known Gaps"). |
 | `zidl_cdr_write_*` | Typed write helpers (alignment, byte-swap) |
 | `zidl_cdr_read_*` | Typed read helpers |
 | `zidl_cdr_compute_key_hash` | RTPS key-hash rule implementation |
@@ -242,7 +242,7 @@ which emit inline field initializers for non-optional defaults.
 | Feature | Status |
 |---|---|
 | `map<K,V>` | Not supported — returns `error.MapTypeNotSupportedInCBackend` |
-| User-supplied allocator for strings/sequences | Not yet implemented — `zidl_cdr_read_string` and sequence reads use `malloc` internally; a `ZidlCdrAllocator` interface is planned |
+| User-supplied allocator for strings/sequences | Process-wide only — `zidl_cdr_set_allocator` sets one global `ZidlAllocator`; no per-type / per-reader / per-call override |
 | `@optional`: more than 64 members per struct | Returns `error.TooManyOptionalMembers` at codegen time |
 | `@optional`: `_set_` macro omitted for array-backed members | Use direct assignment + manual `_present` bit update |
 | `@default` on non-optional members | Returns `error.DefaultOnNonOptionalNotSupportedInCBackend` at codegen time |

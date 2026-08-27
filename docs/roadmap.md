@@ -52,10 +52,19 @@ Full design lived in `zzdds/docs/design/raw-loan-api.md` (and zzdds's own roadma
 
 ---
 
-## Plugin architecture — direction, not yet started
+## Plugin architecture — investigation + design task, not started
 
-**Not scheduled; recorded here so near-term flag additions don't quietly paint zidl into
-a corner.** zidl currently has a small but growing set of flags whose only real reason to
+**Feasibility is an open question, not just the design.** The Zig build/link model is
+compile-time and whole-program: a "plugin" isn't a shared object loaded at runtime the way
+it would be in a C or JVM toolchain. Any plugin mechanism here is more likely to be
+*build-time composition* — zidl core exposed as a Zig package that an implementation-owned
+build step imports and extends, or a codegen-callback interface a downstream `build.zig`
+wires in — and it is not yet clear how cleanly that can express "supply the policy layer"
+without the plugin effectively vendoring large parts of a backend. The design task must
+answer feasibility first, then shape.
+
+**Recorded here so near-term flag additions don't quietly paint zidl into a corner.** zidl
+currently has a small but growing set of flags whose only real reason to
 exist is "what zzdds specifically needs from its C++/Java/etc. impl generation"
 (`--cpp-generate-impl`'s override mechanism below is the newest example; the C ABI's
 `--generate-zzdds-wrappers` is an older one, named after zzdds outright). Every one of
@@ -1039,6 +1048,9 @@ a path dependency). Recommend cutting a zidl release promptly after Phase 1 land
 reverting to the tagged `.url`/`.hash` form, rather than accumulating another long-lived
 local-checkout dependency — a workflow suggestion, not something this review is deciding.
 
+**Resolved:** zidl `v0.3.11-zig.0.16.0` was cut; `zzdds/build.zig.zon` now pins it by
+`.url` + `.hash` (no `.path` override).
+
 ---
 
 ## Embedded / MicroZig / XRCE Roadmap
@@ -1478,8 +1490,8 @@ discovery directly, without going through the Zig core.
   itself, as predicted. Consumer side (zzdds's four hand-written `*Support` classes
   composing the base `DDS::*Impl`, plus the `build.zig` wiring) is done too — see zzdds's
   own roadmap "C++ ABI" entry for the verification detail (full 6-pair cross-binding
-  matrix, zzdds's own test suite, `cpp/hello_world`'s raw-C-ABI workaround removed). Not
-  yet in a tagged zidl release; zzdds's pin stays on `v0.3.1-zig.0.16.0` until one is cut.
+  matrix, zzdds's own test suite, `cpp/hello_world`'s raw-C-ABI workaround removed).
+  Shipped in zidl `v0.3.11-zig.0.16.0`; zzdds's `build.zig.zon` pins it by URL + hash.
 
 - **`ZidlCdrAllocator` (user-supplied allocator for strings/sequences). Done.**
   `zidl_cdr_read_string`/`read_wstring` and the C backend's generated inline sequence-buffer

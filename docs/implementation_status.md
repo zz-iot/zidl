@@ -26,7 +26,7 @@ Current verification inventory:
 - Enum: `typedef enum { … } Foo;` → CDR encodes as `uint32_t` always.
 - Sequence: `typedef struct { T* data; uint32_t size; uint32_t maximum; } FooSeq;`
 - CDR serialize functions: `int Foo_serialize(ZidlCdrWriter* w, const Foo* v)`.
-- CDR deserialize functions: `int Foo_deserialize(ZidlCdrReader* r, Foo* v)`. Unbounded strings and sequences are currently heap-allocated by `zidl_cdr_read_string` / `zidl_cdr_read_seq_*` using `malloc`; callers are responsible for freeing them. A `ZidlCdrAllocator` user-supplied allocator interface is planned but not yet implemented.
+- CDR deserialize functions: `int Foo_deserialize(ZidlCdrReader* r, Foo* v)`. Unbounded strings and sequences are heap-allocated by `zidl_cdr_read_string` / `zidl_cdr_read_seq_*` through the registered `ZidlAllocator` (libc `malloc` if none registered — see `zidl_cdr_set_allocator`); callers free them via `zidl_cdr_free_str` / `zidl_cdr_free_wstr` / `zidl_cdr_free`. The allocator is a single process-wide global; per-type / per-reader overrides are not supported.
 - Keyed structs emit `Foo_serialize_key`, `Foo_deserialize_key`, and
   `Foo_compute_key_hash`. Key hashes serialize keys as canonical PLAIN_CDR2
   big-endian, then apply the RTPS <=16-byte padding / MD5 rule via `zidl-cdr`.
@@ -269,7 +269,7 @@ integration tests run as part of `zig build test`.
 | C backend: `_set_` macro for array-backed `@optional` | Not emitted — use direct field assignment + manual `_present` bit update |
 | C backend: `@default` on non-optional member | Returns `error.DefaultOnNonOptionalNotSupportedInCBackend` at codegen time |
 | C backend: `@optional` `_set_` macro shape-aware setter | No `memcpy`-based setter for fixed arrays / bounded strings — future work |
-| C backend: user-supplied allocator | `ZidlCdrAllocator` interface planned; strings/sequences currently use `malloc` |
+| C backend: user-supplied allocator | Implemented (`ZidlAllocator` + `zidl_cdr_set_allocator`); process-wide only, no per-type / per-reader / per-call override |
 | C++ backend: custom STL allocators | `std::string`, `std::vector`, `std::map` use default allocators; `std::pmr` support planned |
 | Zig 0.15.1 / MicroZig output | Partially implemented: `--zig-version 0.15.1` is wired and bounded strings/sequences use fixed-capacity `zidl_rt.BoundedArray`; full freestanding/no-heap runtime path remains planned |
 | `--generate-interfaces` C++: complex-type adaptation | Primitive and string operation signatures are adapted; richer signatures emit `/* TODO */` stubs |
