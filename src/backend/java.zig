@@ -4299,8 +4299,8 @@ const ImplFileGenerator = struct {
         try self.write(") {\n");
 
         // Callback (listener) interfaces are Java-implemented/native-invoked
-        // the other way around (see zidl roadmap "Java listener JNI upcall
-        // support") — none of their ops get a native forwarding call yet.
+        // the other way around — none of their ops get a native forwarding
+        // call. (Listener JNI upcall trampolines: see zidl/CHANGELOG.md v0.3.5.)
         if (interface.isCallbackInterface(self.iface) or !opIsJniSupported(op)) {
             try self.print("        throw new UnsupportedOperationException(\"{s}: {s}\");\n    }}\n", .{ op.name, unsupported_msg });
             return;
@@ -5089,7 +5089,7 @@ const JniBridgeGenerator = struct {
         // Callback (listener) interfaces get no "Java calls native" bridge
         // for their own ops/attrs at all — those are the callback methods
         // *native code* invokes on a Java-supplied listener, the opposite
-        // direction (see zidl roadmap "Java listener JNI upcall support").
+        // direction (see zidl/CHANGELOG.md v0.3.5).
         if (!is_callback) {
             for (ops.items) |op| {
                 if (!opIsJniSupported(&op)) continue;
@@ -8520,7 +8520,7 @@ test "java: --generate-zzdds-wrappers still emits DataWriter/DataReader for a ke
     // on a keyless topic (a legitimate, real case -- see this test's own
     // point) silently never matched anything before this fix. Confirmed via
     // a real crash-free standalone run, not just this golden check: see
-    // zzdds's own roadmap (WaitSet/condition example entry) for the
+    // zzdds/CHANGELOG.md (2026-08-06, ContentFilteredTopic filtering) for the
     // getFieldFromCdr("priority")-on-a-real-payload verification.
     try testGenOpts(alloc, "struct NoKey { long x; long y; };", "nokey", opts, "case \"x\": return (long) _obj.x;");
 

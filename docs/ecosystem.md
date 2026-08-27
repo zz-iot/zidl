@@ -237,7 +237,7 @@ works by generating a second, boxing-only `CAbiViews` type per annotated interfa
 (nesting the interface's primary base's own `CAbiViews`, `extern struct`-offset-0-composed
 so a leaf's box can be safely reinterpreted as any ancestor's) and routing that
 interface's unboxing through `zidl_rt.unboxAsView` instead of `unboxAs` — see
-`zidl/docs/roadmap.md` "Binding design review: decision" for the full design and why it's
+`zidl/docs/design/binding-c-abi-identity.md` for the full design and why it's
 opt-in per interface rather than automatic (it isn't safe for a *secondary* base of a
 multiply-inherited interface, e.g. `Topic`'s `TopicDescription`).
 

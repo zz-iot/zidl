@@ -326,8 +326,8 @@ pub fn isCallbackInterface(iface: *const Interface) bool {
 /// `Vtable` reinterpretation `zidl_rt.unboxAs` normally does.
 ///
 /// Only unifies a chain reachable by always following an interface's *first*
-/// declared base (see `zidl/docs/roadmap.md`'s "Binding design review:
-/// decision" for why only the primary base is safe to compose this way).
+/// declared base (see `zidl/docs/design/binding-c-abi-identity.md` for why
+/// only the primary base is safe to compose this way).
 /// Annotating an interface that some *other* interface reaches only via a
 /// secondary base (e.g. `Topic : Entity, TopicDescription`, where
 /// `TopicDescription` is annotated) is valid and intentional, not an error:
@@ -335,9 +335,9 @@ pub fn isCallbackInterface(iface: *const Interface) bool {
 /// `sharedCAbiBoxFamilyRoot`/`collectSharedCAbiBoxFamilies`) only ever
 /// inspects `bases[0]`, so `TopicDescription` simply never gets pulled into
 /// `Topic`'s primary-chain family and keeps its own, independent one instead
-/// — a documented, permanent limitation (see roadmap, "Topic's secondary-base
-/// (TopicDescription) view stays independently cached"), not a composition
-/// bug to guard against.
+/// — a documented, permanent limitation (see
+/// `zidl/docs/design/binding-c-abi-identity.md` and `docs/decisions.md`), not a
+/// composition bug to guard against.
 pub fn hasSharedCAbiBox(iface: *const Interface) bool {
     for (iface.raw) |ann| {
         if (std.mem.eql(u8, ann.name, "shared_c_abi_box")) return true;

@@ -4,7 +4,9 @@
 > per-source-file design notes, test counts, key invariants, and known limitations.
 > For the pipeline architecture and design decisions at each stage, see
 > [`architecture.md`](architecture.md). For what each backend generates and its
-> current feature coverage, see [`features.md`](features.md).
+> current feature coverage, see [`features.md`](features.md). For planned work see
+> [`roadmap.md`](roadmap.md); for the change history see [`../CHANGELOG.md`](../CHANGELOG.md);
+> for stable design decisions see [`decisions.md`](decisions.md).
 
 Current verification inventory:
 - `zig build test`: 783 tests passed (771 library tests, 1 CLI test, 11 Zig integration tests) plus golden-output comparison. C/C++/Java integration tests run separately via `zig build integration-test`.
@@ -277,3 +279,8 @@ integration tests run as part of `zig build test`.
 | Union discriminant type validation | Not implemented |
 | TypeObject for typedef/alias | Deferred |
 | value_dcl / component_dcl / home_dcl / template modules | Parsed, silently dropped + warning diagnostic |
+| Transitive imports | Unsupported pipeline-wide; scoped-name imports (`import ::Foo;`) rejected |
+| `@verbatim` and validation/codegen annotations (`@range`/`@min`/`@max`/`@unit`/…) | Parsed into the IR, no backend acts on them |
+| C-ABI entity identity across views | Phase 1 (`Condition` family, via `@shared_c_abi_box`) shipped in v0.3.5; `Entity`/`TopicDescription`/`DomainParticipantFactory` families and embedded-substruct impls open — see [`design/binding-c-abi-identity.md`](design/binding-c-abi-identity.md) |
+| Java `--generate-interfaces` residual stubs | A few parameter/return shapes (by-value `value_struct` return, anonymous inline `sequence<T>` param, `sequence<enum>` param, non-`get_listener` `.callback` return) throw `UnsupportedOperationException`; none occur in dcps.idl/zzdds.idl. QoS/status struct params + listener JNI upcalls are implemented |
+| Factory-less entity bootstrap (`WaitSet`/`GuardCondition`) | Hand-written per binding; `@factory_less_bootstrap` annotation decided, not implemented |

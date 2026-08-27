@@ -69,7 +69,7 @@ pub fn unboxAs(comptime T: type, handle: *anyopaque) T {
 /// pointer as `*const T.CAbiViews` for any ancestor `T` reached by always
 /// following the primary base correctly lands on `T`'s own `flat_vtable`
 /// field — verified for the two-levels-deep case by a real Zig 0.16.0 spike
-/// (see zidl/docs/roadmap.md's "Binding design review: decision" section).
+/// (see zidl/docs/design/binding-c-abi-identity.md).
 ///
 /// This is the whole fix for the C-ABI cross-view identity bug that section
 /// describes: since every ancestor view's `get_c_abi_handle` implementation

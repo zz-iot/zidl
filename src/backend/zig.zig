@@ -1670,9 +1670,9 @@ const Generator = struct {
         // base) correctly recovers that ancestor's own `flat_vtable` field, no
         // matter how deep the real concrete type's chain is. This is what
         // lets a concrete impl share ONE C-ABI box across every interface
-        // view it presents instead of one per view — see zidl/docs/roadmap.md
-        // "Binding design review: decision" for the full rationale and the
-        // Zig-layout spike that confirmed this composition. Deliberately not
+        // view it presents instead of one per view — see
+        // zidl/docs/design/binding-c-abi-identity.md for the full rationale and
+        // the Zig-layout spike that confirmed this composition. Deliberately not
         // generated for every interface: safe only for interfaces reachable
         // via a chain of *primary* (first-listed) bases — see
         // `hasSharedCAbiBox`'s own doc comment for why a secondary base must
@@ -1789,7 +1789,7 @@ const Generator = struct {
         // ergonomic upcast every other backend (C/C++/Java) already generates
         // its own wrapper for. Previously missing: Zig-native code had to
         // spell out `.vtable.as_{Base}(.ptr)` by hand — decided in
-        // zidl/docs/roadmap.md "Binding design review: decision".
+        // zidl/docs/design/binding-c-abi-identity.md.
         // Blank-line separator goes *before* each method, not after: unlike
         // ops/attrs above (always followed by `deinit`, so a trailing blank
         // line is always just a separator from the next thing), this loop
@@ -1856,8 +1856,8 @@ const Generator = struct {
     // every field at the wrong offset. Confirmed as a real, live bug (not just
     // by inspection) via zzdds's own `create_participant_ex`/
     // `get_default_participant_config` (case 1) and `DDS_TopicBuiltinTopicData_
-    // free` (case 2, no TOML config involved at all) — see zzdds's own
-    // `docs/roadmap.md`.
+    // free` (case 2, no TOML config involved at all) — see zzdds/CHANGELOG.md
+    // (2026-08-20, C-ABI struct-layout bug).
     //
     // The fix: for any struct that needs one, generate a *separate*,
     // genuinely `extern struct` "C-ABI mirror" — laid out to match what the
@@ -4139,8 +4139,8 @@ const Generator = struct {
     /// ?zzdds.dcps.filter.FilterValue`), so this struct's generated code can
     /// be registered directly and get real, automatic ContentFilteredTopic
     /// filtering from zzdds's own reader-side `cft_filter` — no app-side
-    /// re-check needed (see zzdds's `docs/roadmap.md` for why this is a real
-    /// fix, not a style preference: `TypeSupport.get_field` existed but no
+    /// re-check needed (see zzdds/CHANGELOG.md, 2026-08-06, for why this is a
+    /// real fix, not a style preference: `TypeSupport.get_field` existed but no
     /// binding ever populated it).
     ///
     /// Unlike `computeKeyHashFromCdr` (which only ever needs `@key` members),
@@ -4730,10 +4730,9 @@ const Generator = struct {
 
     /// `typeRefNeedsSeqDeinit(m.type_ref) or this type has an unbounded string,
     /// directly or via a nested struct field` — matches the C backend's parity
-    /// fix (`structHasSequenceFields`/`emitStructFree`, see zidl's roadmap "C
-    /// backend: `{Type}_free()` is declared but never given a body"): any
-    /// unbounded string/wstring or any sequence needs cleanup, not just
-    /// unbounded sequences.
+    /// fix (`structHasSequenceFields`/`emitStructFree`, see `zidl/CHANGELOG.md`
+    /// v0.3.5 — `{Type}_free()` body completeness): any unbounded string/wstring
+    /// or any sequence needs cleanup, not just unbounded sequences.
     ///
     /// One case the C fix doesn't have to consider: `m` is *itself* a plain
     /// unbounded string (or a typedef chain to one) with a non-empty `@default`,
