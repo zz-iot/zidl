@@ -51,9 +51,10 @@ interface implementations.
 - Namespaces: IDL modules → C++ namespaces, nested correctly.
 - Structs: plain `struct` with public member fields, default member initializers.
 - Inheritance: `: public Base`.
-- Sequences: `std::vector<T>` (default allocator; `std::pmr` / custom allocator support planned).
+- Sequences: `std::vector<T>` (default allocator; `std::pmr::vector<T>` with `--cpp-pmr-containers`).
 - Strings: `std::string` for both unbounded and bounded variants (bound enforced
-  at CDR serialize time; no separate C++ bounded-string type is generated; default allocator).
+  at CDR serialize time; no separate C++ bounded-string type is generated; default
+  allocator, or `std::pmr::string` with `--cpp-pmr-containers`).
 - Enums: `enum class Foo : uint32_t { … }`.
 - Optional members: `std::optional<T>`.
 - Serialize/deserialize declared as C ABI-friendly free functions
@@ -272,7 +273,7 @@ integration tests run as part of `zig build test`.
 | C backend: `@default` on non-optional member | Returns `error.DefaultOnNonOptionalNotSupportedInCBackend` at codegen time |
 | C backend: `@optional` `_set_` macro shape-aware setter | No `memcpy`-based setter for fixed arrays / bounded strings — future work |
 | C backend: user-supplied allocator | Implemented (`ZidlAllocator` + `zidl_cdr_set_allocator`); process-wide only, no per-type / per-reader / per-call override |
-| C++ backend: custom STL allocators | `std::string`, `std::vector`, `std::map` use default allocators; `std::pmr` support planned |
+| C++ backend: container allocators | `--cpp-pmr-containers` (opt-in) emits `std::pmr` containers through the process-wide `zidl::setCppAllocator` resource; without it, default STL allocators. No per-container allocator template-parameter support. |
 | Zig 0.15.1 / MicroZig output | Partially implemented: `--zig-version 0.15.1` is wired and bounded strings/sequences use fixed-capacity `zidl_rt.BoundedArray`; full freestanding/no-heap runtime path remains planned |
 | `--generate-interfaces` C++: complex-type adaptation | Primitive and string operation signatures are adapted; richer signatures emit `/* TODO */` stubs |
 | Const type-checking | Not implemented (e.g. `const long x = "hello"` is not caught) |

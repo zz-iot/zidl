@@ -200,7 +200,7 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 
 | Feature | Status |
 |---|---|
-| Custom allocators for `std::string` / `std::vector` / `std::map` | Not yet implemented — all STL containers use default allocators; `std::pmr` support is planned |
+| Container allocators | `--cpp-pmr-containers` (opt-in) emits `std::pmr::string` / `std::pmr::vector` / `std::pmr::wstring` / `std::pmr::map` routed through `zidl::setCppAllocator`'s process-wide default resource; without the flag, default STL allocators. Per-container allocator template parameters are not supported. |
 | `@verbatim` annotations | Parsed and stored in IR but not yet injected into generated output |
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
 | `--generate-interfaces`: complex-type adaptation | Primitive and string operation signatures are adapted; richer signatures emit `/* TODO: adapt C++ types */` stubs |
