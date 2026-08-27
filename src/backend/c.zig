@@ -1797,7 +1797,8 @@ fn ptrSep(c_type: []const u8) []const u8 {
 /// Extensibility:
 ///   - `@final`    — no DHEADER framing
 ///   - `@appendable` — DHEADER via reserve_dheader_maybe / patch_dheader_maybe
-///   - `@mutable`  — TODO comment emitted (requires EMHEADER; deferred)
+///   - `@mutable`  — outer DHEADER + per-member EMHEADER framing (write_emheader /
+///                   reserve_emheader / patch_emheader; read_mutable_dheader on decode)
 ///
 /// The generated file `#include`s both the header and `zidl_cdr.h`.
 pub fn generateCdrSource(

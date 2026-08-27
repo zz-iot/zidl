@@ -140,8 +140,11 @@ or emit them. The planned placement positions are `BEGIN_FILE`,
 
 The generated `.hpp` includes `zidl_cdr.h` and uses `ZidlCdrWriter`, `ZidlCdrReader`,
 `zidl_cdr_compute_key_hash`, and `zidl_md5` from `zidl-cdr`. `std::string`,
-`std::vector<T>`, and `std::map<K,V>` members use default STL allocators; custom
-allocator support (STL allocator template parameters or `std::pmr`) is not yet implemented.
+`std::vector<T>`, and `std::map<K,V>` members use default STL allocators unless
+`--cpp-pmr-containers` is passed, which emits `std::pmr::string` / `std::pmr::vector` /
+`std::pmr::wstring` / `std::pmr::map` routing through `zidl::setCppAllocator`'s process-wide
+default resource (`zidl_allocator_pmr.hpp`). Per-container STL allocator template parameters
+are not supported.
 
 Build by including the header in your C++ project and compiling the generated
 `<name>_cdr.cpp` source alongside `packages/zidl-cdr/src/zidl_cdr.c`. Add
@@ -175,7 +178,7 @@ references.
 
 | Feature | Status |
 |---|---|
-| Custom allocators for `std::string` / `std::vector` / `std::map` | Not yet implemented — all STL containers use default allocators; `std::pmr` or allocator template parameter support is planned |
+| Container allocators | `--cpp-pmr-containers` (opt-in) emits `std::pmr` containers routed through `zidl::setCppAllocator`'s process-wide default resource; without the flag, default STL allocators. Per-container allocator template parameters are not supported. |
 | `@verbatim` annotations | Parsed and stored in IR but not yet injected into generated output — see [`@verbatim` Injection](#verbatim-injection-not-yet-implemented) above |
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
 | `--generate-interfaces`: complex-type adaptation | Primitive and string operation signatures are adapted; richer signatures emit `/* TODO: adapt C++ types */` stubs |

@@ -68,7 +68,10 @@ option generates the abstract DCPS API layer.
 | [`architecture.md`](architecture.md) | Internal pipeline (preprocessor → lexer → parser → IR → backend); design decisions |
 | [`backend_interface.md`](backend_interface.md) | Backend vtable contract; how to add a new backend; annotation handling |
 | [`implementation_status.md`](implementation_status.md) | Per-source-file design notes, test counts, key invariants, known limitations |
-| [`roadmap.md`](roadmap.md) | Planned backends and future work |
+| [`roadmap.md`](roadmap.md) | Forward-looking: known gaps, planned features, design tasks |
+| [`../CHANGELOG.md`](../CHANGELOG.md) | Change history by release tag |
+| [`decisions.md`](decisions.md) | Stable design decisions with rationale |
+| [`design/`](design/) | Fleshed-out designs (C-ABI entity identity; C-ABI type coverage) |
 
 ---
 

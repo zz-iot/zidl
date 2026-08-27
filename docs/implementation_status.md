@@ -4,7 +4,9 @@
 > per-source-file design notes, test counts, key invariants, and known limitations.
 > For the pipeline architecture and design decisions at each stage, see
 > [`architecture.md`](architecture.md). For what each backend generates and its
-> current feature coverage, see [`features.md`](features.md).
+> current feature coverage, see [`features.md`](features.md). For planned work see
+> [`roadmap.md`](roadmap.md); for the change history see [`../CHANGELOG.md`](../CHANGELOG.md);
+> for stable design decisions see [`decisions.md`](decisions.md).
 
 Current verification inventory:
 - `zig build test`: 783 tests passed (771 library tests, 1 CLI test, 11 Zig integration tests) plus golden-output comparison. C/C++/Java integration tests run separately via `zig build integration-test`.
@@ -26,7 +28,7 @@ Current verification inventory:
 - Enum: `typedef enum { … } Foo;` → CDR encodes as `uint32_t` always.
 - Sequence: `typedef struct { T* data; uint32_t size; uint32_t maximum; } FooSeq;`
 - CDR serialize functions: `int Foo_serialize(ZidlCdrWriter* w, const Foo* v)`.
-- CDR deserialize functions: `int Foo_deserialize(ZidlCdrReader* r, Foo* v)`. Unbounded strings and sequences are currently heap-allocated by `zidl_cdr_read_string` / `zidl_cdr_read_seq_*` using `malloc`; callers are responsible for freeing them. A `ZidlCdrAllocator` user-supplied allocator interface is planned but not yet implemented.
+- CDR deserialize functions: `int Foo_deserialize(ZidlCdrReader* r, Foo* v)`. Unbounded strings and sequences are heap-allocated by `zidl_cdr_read_string` / `zidl_cdr_read_seq_*` through the registered `ZidlAllocator` (libc `malloc` if none registered — see `zidl_cdr_set_allocator`); callers free them via `zidl_cdr_free_str` / `zidl_cdr_free_wstr` / `zidl_cdr_free`. The allocator is a single process-wide global; per-type / per-reader overrides are not supported.
 - Keyed structs emit `Foo_serialize_key`, `Foo_deserialize_key`, and
   `Foo_compute_key_hash`. Key hashes serialize keys as canonical PLAIN_CDR2
   big-endian, then apply the RTPS <=16-byte padding / MD5 rule via `zidl-cdr`.
@@ -49,9 +51,10 @@ interface implementations.
 - Namespaces: IDL modules → C++ namespaces, nested correctly.
 - Structs: plain `struct` with public member fields, default member initializers.
 - Inheritance: `: public Base`.
-- Sequences: `std::vector<T>` (default allocator; `std::pmr` / custom allocator support planned).
+- Sequences: `std::vector<T>` (default allocator; `std::pmr::vector<T>` with `--cpp-pmr-containers`).
 - Strings: `std::string` for both unbounded and bounded variants (bound enforced
-  at CDR serialize time; no separate C++ bounded-string type is generated; default allocator).
+  at CDR serialize time; no separate C++ bounded-string type is generated; default
+  allocator, or `std::pmr::string` with `--cpp-pmr-containers`).
 - Enums: `enum class Foo : uint32_t { … }`.
 - Optional members: `std::optional<T>`.
 - Serialize/deserialize declared as C ABI-friendly free functions
@@ -269,11 +272,16 @@ integration tests run as part of `zig build test`.
 | C backend: `_set_` macro for array-backed `@optional` | Not emitted — use direct field assignment + manual `_present` bit update |
 | C backend: `@default` on non-optional member | Returns `error.DefaultOnNonOptionalNotSupportedInCBackend` at codegen time |
 | C backend: `@optional` `_set_` macro shape-aware setter | No `memcpy`-based setter for fixed arrays / bounded strings — future work |
-| C backend: user-supplied allocator | `ZidlCdrAllocator` interface planned; strings/sequences currently use `malloc` |
-| C++ backend: custom STL allocators | `std::string`, `std::vector`, `std::map` use default allocators; `std::pmr` support planned |
+| C backend: user-supplied allocator | Implemented (`ZidlAllocator` + `zidl_cdr_set_allocator`); process-wide only, no per-type / per-reader / per-call override |
+| C++ backend: container allocators | `--cpp-pmr-containers` (opt-in) emits `std::pmr` containers through the process-wide `zidl::setCppAllocator` resource; without it, default STL allocators. No per-container allocator template-parameter support. |
 | Zig 0.15.1 / MicroZig output | Partially implemented: `--zig-version 0.15.1` is wired and bounded strings/sequences use fixed-capacity `zidl_rt.BoundedArray`; full freestanding/no-heap runtime path remains planned |
 | `--generate-interfaces` C++: complex-type adaptation | Primitive and string operation signatures are adapted; richer signatures emit `/* TODO */` stubs |
 | Const type-checking | Not implemented (e.g. `const long x = "hello"` is not caught) |
 | Union discriminant type validation | Not implemented |
 | TypeObject for typedef/alias | Deferred |
 | value_dcl / component_dcl / home_dcl / template modules | Parsed, silently dropped + warning diagnostic |
+| Transitive imports | Unsupported pipeline-wide; scoped-name imports (`import ::Foo;`) rejected |
+| `@verbatim` and validation/codegen annotations (`@range`/`@min`/`@max`/`@unit`/…) | Parsed into the IR, no backend acts on them |
+| C-ABI entity identity across views | Phase 1 (`Condition` family, via `@shared_c_abi_box`) shipped in v0.3.5; `Entity`/`TopicDescription`/`DomainParticipantFactory` families and embedded-substruct impls open — see [`design/binding-c-abi-identity.md`](design/binding-c-abi-identity.md) |
+| Java `--generate-interfaces` residual stubs | A few parameter/return shapes (by-value `value_struct` return, anonymous inline `sequence<T>` param, `sequence<enum>` param, non-`get_listener` `.callback` return) throw `UnsupportedOperationException`; none occur in dcps.idl/zzdds.idl. QoS/status struct params + listener JNI upcalls are implemented |
+| Factory-less entity bootstrap (`WaitSet`/`GuardCondition`) | Hand-written per binding; `@factory_less_bootstrap` annotation decided, not implemented |

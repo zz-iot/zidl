@@ -192,7 +192,9 @@ An `@optional` member is prefixed by a presence flag (1 byte, bool):
 […]  member value (only if presence = true)
 ```
 
-Supported in Zig, C++, Java backends. Not yet supported in C backend.
+Supported in the Zig, C, C++, and Java backends. The C backend represents optional
+members with a `uint64_t _present` bitmask (max 64 optional members per struct); see
+`docs/backend_c.md`.
 
 ---
 

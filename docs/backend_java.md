@@ -171,5 +171,4 @@ zig build integration-test   # runs all integration tests including Java if java
 
 | Feature | Status |
 |---|---|
-| `bitset` CDR serialization | Emits `// TODO: bitset` — no standard Java CDR mapping defined |
 | `any` / `object` / `value_base` member access | Emits `// TODO: any/object` comment |

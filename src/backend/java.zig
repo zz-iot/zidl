@@ -6,7 +6,9 @@
 //!   - Union     → `public static final class Name implements java.io.Serializable`
 //!   - Enum      → `public enum Name` with value/getValue/valueOf(int)
 //!   - Bitmask   → `public static final class Name` with bit-flag constants
-//!   - Bitset    → TODO comment (no standard Java mapping)
+//!   - Bitset    → `public static final class Name` with an `int`/`long` backing
+//!                 field, per-bitfield get_/set_ accessors, and CDR serialize/
+//!                 deserialize over the backing integer
 //!   - Typedef   → transparent (no Java type emitted; resolved through)
 //!   - Native    → no Java output
 //!   - Exception → `public static class Name extends RuntimeException`
@@ -4209,12 +4211,14 @@ const ImplFileGenerator = struct {
         try self.write("}\n");
     }
 
-    /// Message used by the not-yet-marshaled stub bodies below. QoS/status
-    /// struct marshaling and listener JNI upcall support are tracked
-    /// separately (zidl roadmap); until they land, operations/attributes
-    /// touching those types compile and link, but throw at call time instead
-    /// of silently doing the wrong thing.
-    const unsupported_msg = "QoS/status struct and listener marshaling are not yet implemented in the Java binding";
+    /// Message for the rare operation/attribute the Java binding still can't
+    /// marshal end-to-end: a `value_struct` returned *by value*, a `.callback`
+    /// return other than `get_listener()`, an anonymous inline `sequence<T>`
+    /// param (no typedef to hang marshaling off), or a `sequence<enum>` param.
+    /// None occur in dcps.idl/zzdds.idl today; such an op compiles and links
+    /// but throws at call time rather than silently doing the wrong thing.
+    /// (QoS/status struct params and listener JNI upcalls are implemented.)
+    const unsupported_msg = "parameter or return shape not marshaled by the Java binding";
 
     /// See `isWriteLoanBufferOp`'s doc comment -- these three DataWriter ops
     /// get a hand-written concrete override + native decl using
@@ -4295,8 +4299,8 @@ const ImplFileGenerator = struct {
         try self.write(") {\n");
 
         // Callback (listener) interfaces are Java-implemented/native-invoked
-        // the other way around (see zidl roadmap "Java listener JNI upcall
-        // support") — none of their ops get a native forwarding call yet.
+        // the other way around — none of their ops get a native forwarding
+        // call. (Listener JNI upcall trampolines: see zidl/CHANGELOG.md v0.3.5.)
         if (interface.isCallbackInterface(self.iface) or !opIsJniSupported(op)) {
             try self.print("        throw new UnsupportedOperationException(\"{s}: {s}\");\n    }}\n", .{ op.name, unsupported_msg });
             return;
@@ -4466,13 +4470,14 @@ const JniCategory = enum {
     /// `*Impl` class's `long ptr_` field.
     entity,
     /// A `@callback` IDL `interface` (listener) — a plain C struct of
-    /// function pointers. Needs a native→Java upcall trampoline; not yet
-    /// implemented (see zidl roadmap "Java listener JNI upcall support").
+    /// function pointers. `set_listener` / `get_listener` are supported
+    /// round-trips (native→Java upcall trampolines plus a `get_listener()`
+    /// unbox path); any *other* `.callback` param/return shape is unsupported.
     callback,
     /// An IDL struct/union/bitset (QoS policies, status structs, `Duration_t`,
-    /// sequences, …) — needs field-by-field marshaling into/out of the
-    /// matching C struct; not yet implemented (see zidl roadmap "Java
-    /// QoS/status struct JNI marshaling").
+    /// sequences, …). As a *param* it is marshaled field-by-field into/out of
+    /// the matching C struct (`StructMarshalGenerator`); returned *by value*
+    /// it is unsupported (no dcps.idl op needs that path).
     value_struct,
 };
 
@@ -5084,7 +5089,7 @@ const JniBridgeGenerator = struct {
         // Callback (listener) interfaces get no "Java calls native" bridge
         // for their own ops/attrs at all — those are the callback methods
         // *native code* invokes on a Java-supplied listener, the opposite
-        // direction (see zidl roadmap "Java listener JNI upcall support").
+        // direction (see zidl/CHANGELOG.md v0.3.5).
         if (!is_callback) {
             for (ops.items) |op| {
                 if (!opIsJniSupported(&op)) continue;
@@ -8515,7 +8520,7 @@ test "java: --generate-zzdds-wrappers still emits DataWriter/DataReader for a ke
     // on a keyless topic (a legitimate, real case -- see this test's own
     // point) silently never matched anything before this fix. Confirmed via
     // a real crash-free standalone run, not just this golden check: see
-    // zzdds's own roadmap (WaitSet/condition example entry) for the
+    // zzdds/CHANGELOG.md (2026-08-06, ContentFilteredTopic filtering) for the
     // getFieldFromCdr("priority")-on-a-real-payload verification.
     try testGenOpts(alloc, "struct NoKey { long x; long y; };", "nokey", opts, "case \"x\": return (long) _obj.x;");
 

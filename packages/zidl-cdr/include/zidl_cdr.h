@@ -254,7 +254,7 @@ void zidl_cdr_set_allocator(const ZidlAllocator *allocator);
  * generated `_free()` export with no owning-entity parameter) route through
  * the same process-wide choice `zidl_cdr_set_allocator` established, instead
  * of hardcoding a fixed allocator of its own — see
- * zzdds/docs/design/generated-class-lifecycle.md for the bug class this
+ * zzdds/docs/design/generated-class-lifecycle-design.md for the bug class this
  * closes.
  */
 const ZidlAllocator *zidl_cdr_get_allocator(void);
