@@ -1013,3 +1013,23 @@ test "skip_primitives: oversized count is rejected, not skipped past the buffer"
         c.zidl_cdr_skip_primitives(&r, 0xFFFF_FFFF, 8),
     );
 }
+
+test "zidl_cdr_skip: a byte count near SIZE_MAX is rejected without wrapping the cursor" {
+    // The bounds check must be `n > data_len - pos`, not `pos + n > data_len`:
+    // the latter wraps for a hostile n and moves the cursor backwards. Platform
+    // independent -- exercises the addition-overflow path directly. (greptile PR #47)
+    var cw: c.ZidlCdrWriter = undefined;
+    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
+    defer c.zidl_cdr_writer_deinit(&cw);
+    _ = c.zidl_cdr_write_encap(&cw);
+    _ = c.zidl_cdr_write_u32(&cw, 0);
+
+    var r: c.ZidlCdrReader = undefined;
+    _ = c.zidl_cdr_reader_init(&r, cw.buf, cw.len);
+    const pos_before = r.pos;
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_TRUNCATED), c.zidl_cdr_skip(&r, std.math.maxInt(usize)));
+    try testing.expectEqual(pos_before, r.pos);
+    // A smaller-but-still-out-of-range n is rejected the same way.
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_TRUNCATED), c.zidl_cdr_skip(&r, r.data_len - r.pos + 1));
+    try testing.expectEqual(pos_before, r.pos);
+}

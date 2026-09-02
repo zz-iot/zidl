@@ -58,6 +58,10 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   - The C helper rejects a `count` whose `count * elem_wire_size` would wrap `size_t` on
     a 32-bit target rather than skipping a truncated body past the bounds check. The Zig
     helper already checked this (`std.math.mul`).
+  - `zidl_cdr_skip` and `reader_read_slice` now bounds-check as `n > data_len - pos`
+    (the subtraction is safe — `pos <= data_len` is invariant) instead of `pos + n >
+    data_len`, which wraps for a hostile `n` on a 32-bit target and would move the
+    cursor backwards. (greptile PR #47)
 
 ## v0.3.11-zig.0.16.0 — 2026-08-25
 
