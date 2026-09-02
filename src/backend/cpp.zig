@@ -46,6 +46,7 @@
 const std = @import("std");
 const ast = @import("../ast.zig");
 const ir = @import("../ir/root.zig");
+const cdr_skip = @import("cdr_skip.zig");
 const interface = @import("interface.zig");
 
 // Stack buffer size for get_key_value; zzdds returns an error if the serialized
@@ -440,6 +441,19 @@ const Generator = struct {
         // actually included (--generate-zzdds-wrappers).
         if (self.opts.generate_zzdds_wrappers and isZzddsTopicStructCpp(s)) {
             try self.print("{s}{s}bool {s}_get_field_from_cdr(const uint8_t *_payload, size_t _payload_len, const char *_field, size_t _field_len, zzdds_filter_value *_out, uint8_t *_scratch, size_t _scratch_len);\n", .{ em, sp, c_name });
+            // Selective-parse family (no _deinit_selected: RAII).
+            try self.print("#define {s}_KEY_FIELD_MASK ((uint64_t)(", .{c_name});
+            var first_k = true;
+            for (s.members, 0..) |m, idx| {
+                if (!m.annotations.is_key or s.base != null or s.members.len > 64) continue;
+                if (!first_k) try self.write(" | ");
+                try self.print("(1ull << {d})", .{idx});
+                first_k = false;
+            }
+            if (first_k) try self.write("0");
+            try self.write("))\n");
+            try self.print("{s}{s}bool {s}_field_index(const char *_name, size_t _name_len, uint32_t *_out_idx);\n", .{ em, sp, c_name });
+            try self.print("{s}{s}int {s}_deserialize_selected(ZidlCdrReader *_r, uint64_t _want, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         }
         try self.write("\n");
     }
@@ -1402,7 +1416,7 @@ const CdrGenerator = struct {
         try self.out.appendSlice(self.alloc, s);
     }
 
-    fn ind(self: *CdrGenerator) []const u8 {
+    pub fn ind(self: *CdrGenerator) []const u8 {
         return switch (self.indent_depth) {
             1 => "    ",
             2 => "        ",
@@ -1411,12 +1425,12 @@ const CdrGenerator = struct {
         };
     }
 
-    fn writeI(self: *CdrGenerator, s: []const u8) !void {
+    pub fn writeI(self: *CdrGenerator, s: []const u8) !void {
         try self.out.appendSlice(self.alloc, self.ind());
         try self.out.appendSlice(self.alloc, s);
     }
 
-    fn printI(self: *CdrGenerator, comptime fmt: []const u8, args: anytype) !void {
+    pub fn printI(self: *CdrGenerator, comptime fmt: []const u8, args: anytype) !void {
         try self.out.appendSlice(self.alloc, self.ind());
         const s = try std.fmt.allocPrint(self.alloc, fmt, args);
         defer self.alloc.free(s);
@@ -1492,7 +1506,7 @@ const CdrGenerator = struct {
         }
     }
 
-    fn prefixedCName(self: *CdrGenerator, qname: []const u8) ![]u8 {
+    pub fn prefixedCName(self: *CdrGenerator, qname: []const u8) ![]u8 {
         return interface.prefixedCNameFromQualified(self.alloc, qname, self.opts.type_prefix);
     }
 
@@ -1764,7 +1778,7 @@ const CdrGenerator = struct {
                 try self.writeI("if (_rc) return _rc;\n");
             }
             for (s.members) |m| {
-                try self.emitSkipMember(m);
+                try cdr_skip.emitSkipMember(self, m);
             }
             try self.writeI("return ZIDL_CDR_OK;\n");
         }
@@ -2018,9 +2032,67 @@ const CdrGenerator = struct {
             try self.writeI("return ZIDL_CDR_OK;\n");
             try self.write("}\n\n");
         }
+        if (self.opts.generate_zzdds_wrappers and isZzddsTopicStructCpp(s)) {
+            try self.emitSelectiveFnsCpp(s, c_name, cpp_qname, appendable);
+        }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and isZzddsTopicStructCpp(s)) {
             try self.emitStructZzddsWrappers(s, c_name, cpp_qname);
         }
+    }
+
+    /// Selective-parse family for a Topic struct -- see c.zig's
+    /// `emitSelectiveFnsC` and zig.zig's `emitSelectiveFns`. Unlike C, there
+    /// is **no** `_deinit_selected`: `::Foo`'s members (`std::string`,
+    /// `std::vector`, …) release themselves via RAII when `key_out` goes out
+    /// of scope, even after a mid-parse error. Fallback to `_deserialize` for
+    /// a struct with a base type or > 64 members.
+    fn emitSelectiveFnsCpp(
+        self: *CdrGenerator,
+        s: *const ir.Struct,
+        c_name: []const u8,
+        cpp_qname: []const u8,
+        appendable: bool,
+    ) !void {
+        const fallback = s.base != null or s.members.len > 64;
+
+        // _field_index
+        try self.print("bool {s}_field_index(const char *_name, size_t _name_len, uint32_t *_out_idx) {{\n", .{c_name});
+        if (fallback) {
+            try self.writeI("(void)_name; (void)_name_len; (void)_out_idx;\n");
+        } else {
+            for (s.members, 0..) |m, idx| {
+                try self.printI("if (_name_len == sizeof(\"{s}\") - 1 && memcmp(_name, \"{s}\", _name_len) == 0) {{ *_out_idx = {d}u; return true; }}\n", .{ m.name, m.name, idx });
+            }
+        }
+        try self.writeI("return false;\n");
+        try self.write("}\n\n");
+
+        // _deserialize_selected
+        try self.print("int {s}_deserialize_selected(ZidlCdrReader *_r, uint64_t _want, {s} *_v) {{\n", .{ c_name, cpp_qname });
+        try self.writeI("*_v = {};\n");
+        if (fallback) {
+            try self.writeI("(void)_want;\n");
+            try self.printI("return {s}_deserialize(_r, _v);\n", .{c_name});
+        } else {
+            try self.writeI("int _rc;\n");
+            if (appendable) {
+                try self.writeI("_rc = zidl_cdr_skip_dheader_if_xcdr2(_r);\n");
+                try self.writeI("if (_rc) return _rc;\n");
+            }
+            for (s.members, 0..) |m, idx| {
+                try self.printI("if (_want & (1ull << {d})) {{\n", .{idx});
+                self.indent_depth += 1;
+                try self.emitReadMember(m);
+                self.indent_depth -= 1;
+                try self.writeI("} else {\n");
+                self.indent_depth += 1;
+                try cdr_skip.emitSkipMember(self, m);
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            }
+            try self.writeI("return ZIDL_CDR_OK;\n");
+        }
+        try self.write("}\n\n");
     }
 
     /// Emit `{c_name}_get_field_from_cdr` -- a free function using the flat
@@ -2040,7 +2112,10 @@ const CdrGenerator = struct {
         try self.writeI("if (_rc) return false;\n");
         try self.writeI("ZidlCdrReader *_r = &_r_data;\n");
         try self.printI("{s} _v;\n", .{cpp_qname});
-        try self.printI("_rc = {s}_deserialize(_r, &_v);\n", .{c_name});
+        // Decode only the referenced field, skipping every other member.
+        try self.writeI("uint32_t _fidx;\n");
+        try self.printI("uint64_t _fmask = {s}_field_index(_field, _field_len, &_fidx) ? (1ull << _fidx) : 0;\n", .{c_name});
+        try self.printI("_rc = {s}_deserialize_selected(_r, _fmask, &_v);\n", .{c_name});
         try self.writeI("if (_rc) return false;\n");
         try self.writeI("bool _matched = false;\n");
         var first = true;
@@ -2241,7 +2316,11 @@ const CdrGenerator = struct {
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("_rc = zidl_cdr_reader_init(&_r, _buf, _len);\n");
         try self.writeI("if (_rc) return _rc;\n");
-        try self.printI("return {s}_deserialize_key(&_r, &key_out);\n", .{c_name});
+        // The stored blob is the whole last-alive sample keyed by instance
+        // handle; _deserialize_selected decodes just the @key members and skips
+        // the rest. Non-key fields of key_out stay default-constructed --
+        // unspecified per DDS 1.4 §2.2.2.4.2.17.
+        try self.printI("return {s}_deserialize_selected(&_r, {s}_KEY_FIELD_MASK, &key_out);\n", .{ c_name, c_name });
         try self.write("}\n\n");
         try self.print("DDS_InstanceHandle_t {s}DataWriter::lookup_instance(const {s}& key) {{\n", .{ class_name, cpp_qname });
         try self.writeI("uint8_t _hash[16];\n");
@@ -2358,7 +2437,8 @@ const CdrGenerator = struct {
         try self.writeI("ZidlCdrReader _r;\n");
         try self.writeI("_rc = zidl_cdr_reader_init(&_r, _buf, _len);\n");
         try self.writeI("if (_rc) return _rc;\n");
-        try self.printI("return {s}_deserialize_key(&_r, &key_out);\n", .{c_name});
+        // See DataWriter get_key_value: the stored payload is a full sample.
+        try self.printI("return {s}_deserialize_selected(&_r, {s}_KEY_FIELD_MASK, &key_out);\n", .{ c_name, c_name });
         try self.write("}\n\n");
 
         try self.print("DDS_InstanceHandle_t {s}DataReader::lookup_instance(const {s}& key) {{\n", .{ class_name, cpp_qname });
@@ -2904,9 +2984,9 @@ const CdrGenerator = struct {
                 try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
                 self.indent_depth += 1;
                 if (cas.dimensions.len > 0) {
-                    try self.emitSkipArray(cas.type_ref, cas.dimensions, 0);
+                    try cdr_skip.emitSkipArray(self, cas.type_ref, cas.dimensions, 0);
                 } else {
-                    try self.emitSkipForTypeRef(cas.type_ref);
+                    try cdr_skip.emitSkipForTypeRef(self, cas.type_ref);
                 }
                 try self.writeI("break;\n");
                 self.indent_depth -= 1;
@@ -3544,132 +3624,6 @@ const CdrGenerator = struct {
             try self.emitReadArray(m.type_ref, m.name, lval, m.dimensions, 0);
         } else {
             try self.emitReadForTypeRef(m.type_ref, m.name, lval);
-        }
-    }
-
-    fn emitSkipMember(self: *CdrGenerator, m: ir.StructMember) anyerror!void {
-        if (m.annotations.is_optional) {
-            const pvar = try std.fmt.allocPrint(self.alloc, "_sp_{s}", .{m.name});
-            defer self.alloc.free(pvar);
-            try self.printI("{{ int8_t {s};\n", .{pvar});
-            self.indent_depth += 1;
-            try self.printI("_rc = zidl_cdr_read_bool(_r, &{s});\n", .{pvar});
-            try self.writeI("if (_rc) return _rc;\n");
-            try self.printI("if ({s}) {{\n", .{pvar});
-            self.indent_depth += 1;
-            if (m.dimensions.len > 0) {
-                try self.emitSkipArray(m.type_ref, m.dimensions, 0);
-            } else {
-                try self.emitSkipForTypeRef(m.type_ref);
-            }
-            self.indent_depth -= 1;
-            try self.writeI("}\n");
-            self.indent_depth -= 1;
-            try self.writeI("}\n");
-            return;
-        }
-        if (m.dimensions.len > 0) {
-            try self.emitSkipArray(m.type_ref, m.dimensions, 0);
-        } else {
-            try self.emitSkipForTypeRef(m.type_ref);
-        }
-    }
-
-    fn emitSkipArray(self: *CdrGenerator, elem_tr: ir.TypeRef, dims: []const u64, dim_idx: usize) anyerror!void {
-        const var_name = try std.fmt.allocPrint(self.alloc, "_ski{d}", .{dim_idx});
-        defer self.alloc.free(var_name);
-        try self.printI("{{ uint32_t {s}; for ({s} = 0; {s} < {d}u; {s}++) {{\n", .{
-            var_name, var_name, var_name, dims[0], var_name,
-        });
-        self.indent_depth += 1;
-        if (dims.len > 1) {
-            try self.emitSkipArray(elem_tr, dims[1..], dim_idx + 1);
-        } else {
-            try self.emitSkipForTypeRef(elem_tr);
-        }
-        self.indent_depth -= 1;
-        try self.writeI("}\n");
-        try self.writeI("}\n");
-    }
-
-    fn emitSkipForTypeRef(self: *CdrGenerator, tr: ir.TypeRef) anyerror!void {
-        switch (tr) {
-            .base => |b| {
-                const fn_name = baseCReadFn(b);
-                const c_type = baseToCType(b);
-                if (std.mem.startsWith(u8, fn_name, "//")) {
-                    try self.writeI("return ZIDL_CDR_INVALID;\n");
-                } else {
-                    try self.printI("{{ {s} _tmp; _rc = {s}(_r, &_tmp); if (_rc) return _rc; }}\n", .{ c_type, fn_name });
-                }
-            },
-            .string => {
-                try self.writeI("{ const char *_sp; uint32_t _sl; _rc = zidl_cdr_read_string_zerocopy(_r, &_sp, &_sl); if (_rc) return _rc; }\n");
-            },
-            .wstring => {
-                try self.writeI("{ uint32_t _wl; _rc = zidl_cdr_read_u32(_r, &_wl); if (_rc) return _rc; for (uint32_t _wi = 0; _wi < _wl; _wi++) { uint16_t _wc; _rc = zidl_cdr_read_u16(_r, &_wc); if (_rc) return _rc; } }\n");
-            },
-            .sequence => |seq| {
-                try self.writeI("{ uint32_t _sl;\n");
-                self.indent_depth += 1;
-                try self.writeI("_rc = zidl_cdr_read_u32(_r, &_sl);\n");
-                try self.writeI("if (_rc) return _rc;\n");
-                try self.writeI("for (uint32_t _si = 0; _si < _sl; _si++) {\n");
-                self.indent_depth += 1;
-                try self.emitSkipForTypeRef(seq.element.*);
-                self.indent_depth -= 1;
-                try self.writeI("}\n");
-                self.indent_depth -= 1;
-                try self.writeI("}\n");
-            },
-            .map => |m| {
-                try self.writeI("{ uint32_t _ml;\n");
-                self.indent_depth += 1;
-                try self.writeI("_rc = zidl_cdr_read_u32(_r, &_ml);\n");
-                try self.writeI("if (_rc) return _rc;\n");
-                try self.writeI("for (uint32_t _mi = 0; _mi < _ml; _mi++) {\n");
-                self.indent_depth += 1;
-                try self.emitSkipForTypeRef(m.key.*);
-                try self.emitSkipForTypeRef(m.value.*);
-                self.indent_depth -= 1;
-                try self.writeI("}\n");
-                self.indent_depth -= 1;
-                try self.writeI("}\n");
-            },
-            .named => |td| switch (td) {
-                .enum_ => |e| {
-                    const suffix = enumCStorageType(e.annotations);
-                    const ctype = enumCTypeName(e.annotations);
-                    try self.printI("{{ {s} _tmp; _rc = zidl_cdr_read_{s}(_r, &_tmp); if (_rc) return _rc; }}\n", .{ ctype, suffix });
-                },
-                .bitmask => |bm| {
-                    const ctype = bitmaskStorageType(bm.annotations);
-                    const suffix = enumCStorageType(bm.annotations);
-                    try self.printI("{{ {s} _tmp; _rc = zidl_cdr_read_{s}(_r, &_tmp); if (_rc) return _rc; }}\n", .{ ctype, suffix });
-                },
-                .typedef => |t| {
-                    if (t.dimensions.len > 0) {
-                        try self.emitSkipArray(t.type_ref, t.dimensions, 0);
-                    } else {
-                        try self.emitSkipForTypeRef(t.type_ref);
-                    }
-                },
-                .struct_, .exception, .union_ => {
-                    const c_type = try self.prefixedCName(ir.typeDeclQualifiedName(td));
-                    defer self.alloc.free(c_type);
-                    try self.printI("_rc = {s}_skip(_r);\n", .{c_type});
-                    try self.writeI("if (_rc) return _rc;\n");
-                },
-                .bitset => |bs| {
-                    const ctype = bitsetCdrStorageType(bs);
-                    const suffix = bitsetCdrFnSuffix(bs);
-                    try self.printI("{{ {s} _tmp; _rc = zidl_cdr_read_{s}(_r, &_tmp); if (_rc) return _rc; }}\n", .{ ctype, suffix });
-                },
-                else => try self.writeI("return ZIDL_CDR_INVALID;\n"),
-            },
-            .fixed_pt => |fp| {
-                try self.printI("{{ double _tmp; _rc = zidl_cdr_read_fixed(_r, {d}, {d}, &_tmp); if (_rc) return _rc; }}\n", .{ fp.digits, fp.scale });
-            },
         }
     }
 
@@ -7082,7 +7036,7 @@ test "cpp_backend: get_field_from_cdr generated for int/float/string members, sk
     const s = out.items;
     try testing.expect(has(s, "bool Topic_get_field_from_cdr(const uint8_t *_payload, size_t _payload_len, const char *_field, size_t _field_len, zzdds_filter_value *_out, uint8_t *_scratch, size_t _scratch_len) {"));
     try testing.expect(has(s, "::Topic _v;"));
-    try testing.expect(has(s, "_rc = Topic_deserialize(_r, &_v);"));
+    try testing.expect(has(s, "_rc = Topic_deserialize_selected(_r, _fmask, &_v);"));
     // int-like member
     try testing.expect(has(s, "if (_field_len == sizeof(\"x\") - 1 && memcmp(_field, \"x\", _field_len) == 0) {"));
     try testing.expect(has(s, "_out->kind = 0;"));
@@ -7107,9 +7061,11 @@ test "cpp_backend: get_field_from_cdr generated for int/float/string members, sk
     try testing.expect(has(s, "if (_s_len <= _scratch_len) {"));
     try testing.expect(has(s, "memcpy(_scratch, _v.color.data(), _s_len);"));
     try testing.expect(has(s, "_out->s_ptr = _scratch;"));
-    // nested struct / sequence members are not filterable -- skipped entirely
-    try testing.expect(!has(s, "\"nested\""));
-    try testing.expect(!has(s, "\"seq\""));
+    // nested struct / sequence members are not filterable -- get_field_from_cdr
+    // never compares `_field` against them (`_field_index` maps every member
+    // name, which is fine -- those bits just never get set in a filter mask).
+    try testing.expect(!has(s, "memcmp(_field, \"nested\""));
+    try testing.expect(!has(s, "memcmp(_field, \"seq\""));
     // TypeSupport::register_type wires the new function in
     try testing.expect(has(s, "zzdds_register_type_support(participant, type_name ? type_name : \"Topic\", Topic_compute_key_hash_from_cdr, Topic_get_field_from_cdr);"));
 }

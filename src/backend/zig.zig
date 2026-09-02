@@ -3832,6 +3832,7 @@ const Generator = struct {
             if (self.opts.generate_zzdds_wrappers and isZzddsTopicStruct(s)) {
                 try self.emitComputeKeyHashFromCdr(s);
                 try self.emitGetFieldFromCdr(s);
+                try self.emitSelectiveFns(s);
             }
         } else if (self.opts.generate_zzdds_wrappers and isZzddsTopicStruct(s)) {
             // Keyless topic type but --generate-zzdds-wrappers was requested:
@@ -3912,6 +3913,7 @@ const Generator = struct {
 
             try self.emitComputeKeyHashFromCdr(s);
             try self.emitGetFieldFromCdr(s);
+            try self.emitSelectiveFns(s);
         }
 
         // PL_CDR functions (only for @mutable types when --zig-pl-cdr is set)
@@ -4163,36 +4165,17 @@ const Generator = struct {
         try self.write("\n");
         try self.ind();
         try self.write("    pub fn getFieldFromCdr(ctx: *anyopaque, payload: []const u8, field: []const u8, scratch: []u8) ?_zzdds.dcps.filter.FilterValue {\n");
-        // `field`/`scratch` are only referenced inside the per-member
-        // branches emitted below (string_like members reference both;
-        // int_like/float_like reference only `field`). A struct with no
-        // filterable members at all (every member `.skip` -- arrays/complex
-        // types only) or with no string_like member specifically leaves one
-        // or both genuinely unreferenced, which Zig rejects as an unused
-        // function parameter -- a real, live bug found building
-        // zzdds-examples' `presence` example against a single-int-field
-        // struct. Pre-scan first to decide whether either discard is
-        // actually needed: Zig equally rejects `_ = x;` as a "pointless
-        // discard" when `x` genuinely *is* used later, so an unconditional
-        // discard isn't a safe blanket fix here the way it is in
-        // deserializeInto/serializeKey/etc. above -- it has to match reality
-        // in both directions.
-        var has_field_use = false;
+        // `field` is always used now (fieldIndex(field) below). `scratch` is
+        // referenced only by string_like members' scratch-copy -- a struct
+        // with no string_like member leaves it unreferenced, which Zig
+        // rejects as an unused parameter (a real bug found building
+        // zzdds-examples' `presence` example against a single-int struct),
+        // so pre-scan and discard it only when genuinely unused (Zig equally
+        // rejects `_ = x;` when x *is* used later).
         var has_scratch_use = false;
         for (s.members) |m| {
             if (m.dimensions.len > 0) continue;
-            switch (classifyFilterFieldKind(m.type_ref)) {
-                .skip => continue,
-                .int_like, .float_like => has_field_use = true,
-                .string_like => {
-                    has_field_use = true;
-                    has_scratch_use = true;
-                },
-            }
-        }
-        if (!has_field_use) {
-            try self.ind();
-            try self.write("        _ = field;\n");
+            if (classifyFilterFieldKind(m.type_ref) == .string_like) has_scratch_use = true;
         }
         if (!has_scratch_use) {
             try self.ind();
@@ -4202,11 +4185,17 @@ const Generator = struct {
         try self.write("        const allocator: *const std.mem.Allocator = @ptrCast(@alignCast(ctx));\n");
         try self.ind();
         try self.write("        var _reader = zidl_rt.CdrReader.init(payload) catch return null;\n");
+        // Decode only the referenced field, skipping every other member (a
+        // filter never needs more than one field per getFieldFromCdr call).
         try self.ind();
-        try self.print("        {s} _v = @This().deserialize(&_reader, allocator.*) catch return null;\n", .{if (needs_cleanup) "var" else "const"});
+        try self.write("        const _mask: FieldMask = if (@This().fieldIndex(field)) |_i| (@as(FieldMask, 1) << _i) else 0;\n");
+        try self.ind();
+        try self.write("        var _v: @This() = undefined;\n");
+        try self.ind();
+        try self.write("        @This().deserializeSelected(&_reader, _mask, &_v, allocator.*) catch return null;\n");
         if (needs_cleanup) {
             try self.ind();
-            try self.write("        defer _v.deinit(allocator.*);\n");
+            try self.write("        defer _v.deinitSelected(_mask, allocator.*);\n");
         }
         for (s.members) |m| {
             if (m.dimensions.len > 0) continue; // array member: not a simple filterable field
@@ -4244,6 +4233,146 @@ const Generator = struct {
         }
         try self.ind();
         try self.write("        return null;\n");
+        try self.ind();
+        try self.write("    }\n");
+    }
+
+    /// Emit the selective-parse family for a Topic struct:
+    ///
+    ///   pub const FieldMask = u64;                  // member index -> bit
+    ///   pub const KEY_FIELD_MASK: FieldMask = ...;  // bits of the @key members
+    ///   pub fn fieldIndex(name) ?u6                 // "temp" -> 3
+    ///   pub fn deserializeSelected(reader, want, out, allocator) !void
+    ///   pub fn deinitSelected(self, want, alloc) void
+    ///
+    /// `deserializeSelected` walks the members in declaration order, decoding
+    /// the ones whose bit is set in `want` and *skipping* (not decoding) the
+    /// rest -- so `get_key_value` and a ContentFilteredTopic/QueryCondition
+    /// only pay for the fields they reference, never a full decode of a large
+    /// non-key/non-referenced member. `deinitSelected` frees exactly the
+    /// wanted heap members (mirrors `deinit`, gated by the mask). `out` is
+    /// zeroed first, so a plain `deinit` on the result is also safe (every
+    /// heap free is `len`/`_release`-guarded), but `deinitSelected` is the
+    /// precise path, incl. for an `errdefer` around a failed parse.
+    ///
+    /// Fallbacks (mask ignored, behaves like `deserializeInto`/`deinit`):
+    /// a struct with a base type, or with more than 64 members. `@mutable`
+    /// never reaches here (not a Topic type).
+    fn emitSelectiveFns(self: *Generator, s: *const ir.Struct) !void {
+        const ext = s.annotations.extensibility;
+        const appendable = ext == .appendable;
+        const has_base = s.base != null;
+        const too_many = s.members.len > 64;
+        const fallback = has_base or too_many;
+        const needs_cleanup = self.structNeedsCleanup(s);
+        const needs_alloc = blk: {
+            for (s.members) |m| if (typeRefNeedsAllocator(m.type_ref)) break :blk true;
+            break :blk false;
+        };
+
+        // FieldMask + KEY_FIELD_MASK
+        try self.write("\n");
+        try self.ind();
+        try self.write("    pub const FieldMask = u64;\n");
+        try self.ind();
+        try self.write("    pub const KEY_FIELD_MASK: FieldMask = ");
+        if (fallback) {
+            try self.write("0"); // unused in the fallback path
+        } else {
+            var first = true;
+            for (s.members, 0..) |m, idx| {
+                if (!m.annotations.is_key) continue;
+                if (!first) try self.write(" | ");
+                try self.print("(1 << {d})", .{idx});
+                first = false;
+            }
+            if (first) try self.write("0");
+        }
+        try self.write(";\n");
+
+        // fieldIndex
+        try self.ind();
+        try self.write("    pub fn fieldIndex(name: []const u8) ?u6 {\n");
+        if (fallback) {
+            try self.ind();
+            try self.write("        _ = name;\n");
+            try self.ind();
+            try self.write("        return null;\n");
+        } else {
+            for (s.members, 0..) |m, idx| {
+                try self.ind();
+                try self.print("        if (std.mem.eql(u8, name, \"{s}\")) return {d};\n", .{ m.name, idx });
+            }
+            try self.ind();
+            try self.write("        return null;\n");
+        }
+        try self.ind();
+        try self.write("    }\n");
+
+        // deserializeSelected
+        try self.ind();
+        try self.write("    pub fn deserializeSelected(reader: *zidl_rt.CdrReader, want: FieldMask, out: *@This(), allocator: std.mem.Allocator) !void {\n");
+        if (fallback) {
+            try self.ind();
+            try self.write("        _ = want;\n");
+            try self.ind();
+            try self.write("        out.* = .{};\n");
+            try self.ind();
+            try self.write("        try @This().deserializeInto(out, reader, allocator);\n");
+            try self.ind();
+            try self.write("    }\n");
+        } else {
+            if (!needs_alloc) {
+                try self.ind();
+                try self.write("        _ = allocator;\n");
+            }
+            try self.ind();
+            try self.write("        out.* = .{};\n");
+            if (appendable) {
+                try self.ind();
+                try self.write("        try reader.skipDheaderIfXcdr2();\n");
+            }
+            for (s.members, 0..) |m, idx| {
+                const out_expr = try std.fmt.allocPrint(self.alloc, "out.{s}", .{m.name});
+                defer self.alloc.free(out_expr);
+                try self.ind();
+                try self.print("        if (want & (1 << {d}) != 0) {{\n", .{idx});
+                try self.emitReadMember(m, out_expr, "            ");
+                try self.ind();
+                try self.write("        } else {\n");
+                try self.emitSkipMember(m, "            ");
+                try self.ind();
+                try self.write("        }\n");
+            }
+            try self.ind();
+            try self.write("    }\n");
+        }
+
+        // deinitSelected
+        try self.ind();
+        try self.write("    pub fn deinitSelected(self: *@This(), want: FieldMask, alloc: std.mem.Allocator) void {\n");
+        if (!needs_cleanup) {
+            try self.ind();
+            try self.write("        _ = self;\n");
+            try self.ind();
+            try self.write("        _ = want;\n");
+            try self.ind();
+            try self.write("        _ = alloc;\n");
+        } else if (fallback) {
+            try self.ind();
+            try self.write("        _ = want;\n");
+            try self.ind();
+            try self.write("        self.deinit(alloc);\n");
+        } else {
+            for (s.members, 0..) |m, idx| {
+                if (!self.memberNeedsCleanup(m)) continue;
+                try self.ind();
+                try self.print("        if (want & (1 << {d}) != 0) {{\n", .{idx});
+                try self.emitFieldSeqDeinit(m.name, m.type_ref, "            ");
+                try self.ind();
+                try self.write("        }\n");
+            }
+        }
         try self.ind();
         try self.write("    }\n");
     }
@@ -4327,19 +4456,17 @@ const Generator = struct {
         try self.write("        const _raw = _zzdds.getKeyValueRawWriter(self._dw, handle) orelse return error.BadParameter;\n");
         try self.ind();
         try self.write("        var _r = try zidl_rt.CdrReader.init(_raw);\n");
+        // The stored blob is the whole last-alive sample keyed by instance
+        // handle (src/dcps/writer.zig `key_registry`). `deserializeSelected`
+        // skips every non-@key member instead of decoding it; the non-key
+        // fields of `key_holder` stay zeroed -- per DDS 1.4 §2.2.2.4.2.17
+        // their value after `get_key_value` is unspecified.
         if (needs_deinit) {
             try self.ind();
-            try self.print("        var _kv: {s} = .{{}};\n", .{type_name});
-            try self.ind();
-            try self.write("        errdefer _kv.deinit(self._alloc);\n");
-            try self.ind();
-            try self.print("        try {s}.deserializeKeyInto(&_kv, &_r, self._alloc);\n", .{type_name});
-            try self.ind();
-            try self.write("        key_holder.* = _kv;\n");
-        } else {
-            try self.ind();
-            try self.print("        try {s}.deserializeKeyInto(key_holder, &_r, self._alloc);\n", .{type_name});
+            try self.print("        errdefer {s}.deinitSelected(key_holder, {s}.KEY_FIELD_MASK, self._alloc);\n", .{ type_name, type_name });
         }
+        try self.ind();
+        try self.print("        try {s}.deserializeSelected(&_r, {s}.KEY_FIELD_MASK, key_holder, self._alloc);\n", .{ type_name, type_name });
         try self.ind();
         try self.write("    }\n");
 
@@ -4438,19 +4565,15 @@ const Generator = struct {
         try self.write("        const _raw = _zzdds.getKeyValueRawReader(self._dr, handle) orelse return error.BadParameter;\n");
         try self.ind();
         try self.write("        var _r = try zidl_rt.CdrReader.init(_raw);\n");
+        // See the DataWriter `get_key_value` above: the reader also stores the
+        // whole first-alive sample (src/dcps/reader.zig `key_cdr`);
+        // `deserializeSelected` skips the non-@key members.
         if (needs_deinit) {
             try self.ind();
-            try self.print("        var _kv: {s} = .{{}};\n", .{type_name});
-            try self.ind();
-            try self.write("        errdefer _kv.deinit(self._alloc);\n");
-            try self.ind();
-            try self.print("        try {s}.deserializeKeyInto(&_kv, &_r, self._alloc);\n", .{type_name});
-            try self.ind();
-            try self.write("        key_holder.* = _kv;\n");
-        } else {
-            try self.ind();
-            try self.print("        try {s}.deserializeKeyInto(key_holder, &_r, self._alloc);\n", .{type_name});
+            try self.print("        errdefer {s}.deinitSelected(key_holder, {s}.KEY_FIELD_MASK, self._alloc);\n", .{ type_name, type_name });
         }
+        try self.ind();
+        try self.print("        try {s}.deserializeSelected(&_r, {s}.KEY_FIELD_MASK, key_holder, self._alloc);\n", .{ type_name, type_name });
         try self.ind();
         try self.write("    }\n");
 
@@ -6120,6 +6243,14 @@ const Generator = struct {
             try self.emitSkipForTypeRef(elem_tr, extra);
             return;
         }
+        // Fixed-size primitive element with all dims known → one bulk advance.
+        if (typeRefPrimWireSize(elem_tr)) |sz| {
+            var total: u64 = 1;
+            for (dims) |d| total *= d;
+            try self.ind();
+            try self.print("{s}try reader.skipPrimitives({d}, {d});\n", .{ extra, total, sz });
+            return;
+        }
         try self.ind();
         try self.print("{s}for (0..{d}) |_| {{\n", .{ extra, dims[0] });
         const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
@@ -6155,13 +6286,19 @@ const Generator = struct {
                 defer self.alloc.free(inner);
                 try self.ind();
                 try self.print("{s}const _n = try reader.readU32();\n", .{inner});
-                try self.ind();
-                try self.print("{s}for (0.._n) |_| {{\n", .{inner});
-                const inner2 = try std.fmt.allocPrint(self.alloc, "{s}    ", .{inner});
-                defer self.alloc.free(inner2);
-                try self.emitSkipForTypeRef(seq.element.*, inner2);
-                try self.ind();
-                try self.print("{s}}}\n", .{inner});
+                if (typeRefPrimWireSize(seq.element.*)) |sz| {
+                    // Fixed-size primitive element → one bulk advance, no loop.
+                    try self.ind();
+                    try self.print("{s}try reader.skipPrimitives(_n, {d});\n", .{ inner, sz });
+                } else {
+                    try self.ind();
+                    try self.print("{s}for (0.._n) |_| {{\n", .{inner});
+                    const inner2 = try std.fmt.allocPrint(self.alloc, "{s}    ", .{inner});
+                    defer self.alloc.free(inner2);
+                    try self.emitSkipForTypeRef(seq.element.*, inner2);
+                    try self.ind();
+                    try self.print("{s}}}\n", .{inner});
+                }
                 try self.ind();
                 try self.print("{s}}}\n", .{extra});
             },
@@ -6585,6 +6722,41 @@ fn intFieldExpr(alloc: std.mem.Allocator, tr: ir.TypeRef, name: []const u8) ![]u
         },
         else => unreachable,
     };
+}
+
+/// Fixed wire size (bytes) of a base type, or null for variable-size /
+/// unsupported. Used to turn a per-element skip loop into one `skipPrimitives`
+/// advance.
+fn baseWireSize(b: ast.BaseTypeSpec) ?usize {
+    return switch (b) {
+        .boolean, .octet, .uint8, .char, .int8 => 1,
+        .wchar, .short, .int16, .unsigned_short, .uint16 => 2,
+        .long, .int32, .unsigned_long, .uint32, .float => 4,
+        .long_long, .int64, .unsigned_long_long, .uint64, .double, .long_double => 8,
+        .any, .object, .value_base => null,
+    };
+}
+
+/// Wire size of a type that skips as a flat run of fixed-size elements
+/// (base primitive, or an enum/bitmask by its storage width), else null.
+fn typeRefPrimWireSize(tr: ir.TypeRef) ?usize {
+    return switch (tr) {
+        .base => |b| baseWireSize(b),
+        .named => |td| switch (td) {
+            .enum_ => |e| storageWidth(enumStorageType(e.annotations)),
+            .bitmask => |bm| storageWidth(bitmaskStorageType(bm.annotations)),
+            else => null,
+        },
+        else => null,
+    };
+}
+
+fn storageWidth(stor: []const u8) ?usize {
+    if (std.mem.endsWith(u8, stor, "8")) return 1;
+    if (std.mem.endsWith(u8, stor, "16")) return 2;
+    if (std.mem.endsWith(u8, stor, "32")) return 4;
+    if (std.mem.endsWith(u8, stor, "64")) return 8;
+    return 4;
 }
 
 fn baseReadMethod(b: ast.BaseTypeSpec) []const u8 {
@@ -9096,6 +9268,40 @@ test "zig_backend: keyless struct gets trivial key helpers under --generate-zzdd
     try testing.expect(has(s, "pub fn deserializeKeyInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {"));
 }
 
+test "zig_backend: get_key_value / selective parse for a non-leading key" {
+    // zzdds stores the whole last-alive sample keyed by instance handle, so
+    // get_key_value runs `deserializeSelected(KEY_FIELD_MASK)` -- decodes the
+    // @key members, *skips* the rest (a full `deserializeInto` would misread
+    // nothing here but pays for `label`/`payload`; the key-only
+    // `deserializeKeyInto` would misread `id` since it isn't first).
+    var out = try testGenOpts(
+        \\@appendable struct Msg {
+        \\    string<64> label;
+        \\    @key long id;
+        \\    sequence<octet> payload;
+        \\};
+    , "msg", .{ .generate_zzdds_wrappers = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // selective-parse family
+    try testing.expect(has(s, "pub const KEY_FIELD_MASK: FieldMask = (1 << 1);"));
+    try testing.expect(has(s, "pub fn fieldIndex(name: []const u8) ?u6 {"));
+    try testing.expect(has(s, "if (std.mem.eql(u8, name, \"payload\")) return 2;"));
+    try testing.expect(has(s, "pub fn deserializeSelected(reader: *zidl_rt.CdrReader, want: FieldMask, out: *@This(), allocator: std.mem.Allocator) !void {"));
+    try testing.expect(has(s, "if (want & (1 << 0) != 0) {"));
+    // key-only helpers still emitted (the disposed-sample take path needs them)
+    try testing.expect(has(s, "pub fn deserializeKeyInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {"));
+    // get_key_value on both sides drives deserializeSelected with the key mask
+    const gkv_w = std.mem.indexOf(u8, s, "getKeyValueRawWriter(self._dw, handle)").?;
+    const gkv_w_end = std.mem.indexOfPos(u8, s, gkv_w, "\n    }\n").?;
+    try testing.expect(has(s[gkv_w..gkv_w_end], "Msg.deserializeSelected(&_r, Msg.KEY_FIELD_MASK, key_holder, self._alloc)"));
+    try testing.expect(!has(s[gkv_w..gkv_w_end], "deserializeKeyInto"));
+    try testing.expect(!has(s[gkv_w..gkv_w_end], "deserializeInto"));
+    const gkv_r = std.mem.indexOf(u8, s, "getKeyValueRawReader(self._dr, handle)").?;
+    const gkv_r_end = std.mem.indexOfPos(u8, s, gkv_r, "\n    }\n").?;
+    try testing.expect(has(s[gkv_r..gkv_r_end], "Msg.deserializeSelected(&_r, Msg.KEY_FIELD_MASK, key_holder, self._alloc)"));
+}
+
 // ── getFieldFromCdr tests ──────────────────────────────────────────────────
 
 test "zig_backend: getFieldFromCdr matches int/string members, skips complex ones" {
@@ -9115,7 +9321,9 @@ test "zig_backend: getFieldFromCdr matches int/string members, skips complex one
     try testing.expect(has(s, "pub fn getFieldFromCdr(ctx: *anyopaque, payload: []const u8, field: []const u8, scratch: []u8) ?_zzdds.dcps.filter.FilterValue {"));
     try testing.expect(has(s, "const allocator: *const std.mem.Allocator = @ptrCast(@alignCast(ctx));"));
     try testing.expect(has(s, "var _reader = zidl_rt.CdrReader.init(payload) catch return null;"));
-    try testing.expect(has(s, "_v = @This().deserialize(&_reader, allocator.*) catch return null;"));
+    try testing.expect(has(s, "const _mask: FieldMask = if (@This().fieldIndex(field)) |_i| (@as(FieldMask, 1) << _i) else 0;"));
+    try testing.expect(has(s, "@This().deserializeSelected(&_reader, _mask, &_v, allocator.*) catch return null;"));
+    try testing.expect(!has(s, "@This().deserialize(&_reader"));
     // bounded @key string: uses .slice(), copies into scratch
     try testing.expect(has(s, "if (std.mem.eql(u8, field, \"color\")) {"));
     try testing.expect(has(s, "const _s = _v.color.slice();"));
@@ -9128,9 +9336,11 @@ test "zig_backend: getFieldFromCdr matches int/string members, skips complex one
     // unbounded string: member used directly, no .slice()
     try testing.expect(has(s, "if (std.mem.eql(u8, field, \"note\")) {"));
     try testing.expect(has(s, "const _s = _v.note;"));
-    // nested struct and sequence members are not filterable -- skipped entirely
-    try testing.expect(!has(s, "\"nested\""));
-    try testing.expect(!has(s, "\"values\""));
+    // nested struct and sequence members are not filterable -- getFieldFromCdr
+    // never compares `field` against them (fieldIndex still maps every member
+    // name, which is fine -- those bits just never get set in a filter mask).
+    try testing.expect(!has(s, "std.mem.eql(u8, field, \"nested\")"));
+    try testing.expect(!has(s, "std.mem.eql(u8, field, \"values\")"));
     // falls through to null when nothing matched
     try testing.expect(has(s, "        return null;\n    }\n"));
 }
@@ -9184,17 +9394,17 @@ test "zig_backend: getFieldFromCdr discards scratch when no string member exists
     try testing.expect(!has(s, "scratch[0.."));
 }
 
-test "zig_backend: getFieldFromCdr discards both field and scratch when no filterable member exists" {
-    // The other half of the same bug class: a struct with only array/
-    // complex members (every member `.skip`) leaves `field` unreferenced
-    // too, not just `scratch`.
+test "zig_backend: getFieldFromCdr discards scratch when no string_like member exists" {
+    // `field` is always used now (fieldIndex(field)); only `scratch` can go
+    // unreferenced -- a struct with only array/complex members has no
+    // string_like member to write it.
     var out = try testGenOpts(
         \\struct Inner { long z; };
         \\@appendable struct OnlyComplex { sequence<long> values; Inner nested; };
     , "onlycomplex", .{ .generate_zzdds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "_ = field;"));
+    try testing.expect(!has(s, "_ = field;"));
     try testing.expect(has(s, "_ = scratch;"));
 }
 

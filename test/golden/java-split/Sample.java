@@ -248,7 +248,8 @@ public class Sample implements java.io.Serializable {
         java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(_payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
         int _xcdrVersion = _cdrDetectXcdr(_payload);
         _buf.position(4);
-        Sample _obj = deserializeFrom(_buf, 4, _xcdrVersion);
+        int _fi = fieldIndex(_field);
+        Sample _obj = deserializeSelected(_buf, 4, _xcdrVersion, _fi < 0 ? 0L : (1L << _fi));
         switch (_field) {
             case "id": return (long) _obj.id;
             case "b": return (_obj.b ? 1L : 0L);
@@ -266,6 +267,133 @@ public class Sample implements java.io.Serializable {
             case "clr": return (long) _obj.clr.getValue();
             default: return null;
         }
+    }
+
+    public static final long KEY_FIELD_MASK = (1L << 0);
+    public static int fieldIndex(String _name) {
+        switch (_name) {
+            case "id": return 0;
+            case "b": return 1;
+            case "u8_val": return 2;
+            case "s16_val": return 3;
+            case "u16_val": return 4;
+            case "s32_val": return 5;
+            case "u32_val": return 6;
+            case "s64_val": return 7;
+            case "u64_val": return 8;
+            case "f32_val": return 9;
+            case "f64_val": return 10;
+            case "str": return 11;
+            case "bstr": return 12;
+            case "nums": return 13;
+            case "arr": return 14;
+            case "clr": return 15;
+            case "nested": return 16;
+            default: return -1;
+        }
+    }
+
+    public static Sample deserializeSelected(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion, long _want) {
+        _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        Sample _out = new Sample();
+        if ((_want & (1L << 0)) != 0) {
+            _cdrAlign(_buf, _cdrBase, 4); _out.id = _buf.getInt();
+        } else {
+            _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
+        }
+        if ((_want & (1L << 1)) != 0) {
+            _out.b = _buf.get() != 0;
+        } else {
+            _buf.get();
+        }
+        if ((_want & (1L << 2)) != 0) {
+            _out.u8_val = _buf.get();
+        } else {
+            _buf.get();
+        }
+        if ((_want & (1L << 3)) != 0) {
+            _cdrAlign(_buf, _cdrBase, 2); _out.s16_val = _buf.getShort();
+        } else {
+            _cdrAlign(_buf, _cdrBase, 2); _buf.getShort();
+        }
+        if ((_want & (1L << 4)) != 0) {
+            _cdrAlign(_buf, _cdrBase, 2); _out.u16_val = _buf.getShort();
+        } else {
+            _cdrAlign(_buf, _cdrBase, 2); _buf.getShort();
+        }
+        if ((_want & (1L << 5)) != 0) {
+            _cdrAlign(_buf, _cdrBase, 4); _out.s32_val = _buf.getInt();
+        } else {
+            _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
+        }
+        if ((_want & (1L << 6)) != 0) {
+            _cdrAlign(_buf, _cdrBase, 4); _out.u32_val = _buf.getInt();
+        } else {
+            _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
+        }
+        if ((_want & (1L << 7)) != 0) {
+            _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _out.s64_val = _buf.getLong();
+        } else {
+            _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _buf.getLong();
+        }
+        if ((_want & (1L << 8)) != 0) {
+            _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _out.u64_val = _buf.getLong();
+        } else {
+            _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _buf.getLong();
+        }
+        if ((_want & (1L << 9)) != 0) {
+            _cdrAlign(_buf, _cdrBase, 4); _out.f32_val = _buf.getFloat();
+        } else {
+            _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
+        }
+        if ((_want & (1L << 10)) != 0) {
+            _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _out.f64_val = _buf.getDouble();
+        } else {
+            _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _buf.getLong();
+        }
+        if ((_want & (1L << 11)) != 0) {
+            _out.str = _cdrReadString(_buf, _cdrBase);
+        } else {
+            _cdrReadString(_buf, _cdrBase);
+        }
+        if ((_want & (1L << 12)) != 0) {
+            _out.bstr = _cdrReadString(_buf, _cdrBase);
+        } else {
+            _cdrReadString(_buf, _cdrBase);
+        }
+        if ((_want & (1L << 13)) != 0) {
+            _cdrAlign(_buf, _cdrBase, 4); int _n__out_nums = _buf.getInt();
+            _out.nums = new java.util.ArrayList<>(_n__out_nums);
+            for (int _i__out_nums = 0; _i__out_nums < _n__out_nums; _i__out_nums++) {
+                _cdrAlign(_buf, _cdrBase, 4); _out.nums.add(_buf.getInt());
+            }
+        } else {
+            { _cdrAlign(_buf, _cdrBase, 4); int _n = _buf.getInt();
+              for (int _i = 0; _i < _n; _i++) {
+                _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
+              }
+            }
+        }
+        if ((_want & (1L << 14)) != 0) {
+            for (int _d0 = 0; _d0 < 3; _d0++) {
+                _cdrAlign(_buf, _cdrBase, 4); _out.arr[_d0] = _buf.getInt();
+            }
+        } else {
+            for (int _sk0 = 0; _sk0 < 3; _sk0++) {
+                _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
+            }
+        }
+        if ((_want & (1L << 15)) != 0) {
+            _cdrAlign(_buf, _cdrBase, 4); _out.clr = Color.valueOf(_buf.getInt());
+        } else {
+            _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
+        }
+        if ((_want & (1L << 16)) != 0) {
+            _out.nested = Point.deserializeFrom(_buf, _cdrBase, _xcdrVersion);
+        } else {
+            Point.skip(_buf, _cdrBase, _xcdrVersion);
+        }
+        return _out;
     }
 } // Sample
 

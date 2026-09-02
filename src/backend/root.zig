@@ -9,6 +9,7 @@
 const std = @import("std");
 
 pub const interface = @import("interface.zig");
+pub const cdr_skip = @import("cdr_skip.zig");
 pub const c = @import("c.zig");
 pub const cpp = @import("cpp.zig");
 pub const java = @import("java.zig");

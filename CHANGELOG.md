@@ -7,6 +7,66 @@ Notable changes to zidl, newest first. For current capability and known limitati
 
 Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
+## v0.3.12-zig.0.16.0 — 2026-08-30
+
+- **Fixed `get_key_value` returning the wrong key for types whose `@key` member is not
+  first.** zzdds stores the whole last-alive sample keyed by instance handle
+  (`key_registry` on the writer, `key_cdr` on the reader), not a key-only blob, but every
+  backend's generated `get_key_value` parsed it with the *key-only* deserializer
+  (`deserializeKeyInto` / `{Type}_deserialize_key` / `deserializeKey`), which expects a
+  stream that starts at the key member. For `struct M { string label; @key long id; }` it
+  read `label`'s length prefix as `id`; it only worked when the key was the leading
+  member. Found by zzdds's stress-suite `instance` scenario. Key-only helpers are
+  unchanged (still used for disposed/unregistered samples on the take path).
+  The fix is a **selective-parse family**, emitted per Topic struct under
+  `--generate-zzdds-wrappers`: a `FieldMask` (`u64`, member index → bit),
+  `KEY_FIELD_MASK`, a `name → index` lookup, `deserialize_selected(reader, want, out
+  [, alloc])` — walks members in declaration order, decoding the ones whose bit is set in
+  `want` and **skipping** (not decoding) the rest — and `deinit_selected(out, want
+  [, alloc])`, which frees exactly the wanted heap members. `get_key_value` drives it with
+  `KEY_FIELD_MASK`, so a large non-key member (a blob, a long string) is stepped over, not
+  allocated and copied. Fallback to the full deserializer for a struct with a base type or
+  > 64 members.
+- **`get_field_from_cdr` now skip-parses too** (all four backends). ContentFilteredTopic /
+  QueryCondition evaluation resolves the referenced field name to its member index and
+  calls `deserialize_selected(1 << idx)` instead of a full `deserialize` — so a filter
+  like `count > 5` on a type with a 100 KB non-key member no longer decodes (and, in
+  C/C++, allocates + frees) that member on every sample. Previously each `get_field`
+  call did a full decode; a multi-field filter (`a > 5 AND b < 10`) did one per reference.
+  - **Zig**: `deserializeSelected` / `deinitSelected` / `KEY_FIELD_MASK` / `fieldIndex`.
+    Runtime test: `test/integration/zig_wrapper_contract` "deserializeSelected …".
+  - **C**: `{Type}_deserialize_selected` / `{Type}_deinit_selected` / `{TYPE}_KEY_FIELD_MASK`
+    / `{Type}_field_index`.
+  - **C++**: `{Type}_deserialize_selected` / `{TYPE}_KEY_FIELD_MASK` / `{Type}_field_index`
+    — no `_deinit_selected` (the `::Foo` members are RAII, so a mid-parse error and normal
+    teardown are both handled by `key_out` going out of scope).
+  - **Java**: `{Type}.deserializeSelected(buf, cdrBase, xcdrVersion, want)` /
+    `{Type}.KEY_FIELD_MASK` / `{Type}.fieldIndex(name)` — no `deinitSelected` (GC).
+  - C/C++ compile-verified against the real zzdds headers; Java compile-verified
+    (golden compiled by `integration-test`) and runtime-verified
+    (`test/integration/java/Test.java` "testSampleDeserializeSelected").
+- **`skipPrimitives(count, elem_wire_size)`** — `CdrReader.skipPrimitives` (zidl-rt) and
+  `zidl_cdr_skip_primitives` (zidl-cdr) — plus a `skip()` fast path: a
+  `sequence<primitive>` / primitive array is stepped over with one aligned cursor advance
+  instead of a per-element read-and-discard loop. The C and C++ backends' near-verbatim
+  skip codegen is now a single shared module, `src/backend/cdr_skip.zig` (skip is
+  representation-agnostic — it never touches the output struct).
+  - `count == 0` short-circuits before the element-alignment step: an empty sequence
+    emits only its length prefix (no elements → no leading alignment padding), so
+    aligning would consume bytes belonging to the next member. Manifested in XCDR1 where
+    element alignment (up to 8) exceeds the 4-aligned post-length cursor. (greptile PR #47)
+  - The C helper rejects a `count` whose `count * elem_wire_size` would wrap `size_t` on
+    a 32-bit target rather than skipping a truncated body past the bounds check. The Zig
+    helper already checked this (`std.math.mul`).
+  - `zidl_cdr_skip` and `reader_read_slice` now bounds-check as `n > data_len - pos`
+    (the subtraction is safe — `pos <= data_len` is invariant) instead of `pos + n >
+    data_len`, which wraps for a hostile `n` on a 32-bit target and would move the
+    cursor backwards. (greptile PR #47)
+  - `reader_align_pos` clamps to `data_len` — a sample truncated inside a member's
+    alignment padding could otherwise leave `pos` past the buffer, underflowing the
+    `data_len - pos` check above and letting a later read run off the end. (greptile
+    PR #47, security)
+
 ## v0.3.11-zig.0.16.0 — 2026-08-25
 
 - **User-supplied CDR allocator implemented** (`ZidlAllocator` + `zidl_cdr_set_allocator`,

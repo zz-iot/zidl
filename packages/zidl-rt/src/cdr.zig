@@ -853,6 +853,22 @@ pub const CdrReader = struct {
         self.pos += n;
     }
 
+    /// Skip a run of `count` fixed-size primitive elements of `elem_wire_size`
+    /// bytes each (a `sequence<primitive>` body or a primitive array) without
+    /// touching the bytes -- aligns to the element boundary, then advances the
+    /// cursor by `count * elem_wire_size` in one step. `elem_wire_size` must be
+    /// 1/2/4/8. The caller has already consumed any length prefix.
+    pub fn skipPrimitives(self: *CdrReader, count: usize, elem_wire_size: usize) !void {
+        // An empty sequence emits no elements and no leading element alignment
+        // padding, only the (already-consumed) length prefix -- aligning here
+        // would consume bytes belonging to the next member. Fixed arrays always
+        // have count >= 1, so this only affects sequences.
+        if (count == 0) return;
+        if (elem_wire_size > 1) self.alignPos(self.alignCap(elem_wire_size));
+        const total = std.math.mul(usize, count, elem_wire_size) catch return error.EndOfStream;
+        try self.skip(total);
+    }
+
     // ── Primitive reads ───────────────────────────────────────────────────
 
     pub fn readU8(self: *CdrReader) !u8 {
@@ -1732,6 +1748,56 @@ test "mixed struct: bool + u32 + f64" {
         .value = try r.readF64(),
     };
     try testing.expectEqual(orig, got);
+}
+
+test "skipPrimitives: empty sequence leaves the cursor at the next member (xcdr1)" {
+    // An empty sequence emits only its length prefix -- no elements, hence no
+    // leading element-alignment padding. Aligning during the skip would consume
+    // bytes belonging to the following member. Regression for greptile PR #47.
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(testing.allocator);
+    var w = mkWriter(.xcdr1, &buf);
+    try w.writeEncapHeader();
+    try w.writeU32(0); // empty sequence<u64> length
+    try w.writeU8(0xCD); // next member
+
+    var r = try CdrReader.init(buf.items);
+    try testing.expectEqual(@as(u32, 0), try r.readU32());
+    const pos_before = r.pos;
+    try r.skipPrimitives(0, 8);
+    try testing.expectEqual(pos_before, r.pos);
+    try testing.expectEqual(@as(u8, 0xCD), try r.readU8());
+}
+
+test "skipPrimitives: non-empty run still aligns then steps the whole body (xcdr1)" {
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(testing.allocator);
+    var w = mkWriter(.xcdr1, &buf);
+    try w.writeEncapHeader();
+    try w.writeU8(0xAA); // knock the cursor off alignment
+    try w.writeU32(2); // sequence<u32> length
+    try w.writeU32(111);
+    try w.writeU32(222);
+    try w.writeU8(0xBB);
+
+    var r = try CdrReader.init(buf.items);
+    _ = try r.readU8();
+    const n = try r.readU32();
+    try testing.expectEqual(@as(u32, 2), n);
+    try r.skipPrimitives(n, 4);
+    try testing.expectEqual(@as(u8, 0xBB), try r.readU8());
+}
+
+test "skipPrimitives: an overflowing count is rejected" {
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(testing.allocator);
+    var w = mkWriter(.xcdr2, &buf);
+    try w.writeEncapHeader();
+    try w.writeU32(4);
+
+    var r = try CdrReader.init(buf.items);
+    _ = try r.readU32();
+    try testing.expectError(error.EndOfStream, r.skipPrimitives(std.math.maxInt(usize), 8));
 }
 
 test "reserveDheaderMaybe: xcdr2 reserves and patches a DHEADER" {

@@ -61,3 +61,49 @@ test "wrapper contract: Reading write/take round-trip against the fake middlewar
     const got = try dr.take_next_sample(&data, &sample_info);
     try testing.expect(!got);
 }
+
+test "deserializeSelected: extracts a non-leading @key, skips large non-key members" {
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(testing.allocator);
+    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    try writer.writeEncapHeaderDelimited();
+    const big = [_]u8{0xAB} ** 4096;
+    try fixture.KeyedBlob.serialize(&writer, .{
+        .prefix = "a-prefix-that-should-be-skipped",
+        .id = 0x0BADF00D,
+        .blob = .{ ._buffer = @constCast(&big), ._length = big.len, ._maximum = big.len, ._release = false },
+    });
+
+    var reader = try zidl_rt.CdrReader.init(buf.items);
+    var out: fixture.KeyedBlob = undefined;
+    try fixture.KeyedBlob.deserializeSelected(&reader, fixture.KeyedBlob.KEY_FIELD_MASK, &out, testing.allocator);
+    defer fixture.KeyedBlob.deinitSelected(&out, fixture.KeyedBlob.KEY_FIELD_MASK, testing.allocator);
+
+    try testing.expectEqual(@as(i32, 0x0BADF00D), out.id); // the @key, decoded
+    try testing.expectEqual(@as(usize, 0), out.prefix.len); // preceding non-key: skipped, stayed zeroed
+    try testing.expectEqual(@as(u32, 0), out.blob._length); // trailing non-key: skipped
+    // KEY_FIELD_MASK is exactly bit 1 (id is the 2nd member).
+    try testing.expectEqual(@as(fixture.KeyedBlob.FieldMask, 1 << 1), fixture.KeyedBlob.KEY_FIELD_MASK);
+}
+
+test "getFieldFromCdr: decodes only the referenced field, skips the rest" {
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(testing.allocator);
+    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    try writer.writeEncapHeaderDelimited();
+    const big = [_]u8{0xCD} ** 4096;
+    try fixture.KeyedBlob.serialize(&writer, .{
+        .prefix = "unused-prefix",
+        .id = 12345,
+        .blob = .{ ._buffer = @constCast(&big), ._length = big.len, ._maximum = big.len, ._release = false },
+    });
+
+    var alloc: std.mem.Allocator = testing.allocator;
+    var scratch: [64]u8 = undefined;
+    // "id" -> decodes id, skips the 4 KB blob and the string
+    const v = fixture.KeyedBlob.getFieldFromCdr(@ptrCast(&alloc), buf.items, "id", &scratch);
+    try testing.expect(v != null);
+    try testing.expectEqual(@as(i64, 12345), v.?.int);
+    // an unknown field name -> null, no crash
+    try testing.expect(fixture.KeyedBlob.getFieldFromCdr(@ptrCast(&alloc), buf.items, "nope", &scratch) == null);
+}

@@ -366,10 +366,21 @@ static void reader_align_pos(ZidlCdrReader *r, size_t boundary) {
     size_t cdr_pos = r->pos - 4u;
     size_t rem     = cdr_pos % boundary;
     if (rem != 0) r->pos += boundary - rem;
+    /*
+     * A truncated sample can end inside the alignment padding, leaving pos past
+     * the buffer. Clamp so `pos <= data_len` stays invariant -- the next
+     * read/skip then reports ZIDL_CDR_TRUNCATED instead of the `data_len - pos`
+     * bounds checks underflowing and letting a later read run off the end.
+     */
+    if (r->pos > r->data_len) r->pos = r->data_len;
 }
 
 static int reader_read_slice(ZidlCdrReader *r, size_t n, const uint8_t **out) {
-    if (r->pos + n > r->data_len) return ZIDL_CDR_TRUNCATED;
+    /* r->pos <= r->data_len is invariant (init, every advance, seek_to, and the
+     * clamp in reader_align_pos all enforce it), so `data_len - pos` cannot
+     * underflow -- and comparing against it, rather than `pos + n`, cannot
+     * overflow for a hostile n. */
+    if (n > r->data_len - r->pos) return ZIDL_CDR_TRUNCATED;
     *out     = r->data + r->pos;
     r->pos  += n;
     return ZIDL_CDR_OK;
@@ -773,9 +784,28 @@ size_t zidl_cdr_remaining(const ZidlCdrReader *r) {
 }
 
 int zidl_cdr_skip(ZidlCdrReader *r, size_t n) {
-    if (r->pos + n > r->data_len) return ZIDL_CDR_TRUNCATED;
+    /* `n > data_len - pos` rather than `pos + n > data_len`: pos <= data_len is
+     * invariant (see reader_read_slice), so the subtraction is safe, and this
+     * cannot wrap for a hostile n (e.g. an overflowed sequence byte count) the
+     * way `pos + n` would. */
+    if (n > r->data_len - r->pos) return ZIDL_CDR_TRUNCATED;
     r->pos += n;
     return ZIDL_CDR_OK;
+}
+
+int zidl_cdr_skip_primitives(ZidlCdrReader *r, uint32_t count, size_t elem_wire_size) {
+    /* An empty sequence emits no elements and therefore no leading element
+     * alignment padding -- only the length prefix (already consumed by the
+     * caller). Aligning here would skip bytes that belong to the next member.
+     * A fixed-size array always has count >= 1, so this only guards sequences. */
+    if (count == 0) return ZIDL_CDR_OK;
+    if (elem_wire_size > 1)
+        reader_align_pos(r, reader_align_cap(r->xcdr_version, elem_wire_size));
+    /* (size_t)count * elem_wire_size can wrap on a 32-bit size_t for a
+     * hostile wire-provided length; reject rather than skip a truncated body. */
+    if (elem_wire_size != 0 && count > ((size_t)-1) / elem_wire_size)
+        return ZIDL_CDR_TRUNCATED;
+    return zidl_cdr_skip(r, (size_t)count * elem_wire_size);
 }
 
 int zidl_cdr_seek_to(ZidlCdrReader *r, size_t abs_pos) {

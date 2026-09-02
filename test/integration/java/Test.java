@@ -220,6 +220,41 @@ public class Test {
         System.out.println("  testSampleDeserializeKey: OK");
     }
 
+    static void testSampleDeserializeSelected() {
+        /* deserializeSelected operates on a FULL sample, decoding only the
+         * masked members and skipping the rest (get_key_value's mechanism). */
+        ByteBuffer buf = ByteBuffer.allocate(4096).order(ByteOrder.LITTLE_ENDIAN);
+        writeEncapHeader(buf);
+        int cdrBase = buf.position();
+
+        Types.Sample s = new Types.Sample();
+        s.set_id(0x0BADF00D);
+        s.set_s32_val(777);
+        StringBuilder big = new StringBuilder();
+        for (int i = 0; i < 2000; i++) big.append('z');
+        s.set_str(big.toString());
+        s.serialize(buf, cdrBase, 2);
+
+        buf.flip();
+        buf.position(4);
+        Types.Sample key = Types.Sample.deserializeSelected(buf, cdrBase, 2, Types.Sample.KEY_FIELD_MASK);
+        checkEq(s.get_id(), key.get_id(), "selected key.id");
+        check(key.get_str() == null || key.get_str().isEmpty(), "non-key str skipped, stayed default");
+        checkEq(0, key.get_s32_val(), "non-key s32_val skipped");
+        checkEq(0, Types.Sample.fieldIndex("id"), "fieldIndex(id)");
+        checkEq(-1, Types.Sample.fieldIndex("nope"), "fieldIndex(unknown)");
+
+        // getFieldFromCdr uses the same mechanism: one field, rest skipped.
+        buf.position(0);
+        byte[] payload = new byte[buf.limit()];
+        buf.get(payload);
+        Object idv = Types.Sample.getFieldFromCdr(payload, "s32_val");
+        checkEq(777, ((Number) idv).longValue(), "getFieldFromCdr(s32_val)");
+        check(Types.Sample.getFieldFromCdr(payload, "nope") == null, "getFieldFromCdr(unknown) == null");
+
+        System.out.println("  testSampleDeserializeSelected: OK");
+    }
+
     static void testSampleComputeKeyHash() {
         Types.Sample s = new Types.Sample();
         s.set_id(0x01020304);
@@ -243,6 +278,7 @@ public class Test {
         testFrameRoundtrip();
         testSampleKey();
         testSampleDeserializeKey();
+        testSampleDeserializeSelected();
         testSampleComputeKeyHash();
         testWireBytesSampleKey();
         testWireBytesBeaconKey();

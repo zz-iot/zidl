@@ -403,6 +403,15 @@ size_t zidl_cdr_remaining(const ZidlCdrReader *r);
 int    zidl_cdr_skip      (ZidlCdrReader *r, size_t n);
 
 /**
+ * Skip `count` fixed-size primitive elements of `elem_wire_size` bytes each
+ * (a `sequence<primitive>` body or a primitive array) -- aligns to the
+ * element boundary, then advances the cursor by `count * elem_wire_size` in
+ * one step. `elem_wire_size` must be 1/2/4/8. The caller has already consumed
+ * any length prefix.
+ */
+int    zidl_cdr_skip_primitives(ZidlCdrReader *r, uint32_t count, size_t elem_wire_size);
+
+/**
  * Seek to an absolute position in the reader buffer.
  * Used by generated PL_CDR deserializers to advance to PlParam.end_pos
  * after processing (or skipping) a parameter value.
