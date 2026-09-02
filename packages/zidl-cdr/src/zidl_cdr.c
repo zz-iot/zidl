@@ -779,8 +779,17 @@ int zidl_cdr_skip(ZidlCdrReader *r, size_t n) {
 }
 
 int zidl_cdr_skip_primitives(ZidlCdrReader *r, uint32_t count, size_t elem_wire_size) {
+    /* An empty sequence emits no elements and therefore no leading element
+     * alignment padding -- only the length prefix (already consumed by the
+     * caller). Aligning here would skip bytes that belong to the next member.
+     * A fixed-size array always has count >= 1, so this only guards sequences. */
+    if (count == 0) return ZIDL_CDR_OK;
     if (elem_wire_size > 1)
         reader_align_pos(r, reader_align_cap(r->xcdr_version, elem_wire_size));
+    /* (size_t)count * elem_wire_size can wrap on a 32-bit size_t for a
+     * hostile wire-provided length; reject rather than skip a truncated body. */
+    if (elem_wire_size != 0 && count > ((size_t)-1) / elem_wire_size)
+        return ZIDL_CDR_TRUNCATED;
     return zidl_cdr_skip(r, (size_t)count * elem_wire_size);
 }
 

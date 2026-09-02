@@ -51,6 +51,13 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   instead of a per-element read-and-discard loop. The C and C++ backends' near-verbatim
   skip codegen is now a single shared module, `src/backend/cdr_skip.zig` (skip is
   representation-agnostic — it never touches the output struct).
+  - `count == 0` short-circuits before the element-alignment step: an empty sequence
+    emits only its length prefix (no elements → no leading alignment padding), so
+    aligning would consume bytes belonging to the next member. Manifested in XCDR1 where
+    element alignment (up to 8) exceeds the 4-aligned post-length cursor. (greptile PR #47)
+  - The C helper rejects a `count` whose `count * elem_wire_size` would wrap `size_t` on
+    a 32-bit target rather than skipping a truncated body past the bounds check. The Zig
+    helper already checked this (`std.math.mul`).
 
 ## v0.3.11-zig.0.16.0 — 2026-08-25
 

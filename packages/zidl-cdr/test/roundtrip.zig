@@ -944,3 +944,72 @@ test "allocator: embedded-NUL rejection makes free_str's strlen reconstruction e
     // free happened."
     try testing.expectEqual(track.last_alloc_len, track.last_free_len);
 }
+
+test "skip_primitives: empty sequence does not consume the next member's bytes (XCDR1)" {
+    // An empty sequence<u32>/<u64>/... emits only its length prefix -- no
+    // elements, so no leading element-alignment padding. In XCDR1 the cursor
+    // after the 4-byte length is 4-aligned but element alignment is 8 for
+    // 8-byte primitives / 4 for 4-byte ones; aligning during the skip would
+    // eat bytes belonging to whatever follows. Regression for greptile PR #47.
+    var cw: c.ZidlCdrWriter = undefined;
+    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR1);
+    defer c.zidl_cdr_writer_deinit(&cw);
+    _ = c.zidl_cdr_write_encap(&cw);
+    _ = c.zidl_cdr_write_u32(&cw, 0); // empty sequence length
+    _ = c.zidl_cdr_write_u8(&cw, 0xCD); // the next member, 1-byte aligned
+
+    var r: c.ZidlCdrReader = undefined;
+    _ = c.zidl_cdr_reader_init(&r, cw.buf, cw.len);
+    var len: u32 = 0xFFFF;
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c.zidl_cdr_read_u32(&r, &len));
+    try testing.expectEqual(@as(u32, 0), len);
+    const pos_before = r.pos;
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c.zidl_cdr_skip_primitives(&r, 0, 8));
+    try testing.expectEqual(pos_before, r.pos); // cursor untouched
+    var marker: u8 = 0;
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c.zidl_cdr_read_u8(&r, &marker));
+    try testing.expectEqual(@as(u8, 0xCD), marker);
+}
+
+test "skip_primitives: non-empty sequence still aligns then steps the whole run (XCDR1)" {
+    var cw: c.ZidlCdrWriter = undefined;
+    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR1);
+    defer c.zidl_cdr_writer_deinit(&cw);
+    _ = c.zidl_cdr_write_encap(&cw);
+    _ = c.zidl_cdr_write_u8(&cw, 0xAA); // pushes the cursor off 4-alignment
+    _ = c.zidl_cdr_write_u32(&cw, 2); // sequence<u32> length
+    _ = c.zidl_cdr_write_u32(&cw, 111);
+    _ = c.zidl_cdr_write_u32(&cw, 222);
+    _ = c.zidl_cdr_write_u8(&cw, 0xBB);
+
+    var r: c.ZidlCdrReader = undefined;
+    _ = c.zidl_cdr_reader_init(&r, cw.buf, cw.len);
+    var b: u8 = 0;
+    var len: u32 = 0;
+    _ = c.zidl_cdr_read_u8(&r, &b);
+    _ = c.zidl_cdr_read_u32(&r, &len);
+    try testing.expectEqual(@as(u32, 2), len);
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c.zidl_cdr_skip_primitives(&r, len, 4));
+    var marker: u8 = 0;
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c.zidl_cdr_read_u8(&r, &marker));
+    try testing.expectEqual(@as(u8, 0xBB), marker);
+}
+
+test "skip_primitives: oversized count is rejected, not skipped past the buffer" {
+    var cw: c.ZidlCdrWriter = undefined;
+    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
+    defer c.zidl_cdr_writer_deinit(&cw);
+    _ = c.zidl_cdr_write_encap(&cw);
+    _ = c.zidl_cdr_write_u32(&cw, 8); // claims 8 elements, buffer has none
+
+    var r: c.ZidlCdrReader = undefined;
+    _ = c.zidl_cdr_reader_init(&r, cw.buf, cw.len);
+    var len: u32 = 0;
+    _ = c.zidl_cdr_read_u32(&r, &len);
+    // count * elem_wire_size must not wrap (32-bit size_t) into a small value
+    // that passes the bounds check.
+    try testing.expectEqual(
+        @as(c_int, c.ZIDL_CDR_TRUNCATED),
+        c.zidl_cdr_skip_primitives(&r, 0xFFFF_FFFF, 8),
+    );
+}
