@@ -1033,3 +1033,46 @@ test "zidl_cdr_skip: a byte count near SIZE_MAX is rejected without wrapping the
     try testing.expectEqual(@as(c_int, c.ZIDL_CDR_TRUNCATED), c.zidl_cdr_skip(&r, r.data_len - r.pos + 1));
     try testing.expectEqual(pos_before, r.pos);
 }
+
+test "align near a truncated buffer end keeps pos <= data_len (no bounds-check underflow)" {
+    // A sample truncated inside the element-alignment padding of a non-empty
+    // primitive sequence: reader_align_pos must not run pos past data_len, or
+    // the `data_len - pos` bounds check underflows and the skip is wrongly
+    // accepted -- letting a later selected-member read go out of bounds.
+    // (greptile PR #47, security)
+    var cw: c.ZidlCdrWriter = undefined;
+    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR1);
+    defer c.zidl_cdr_writer_deinit(&cw);
+    _ = c.zidl_cdr_write_encap(&cw);
+    _ = c.zidl_cdr_write_u32(&cw, 1); // sequence<u64> length = 1; buffer ends here
+
+    var r: c.ZidlCdrReader = undefined;
+    _ = c.zidl_cdr_reader_init(&r, cw.buf, cw.len);
+    var len: u32 = 0;
+    _ = c.zidl_cdr_read_u32(&r, &len);
+    try testing.expectEqual(@as(u32, 1), len);
+    // Post-length cursor is 4-aligned; u64 elements align to 8 in XCDR1, so the
+    // 8-byte padding runs off the end.
+    try testing.expectEqual(
+        @as(c_int, c.ZIDL_CDR_TRUNCATED),
+        c.zidl_cdr_skip_primitives(&r, len, 8),
+    );
+    try testing.expect(r.pos <= r.data_len);
+}
+
+test "a truncated aligned primitive read reports TRUNCATED, not an out-of-bounds slice" {
+    var cw: c.ZidlCdrWriter = undefined;
+    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR1);
+    defer c.zidl_cdr_writer_deinit(&cw);
+    _ = c.zidl_cdr_write_encap(&cw);
+    _ = c.zidl_cdr_write_u32(&cw, 0xABCD); // buffer ends 4-aligned
+
+    var r: c.ZidlCdrReader = undefined;
+    _ = c.zidl_cdr_reader_init(&r, cw.buf, cw.len);
+    var u: u32 = 0;
+    _ = c.zidl_cdr_read_u32(&r, &u);
+    var v: u64 = 0;
+    // read_u64 aligns to 8 first; padding runs past the end.
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_TRUNCATED), c.zidl_cdr_read_u64(&r, &v));
+    try testing.expect(r.pos <= r.data_len);
+}

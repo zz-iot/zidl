@@ -366,12 +366,20 @@ static void reader_align_pos(ZidlCdrReader *r, size_t boundary) {
     size_t cdr_pos = r->pos - 4u;
     size_t rem     = cdr_pos % boundary;
     if (rem != 0) r->pos += boundary - rem;
+    /*
+     * A truncated sample can end inside the alignment padding, leaving pos past
+     * the buffer. Clamp so `pos <= data_len` stays invariant -- the next
+     * read/skip then reports ZIDL_CDR_TRUNCATED instead of the `data_len - pos`
+     * bounds checks underflowing and letting a later read run off the end.
+     */
+    if (r->pos > r->data_len) r->pos = r->data_len;
 }
 
 static int reader_read_slice(ZidlCdrReader *r, size_t n, const uint8_t **out) {
-    /* r->pos <= r->data_len is an invariant (init, every advance, and seek_to
-     * all enforce it), so `data_len - pos` cannot underflow -- and comparing
-     * against it, rather than `pos + n`, cannot overflow for a hostile n. */
+    /* r->pos <= r->data_len is invariant (init, every advance, seek_to, and the
+     * clamp in reader_align_pos all enforce it), so `data_len - pos` cannot
+     * underflow -- and comparing against it, rather than `pos + n`, cannot
+     * overflow for a hostile n. */
     if (n > r->data_len - r->pos) return ZIDL_CDR_TRUNCATED;
     *out     = r->data + r->pos;
     r->pos  += n;
@@ -777,8 +785,9 @@ size_t zidl_cdr_remaining(const ZidlCdrReader *r) {
 
 int zidl_cdr_skip(ZidlCdrReader *r, size_t n) {
     /* `n > data_len - pos` rather than `pos + n > data_len`: pos <= data_len is
-     * invariant, so the subtraction is safe, and this cannot wrap for a hostile
-     * n (e.g. an overflowed sequence byte count) the way `pos + n` would. */
+     * invariant (see reader_read_slice), so the subtraction is safe, and this
+     * cannot wrap for a hostile n (e.g. an overflowed sequence byte count) the
+     * way `pos + n` would. */
     if (n > r->data_len - r->pos) return ZIDL_CDR_TRUNCATED;
     r->pos += n;
     return ZIDL_CDR_OK;

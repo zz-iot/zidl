@@ -62,6 +62,10 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
     (the subtraction is safe — `pos <= data_len` is invariant) instead of `pos + n >
     data_len`, which wraps for a hostile `n` on a 32-bit target and would move the
     cursor backwards. (greptile PR #47)
+  - `reader_align_pos` clamps to `data_len` — a sample truncated inside a member's
+    alignment padding could otherwise leave `pos` past the buffer, underflowing the
+    `data_len - pos` check above and letting a later read run off the end. (greptile
+    PR #47, security)
 
 ## v0.3.11-zig.0.16.0 — 2026-08-25
 
