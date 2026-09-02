@@ -113,12 +113,39 @@ public class Beacon implements java.io.Serializable {
         java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(_payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
         int _xcdrVersion = _cdrDetectXcdr(_payload);
         _buf.position(4);
-        Beacon _obj = deserializeFrom(_buf, 4, _xcdrVersion);
+        int _fi = fieldIndex(_field);
+        Beacon _obj = deserializeSelected(_buf, 4, _xcdrVersion, _fi < 0 ? 0L : (1L << _fi));
         switch (_field) {
             case "id": return (long) _obj.id;
             case "payload": return _obj.payload;
             default: return null;
         }
+    }
+
+    public static final long KEY_FIELD_MASK = (1L << 0);
+    public static int fieldIndex(String _name) {
+        switch (_name) {
+            case "id": return 0;
+            case "payload": return 1;
+            default: return -1;
+        }
+    }
+
+    public static Beacon deserializeSelected(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion, long _want) {
+        _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        Beacon _out = new Beacon();
+        if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); } // skip DHEADER
+        if ((_want & (1L << 0)) != 0) {
+            _cdrAlign(_buf, _cdrBase, 4); _out.id = _buf.getInt();
+        } else {
+            _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
+        }
+        if ((_want & (1L << 1)) != 0) {
+            _out.payload = _cdrReadString(_buf, _cdrBase);
+        } else {
+            _cdrReadString(_buf, _cdrBase);
+        }
+        return _out;
     }
 } // Beacon
 

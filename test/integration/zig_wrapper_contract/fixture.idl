@@ -25,6 +25,15 @@ struct IntOnly {
     long seq_num;
 };
 
+// Non-leading @key with large non-key members on either side -- exercises
+// deserializeSelected / deinitSelected / KEY_FIELD_MASK at runtime.
+@appendable
+struct KeyedBlob {
+    string prefix;
+    @key long id;
+    sequence<octet> blob;
+};
+
 struct Inner {
     long z;
 };

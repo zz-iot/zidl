@@ -175,13 +175,9 @@ pub const Sample = struct {
         try reader.skipString();
         {
             const _n = try reader.readU32();
-            for (0.._n) |_| {
-                _ = try reader.readI32();
-            }
+            try reader.skipPrimitives(_n, 4);
         }
-        for (0..3) |_| {
-            _ = try reader.readI32();
-        }
+        try reader.skipPrimitives(3, 4);
         _ = try reader.readU32();
         try Point.skip(reader);
     }

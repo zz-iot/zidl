@@ -853,6 +853,17 @@ pub const CdrReader = struct {
         self.pos += n;
     }
 
+    /// Skip a run of `count` fixed-size primitive elements of `elem_wire_size`
+    /// bytes each (a `sequence<primitive>` body or a primitive array) without
+    /// touching the bytes -- aligns to the element boundary, then advances the
+    /// cursor by `count * elem_wire_size` in one step. `elem_wire_size` must be
+    /// 1/2/4/8. The caller has already consumed any length prefix.
+    pub fn skipPrimitives(self: *CdrReader, count: usize, elem_wire_size: usize) !void {
+        if (elem_wire_size > 1) self.alignPos(self.alignCap(elem_wire_size));
+        const total = std.math.mul(usize, count, elem_wire_size) catch return error.EndOfStream;
+        try self.skip(total);
+    }
+
     // ── Primitive reads ───────────────────────────────────────────────────
 
     pub fn readU8(self: *CdrReader) !u8 {

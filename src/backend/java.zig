@@ -2005,6 +2005,7 @@ const Generator = struct {
             try self.write("}\n");
 
             try self.emitGetFieldFromCdr(s);
+            try self.emitSelectiveFnsJava(s, appendable);
         } else if (self.opts.generate_zzdds_wrappers and isZzddsTopicStructJava(s)) {
             // Keyless topic type but --generate-zzdds-wrappers was requested
             // -- see the matching `else if` in c.zig's emitStructFns for the
@@ -2066,6 +2067,7 @@ const Generator = struct {
             // unconditionally on every topic struct regardless of key
             // status, so no other change is needed to call it here.
             try self.emitGetFieldFromCdr(s);
+            try self.emitSelectiveFnsJava(s, appendable);
         }
     }
 
@@ -2092,8 +2094,11 @@ const Generator = struct {
         try self.write("    int _xcdrVersion = _cdrDetectXcdr(_payload);\n");
         try self.ind();
         try self.write("    _buf.position(4);\n");
+        // Decode only the referenced field, skipping every other member.
         try self.ind();
-        try self.print("    {s}{s} _obj = deserializeFrom(_buf, 4, _xcdrVersion);\n", .{ self.opts.type_prefix, s.name });
+        try self.write("    int _fi = fieldIndex(_field);\n");
+        try self.ind();
+        try self.print("    {s}{s} _obj = deserializeSelected(_buf, 4, _xcdrVersion, _fi < 0 ? 0L : (1L << _fi));\n", .{ self.opts.type_prefix, s.name });
         try self.ind();
         try self.write("    switch (_field) {\n");
         for (s.members) |m| {
@@ -2122,6 +2127,89 @@ const Generator = struct {
         try self.write("        default: return null;\n");
         try self.ind();
         try self.write("    }\n");
+        try self.ind();
+        try self.write("}\n");
+    }
+
+    /// Emit the selective-parse family for a Topic struct -- see zig.zig's
+    /// `emitSelectiveFns` and c.zig's `emitSelectiveFnsC`. Java needs no
+    /// `deinitSelected` (GC). `deserializeSelected` decodes the members whose
+    /// bit is set in `_want` and *skips* the rest. Fallback to
+    /// `deserializeFrom` for a struct with a base type or > 64 members
+    /// (`@mutable` never reaches here).
+    fn emitSelectiveFnsJava(self: *Generator, s: *const ir.Struct, appendable: bool) !void {
+        const jn = try std.fmt.allocPrint(self.alloc, "{s}{s}", .{ self.opts.type_prefix, s.name });
+        defer self.alloc.free(jn);
+        const fallback = s.base != null or s.members.len > 64;
+
+        // KEY_FIELD_MASK
+        try self.write("\n");
+        try self.ind();
+        try self.write("public static final long KEY_FIELD_MASK = ");
+        if (fallback) {
+            try self.write("0L");
+        } else {
+            var first = true;
+            for (s.members, 0..) |m, idx| {
+                if (!m.annotations.is_key) continue;
+                if (!first) try self.write(" | ");
+                try self.print("(1L << {d})", .{idx});
+                first = false;
+            }
+            if (first) try self.write("0L");
+        }
+        try self.write(";\n");
+
+        // fieldIndex
+        try self.ind();
+        try self.write("public static int fieldIndex(String _name) {\n");
+        if (!fallback) {
+            try self.ind();
+            try self.write("    switch (_name) {\n");
+            for (s.members, 0..) |m, idx| {
+                try self.ind();
+                try self.print("        case \"{s}\": return {d};\n", .{ m.name, idx });
+            }
+            try self.ind();
+            try self.write("        default: return -1;\n");
+            try self.ind();
+            try self.write("    }\n");
+        } else {
+            try self.ind();
+            try self.write("    return -1;\n");
+        }
+        try self.ind();
+        try self.write("}\n");
+
+        // deserializeSelected
+        try self.write("\n");
+        try self.ind();
+        try self.print("public static {s} deserializeSelected(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion, long _want) {{\n", .{jn});
+        try self.ind();
+        try self.write("    _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
+        if (fallback) {
+            try self.ind();
+            try self.write("    return deserializeFrom(_buf, _cdrBase, _xcdrVersion);\n");
+        } else {
+            try self.ind();
+            try self.print("    {s} _out = new {s}();\n", .{ jn, jn });
+            if (appendable) {
+                try self.ind();
+                try self.write("    if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); } // skip DHEADER\n");
+            }
+            for (s.members, 0..) |m, idx| {
+                try self.ind();
+                try self.print("    if ((_want & (1L << {d})) != 0) {{\n", .{idx});
+                try self.emitMemberDeserializeKey(m, "_out", "        ");
+                try self.ind();
+                try self.write("    } else {\n");
+                try self.emitMemberSkip(m, "        ");
+                try self.ind();
+                try self.write("    }\n");
+            }
+            try self.ind();
+            try self.write("    return _out;\n");
+        }
         try self.ind();
         try self.write("}\n");
     }
@@ -3361,15 +3449,20 @@ fn emitZzddsDataWriterFile(
         \\        throw new IllegalArgumentException("zidl: unsupported CDR encapsulation id 0x" + Integer.toHexString(_id));
         \\    }}
         \\
-        \\    /** Returns the stored key-only fields for {{@code handle}}, or null
-        \\     * if no alive write has been made for that instance. */
+        \\    /** Returns the key fields for {{@code handle}}, or null if no alive
+        \\     * write has been made for that instance. zzdds stores the whole
+        \\     * last-alive sample keyed by handle, so this runs the full
+        \\     * deserializer (deserializeKey expects a key-only stream and would
+        \\     * misread the key of any type whose key member isn't first). Non-key
+        \\     * fields end up populated too; their value is unspecified per DDS
+        \\     * 1.4 section 2.2.2.4.2.17. */
         \\    public {[t]s} get_key_value(long handle) {{
         \\        byte[] _payload = io.zzdds.runtime.ZzddsRuntime.getKeyValueWriterRaw(writer, handle);
         \\        if (_payload == null) return null;
         \\        java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(_payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
         \\        int _xcdrVersion = xcdrVersionOf(_payload);
         \\        _buf.position(4);
-        \\        return {[t]s}.deserializeKey(_buf, 4, _xcdrVersion);
+        \\        return {[t]s}.deserializeSelected(_buf, 4, _xcdrVersion, {[t]s}.KEY_FIELD_MASK);
         \\    }}
         \\
         \\    /** Returns {{@code DDS_HANDLE_NIL}} (0) if no alive write has been
@@ -3589,15 +3682,17 @@ fn emitZzddsDataReaderFile(
         \\        return fromPayloads(_payloads, _infos);
         \\    }}
         \\
-        \\    /** Returns the stored key-only fields for {{@code handle}}, or null
-        \\     * if no alive sample has arrived for that instance. */
+        \\    /** Returns the key fields for {{@code handle}}, or null if no alive
+        \\     * sample has arrived for that instance. See the DataWriter
+        \\     * get_key_value: the stored payload is a full sample, so this runs
+        \\     * the full deserializer. */
         \\    public {[t]s} get_key_value(long handle) {{
         \\        byte[] _payload = io.zzdds.runtime.ZzddsRuntime.getKeyValueReaderRaw(reader, handle);
         \\        if (_payload == null) return null;
         \\        java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(_payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
         \\        int _xcdrVersion = xcdrVersionOf(_payload);
         \\        _buf.position(4);
-        \\        return {[t]s}.deserializeKey(_buf, 4, _xcdrVersion);
+        \\        return {[t]s}.deserializeSelected(_buf, 4, _xcdrVersion, {[t]s}.KEY_FIELD_MASK);
         \\    }}
         \\
         \\    /** Returns {{@code DDS_HANDLE_NIL}} (0) if no alive sample has arrived
@@ -8448,7 +8543,7 @@ test "java: --generate-zzdds-wrappers DataWriter gets register_instance, _w_time
 
     try testing.expect(std.mem.indexOf(u8, w, "public Foo get_key_value(long handle) {") != null);
     try testing.expect(std.mem.indexOf(u8, w, "ZzddsRuntime.getKeyValueWriterRaw(writer, handle)") != null);
-    try testing.expect(std.mem.indexOf(u8, w, "Foo.deserializeKey(_buf, 4, _xcdrVersion)") != null);
+    try testing.expect(std.mem.indexOf(u8, w, "Foo.deserializeSelected(_buf, 4, _xcdrVersion, Foo.KEY_FIELD_MASK)") != null);
     try testing.expect(std.mem.indexOf(u8, w, "public long lookup_instance(Foo key) {") != null);
     try testing.expect(std.mem.indexOf(u8, w, "ZzddsRuntime.lookupInstanceWriterRaw(writer, key.computeKeyHash())") != null);
 }
@@ -8498,7 +8593,7 @@ test "java: --generate-zzdds-wrappers DataReader gets take_instance/read_instanc
 
     try testing.expect(std.mem.indexOf(u8, r, "public Foo get_key_value(long handle) {") != null);
     try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.getKeyValueReaderRaw(reader, handle)") != null);
-    try testing.expect(std.mem.indexOf(u8, r, "Foo.deserializeKey(_buf, 4, _xcdrVersion)") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "Foo.deserializeSelected(_buf, 4, _xcdrVersion, Foo.KEY_FIELD_MASK)") != null);
     try testing.expect(std.mem.indexOf(u8, r, "public long lookup_instance(Foo key) {") != null);
     try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.lookupInstanceReaderRaw(reader, key.computeKeyHash())") != null);
 }
@@ -8581,7 +8676,7 @@ test "java: --generate-zzdds-wrappers DataReader auto-detects xcdr version from 
     try testing.expect(std.mem.indexOf(u8, reader_content, "if (_id == 0x0001) return 1;") != null);
     try testing.expect(std.mem.indexOf(u8, reader_content, "if (_id == 0x0007) return 2;") != null);
     try testing.expect(std.mem.indexOf(u8, reader_content, "int _xcdrVersion = xcdrVersionOf(payload);") != null);
-    try testing.expect(std.mem.indexOf(u8, reader_content, "Foo.deserializeFrom(_buf, 4, _xcdrVersion)") != null);
+    try testing.expect(std.mem.indexOf(u8, reader_content, "Foo.deserializeSelected(_buf, 4, _xcdrVersion, Foo.KEY_FIELD_MASK)") != null);
 }
 
 test "java: mutable struct DHEADER stays unconditional regardless of _xcdrVersion" {

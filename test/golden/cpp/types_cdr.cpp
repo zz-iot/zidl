@@ -150,14 +150,9 @@ int Sample_skip(ZidlCdrReader *_r) {
     { uint32_t _sl;
         _rc = zidl_cdr_read_u32(_r, &_sl);
         if (_rc) return _rc;
-        for (uint32_t _si = 0; _si < _sl; _si++) {
-            { int32_t _tmp; _rc = zidl_cdr_read_i32(_r, &_tmp); if (_rc) return _rc; }
-        }
+        _rc = zidl_cdr_skip_primitives(_r, _sl, 4); if (_rc) return _rc;
     }
-    { uint32_t _ski0; for (_ski0 = 0; _ski0 < 3u; _ski0++) {
-        { int32_t _tmp; _rc = zidl_cdr_read_i32(_r, &_tmp); if (_rc) return _rc; }
-    }
-    }
+    _rc = zidl_cdr_skip_primitives(_r, 3u, 4); if (_rc) return _rc;
     { uint32_t _tmp; _rc = zidl_cdr_read_u32(_r, &_tmp); if (_rc) return _rc; }
     _rc = Point_skip(_r);
     if (_rc) return _rc;

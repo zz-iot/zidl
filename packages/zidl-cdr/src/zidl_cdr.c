@@ -778,6 +778,12 @@ int zidl_cdr_skip(ZidlCdrReader *r, size_t n) {
     return ZIDL_CDR_OK;
 }
 
+int zidl_cdr_skip_primitives(ZidlCdrReader *r, uint32_t count, size_t elem_wire_size) {
+    if (elem_wire_size > 1)
+        reader_align_pos(r, reader_align_cap(r->xcdr_version, elem_wire_size));
+    return zidl_cdr_skip(r, (size_t)count * elem_wire_size);
+}
+
 int zidl_cdr_seek_to(ZidlCdrReader *r, size_t abs_pos) {
     if (abs_pos > r->data_len) return ZIDL_CDR_TRUNCATED;
     r->pos = abs_pos;
