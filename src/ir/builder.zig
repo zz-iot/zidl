@@ -1111,6 +1111,8 @@ const Builder = struct {
                 result.is_topic = true;
             } else if (std.ascii.eqlIgnoreCase(name, "nested")) {
                 result.is_nested = true;
+            } else if (std.ascii.eqlIgnoreCase(name, "pl_retain_unknown")) {
+                result.pl_retain_unknown = true;
             } else if (std.ascii.eqlIgnoreCase(name, "final")) {
                 result.extensibility = .final;
             } else if (std.ascii.eqlIgnoreCase(name, "appendable")) {
@@ -1681,6 +1683,23 @@ test "builder: @appendable type annotation" {
 
     const s = ir_spec.items[0].type_decl.struct_;
     try testing.expectEqual(ir.Extensibility.appendable, s.annotations.extensibility);
+}
+
+test "builder: @pl_retain_unknown type annotation" {
+    var ir_spec = try testBuild(
+        \\@mutable @pl_retain_unknown struct Foo { @id(1) long x; };
+    );
+    defer ir_spec.deinit();
+
+    const s = ir_spec.items[0].type_decl.struct_;
+    try testing.expect(s.annotations.pl_retain_unknown);
+    try testing.expectEqual(ir.Extensibility.mutable, s.annotations.extensibility);
+
+    var plain = try testBuild(
+        \\@mutable struct Bar { @id(1) long x; };
+    );
+    defer plain.deinit();
+    try testing.expect(!plain.items[0].type_decl.struct_.annotations.pl_retain_unknown);
 }
 
 test "builder: sequence member" {

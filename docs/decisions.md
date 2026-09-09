@@ -59,6 +59,18 @@ runs entirely inside a DDS implementation's Zig core and never crosses the C-ABI
 time a binding sees discovery data it is an ordinary decoded `@final` struct. Re-raise only
 if a non-Zig program needs to implement RTPS wire discovery directly.
 
+**PL_CDR decode has a strictness `mode` and an opt-in lossless-retention mode.**
+`deserializeFromPlCdr` takes `mode: zidl_rt.PlMode` — `.lenient` (tolerate a truncated tail
+/ missing sentinel / misaligned length, as a hand-rolled RTPS parser does) or `.strict`
+(typed errors for those plus an unknown must-understand PID and a repeated singleton PID).
+`@pl_retain_unknown` on the struct additionally keeps every unmodelled parameter verbatim
+(`unknown_params`) and replays it on re-encode. Both exist so a DDS core can adopt the
+generated codec for real discovery traffic — lenient for its own LAN, strict for an
+untrusted peer — and so a store-and-forward consumer (a discovery broker, an inspection
+tool) round-trips vendor extensions and not-yet-modelled QoS without corrupting them. The
+lossless requirement is why the codec is generated from a dedicated `@mutable` IDL rather
+than reusing the `@final` DDS QoS structs.
+
 **`--c-no-free` is scoped to `{Type}_free` only, not folded into `--no-typesupport`.**
 `serialize`/`deserialize`/`skip` had no symbol collision to avoid in the motivating case
 (a consumer that already exports `{Type}_free` from elsewhere); suppressing them too would

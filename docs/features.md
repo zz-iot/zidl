@@ -32,7 +32,7 @@ All four backends generate the same core set of outputs for every IDL input:
 | CDR `@final` (no framing) | Implemented |
 | CDR `@appendable` (DHEADER) | Implemented |
 | CDR `@mutable` (XCDR2 EMHEADER) | Implemented in all backends |
-| CDR `@mutable` (PL_CDR / RTPS ParameterList) | Zig only, via `--zig-pl-cdr` flag |
+| CDR `@mutable` (PL_CDR / RTPS ParameterList) | Zig only, via `--zig-pl-cdr` flag; `.lenient`/`.strict` decode; `@pl_retain_unknown` for lossless round trip |
 | `--generate-interfaces` DCPS binding layer | Zig/C/Java: implemented; C++ abstract classes plus primitive/string C ABI adapters implemented, complex adapters remain TODO stubs |
 | `--generate-zzdds-wrappers` | Opt-in typed zzdds TypeSupport/DataWriter/DataReader wrappers for non-mutable topic structs (keyed or keyless) in Zig, C, C++, and Java — keyless structs get trivial constant-zero-hash key-function bodies so a `TypeSupport` registration call is uniform either way |
 | `--zig-generate-c-api` bare `sequence<EntityInterface>` operation params (Zig backend) | Boxes each result element to the C ABI's single-opaque-pointer sequence layout (previously reused the native `{ptr,vtable}` fat-pointer layout directly as the exported function's parameter type — a binary layout corruption for any binding calling `Subscriber.get_datareaders`/`WaitSet.wait`/`get_conditions` through the real C ABI) |
@@ -54,7 +54,7 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 **Reference**: [`backend_zig.md`](backend_zig.md)  
 **Output**: `.zig` source  
 **Runtime**: `zidl-rt` (included in this repo)  
-**Tests**: 132 codegen + 11 integration + 61 runtime + 15 PL_CDR + 10 interop
+**Tests**: 132 codegen + 11 integration + 61 runtime + 30 PL_CDR (codegen + zidl-rt + compile-and-run) + 10 interop
 
 ### IDL → Zig type mapping
 

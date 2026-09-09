@@ -76,3 +76,15 @@ the deprecation warning when it is added.
 Internal annotation used by the RTPS discovery layer.  Emits one PID entry per
 sequence element instead of a single length-prefixed sequence in the PL_CDR
 encoding.  Not intended for user IDL.
+
+### `@pl_retain_unknown`
+
+**Target:** a `@mutable` struct (with `--zig-pl-cdr`).
+
+Internal annotation used by the RTPS discovery layer.  The generated
+`deserializeFromPlCdr` keeps every PL_CDR parameter it has no member for in an
+`unknown_params: []zidl_rt.RawParam` field, and `serializePlCdr` replays them
+before the sentinel, so a decode → re-encode round trip preserves vendor
+extensions and not-yet-modelled parameters byte-for-byte.  Generated
+`deinit`/`clone` cover the field.  Ignored on non-`@mutable` types and without
+`--zig-pl-cdr`.  Not intended for user IDL.

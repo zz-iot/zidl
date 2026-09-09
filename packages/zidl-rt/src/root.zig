@@ -61,6 +61,9 @@ pub const BoundedArray = cdr.BoundedArray;
 pub const KeyHashWriter = cdr.KeyHashWriter;
 
 pub const PlCdrWriter = cdr.PlCdrWriter;
+pub const PlMode = cdr.CdrReader.PlMode;
+pub const PlParam = cdr.CdrReader.PlParam;
+pub const RawParam = cdr.CdrReader.RawParam;
 
 pub const ENCAP_CDR1_LE = cdr.ENCAP_CDR1_LE;
 pub const ENCAP_CDR1_BE = cdr.ENCAP_CDR1_BE;

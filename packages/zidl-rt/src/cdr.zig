@@ -699,12 +699,26 @@ pub const PlCdrWriter = struct {
         self.inner.pos += 4;
     }
 
+    /// Re-emit a parameter retained verbatim (`zidl_rt.RawParam`): the raw `pid`
+    /// (flag bits included) and its value bytes, re-padded to a 4-byte boundary.
+    /// Used by a `@pl_retain_unknown` type's generated `serializePlCdr` to
+    /// replay unknown parameters before the sentinel.
+    pub fn writeRawParam(self: *PlCdrWriter, pid: u16, value: []const u8) !void {
+        const h = try self.reservePlParam(pid);
+        try self.inner.writeBytes(value);
+        try self.patchPlParam(h);
+    }
+
     /// Return the raw bytes written so far (including encap header).
     pub fn bytes(self: *const PlCdrWriter) []const u8 {
         return self.inner.buf.items;
     }
 
     // ── Forwarded primitive writes ─────────────────────────────────────────
+    /// Append raw bytes at the current position (no length prefix, no padding).
+    pub fn writeBytes(self: *PlCdrWriter, data: []const u8) !void {
+        try self.inner.writeBytes(data);
+    }
     pub fn writeU8(self: *PlCdrWriter, v: u8) !void {
         try self.inner.writeU8(v);
     }
@@ -1117,12 +1131,38 @@ pub const CdrReader = struct {
 
     // ── PL_CDR (ParameterList) framing ────────────────────────────────────
 
+    /// Structural-validation strictness for `readPlParam`.
+    ///
+    ///  * `lenient` — end the parameter loop cleanly at a truncated parameter or
+    ///    a buffer that ends without `PID_SENTINEL`, and round a length that is
+    ///    not a multiple of 4 up to the next boundary. Matches the tolerance of
+    ///    hand-rolled RTPS discovery parsers.
+    ///  * `strict` — return a typed error for any of those
+    ///    (`error.TruncatedParameter` / `error.MissingSentinel` /
+    ///    `error.MisalignedParameter`). For decoding data from an untrusted peer.
+    pub const PlMode = enum { lenient, strict };
+
+    /// One PL_CDR parameter retained verbatim by a `@pl_retain_unknown` type's
+    /// generated deserializer. `bytes` is the value only (no PID/length header,
+    /// no trailing pad), owned by the containing struct's allocator; re-emit it
+    /// with `PlCdrWriter.writeRawParam(pid, bytes)`.
+    pub const RawParam = struct {
+        pid: u16,
+        bytes: []u8,
+    };
+
     /// Decoded PL_CDR parameter header.
     pub const PlParam = struct {
-        /// Parameter ID (bits 13:0; bit 15=must_understand, bit 14=vendor).
+        /// Parameter ID, flag bits included. Bit 15 (`0x8000`) = vendor-specific,
+        /// bit 14 (`0x4000`) = must-understand (RTPS 2.5 §9.6.4, Table 9.6);
+        /// mask with `0x3FFF` for the bare id.
         pid: u16,
         /// Raw value byte count from the length field (before padding).
         byte_len: u16,
+        /// Absolute reader position of the first value byte (equals `reader.pos`
+        /// immediately after `readPlParam` returns). `data[value_start ..
+        /// value_start + byte_len]` is the value.
+        value_start: usize,
         /// Absolute reader position of the first byte *after* this parameter
         /// (value bytes + padding to next 4-byte boundary).
         /// Always call `seekTo(p.end_pos)` after processing a parameter.
@@ -1131,15 +1171,36 @@ pub const CdrReader = struct {
 
     /// Read one PL_CDR parameter header.
     ///
-    /// Returns `null` on `PID_SENTINEL (0x0001)` — the caller should break
-    /// its loop.  For all other PIDs the caller reads the value and then
-    /// calls `seekTo(p.end_pos)` to advance past any trailing padding.
-    pub fn readPlParam(self: *CdrReader) !?PlParam {
+    /// Returns `null` on `PID_SENTINEL (0x0001)`, and (in `.lenient` mode) also
+    /// when the buffer ends without a sentinel or the parameter value runs past
+    /// the buffer — the caller should break its loop.  For all other PIDs the
+    /// caller reads the value and then calls `seekTo(p.end_pos)` to advance past
+    /// any trailing padding.
+    pub fn readPlParam(self: *CdrReader, mode: PlMode) !?PlParam {
+        if (self.pos + 4 > self.data.len) {
+            return switch (mode) {
+                .lenient => null,
+                .strict => error.MissingSentinel,
+            };
+        }
         const pid = try self.readU16();
         const len = try self.readU16();
         if (pid == 0x0001) return null; // PID_SENTINEL
+        if (mode == .strict and len % 4 != 0) return error.MisalignedParameter;
         const padded = ((@as(usize, len) + 3) / 4) * 4;
-        return PlParam{ .pid = pid, .byte_len = len, .end_pos = self.pos + padded };
+        const end_pos = self.pos + padded;
+        if (end_pos > self.data.len) {
+            return switch (mode) {
+                .lenient => null,
+                .strict => error.TruncatedParameter,
+            };
+        }
+        return PlParam{
+            .pid = pid,
+            .byte_len = len,
+            .value_start = self.pos,
+            .end_pos = end_pos,
+        };
     }
 
     /// Seek to an absolute position in the data buffer.
@@ -1888,7 +1949,7 @@ test "pl_cdr: single i32 param roundtrip" {
     var r = try CdrReader.init(buf.items);
     try testing.expect(r.is_pl_cdr);
     var found: i32 = 0;
-    while (try r.readPlParam()) |p| {
+    while (try r.readPlParam(.lenient)) |p| {
         switch (p.pid & 0x3FFF) {
             5 => found = try r.readI32(),
             else => {},
@@ -1921,7 +1982,7 @@ test "pl_cdr: multiple params with padding" {
     var r = try CdrReader.init(buf.items);
     var v1: u8 = 0;
     var v2: u32 = 0;
-    while (try r.readPlParam()) |p| {
+    while (try r.readPlParam(.lenient)) |p| {
         switch (p.pid & 0x3FFF) {
             0x0010 => v1 = try r.readU8(),
             0x0020 => v2 = try r.readU32(),
@@ -1949,7 +2010,7 @@ test "pl_cdr: unknown pid is skipped via seekTo" {
 
     var r = try CdrReader.init(buf.items);
     var found: i32 = 0;
-    while (try r.readPlParam()) |p| {
+    while (try r.readPlParam(.lenient)) |p| {
         switch (p.pid & 0x3FFF) {
             7 => found = try r.readI32(),
             else => {}, // unknown: seekTo advances past it
@@ -1979,7 +2040,7 @@ test "pl_cdr: xcdr1 8-byte alignment within param" {
 
     var r = try CdrReader.init(buf.items);
     var val: f64 = 0;
-    while (try r.readPlParam()) |p| {
+    while (try r.readPlParam(.lenient)) |p| {
         switch (p.pid & 0x3FFF) {
             10 => {
                 _ = try r.readU8(); // skip the u8
@@ -2012,7 +2073,7 @@ test "pl_cdr: @pl_repeated round-trip: three i32 elements with same PID" {
     defer items.deinit(testing.allocator);
     var r = try CdrReader.init(buf.items);
     try testing.expect(r.is_pl_cdr);
-    while (try r.readPlParam()) |p| {
+    while (try r.readPlParam(.lenient)) |p| {
         switch (p.pid & 0x3FFF) {
             pid => try items.append(testing.allocator, try r.readI32()),
             else => {},
@@ -2024,6 +2085,119 @@ test "pl_cdr: @pl_repeated round-trip: three i32 elements with same PID" {
     try testing.expectEqual(@as(i32, 10), items.items[0]);
     try testing.expectEqual(@as(i32, 20), items.items[1]);
     try testing.expectEqual(@as(i32, 30), items.items[2]);
+}
+
+// ── PL_CDR: retention + strict mode ──────────────────────────────────────────
+
+test "pl_cdr: value_start points at the value bytes" {
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(testing.allocator);
+    var w = PlCdrWriter.init(&buf, testing.allocator);
+    try w.writeEncapHeader();
+    const h = try w.reservePlParam(0x0040);
+    try w.writeU32(0xCAFEF00D);
+    try w.patchPlParam(h);
+    try w.writePlSentinel();
+
+    var r = try CdrReader.init(buf.items);
+    const p = (try r.readPlParam(.lenient)).?;
+    try testing.expectEqual(@as(usize, 4), p.byte_len);
+    try testing.expectEqual(r.pos, p.value_start);
+    try testing.expectEqualSlices(u8, buf.items[p.value_start .. p.value_start + p.byte_len], &[_]u8{ 0x0D, 0xF0, 0xFE, 0xCA });
+}
+
+test "pl_cdr: writeRawParam replays an unknown parameter byte-for-byte" {
+    // Original: [ unknown pid=0x8123 with 6 value bytes (must-understand-free) ][ known pid=7 ]
+    var orig = std.ArrayListUnmanaged(u8).empty;
+    defer orig.deinit(testing.allocator);
+    var w = PlCdrWriter.init(&orig, testing.allocator);
+    try w.writeEncapHeader();
+    const hu = try w.reservePlParam(0x8123);
+    try w.writeBytes(&[_]u8{ 1, 2, 3, 4, 5, 6 });
+    try w.patchPlParam(hu);
+    const hk = try w.reservePlParam(7);
+    try w.writeI32(777);
+    try w.patchPlParam(hk);
+    try w.writePlSentinel();
+
+    // Decode, retaining the unknown, then re-encode via writeRawParam in the same slot.
+    var r = try CdrReader.init(orig.items);
+    var retained: ?CdrReader.RawParam = null;
+    defer if (retained) |rp| testing.allocator.free(rp.bytes);
+    var known: i32 = 0;
+    while (try r.readPlParam(.lenient)) |p| {
+        switch (p.pid & 0x3FFF) {
+            7 => known = try r.readI32(),
+            else => retained = .{
+                .pid = p.pid,
+                .bytes = try testing.allocator.dupe(u8, orig.items[p.value_start .. p.value_start + p.byte_len]),
+            },
+        }
+        try r.seekTo(p.end_pos);
+    }
+    try testing.expectEqual(@as(i32, 777), known);
+    try testing.expect(retained != null);
+    try testing.expectEqual(@as(u16, 0x8123), retained.?.pid);
+
+    var re = std.ArrayListUnmanaged(u8).empty;
+    defer re.deinit(testing.allocator);
+    var w2 = PlCdrWriter.init(&re, testing.allocator);
+    try w2.writeEncapHeader();
+    try w2.writeRawParam(retained.?.pid, retained.?.bytes);
+    const hk2 = try w2.reservePlParam(7);
+    try w2.writeI32(777);
+    try w2.patchPlParam(hk2);
+    try w2.writePlSentinel();
+
+    try testing.expectEqualSlices(u8, orig.items, re.items);
+}
+
+test "pl_cdr: strict rejects a truncated final parameter; lenient stops" {
+    // pid=0x0050, declared len=8, but only 4 value bytes present.
+    const data = [_]u8{
+        0x00, 0x03, 0x00, 0x00, // encap
+        0x50, 0x00, 0x08, 0x00, // pid=0x0050 len=8
+        0xAA, 0xBB, 0xCC, 0xDD, // only 4 bytes
+    };
+    var rs = try CdrReader.init(&data);
+    try testing.expectError(error.TruncatedParameter, rs.readPlParam(.strict));
+
+    var rl = try CdrReader.init(&data);
+    try testing.expectEqual(@as(?CdrReader.PlParam, null), try rl.readPlParam(.lenient));
+}
+
+test "pl_cdr: strict rejects a missing sentinel; lenient stops" {
+    // One well-formed param, then the buffer ends — no PID_SENTINEL.
+    const data = [_]u8{
+        0x00, 0x03, 0x00, 0x00, // encap
+        0x50, 0x00, 0x04, 0x00, // pid=0x0050 len=4
+        0x01, 0x02, 0x03, 0x04,
+    };
+    var rs = try CdrReader.init(&data);
+    const p0 = (try rs.readPlParam(.strict)).?; // first param OK
+    try rs.seekTo(p0.end_pos);
+    try testing.expectError(error.MissingSentinel, rs.readPlParam(.strict));
+
+    var rl = try CdrReader.init(&data);
+    const p1 = (try rl.readPlParam(.lenient)).?;
+    try rl.seekTo(p1.end_pos);
+    try testing.expectEqual(@as(?CdrReader.PlParam, null), try rl.readPlParam(.lenient));
+}
+
+test "pl_cdr: strict rejects a non-multiple-of-4 length; lenient rounds up" {
+    const data = [_]u8{
+        0x00, 0x03, 0x00, 0x00, // encap
+        0x05, 0x00, 0x03, 0x00, // pid=5 len=3 (misaligned)
+        0x41, 0x42, 0x43, 0x00, // 3 value bytes + 1 pad
+        0x01, 0x00, 0x00, 0x00, // sentinel
+    };
+    var rs = try CdrReader.init(&data);
+    try testing.expectError(error.MisalignedParameter, rs.readPlParam(.strict));
+
+    var rl = try CdrReader.init(&data);
+    const p = (try rl.readPlParam(.lenient)).?;
+    try testing.expectEqual(@as(u16, 3), p.byte_len);
+    try testing.expectEqual(@as(usize, 12), p.end_pos); // 8 (hdr end) + 4 (padded)
 }
 
 // ── fixed<D,S> roundtrips ─────────────────────────────────────────────────────
@@ -2120,7 +2294,7 @@ test "pl_cdr: @pl_repeated round-trip: mixed PID types" {
     defer list_b.deinit(testing.allocator);
 
     var r = try CdrReader.init(buf.items);
-    while (try r.readPlParam()) |p| {
+    while (try r.readPlParam(.lenient)) |p| {
         switch (p.pid & 0x3FFF) {
             0x0032 => try list_a.append(testing.allocator, try r.readI32()),
             0x0033 => try list_b.append(testing.allocator, try r.readI32()),

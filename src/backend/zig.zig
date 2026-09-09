@@ -478,6 +478,16 @@ const Generator = struct {
         for (s.members) |m| {
             try self.emitField(m.name, m.type_ref, m.dimensions, m.annotations.is_optional, m.annotations.default_value);
         }
+        if (self.plRetainsUnknown(s)) {
+            try self.ind();
+            try self.write("    /// PL_CDR parameters with no member here, kept verbatim by\n");
+            try self.ind();
+            try self.write("    /// `deserializeFromPlCdr` and replayed by `serializePlCdr` (@pl_retain_unknown).\n");
+            try self.ind();
+            try self.write("    /// Owned; freed by `deinit`.\n");
+            try self.ind();
+            try self.write("    unknown_params: []zidl_rt.RawParam = &.{},\n");
+        }
         // default() is always emitted; it relies only on field defaults, not CDR support.
         try self.ind();
         try self.print("\n    pub fn default() @This() {{\n", .{});
@@ -3993,26 +4003,57 @@ const Generator = struct {
                     try self.print("        try writer.patchPlParam(_ph{d});\n", .{idx});
                 }
             }
+            if (self.plRetainsUnknown(s)) {
+                try self.ind();
+                try self.write("        for (value.unknown_params) |_rp| try writer.writeRawParam(_rp.pid, _rp.bytes);\n");
+            }
             try self.ind();
             try self.write("        try writer.writePlSentinel();\n");
             try self.ind();
             try self.write("    }\n\n");
 
             // deserializeFromPlCdr
+            const pl_retain = self.plRetainsUnknown(s);
             try self.ind();
-            try self.write("    pub fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {\n");
-            if (!needs_alloc) {
+            try self.write("    pub fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator, mode: zidl_rt.PlMode) !void {\n");
+            if (!needs_alloc and !pl_retain) {
                 try self.ind();
                 try self.write("        _ = allocator;\n");
             }
+            if (pl_retain) {
+                try self.ind();
+                try self.write("        var _unknown: std.ArrayListUnmanaged(zidl_rt.RawParam) = .empty;\n");
+                try self.ind();
+                try self.write("        errdefer {\n");
+                try self.ind();
+                try self.write("            for (_unknown.items) |_rp| allocator.free(_rp.bytes);\n");
+                try self.ind();
+                try self.write("            _unknown.deinit(allocator);\n");
+                try self.ind();
+                try self.write("        }\n");
+            }
+            // Strict mode flags a non-`@pl_repeated` member whose PID appears
+            // more than once. Indexed by member position; slots for repeated
+            // members are never touched.
             try self.ind();
-            try self.write("        while (try reader.readPlParam()) |_p| {\n");
+            try self.print("        var _seen_pl = [_]bool{{false}} ** {d};\n", .{s.members.len});
+            try self.ind();
+            try self.write("        _ = &_seen_pl;\n");
+            try self.ind();
+            try self.write("        while (try reader.readPlParam(mode)) |_p| {\n");
             try self.ind();
             try self.write("            switch (_p.pid & 0x3FFF) {\n");
             for (s.members, 0..) |m, idx| {
                 const pid: u32 = memberIdAt(m, idx);
                 try self.ind();
                 try self.print("                {d} => {{\n", .{pid});
+                if (!m.annotations.is_pl_repeated) {
+                    // A non-repeated member's PID appearing twice is ambiguous.
+                    try self.ind();
+                    try self.print("                    if (mode == .strict and _seen_pl[{d}]) return error.DuplicateParameter;\n", .{idx});
+                    try self.ind();
+                    try self.print("                    _seen_pl[{d}] = true;\n", .{idx});
+                }
                 if (m.annotations.is_pl_repeated) {
                     // @pl_repeated: each occurrence of this PID carries one element;
                     // accumulate into the sequence.
@@ -4066,14 +4107,33 @@ const Generator = struct {
                 try self.ind();
                 try self.write("                },\n");
             }
+            // Unknown PID. In strict mode a must-understand parameter (RTPS 2.5
+            // §9.6.4: pid & 0x4000) fails the decode. Otherwise it is retained
+            // verbatim (@pl_retain_unknown) or skipped.
             try self.ind();
-            try self.write("                else => {},\n");
+            try self.write("                else => {\n");
+            try self.ind();
+            try self.write("                    if (mode == .strict and (_p.pid & 0x4000) != 0) return error.UnknownMustUnderstand;\n");
+            if (pl_retain) {
+                try self.ind();
+                try self.write("                    const _rv = try allocator.dupe(u8, reader.data[_p.value_start .. _p.value_start + _p.byte_len]);\n");
+                try self.ind();
+                try self.write("                    errdefer allocator.free(_rv);\n");
+                try self.ind();
+                try self.write("                    try _unknown.append(allocator, .{ .pid = _p.pid, .bytes = _rv });\n");
+            }
+            try self.ind();
+            try self.write("                },\n");
             try self.ind();
             try self.write("            }\n");
             try self.ind();
             try self.write("            try reader.seekTo(_p.end_pos);\n");
             try self.ind();
             try self.write("        }\n");
+            if (pl_retain) {
+                try self.ind();
+                try self.write("        out.unknown_params = try _unknown.toOwnedSlice(allocator);\n");
+            }
             try self.ind();
             try self.write("    }\n");
         }
@@ -4888,7 +4948,17 @@ const Generator = struct {
         return true;
     }
 
+    /// True when `s` gets a generated `unknown_params: []zidl_rt.RawParam` field
+    /// and the matching retain/replay/free code: `@pl_retain_unknown` on a
+    /// `@mutable` struct, with `--zig-pl-cdr` in effect.
+    fn plRetainsUnknown(self: *const Generator, s: *const ir.Struct) bool {
+        return self.opts.pl_cdr and
+            s.annotations.extensibility == .mutable and
+            s.annotations.pl_retain_unknown;
+    }
+
     fn structNeedsCleanup(self: *Generator, s: *const ir.Struct) bool {
+        if (self.plRetainsUnknown(s)) return true;
         if (s.base) |base| switch (base) {
             .struct_ => |bs| if (self.structNeedsCleanup(bs)) return true,
             else => {},
@@ -4943,6 +5013,14 @@ const Generator = struct {
         for (s.members) |m| {
             if (!self.memberNeedsCleanup(m)) continue;
             try self.emitFieldSeqDeinit(m.name, m.type_ref, "        ");
+        }
+        if (self.plRetainsUnknown(s)) {
+            try self.ind();
+            try self.write("        for (self.unknown_params) |_rp| alloc.free(_rp.bytes);\n");
+            try self.ind();
+            try self.write("        if (self.unknown_params.len != 0) alloc.free(self.unknown_params);\n");
+            try self.ind();
+            try self.write("        self.unknown_params = &.{};\n");
         }
         try self.ind();
         try self.write("    }\n");
@@ -5056,6 +5134,30 @@ const Generator = struct {
             if (!self.memberNeedsCleanup(m)) continue;
             try self.emitFieldSeqCloneStmt(m.name, m.type_ref, "        ");
             try self.emitFieldSeqCloneErrdefer(m.name, m.type_ref, "        ");
+        }
+        if (self.plRetainsUnknown(s)) {
+            try self.ind();
+            try self.write("        result.unknown_params = &.{};\n");
+            try self.ind();
+            try self.write("        if (self.unknown_params.len != 0) {\n");
+            try self.ind();
+            try self.write("            const _up = try alloc.alloc(zidl_rt.RawParam, self.unknown_params.len);\n");
+            try self.ind();
+            try self.write("            errdefer alloc.free(_up);\n");
+            try self.ind();
+            try self.write("            var _n: usize = 0;\n");
+            try self.ind();
+            try self.write("            errdefer for (_up[0.._n]) |_rp| alloc.free(_rp.bytes);\n");
+            try self.ind();
+            try self.write("            while (_n < self.unknown_params.len) : (_n += 1) {\n");
+            try self.ind();
+            try self.write("                _up[_n] = .{ .pid = self.unknown_params[_n].pid, .bytes = try alloc.dupe(u8, self.unknown_params[_n].bytes) };\n");
+            try self.ind();
+            try self.write("            }\n");
+            try self.ind();
+            try self.write("            result.unknown_params = _up;\n");
+            try self.ind();
+            try self.write("        }\n");
         }
         try self.ind();
         try self.write("        return result;\n");
@@ -9000,10 +9102,44 @@ test "zig_backend pl_cdr: deserializeFromPlCdr emitted for @mutable struct" {
     });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "pub fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {"));
-    try testing.expect(has(s, "readPlParam()"));
+    try testing.expect(has(s, "pub fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator, mode: zidl_rt.PlMode) !void {"));
+    try testing.expect(has(s, "readPlParam(mode)"));
     try testing.expect(has(s, "switch (_p.pid & 0x3FFF) {"));
     try testing.expect(has(s, "seekTo(_p.end_pos)"));
+    // Unknown-PID must-understand check is always emitted, retention is not.
+    try testing.expect(has(s, "mode == .strict and (_p.pid & 0x4000) != 0) return error.UnknownMustUnderstand"));
+    try testing.expect(!has(s, "unknown_params"));
+    // Repeated-singleton detection is always emitted.
+    try testing.expect(has(s, "var _seen_pl = [_]bool{false} ** 2;"));
+    try testing.expect(has(s, "if (mode == .strict and _seen_pl[0]) return error.DuplicateParameter;"));
+}
+
+test "zig_backend pl_cdr: @pl_retain_unknown emits unknown_params field + retain/replay" {
+    var out = try testGenOpts(
+        "@mutable @pl_retain_unknown struct S { @id(1) long x; };",
+        "t",
+        .{ .no_typeobject_support = true, .pl_cdr = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "unknown_params: []zidl_rt.RawParam = &.{},"));
+    // serialize replays before the sentinel
+    try testing.expect(has(s, "for (value.unknown_params) |_rp| try writer.writeRawParam(_rp.pid, _rp.bytes);"));
+    // deserialize retains in the else arm and publishes the owned slice
+    try testing.expect(has(s, "try _unknown.append(allocator, .{ .pid = _p.pid, .bytes = _rv });"));
+    try testing.expect(has(s, "out.unknown_params = try _unknown.toOwnedSlice(allocator);"));
+    // deinit frees it
+    try testing.expect(has(s, "for (self.unknown_params) |_rp| alloc.free(_rp.bytes);"));
+}
+
+test "zig_backend pl_cdr: @pl_retain_unknown ignored without --zig-pl-cdr" {
+    var out = try testGenOpts(
+        "@mutable @pl_retain_unknown struct S { @id(1) long x; };",
+        "t",
+        .{ .no_typeobject_support = true },
+    );
+    defer out.deinit(testing.allocator);
+    try testing.expect(!has(out.items, "unknown_params"));
 }
 
 test "zig_backend pl_cdr: @optional member skips sentinel in serialize" {

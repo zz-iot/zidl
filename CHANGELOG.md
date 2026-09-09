@@ -7,6 +7,29 @@ Notable changes to zidl, newest first. For current capability and known limitati
 
 Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
+## Unreleased
+
+- **PL_CDR decode gained a strictness `mode` and an opt-in lossless-retention mode**
+  (`--zig-pl-cdr`, `@mutable` types), for a DDS core adopting the generated codec for real
+  RTPS SPDP/SEDP traffic instead of a hand-rolled parser.
+  - `deserializeFromPlCdr` now takes `mode: zidl_rt.PlMode`. `.lenient` matches a
+    hand-rolled RTPS parser (end the loop at a truncated tail or a missing `PID_SENTINEL`,
+    round a non-multiple-of-4 length up). `.strict` returns `error.TruncatedParameter` /
+    `error.MissingSentinel` / `error.MisalignedParameter` for those, plus
+    `error.UnknownMustUnderstand` for an unrecognized PID with the must-understand flag
+    (`pid & 0x4000`, RTPS 2.5 §9.6.4 Table 9.6) and `error.DuplicateParameter` for a
+    repeated non-`@pl_repeated` PID.
+  - New internal `@pl_retain_unknown` struct annotation: the generated struct gets
+    `unknown_params: []zidl_rt.RawParam`; `deserializeFromPlCdr` keeps every parameter it
+    has no member for (value bytes, owned) and `serializePlCdr` replays them before the
+    sentinel, so decode → re-encode preserves vendor extensions and not-yet-modelled
+    parameters. Generated `deinit`/`clone` cover the field.
+  - `zidl_rt`: `CdrReader.readPlParam` takes a `PlMode`; new `PlParam.value_start`, new
+    `RawParam` type, new `PlCdrWriter.writeRawParam` / `writeBytes`, re-exported as
+    `zidl_rt.PlMode` / `zidl_rt.PlParam` / `zidl_rt.RawParam`. The `PlParam` flag-bit doc
+    comment was corrected (`0x8000` = vendor, `0x4000` = must-understand).
+  - New compile-and-run integration suite `test/integration/zig_pl_cdr/`.
+
 ## v0.3.12-zig.0.16.0 — 2026-08-30
 
 - **Fixed `get_key_value` returning the wrong key for types whose `@key` member is not
