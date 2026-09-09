@@ -17,8 +17,13 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
     round a non-multiple-of-4 length up). `.strict` returns `error.TruncatedParameter` /
     `error.MissingSentinel` / `error.MisalignedParameter` for those, plus
     `error.UnknownMustUnderstand` for an unrecognized PID with the must-understand flag
-    (`pid & 0x4000`, RTPS 2.5 §9.6.4 Table 9.6) and `error.DuplicateParameter` for a
-    repeated non-`@pl_repeated` PID.
+    (`pid & 0x4000`, RTPS 2.5 §9.6.4 Table 9.6), `error.DuplicateParameter` for a
+    repeated non-`@pl_repeated` PID, and `error.TruncatedParameter` when a known member's
+    encoding reads past the parameter's declared length. On error `out` may be left
+    partially populated (caller `deinit`s it, as with `deserializeInto`).
+  - New builder error `error.PlRetainUnknownFieldCollision`: a `@pl_retain_unknown` struct
+    that declares its own `unknown_params` member is rejected rather than generating two
+    fields of that name.
   - New internal `@pl_retain_unknown` struct annotation: the generated struct gets
     `unknown_params: []zidl_rt.RawParam`; `deserializeFromPlCdr` keeps every parameter it
     has no member for (value bytes, owned) and `serializePlCdr` replays them before the

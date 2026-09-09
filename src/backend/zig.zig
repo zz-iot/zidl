@@ -4015,6 +4015,12 @@ const Generator = struct {
             // deserializeFromPlCdr
             const pl_retain = self.plRetainsUnknown(s);
             try self.ind();
+            try self.write("    /// `out` must be freshly `.{}`-initialized. On error `out` may be left\n");
+            try self.ind();
+            try self.write("    /// partially populated (the caller should `deinit` it); as with\n");
+            try self.ind();
+            try self.write("    /// `deserializeInto`, reusing a populated `out` leaks its prior contents.\n");
+            try self.ind();
             try self.write("    pub fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator, mode: zidl_rt.PlMode) !void {\n");
             if (!needs_alloc and !pl_retain) {
                 try self.ind();
@@ -4126,6 +4132,13 @@ const Generator = struct {
             try self.write("                },\n");
             try self.ind();
             try self.write("            }\n");
+            // Strict mode: a known member whose encoding consumed more than the
+            // parameter's declared length read into the next parameter. Reject
+            // rather than keep the corrupted value. (Reading fewer bytes than
+            // declared is fine — a newer peer may have appended data; seekTo
+            // skips it.)
+            try self.ind();
+            try self.write("            if (mode == .strict and reader.pos > _p.end_pos) return error.TruncatedParameter;\n");
             try self.ind();
             try self.write("            try reader.seekTo(_p.end_pos);\n");
             try self.ind();
@@ -9112,6 +9125,8 @@ test "zig_backend pl_cdr: deserializeFromPlCdr emitted for @mutable struct" {
     // Repeated-singleton detection is always emitted.
     try testing.expect(has(s, "var _seen_pl = [_]bool{false} ** 2;"));
     try testing.expect(has(s, "if (mode == .strict and _seen_pl[0]) return error.DuplicateParameter;"));
+    // Per-parameter boundary check after each decoded member.
+    try testing.expect(has(s, "if (mode == .strict and reader.pos > _p.end_pos) return error.TruncatedParameter;"));
 }
 
 test "zig_backend pl_cdr: @pl_retain_unknown emits unknown_params field + retain/replay" {

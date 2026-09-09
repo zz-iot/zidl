@@ -10,9 +10,17 @@
 struct RetainRec {
     @id(16) long a;
     @id(32) @optional long b;
+    @id(48) string label; // an allocating member — exercises partial-out cleanup
 };
 
 @mutable
 struct PlainRec {
     @id(16) long a;
+};
+
+// A member wider than 4 bytes, for the "strict rejects a known member that
+// reads past its declared parameter length" case (declare len=4, decode an i64).
+@mutable
+struct WideRec {
+    @id(16) long long w;
 };
