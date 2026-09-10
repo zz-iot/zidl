@@ -12,6 +12,8 @@ const fixture = @import("fixture");
 const RetainRec = fixture.RetainRec;
 const PlainRec = fixture.PlainRec;
 const WideRec = fixture.WideRec;
+const OptSeqRec = fixture.OptSeqRec;
+const OptSeqRecApp = fixture.OptSeqRecApp;
 
 const UNKNOWN_IGNORABLE: u16 = 0x8055; // vendor bit set, must-understand clear
 const UNKNOWN_MUST_UNDERSTAND: u16 = 0x4099; // must-understand bit set
@@ -244,6 +246,169 @@ test "pl_cdr fixture: clone deep-copies unknown_params" {
     try testing.expectEqualSlices(u8, rec.unknown_params[0].bytes, cl.unknown_params[0].bytes);
     // independent allocations: the two deinits (deferred) must not double-free
     try testing.expect(rec.unknown_params[0].bytes.ptr != cl.unknown_params[0].bytes.ptr);
+}
+
+test "pl_cdr fixture: @optional sequence / array members round-trip (decode, serialize, deinit, clone)" {
+    const alloc = testing.allocator;
+
+    // Field types: the array dimension survives the optional, and the sequence
+    // fields are the same nominal type the decode temp uses.
+    try testing.expectEqual(?[16]u8, @FieldType(OptSeqRec, "guid"));
+
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(alloc);
+    var w = zidl_rt.PlCdrWriter.init(&buf, alloc);
+    try w.writeEncapHeader();
+    { // data: sequence<octet> = {0xAA, 0xBB, 0xCC}
+        const h = try w.reservePlParam(10);
+        try w.writeU32(3);
+        try w.writeBytes(&[_]u8{ 0xAA, 0xBB, 0xCC });
+        try w.patchPlParam(h);
+    }
+    { // names: sequence<string> = {"alpha", "beta"}
+        const h = try w.reservePlParam(20);
+        try w.writeU32(2);
+        try w.writeString("alpha");
+        try w.writeString("beta");
+        try w.patchPlParam(h);
+    }
+    { // guid: octet[16]
+        const h = try w.reservePlParam(30);
+        try w.writeBytes(&[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 });
+        try w.patchPlParam(h);
+    }
+    { // tail
+        const h = try w.reservePlParam(40);
+        try w.writeI32(-77);
+        try w.patchPlParam(h);
+    }
+    try w.writePlSentinel();
+
+    var reader = try zidl_rt.CdrReader.init(buf.items);
+    var rec: OptSeqRec = .{};
+    try OptSeqRec.deserializeFromPlCdr(&rec, &reader, alloc, .lenient);
+    defer rec.deinit(alloc);
+
+    try testing.expect(rec.data != null);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xAA, 0xBB, 0xCC }, rec.data.?._buffer.?[0..rec.data.?._length]);
+    try testing.expect(rec.names != null);
+    try testing.expectEqual(@as(u32, 2), rec.names.?._length);
+    try testing.expectEqualStrings("alpha", std.mem.span(rec.names.?._buffer.?[0]));
+    try testing.expectEqualStrings("beta", std.mem.span(rec.names.?._buffer.?[1]));
+    try testing.expect(rec.guid != null);
+    try testing.expectEqual(@as(u8, 16), rec.guid.?[15]);
+    try testing.expectEqual(@as(i32, -77), rec.tail);
+
+    // clone must deep-copy the optional sequences (independent buffers).
+    var cl = try rec.clone(alloc);
+    defer cl.deinit(alloc);
+    try testing.expect(rec.data.?._buffer.? != cl.data.?._buffer.?);
+    try testing.expect(rec.names.?._buffer.?[0] != cl.names.?._buffer.?[0]);
+    try testing.expectEqualStrings("alpha", std.mem.span(cl.names.?._buffer.?[0]));
+    try testing.expectEqual(@as(u8, 16), cl.guid.?[15]);
+
+    // serialize → decode again: values survive a round-trip.
+    var buf2 = std.ArrayListUnmanaged(u8).empty;
+    defer buf2.deinit(alloc);
+    var w2 = zidl_rt.PlCdrWriter.init(&buf2, alloc);
+    try w2.writeEncapHeader();
+    try OptSeqRec.serializePlCdr(&w2, rec);
+
+    var r2 = try zidl_rt.CdrReader.init(buf2.items);
+    var rec2: OptSeqRec = .{};
+    try OptSeqRec.deserializeFromPlCdr(&rec2, &r2, alloc, .lenient);
+    defer rec2.deinit(alloc);
+    try testing.expectEqualStrings("beta", std.mem.span(rec2.names.?._buffer.?[1]));
+    try testing.expectEqual(@as(i32, -77), rec2.tail);
+}
+
+test "pl_cdr fixture: @optional sequence / array members absent → null after decode" {
+    const alloc = testing.allocator;
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(alloc);
+    var w = zidl_rt.PlCdrWriter.init(&buf, alloc);
+    try w.writeEncapHeader();
+    {
+        const h = try w.reservePlParam(40);
+        try w.writeI32(1);
+        try w.patchPlParam(h);
+    }
+    try w.writePlSentinel();
+
+    var reader = try zidl_rt.CdrReader.init(buf.items);
+    var rec: OptSeqRec = .{};
+    try OptSeqRec.deserializeFromPlCdr(&rec, &reader, alloc, .lenient);
+    defer rec.deinit(alloc); // must be a no-op for the null optionals
+    try testing.expect(rec.data == null);
+    try testing.expect(rec.names == null);
+    try testing.expect(rec.guid == null);
+
+    var cl = try rec.clone(alloc);
+    defer cl.deinit(alloc);
+    try testing.expect(cl.names == null);
+}
+
+test "@optional sequence / array members round-trip on the @mutable (EMHEADER) path" {
+    const alloc = testing.allocator;
+    var names = [_][*:0]const u8{ "x", "yy" };
+    const src = OptSeqRec{
+        .data = .{ ._maximum = 2, ._length = 2, ._buffer = @constCast(&[_]u8{ 9, 8 }), ._release = false },
+        .names = .{ ._maximum = 2, ._length = 2, ._buffer = &names, ._release = false },
+        .guid = [_]u8{5} ** 16,
+        .tail = 3,
+    };
+
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(alloc);
+    var w = zidl_rt.CdrWriter(.xcdr2).init(&buf, alloc);
+    try w.writeEncapHeader();
+    try OptSeqRec.serialize(&w, src);
+
+    var r = try zidl_rt.CdrReader.init(buf.items);
+    var out: OptSeqRec = .{};
+    try OptSeqRec.deserializeInto(&out, &r, alloc);
+    defer out.deinit(alloc);
+
+    try testing.expectEqualSlices(u8, &[_]u8{ 9, 8 }, out.data.?._buffer.?[0..out.data.?._length]);
+    try testing.expectEqualStrings("yy", std.mem.span(out.names.?._buffer.?[1]));
+    try testing.expectEqual(@as(u8, 5), out.guid.?[0]);
+
+    var cl = try out.clone(alloc);
+    defer cl.deinit(alloc);
+    try testing.expect(out.data.?._buffer.? != cl.data.?._buffer.?);
+    try testing.expectEqualStrings("x", std.mem.span(cl.names.?._buffer.?[0]));
+}
+
+test "@optional sequence / array members round-trip on the @appendable (XCDR2) path" {
+    const alloc = testing.allocator;
+    var names = [_][*:0]const u8{"solo"};
+    const src = OptSeqRecApp{
+        .data = .{ ._maximum = 3, ._length = 3, ._buffer = @constCast(&[_]u8{ 1, 2, 3 }), ._release = false },
+        .names = .{ ._maximum = 1, ._length = 1, ._buffer = &names, ._release = false },
+        .guid = null,
+        .tail = -1,
+    };
+
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(alloc);
+    var w = zidl_rt.CdrWriter(.xcdr2).init(&buf, alloc);
+    try w.writeEncapHeaderDelimited();
+    try OptSeqRecApp.serialize(&w, src);
+
+    var r = try zidl_rt.CdrReader.init(buf.items);
+    var out: OptSeqRecApp = .{};
+    try OptSeqRecApp.deserializeInto(&out, &r, alloc);
+    defer out.deinit(alloc);
+
+    try testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3 }, out.data.?._buffer.?[0..out.data.?._length]);
+    try testing.expectEqualStrings("solo", std.mem.span(out.names.?._buffer.?[0]));
+    try testing.expect(out.guid == null);
+    try testing.expectEqual(@as(i32, -1), out.tail);
+
+    var cl = try out.clone(alloc);
+    defer cl.deinit(alloc);
+    try testing.expect(out.names.?._buffer.? != cl.names.?._buffer.?);
+    try testing.expect(cl.guid == null);
 }
 
 test "pl_cdr fixture: plain @mutable struct still honours strict must-understand" {

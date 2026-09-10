@@ -18,6 +18,30 @@ struct PlainRec {
     @id(16) long a;
 };
 
+// Exercises @optional members whose generated field type is either an anon
+// `extern struct` (unbounded sequence) or a fixed array — both of which the
+// Zig backend previously miscompiled (decode temp / field type mismatch, and
+// non-unwrapping deinit/clone). `data`/`names` also need per-element cleanup so
+// the generated deinit/clone must unwrap the optional first.
+@mutable @pl_retain_unknown
+struct OptSeqRec {
+    @id(10) @optional sequence<octet>  data;
+    @id(20) @optional sequence<string> names;
+    @id(30) @optional octet            guid[16];
+    @id(40)           long             tail;
+};
+
+// Same shapes on the @appendable (XCDR2) path, so `serialize` /
+// `deserializeInto` / deinit / clone for optional sequences and arrays are
+// compile-and-run checked there too (not just the PL_CDR path).
+@appendable
+struct OptSeqRecApp {
+    @optional sequence<octet>  data;
+    @optional sequence<string> names;
+    @optional octet            guid[16];
+    long                       tail;
+};
+
 // A member wider than 4 bytes, for the "strict rejects a known member that
 // reads past its declared parameter length" case (declare len=4, decode an i64).
 @mutable
