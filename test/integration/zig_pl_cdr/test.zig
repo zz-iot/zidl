@@ -183,10 +183,8 @@ test "pl_cdr fixture: strict decode rejects a known member that reads past its d
     );
 }
 
-test "pl_cdr fixture: a second decode into the same out releases the first's retained params" {
+test "pl_cdr fixture: decoding into a populated retaining out is rejected; deinit then reuse works" {
     const alloc = testing.allocator;
-    // No pid 48, so `label` never allocates and the only reused owned state is
-    // unknown_params — which the decoder must free before repopulating.
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(alloc);
     var w = zidl_rt.PlCdrWriter.init(&buf, alloc);
@@ -209,8 +207,19 @@ test "pl_cdr fixture: a second decode into the same out releases the first's ret
     try RetainRec.deserializeFromPlCdr(&rec, &r1, alloc, .lenient);
     try testing.expectEqual(@as(usize, 1), rec.unknown_params.len);
 
+    // Bare reuse: rejected rather than leaking the retained slice or freeing it
+    // through this call's (possibly different) allocator.
     var r2 = try zidl_rt.CdrReader.init(buf.items);
-    try RetainRec.deserializeFromPlCdr(&rec, &r2, alloc, .lenient); // testing.allocator flags a leak here if the first slice was orphaned
+    try testing.expectError(
+        error.RetainedOutputNotEmpty,
+        RetainRec.deserializeFromPlCdr(&rec, &r2, alloc, .lenient),
+    );
+    try testing.expectEqual(@as(usize, 1), rec.unknown_params.len); // untouched
+
+    // deinit first, then the same `rec` is a valid target again.
+    rec.deinit(alloc);
+    var r3 = try zidl_rt.CdrReader.init(buf.items);
+    try RetainRec.deserializeFromPlCdr(&rec, &r3, alloc, .lenient);
     try testing.expectEqual(@as(usize, 1), rec.unknown_params.len);
     try testing.expectEqualSlices(u8, &[_]u8{ 9, 9, 9, 9 }, rec.unknown_params[0].bytes);
 }

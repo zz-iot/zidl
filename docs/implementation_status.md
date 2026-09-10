@@ -161,7 +161,9 @@ fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: st
   `deserializeFromPlCdr` keeps each unrecognized parameter (value bytes, owned) and
   `serializePlCdr` replays them before the sentinel, so a decode → re-encode round trip
   preserves vendor extensions and unmodelled parameters. Generated `deinit`/`clone` cover
-  the field.
+  the field. `deserializeFromPlCdr` returns `error.RetainedOutputNotEmpty` if `out` already
+  holds retained parameters — reuse must go through `deinit` first, since the retained
+  buffers belong to the previous decode's allocator.
 
 **Tests:** codegen (`src/backend/zig.zig`), `zidl-rt` round-trip (`packages/zidl-rt/src/cdr.zig`),
 and a compile-and-run integration suite (`test/integration/zig_pl_cdr/`).
