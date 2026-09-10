@@ -4021,13 +4021,9 @@ const Generator = struct {
             // deserializeFromPlCdr
             const pl_retain = self.plRetainsUnknown(s);
             try self.ind();
-            try self.write("    /// `out` must be freshly `.{}`-initialized (a populated `out` is a debug\n");
+            try self.write("    /// On error `out` may be left partially populated — the caller `deinit`s it,\n");
             try self.ind();
-            try self.write("    /// assertion here when the type retains unknowns; as with `deserializeInto`,\n");
-            try self.ind();
-            try self.write("    /// reusing one otherwise leaks its prior contents). On error `out` may be\n");
-            try self.ind();
-            try self.write("    /// left partially populated — the caller `deinit`s it, e.g.\n");
+            try self.write("    /// same contract as `deserializeInto`:\n");
             try self.ind();
             try self.write("    /// `var v: @This() = .{}; defer v.deinit(a); try deserializeFromPlCdr(&v, ...);`.\n");
             try self.ind();
@@ -4037,11 +4033,15 @@ const Generator = struct {
                 try self.write("        _ = allocator;\n");
             }
             if (pl_retain) {
-                // Enforce the fresh-`out` contract for the retained slice: a
-                // populated `out` would have its prior entries overwritten and
-                // leaked. No-op in release builds.
+                // Release any parameters retained by a previous decode into this
+                // same `out` before overwriting the slice below. A fresh `.{}`
+                // out has `&.{}` here, so this is a no-op.
                 try self.ind();
-                try self.write("        std.debug.assert(out.unknown_params.len == 0);\n");
+                try self.write("        for (out.unknown_params) |_rp| allocator.free(_rp.bytes);\n");
+                try self.ind();
+                try self.write("        if (out.unknown_params.len != 0) allocator.free(out.unknown_params);\n");
+                try self.ind();
+                try self.write("        out.unknown_params = &.{};\n");
                 try self.ind();
                 try self.write("        var _unknown: std.ArrayListUnmanaged(zidl_rt.RawParam) = .empty;\n");
                 try self.ind();
@@ -9160,8 +9160,8 @@ test "zig_backend pl_cdr: @pl_retain_unknown emits unknown_params field + retain
     try testing.expect(has(s, "out.unknown_params = try _unknown.toOwnedSlice(allocator);"));
     // deinit frees it
     try testing.expect(has(s, "for (self.unknown_params) |_rp| alloc.free(_rp.bytes);"));
-    // fresh-out contract enforced for the retained slice
-    try testing.expect(has(s, "std.debug.assert(out.unknown_params.len == 0);"));
+    // a reused `out` has its previously retained params released before overwrite
+    try testing.expect(has(s, "if (out.unknown_params.len != 0) allocator.free(out.unknown_params);"));
 }
 
 test "zig_backend pl_cdr: @pl_retain_unknown ignored without --zig-pl-cdr" {

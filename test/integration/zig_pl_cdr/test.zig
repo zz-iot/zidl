@@ -183,6 +183,38 @@ test "pl_cdr fixture: strict decode rejects a known member that reads past its d
     );
 }
 
+test "pl_cdr fixture: a second decode into the same out releases the first's retained params" {
+    const alloc = testing.allocator;
+    // No pid 48, so `label` never allocates and the only reused owned state is
+    // unknown_params — which the decoder must free before repopulating.
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(alloc);
+    var w = zidl_rt.PlCdrWriter.init(&buf, alloc);
+    try w.writeEncapHeader();
+    {
+        const h = try w.reservePlParam(16);
+        try w.writeI32(1);
+        try w.patchPlParam(h);
+    }
+    {
+        const h = try w.reservePlParam(UNKNOWN_IGNORABLE);
+        try w.writeBytes(&[_]u8{ 9, 9, 9, 9 });
+        try w.patchPlParam(h);
+    }
+    try w.writePlSentinel();
+
+    var rec: RetainRec = .{};
+    defer rec.deinit(alloc);
+    var r1 = try zidl_rt.CdrReader.init(buf.items);
+    try RetainRec.deserializeFromPlCdr(&rec, &r1, alloc, .lenient);
+    try testing.expectEqual(@as(usize, 1), rec.unknown_params.len);
+
+    var r2 = try zidl_rt.CdrReader.init(buf.items);
+    try RetainRec.deserializeFromPlCdr(&rec, &r2, alloc, .lenient); // testing.allocator flags a leak here if the first slice was orphaned
+    try testing.expectEqual(@as(usize, 1), rec.unknown_params.len);
+    try testing.expectEqualSlices(u8, &[_]u8{ 9, 9, 9, 9 }, rec.unknown_params[0].bytes);
+}
+
 test "pl_cdr fixture: clone deep-copies unknown_params" {
     const alloc = testing.allocator;
     var buf = std.ArrayListUnmanaged(u8).empty;

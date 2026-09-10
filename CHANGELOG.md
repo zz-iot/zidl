@@ -19,10 +19,9 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
     `error.UnknownMustUnderstand` for an unrecognized PID with the must-understand flag
     (`pid & 0x4000`, RTPS 2.5 §9.6.4 Table 9.6), `error.DuplicateParameter` for a
     repeated non-`@pl_repeated` PID, and `error.TruncatedParameter` when a known member's
-    encoding reads past the parameter's declared length. Contract (as with
-    `deserializeInto`): `out` must be a fresh `.{}` — for a retaining type this is a debug
-    assertion — and on error `out` may be left partially populated for the caller to
-    `deinit`.
+    encoding reads past the parameter's declared length. Contract matches `deserializeInto`:
+    on error `out` may be left partially populated for the caller to `deinit`. A retaining
+    type additionally releases any previously retained parameters if `out` is reused.
   - The Zig backend rejects (`error.PlRetainUnknownFieldCollision`) a `@mutable`
     `@pl_retain_unknown` struct, built with `--zig-pl-cdr`, that declares its own
     `unknown_params` member — it would otherwise emit two fields of that name. Only checked
