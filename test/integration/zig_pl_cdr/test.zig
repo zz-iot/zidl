@@ -13,6 +13,7 @@ const RetainRec = fixture.RetainRec;
 const PlainRec = fixture.PlainRec;
 const WideRec = fixture.WideRec;
 const OptSeqRec = fixture.OptSeqRec;
+const OptSeqRecApp = fixture.OptSeqRecApp;
 
 const UNKNOWN_IGNORABLE: u16 = 0x8055; // vendor bit set, must-understand clear
 const UNKNOWN_MUST_UNDERSTAND: u16 = 0x4099; // must-understand bit set
@@ -345,6 +346,69 @@ test "pl_cdr fixture: @optional sequence / array members absent → null after d
     var cl = try rec.clone(alloc);
     defer cl.deinit(alloc);
     try testing.expect(cl.names == null);
+}
+
+test "@optional sequence / array members round-trip on the @mutable (EMHEADER) path" {
+    const alloc = testing.allocator;
+    var names = [_][*:0]const u8{ "x", "yy" };
+    const src = OptSeqRec{
+        .data = .{ ._maximum = 2, ._length = 2, ._buffer = @constCast(&[_]u8{ 9, 8 }), ._release = false },
+        .names = .{ ._maximum = 2, ._length = 2, ._buffer = &names, ._release = false },
+        .guid = [_]u8{5} ** 16,
+        .tail = 3,
+    };
+
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(alloc);
+    var w = zidl_rt.CdrWriter(.xcdr2).init(&buf, alloc);
+    try w.writeEncapHeader();
+    try OptSeqRec.serialize(&w, src);
+
+    var r = try zidl_rt.CdrReader.init(buf.items);
+    var out: OptSeqRec = .{};
+    try OptSeqRec.deserializeInto(&out, &r, alloc);
+    defer out.deinit(alloc);
+
+    try testing.expectEqualSlices(u8, &[_]u8{ 9, 8 }, out.data.?._buffer.?[0..out.data.?._length]);
+    try testing.expectEqualStrings("yy", std.mem.span(out.names.?._buffer.?[1]));
+    try testing.expectEqual(@as(u8, 5), out.guid.?[0]);
+
+    var cl = try out.clone(alloc);
+    defer cl.deinit(alloc);
+    try testing.expect(out.data.?._buffer.? != cl.data.?._buffer.?);
+    try testing.expectEqualStrings("x", std.mem.span(cl.names.?._buffer.?[0]));
+}
+
+test "@optional sequence / array members round-trip on the @appendable (XCDR2) path" {
+    const alloc = testing.allocator;
+    var names = [_][*:0]const u8{"solo"};
+    const src = OptSeqRecApp{
+        .data = .{ ._maximum = 3, ._length = 3, ._buffer = @constCast(&[_]u8{ 1, 2, 3 }), ._release = false },
+        .names = .{ ._maximum = 1, ._length = 1, ._buffer = &names, ._release = false },
+        .guid = null,
+        .tail = -1,
+    };
+
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(alloc);
+    var w = zidl_rt.CdrWriter(.xcdr2).init(&buf, alloc);
+    try w.writeEncapHeaderDelimited();
+    try OptSeqRecApp.serialize(&w, src);
+
+    var r = try zidl_rt.CdrReader.init(buf.items);
+    var out: OptSeqRecApp = .{};
+    try OptSeqRecApp.deserializeInto(&out, &r, alloc);
+    defer out.deinit(alloc);
+
+    try testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3 }, out.data.?._buffer.?[0..out.data.?._length]);
+    try testing.expectEqualStrings("solo", std.mem.span(out.names.?._buffer.?[0]));
+    try testing.expect(out.guid == null);
+    try testing.expectEqual(@as(i32, -1), out.tail);
+
+    var cl = try out.clone(alloc);
+    defer cl.deinit(alloc);
+    try testing.expect(out.names.?._buffer.? != cl.names.?._buffer.?);
+    try testing.expect(cl.guid == null);
 }
 
 test "pl_cdr fixture: plain @mutable struct still honours strict must-understand" {

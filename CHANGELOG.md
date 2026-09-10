@@ -43,7 +43,9 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   before). An `@optional` unbounded-sequence or fixed-array member no longer miscompiles:
   - **Field type.** `@optional octet x[16]` is now `?[16]u8`, not `?u8` — the array
     dimension is applied inside the optional. (Also fixes the `serialize` loop over the
-    captured value.)
+    captured value.) A scalar `@default(v)` is not assignable to an array type, so — like a
+    non-optional array member — it is ignored and the `@optional` array field initializes
+    to `null`.
   - **Decoder temp.** The `@optional` decode arm's temp is now typed
     `@typeInfo(@FieldType(@This(), "<name>")).optional.child` instead of a freshly
     re-emitted anonymous `extern struct` literal, so `out.<name> = <temp>` for an
@@ -55,9 +57,10 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
     `self.<name>._release` / calling `self.<name>.deinit(alloc)` on the `?T` directly.
     `clone` nulls the shallow-copied optional and rebuilds only when present, with a
     presence-guarded errdefer.
-  - New `OptSeqRec` fixture + tests in `test/integration/zig_pl_cdr/` covering
-    `@optional sequence<octet>` / `sequence<string>` / `octet[16]` decode, serialize,
-    deinit, clone, and the absent-→-`null` path.
+  - New `OptSeqRec` (`@mutable`/PL_CDR) and `OptSeqRecApp` (`@appendable`/XCDR2) fixtures +
+    tests in `test/integration/zig_pl_cdr/` covering `@optional sequence<octet>` /
+    `sequence<string>` / `octet[16]` decode, serialize, deinit, clone, and the
+    absent-→-`null` path on all three decoder families.
 
 ## v0.3.12-zig.0.16.0 — 2026-08-30
 

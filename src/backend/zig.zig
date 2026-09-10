@@ -3315,13 +3315,16 @@ const Generator = struct {
             else
                 zig_type;
             defer if (dims.len > 0) self.alloc.free(@constCast(inner));
-            if (default_value) |dv| {
+            // A scalar `@default(v)` is not assignable to an array type; the
+            // non-optional array path (below) ignores it too, so an
+            // `@optional` array member always initializes to `null`.
+            if (dims.len == 0) if (default_value) |dv| {
                 const dv_str = try self.formatDefaultValueZig(dv, type_ref);
                 defer self.alloc.free(dv_str);
                 try self.print("    {s}: ?{s} = {s},\n", .{ name, inner, dv_str });
-            } else {
-                try self.print("    {s}: ?{s} = null,\n", .{ name, inner });
-            }
+                return;
+            };
+            try self.print("    {s}: ?{s} = null,\n", .{ name, inner });
         } else if (dims.len > 0) {
             const arr_type = try self.makeArrayType(zig_type, dims);
             defer self.alloc.free(arr_type);
@@ -9830,6 +9833,21 @@ test "zig_backend: @optional without @default initializes to null" {
     , "cfg");
     defer h.deinit(testing.allocator);
     try testing.expect(has(h.items, "val: ?i32 = null,"));
+}
+
+test "zig_backend: @optional array member keeps its dimension and ignores a scalar @default" {
+    var h = try testGen(
+        \\struct Cfg {
+        \\    @optional octet a[16];
+        \\    @optional @default(7) octet b[4];
+        \\};
+    , "cfg");
+    defer h.deinit(testing.allocator);
+    // `?[N]T`, not `?T`; a scalar @default is not assignable to an array, so
+    // (like a non-optional array) it is ignored and the field is `null`.
+    try testing.expect(has(h.items, "a: ?[16]u8 = null,"));
+    try testing.expect(has(h.items, "b: ?[4]u8 = null,"));
+    try testing.expect(!has(h.items, "?[4]u8 = 7"));
 }
 
 test "zig_backend: @default float field sets initializer" {

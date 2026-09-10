@@ -31,6 +31,17 @@ struct OptSeqRec {
     @id(40)           long             tail;
 };
 
+// Same shapes on the @appendable (XCDR2) path, so `serialize` /
+// `deserializeInto` / deinit / clone for optional sequences and arrays are
+// compile-and-run checked there too (not just the PL_CDR path).
+@appendable
+struct OptSeqRecApp {
+    @optional sequence<octet>  data;
+    @optional sequence<string> names;
+    @optional octet            guid[16];
+    long                       tail;
+};
+
 // A member wider than 4 bytes, for the "strict rejects a known member that
 // reads past its declared parameter length" case (declare len=4, decode an i64).
 @mutable
