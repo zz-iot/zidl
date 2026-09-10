@@ -1111,6 +1111,8 @@ const Builder = struct {
                 result.is_topic = true;
             } else if (std.ascii.eqlIgnoreCase(name, "nested")) {
                 result.is_nested = true;
+            } else if (std.ascii.eqlIgnoreCase(name, "pl_retain_unknown")) {
+                result.pl_retain_unknown = true;
             } else if (std.ascii.eqlIgnoreCase(name, "final")) {
                 result.extensibility = .final;
             } else if (std.ascii.eqlIgnoreCase(name, "appendable")) {
@@ -1683,6 +1685,23 @@ test "builder: @appendable type annotation" {
     try testing.expectEqual(ir.Extensibility.appendable, s.annotations.extensibility);
 }
 
+test "builder: @pl_retain_unknown type annotation" {
+    var ir_spec = try testBuild(
+        \\@mutable @pl_retain_unknown struct Foo { @id(1) long x; };
+    );
+    defer ir_spec.deinit();
+
+    const s = ir_spec.items[0].type_decl.struct_;
+    try testing.expect(s.annotations.pl_retain_unknown);
+    try testing.expectEqual(ir.Extensibility.mutable, s.annotations.extensibility);
+
+    var plain = try testBuild(
+        \\@mutable struct Bar { @id(1) long x; };
+    );
+    defer plain.deinit();
+    try testing.expect(!plain.items[0].type_decl.struct_.annotations.pl_retain_unknown);
+}
+
 test "builder: sequence member" {
     var ir_spec = try testBuild(
         \\struct Bag { sequence<long> items; };
@@ -1960,6 +1979,15 @@ test "builder: @pl_repeated on string member is rejected" {
         error.PlRepeatedOnNonSequence,
         testBuild("struct S { @pl_repeated string name; };"),
     );
+}
+
+test "builder: @pl_retain_unknown does not reserve the 'unknown_params' member name" {
+    // The name clash is a Zig-backend + --zig-pl-cdr concern (that is where the
+    // field is emitted), so the IR builder accepts this; the Zig backend
+    // rejects it. See src/backend/zig.zig.
+    var ir_spec = try testBuild("@mutable @pl_retain_unknown struct S { @id(1) long unknown_params; };");
+    defer ir_spec.deinit();
+    try testing.expect(ir_spec.items[0].type_decl.struct_.annotations.pl_retain_unknown);
 }
 
 test "builder: @default positional integer is stored in default_value" {

@@ -137,7 +137,7 @@ the normal XCDR2 serialize/deserialize:
 
 ```zig
 fn serializePlCdr(writer: *zidl_rt.PlCdrWriter, value: @This()) !void
-fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void
+fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator, mode: zidl_rt.PlMode) !void
 ```
 
 - PID = `@id(N)` if present on the member, else sequential member index (same as EMHEADER)
@@ -147,8 +147,26 @@ fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: st
   prefix); deserialize appends one element per occurrence of the PID
 - `@pl_repeated` on a non-sequence member is a build-time error (`error.PlRepeatedOnNonSequence`
   from the IR builder)
+- `mode: zidl_rt.PlMode` (`.lenient` / `.strict`): `.lenient` ends the parameter loop cleanly
+  at a truncated parameter or a missing `PID_SENTINEL` and rounds a non-multiple-of-4 length
+  up; `.strict` returns `error.TruncatedParameter` / `error.MissingSentinel` /
+  `error.MisalignedParameter` for those, `error.UnknownMustUnderstand` for an unrecognized
+  PID with the must-understand flag (`pid & 0x4000`, RTPS 2.5 §9.6.4),
+  `error.DuplicateParameter` for a repeated non-`@pl_repeated` PID, and
+  `error.TruncatedParameter` when a known member's encoding reads past its parameter's
+  declared length (into the next parameter). `.strict` is memory-safe on any input; it does
+  not, on error, free allocations already stored in `out` (same contract as
+  `deserializeInto` — `out` must be a fresh `.{}` and the caller `deinit`s a partial result).
+- `@pl_retain_unknown` on the struct: adds `unknown_params: []zidl_rt.RawParam`;
+  `deserializeFromPlCdr` keeps each unrecognized parameter (value bytes, owned) and
+  `serializePlCdr` replays them before the sentinel, so a decode → re-encode round trip
+  preserves vendor extensions and unmodelled parameters. Generated `deinit`/`clone` cover
+  the field. `deserializeFromPlCdr` returns `error.RetainedOutputNotEmpty` if `out` already
+  holds retained parameters — reuse must go through `deinit` first, since the retained
+  buffers belong to the previous decode's allocator.
 
-**Tests:** 15 new (9 codegen + 6 zidl-rt round-trip).
+**Tests:** codegen (`src/backend/zig.zig`), `zidl-rt` round-trip (`packages/zidl-rt/src/cdr.zig`),
+and a compile-and-run integration suite (`test/integration/zig_pl_cdr/`).
 
 ### TOML config application (`--zig-generate-toml-config`)
 

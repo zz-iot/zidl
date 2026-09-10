@@ -1,0 +1,26 @@
+// Fixture for the PL_CDR retention + strict-mode compile-and-run check.
+//
+// The codegen tests in src/backend/zig.zig only substring-match generated
+// text. This fixture is generated with --zig-pl-cdr, compiled for real, and
+// round-tripped in test.zig so a regression in the generated
+// serializePlCdr / deserializeFromPlCdr / deinit / clone is a real
+// `zig build test` failure.
+
+@mutable @pl_retain_unknown
+struct RetainRec {
+    @id(16) long a;
+    @id(32) @optional long b;
+    @id(48) string label; // an allocating member — exercises partial-out cleanup
+};
+
+@mutable
+struct PlainRec {
+    @id(16) long a;
+};
+
+// A member wider than 4 bytes, for the "strict rejects a known member that
+// reads past its declared parameter length" case (declare len=4, decode an i64).
+@mutable
+struct WideRec {
+    @id(16) long long w;
+};

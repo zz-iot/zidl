@@ -187,6 +187,42 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_wrapper_contract.step);
     }
 
+    // ── PL_CDR retention / strict-mode compile-and-run check ──────────────────
+    // src/backend/zig.zig's PL_CDR tests only substring-match. This generates
+    // test/integration/zig_pl_cdr/fixture.idl with --zig-pl-cdr, compiles the
+    // output, and round-trips it (retention, replay, strict must-understand,
+    // deinit/clone of unknown_params).
+    {
+        const gen_pl_cdr = b.addRunArtifact(exe);
+        gen_pl_cdr.addArgs(&.{ "-b", "zig", "--zig-pl-cdr", "--no-typeobject-support", "-o" });
+        const pl_cdr_dir = gen_pl_cdr.addOutputDirectoryArg("zig-pl-cdr-gen");
+        gen_pl_cdr.addFileArg(b.path("test/integration/zig_pl_cdr/fixture.idl"));
+
+        const pl_cdr_fixture_mod = b.createModule(.{
+            .root_source_file = pl_cdr_dir.path(b, "fixture.zig"),
+            .target = target,
+            .sanitize_thread = sanitize_thread,
+            .imports = &.{
+                .{ .name = "zidl_rt", .module = zidl_rt_mod },
+            },
+        });
+
+        const pl_cdr_tests = b.addTest(.{
+            .name = "zidl-pl-cdr",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("test/integration/zig_pl_cdr/test.zig"),
+                .target = target,
+                .sanitize_thread = sanitize_thread,
+                .imports = &.{
+                    .{ .name = "zidl_rt", .module = zidl_rt_mod },
+                    .{ .name = "fixture", .module = pl_cdr_fixture_mod },
+                },
+            }),
+        });
+        const run_pl_cdr = b.addRunArtifact(pl_cdr_tests);
+        test_step.dependOn(&run_pl_cdr.step);
+    }
+
     // ── check_goldens tool ────────────────────────────────────────────────────
     // Bidirectional directory comparison; replaces `diff -rq` and works on all
     // platforms.  Always compiled for the host so it can run during the build.

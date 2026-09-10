@@ -65,6 +65,13 @@ pub const TypeAnnotations = struct {
     is_topic: bool = false,
     /// `@nested` — suppress DataWriter/DataReader generation for this type.
     is_nested: bool = false,
+    /// `@pl_retain_unknown` — on a `@mutable` struct with `--zig-pl-cdr`: the
+    /// generated `deserializeFromPlCdr` keeps every parameter it has no member
+    /// for (`zidl_rt.RawParam` entries in an `unknown_params` field) and
+    /// `serializePlCdr` replays them, so a decode/re-encode round trip is
+    /// lossless. Internal annotation for the RTPS discovery codec; not for user
+    /// IDL. Ignored on non-`@mutable` types and without `--zig-pl-cdr`.
+    pl_retain_unknown: bool = false,
     raw: []const RawAnnotation = &.{},
 };
 
