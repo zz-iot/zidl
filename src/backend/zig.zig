@@ -479,6 +479,12 @@ const Generator = struct {
             try self.emitField(m.name, m.type_ref, m.dimensions, m.annotations.is_optional, m.annotations.default_value);
         }
         if (self.plRetainsUnknown(s)) {
+            // The generated retention field would shadow an identically named
+            // IDL member. Only a concern here — where the field is actually
+            // emitted (`@mutable` + `--zig-pl-cdr`), not for every backend.
+            for (s.members) |m| {
+                if (std.mem.eql(u8, m.name, "unknown_params")) return error.PlRetainUnknownFieldCollision;
+            }
             try self.ind();
             try self.write("    /// PL_CDR parameters with no member here, kept verbatim by\n");
             try self.ind();
@@ -9155,6 +9161,33 @@ test "zig_backend pl_cdr: @pl_retain_unknown ignored without --zig-pl-cdr" {
     );
     defer out.deinit(testing.allocator);
     try testing.expect(!has(out.items, "unknown_params"));
+}
+
+test "zig_backend pl_cdr: @pl_retain_unknown + member named unknown_params is rejected" {
+    // Only where the field is actually emitted.
+    try testing.expectError(error.PlRetainUnknownFieldCollision, testGenOpts(
+        "@mutable @pl_retain_unknown struct S { @id(1) long unknown_params; };",
+        "t",
+        .{ .no_typeobject_support = true, .pl_cdr = true },
+    ));
+    // Not rejected when no field is generated: no --zig-pl-cdr...
+    {
+        var out = try testGenOpts(
+            "@mutable @pl_retain_unknown struct S { @id(1) long unknown_params; };",
+            "t",
+            .{ .no_typeobject_support = true },
+        );
+        out.deinit(testing.allocator);
+    }
+    // ...or not @mutable.
+    {
+        var out = try testGenOpts(
+            "@pl_retain_unknown struct S { long unknown_params; };",
+            "t",
+            .{ .no_typeobject_support = true, .pl_cdr = true },
+        );
+        out.deinit(testing.allocator);
+    }
 }
 
 test "zig_backend pl_cdr: @optional member skips sentinel in serialize" {

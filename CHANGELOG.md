@@ -21,9 +21,10 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
     repeated non-`@pl_repeated` PID, and `error.TruncatedParameter` when a known member's
     encoding reads past the parameter's declared length. On error `out` may be left
     partially populated (caller `deinit`s it, as with `deserializeInto`).
-  - New builder error `error.PlRetainUnknownFieldCollision`: a `@pl_retain_unknown` struct
-    that declares its own `unknown_params` member is rejected rather than generating two
-    fields of that name.
+  - The Zig backend rejects (`error.PlRetainUnknownFieldCollision`) a `@mutable`
+    `@pl_retain_unknown` struct, built with `--zig-pl-cdr`, that declares its own
+    `unknown_params` member — it would otherwise emit two fields of that name. Only checked
+    where the field is generated; other backends and non-`@mutable` types are unaffected.
   - New internal `@pl_retain_unknown` struct annotation: the generated struct gets
     `unknown_params: []zidl_rt.RawParam`; `deserializeFromPlCdr` keeps every parameter it
     has no member for (value bytes, owned) and `serializePlCdr` replays them before the

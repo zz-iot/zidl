@@ -567,15 +567,6 @@ const Builder = struct {
                     }
                     p.members = try self.buildStructMembers(sdef.members, module_qpath, scope);
                     p.annotations = try self.interpretTypeAnnotations(annotations);
-                    // @pl_retain_unknown injects an `unknown_params` field; a
-                    // member of that name would produce two Zig fields.
-                    if (p.annotations.pl_retain_unknown) {
-                        for (p.members) |mem| {
-                            if (std.mem.eql(u8, mem.name, "unknown_params")) {
-                                return error.PlRetainUnknownFieldCollision;
-                            }
-                        }
-                    }
                     try out.append(self.alloc, entry);
                 },
             },
@@ -1990,14 +1981,13 @@ test "builder: @pl_repeated on string member is rejected" {
     );
 }
 
-test "builder: @pl_retain_unknown struct with an 'unknown_params' member is rejected" {
-    try testing.expectError(
-        error.PlRetainUnknownFieldCollision,
-        testBuild("@mutable @pl_retain_unknown struct S { @id(1) long unknown_params; };"),
-    );
-    // The name is only reserved when the annotation is present.
-    var ok = try testBuild("@mutable struct S { @id(1) long unknown_params; };");
-    ok.deinit();
+test "builder: @pl_retain_unknown does not reserve the 'unknown_params' member name" {
+    // The name clash is a Zig-backend + --zig-pl-cdr concern (that is where the
+    // field is emitted), so the IR builder accepts this; the Zig backend
+    // rejects it. See src/backend/zig.zig.
+    var ir_spec = try testBuild("@mutable @pl_retain_unknown struct S { @id(1) long unknown_params; };");
+    defer ir_spec.deinit();
+    try testing.expect(ir_spec.items[0].type_decl.struct_.annotations.pl_retain_unknown);
 }
 
 test "builder: @default positional integer is stored in default_value" {
