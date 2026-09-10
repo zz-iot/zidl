@@ -38,6 +38,27 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
     comment was corrected (`0x8000` = vendor, `0x4000` = must-understand).
   - New compile-and-run integration suite `test/integration/zig_pl_cdr/`.
 
+- **Zig backend: fixed `@optional` sequence / array members** (surfaced by a DDS core
+  calling the PL_CDR codec for real — these paths compiled but were never exercised
+  before). An `@optional` unbounded-sequence or fixed-array member no longer miscompiles:
+  - **Field type.** `@optional octet x[16]` is now `?[16]u8`, not `?u8` — the array
+    dimension is applied inside the optional. (Also fixes the `serialize` loop over the
+    captured value.)
+  - **Decoder temp.** The `@optional` decode arm's temp is now typed
+    `@typeInfo(@FieldType(@This(), "<name>")).optional.child` instead of a freshly
+    re-emitted anonymous `extern struct` literal, so `out.<name> = <temp>` for an
+    unbounded-sequence member no longer fails with a nominal type mismatch. Applies to the
+    `@mutable`, XCDR2, and `--zig-pl-cdr` decoders (shared `emitOptionalMemberDecode`).
+  - **`deinit` / `clone`.** Generated cleanup for an `@optional` member that needs it (an
+    unbounded sequence/string, or a nested type with its own `deinit`) now unwraps the
+    optional (`if (self.<name> != null) { … self.<name>.? … }`) instead of accessing
+    `self.<name>._release` / calling `self.<name>.deinit(alloc)` on the `?T` directly.
+    `clone` nulls the shallow-copied optional and rebuilds only when present, with a
+    presence-guarded errdefer.
+  - New `OptSeqRec` fixture + tests in `test/integration/zig_pl_cdr/` covering
+    `@optional sequence<octet>` / `sequence<string>` / `octet[16]` decode, serialize,
+    deinit, clone, and the absent-→-`null` path.
+
 ## v0.3.12-zig.0.16.0 — 2026-08-30
 
 - **Fixed `get_key_value` returning the wrong key for types whose `@key` member is not

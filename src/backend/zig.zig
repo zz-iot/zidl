@@ -3308,12 +3308,19 @@ const Generator = struct {
         try self.ind();
 
         if (is_optional) {
+            // An `@optional` array member is `?[N]T`, not `?T` — the array
+            // dimension must still be applied inside the optional.
+            const inner: []const u8 = if (dims.len > 0)
+                try self.makeArrayType(zig_type, dims)
+            else
+                zig_type;
+            defer if (dims.len > 0) self.alloc.free(@constCast(inner));
             if (default_value) |dv| {
                 const dv_str = try self.formatDefaultValueZig(dv, type_ref);
                 defer self.alloc.free(dv_str);
-                try self.print("    {s}: ?{s} = {s},\n", .{ name, zig_type, dv_str });
+                try self.print("    {s}: ?{s} = {s},\n", .{ name, inner, dv_str });
             } else {
-                try self.print("    {s}: ?{s} = null,\n", .{ name, zig_type });
+                try self.print("    {s}: ?{s} = null,\n", .{ name, inner });
             }
         } else if (dims.len > 0) {
             const arr_type = try self.makeArrayType(zig_type, dims);
@@ -3330,6 +3337,31 @@ const Generator = struct {
             defer self.alloc.free(default);
             try self.print("    {s}: {s} = {s},\n", .{ name, zig_type, default });
         }
+    }
+
+    /// Emit the body of an `@optional` (non-`@pl_repeated`) member's decode arm:
+    /// a temp typed *exactly* as the field's payload — `@typeInfo(@FieldType(...))
+    /// .optional.child` — so the trailing `out.<name> = <temp>` can never hit an
+    /// anonymous-`extern struct` nominal mismatch (unbounded sequences) or an
+    /// array-dimension drop. Shared by the @mutable, XCDR2, and PL_CDR decoders.
+    fn emitOptionalMemberDecode(self: *Generator, m: ir.StructMember, indent: []const u8) !void {
+        const opt_var = try std.fmt.allocPrint(self.alloc, "_opt_{s}", .{m.name});
+        defer self.alloc.free(opt_var);
+        const child_ty = try std.fmt.allocPrint(
+            self.alloc,
+            "@typeInfo(@FieldType(@This(), \"{s}\")).optional.child",
+            .{m.name},
+        );
+        defer self.alloc.free(child_ty);
+        try self.ind();
+        try self.print("{s}var {s}: {s} = std.mem.zeroes({s});\n", .{ indent, opt_var, child_ty, child_ty });
+        if (m.dimensions.len > 0) {
+            try self.emitReadArray(m.type_ref, opt_var, m.dimensions, indent, 0);
+        } else {
+            try self.emitReadForTypeRef(m.type_ref, opt_var, indent);
+        }
+        try self.ind();
+        try self.print("{s}out.{s} = {s};\n", .{ indent, m.name, opt_var });
     }
 
     /// Format an `AnnotationParamValue` as a Zig literal expression.
@@ -3534,29 +3566,7 @@ const Generator = struct {
                 try self.print("                {d} => {{\n", .{member_id});
                 if (m.annotations.is_optional) {
                     // For @mutable+@optional: member appears → value is present.
-                    const zig_type = try self.typeRefToZig(m.type_ref);
-                    defer self.alloc.free(zig_type);
-                    const opt_var = try std.fmt.allocPrint(self.alloc, "_opt_{s}", .{m.name});
-                    defer self.alloc.free(opt_var);
-                    const decl_type: []u8 = if (m.dimensions.len > 0)
-                        try self.makeArrayType(zig_type, m.dimensions)
-                    else
-                        try self.alloc.dupe(u8, zig_type);
-                    defer self.alloc.free(decl_type);
-                    const default_val: []u8 = if (m.dimensions.len > 0)
-                        try self.defaultForArrayType(decl_type)
-                    else
-                        try self.defaultForTypeRef(m.type_ref);
-                    defer self.alloc.free(default_val);
-                    try self.ind();
-                    try self.print("                    var {s}: {s} = {s};\n", .{ opt_var, decl_type, default_val });
-                    if (m.dimensions.len > 0) {
-                        try self.emitReadArray(m.type_ref, opt_var, m.dimensions, "                    ", 0);
-                    } else {
-                        try self.emitReadForTypeRef(m.type_ref, opt_var, "                    ");
-                    }
-                    try self.ind();
-                    try self.print("                    out.{s} = {s};\n", .{ m.name, opt_var });
+                    try self.emitOptionalMemberDecode(m, "                    ");
                 } else {
                     const out_expr = try std.fmt.allocPrint(self.alloc, "out.{s}", .{m.name});
                     defer self.alloc.free(out_expr);
@@ -3595,31 +3605,9 @@ const Generator = struct {
             for (s.members) |m| {
                 if (m.annotations.is_optional) {
                     // XCDR2: read bool presence flag; if true deserialize value (§12).
-                    const zig_type = try self.typeRefToZig(m.type_ref);
-                    defer self.alloc.free(zig_type);
-                    const opt_var = try std.fmt.allocPrint(self.alloc, "_opt_{s}", .{m.name});
-                    defer self.alloc.free(opt_var);
-                    const decl_type: []u8 = if (m.dimensions.len > 0)
-                        try self.makeArrayType(zig_type, m.dimensions)
-                    else
-                        try self.alloc.dupe(u8, zig_type);
-                    defer self.alloc.free(decl_type);
-                    const default_val: []u8 = if (m.dimensions.len > 0)
-                        try self.defaultForArrayType(decl_type)
-                    else
-                        try self.defaultForTypeRef(m.type_ref);
-                    defer self.alloc.free(default_val);
                     try self.ind();
                     try self.write("        if (try reader.readBool()) {\n");
-                    try self.ind();
-                    try self.print("            var {s}: {s} = {s};\n", .{ opt_var, decl_type, default_val });
-                    if (m.dimensions.len > 0) {
-                        try self.emitReadArray(m.type_ref, opt_var, m.dimensions, "            ", 0);
-                    } else {
-                        try self.emitReadForTypeRef(m.type_ref, opt_var, "            ");
-                    }
-                    try self.ind();
-                    try self.print("            out.{s} = {s};\n", .{ m.name, opt_var });
+                    try self.emitOptionalMemberDecode(m, "            ");
                     try self.ind();
                     try self.write("        } else {\n");
                     try self.ind();
@@ -4095,29 +4083,7 @@ const Generator = struct {
                     }
                 } else if (m.annotations.is_optional) {
                     // Presence implied by PID appearing in the stream
-                    const zig_type = try self.typeRefToZig(m.type_ref);
-                    defer self.alloc.free(zig_type);
-                    const opt_var = try std.fmt.allocPrint(self.alloc, "_opt_{s}", .{m.name});
-                    defer self.alloc.free(opt_var);
-                    const decl_type: []u8 = if (m.dimensions.len > 0)
-                        try self.makeArrayType(zig_type, m.dimensions)
-                    else
-                        try self.alloc.dupe(u8, zig_type);
-                    defer self.alloc.free(decl_type);
-                    const default_val: []u8 = if (m.dimensions.len > 0)
-                        try self.defaultForArrayType(decl_type)
-                    else
-                        try self.defaultForTypeRef(m.type_ref);
-                    defer self.alloc.free(default_val);
-                    try self.ind();
-                    try self.print("                    var {s}: {s} = {s};\n", .{ opt_var, decl_type, default_val });
-                    if (m.dimensions.len > 0) {
-                        try self.emitReadArray(m.type_ref, opt_var, m.dimensions, "                    ", 0);
-                    } else {
-                        try self.emitReadForTypeRef(m.type_ref, opt_var, "                    ");
-                    }
-                    try self.ind();
-                    try self.print("                    out.{s} = {s};\n", .{ m.name, opt_var });
+                    try self.emitOptionalMemberDecode(m, "                    ");
                 } else {
                     const out_expr = try std.fmt.allocPrint(self.alloc, "out.{s}", .{m.name});
                     defer self.alloc.free(out_expr);
@@ -5042,7 +5008,18 @@ const Generator = struct {
         };
         for (s.members) |m| {
             if (!self.memberNeedsCleanup(m)) continue;
-            try self.emitFieldSeqDeinit(m.name, m.type_ref, "        ");
+            if (m.annotations.is_optional) {
+                // `x: ?T` — clean the payload through `.?`, guarded on presence.
+                const fa = try std.fmt.allocPrint(self.alloc, "{s}.?", .{m.name});
+                defer self.alloc.free(fa);
+                try self.ind();
+                try self.print("        if (self.{s} != null) {{\n", .{m.name});
+                try self.emitFieldSeqDeinit(fa, m.type_ref, "            ");
+                try self.ind();
+                try self.write("        }\n");
+            } else {
+                try self.emitFieldSeqDeinit(m.name, m.type_ref, "        ");
+            }
         }
         if (self.plRetainsUnknown(s)) {
             try self.ind();
@@ -5162,8 +5139,33 @@ const Generator = struct {
         };
         for (s.members) |m| {
             if (!self.memberNeedsCleanup(m)) continue;
-            try self.emitFieldSeqCloneStmt(m.name, m.type_ref, "        ");
-            try self.emitFieldSeqCloneErrdefer(m.name, m.type_ref, "        ");
+            if (m.annotations.is_optional) {
+                // `var result = self;` shallow-copied `result.<name>`; drop it
+                // and deep-copy the payload through `.?` only when present.
+                const fa = try std.fmt.allocPrint(self.alloc, "{s}.?", .{m.name});
+                defer self.alloc.free(fa);
+                try self.ind();
+                try self.print("        result.{s} = null;\n", .{m.name});
+                try self.ind();
+                try self.print("        if (self.{s} != null) {{\n", .{m.name});
+                try self.ind();
+                try self.print("            result.{s} = .{{}};\n", .{m.name});
+                try self.emitFieldSeqCloneStmt(fa, m.type_ref, "            ");
+                try self.ind();
+                try self.write("        }\n");
+                try self.ind();
+                try self.write("        errdefer {\n");
+                try self.ind();
+                try self.print("            if (result.{s} != null) {{\n", .{m.name});
+                try self.emitFieldSeqCloneErrdeferBody(fa, m.type_ref, "            ");
+                try self.ind();
+                try self.write("            }\n");
+                try self.ind();
+                try self.write("        }\n");
+            } else {
+                try self.emitFieldSeqCloneStmt(m.name, m.type_ref, "        ");
+                try self.emitFieldSeqCloneErrdefer(m.name, m.type_ref, "        ");
+            }
         }
         if (self.plRetainsUnknown(s)) {
             try self.ind();
@@ -5287,14 +5289,49 @@ const Generator = struct {
     /// `emitFieldSeqCloneStmt`.  Must be emitted immediately after the clone
     /// statement so that failures in subsequent fields trigger this cleanup.
     fn emitFieldSeqCloneErrdefer(self: *Generator, field_name: []const u8, tr: ir.TypeRef, indent: []const u8) !void {
+        // Simple single-statement forms stay `errdefer <stmt>;`; the sequence
+        // form needs a block. `emitFieldSeqCloneErrdeferBody` writes the body
+        // targeting `result.<field_name>` — here always at function scope.
         switch (tr) {
             .string => |bound| if (bound == null) {
                 try self.ind();
-                try self.print("{s}errdefer if (result.{s}.len != 0) alloc.free(result.{s});\n", .{ indent, field_name, field_name });
+                try self.print("{s}errdefer ", .{indent});
+                try self.emitFieldSeqCloneErrdeferBody(field_name, tr, "");
             },
-            .sequence => |seq| {
+            .named => |td| switch (td) {
+                .typedef, .struct_, .union_ => {
+                    try self.ind();
+                    try self.print("{s}errdefer ", .{indent});
+                    try self.emitFieldSeqCloneErrdeferBody(field_name, tr, "");
+                },
+                else => {},
+            },
+            .sequence => {
                 try self.ind();
                 try self.print("{s}errdefer {{\n", .{indent});
+                try self.emitFieldSeqCloneErrdeferBody(field_name, tr, indent);
+                try self.ind();
+                try self.print("{s}}}\n", .{indent});
+            },
+            else => {},
+        }
+    }
+
+    /// The cleanup statements only (no `errdefer` keyword), operating on
+    /// `result.<field_name>`. Callers wrap in `errdefer { ... }` (function
+    /// scope) or `errdefer { if (result.<name> != null) { ... } }` for an
+    /// `@optional` member whose `field_name` is `<name>.?`.
+    fn emitFieldSeqCloneErrdeferBody(self: *Generator, field_name: []const u8, tr: ir.TypeRef, indent: []const u8) !void {
+        // The single-statement forms are emitted inline after `errdefer ` when
+        // `indent` is empty (function-scope caller), and on their own indented
+        // line when it isn't (the `@optional` wrapper caller). The multi-line
+        // `.sequence` form always indents.
+        if (indent.len != 0 and tr != .sequence) try self.ind();
+        switch (tr) {
+            .string => |bound| if (bound == null) {
+                try self.print("{s}if (result.{s}.len != 0) alloc.free(result.{s});\n", .{ indent, field_name, field_name });
+            },
+            .sequence => |seq| {
                 try self.ind();
                 try self.print("{s}    if (result.{s}._release) {{\n", .{ indent, field_name });
                 try self.ind();
@@ -5317,20 +5354,15 @@ const Generator = struct {
                 try self.print("{s}        result.{s} = .{{}};\n", .{ indent, field_name });
                 try self.ind();
                 try self.print("{s}    }}\n", .{indent});
-                try self.ind();
-                try self.print("{s}}}\n", .{indent});
             },
             .named => |td| switch (td) {
                 .typedef => |t| if (typedefTargetsPlainString(t)) {
-                    try self.ind();
-                    try self.print("{s}errdefer if (result.{s}.len != 0) alloc.free(result.{s});\n", .{ indent, field_name, field_name });
+                    try self.print("{s}if (result.{s}.len != 0) alloc.free(result.{s});\n", .{ indent, field_name, field_name });
                 } else {
-                    try self.ind();
-                    try self.print("{s}errdefer result.{s}.deinit(alloc);\n", .{ indent, field_name });
+                    try self.print("{s}result.{s}.deinit(alloc);\n", .{ indent, field_name });
                 },
                 .struct_, .union_ => {
-                    try self.ind();
-                    try self.print("{s}errdefer result.{s}.deinit(alloc);\n", .{ indent, field_name });
+                    try self.print("{s}result.{s}.deinit(alloc);\n", .{ indent, field_name });
                 },
                 else => {},
             },
@@ -8880,9 +8912,11 @@ test "zig_backend: cdr @optional scalar deserialize reads bool and sets null" {
     , "opt");
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // Deserialize: read bool, branch on presence.
+    // Deserialize: read bool, branch on presence. The decode temp is typed
+    // exactly as the field's payload (see emitOptionalMemberDecode) so an
+    // anon-`extern struct` sequence or an array dimension can't be dropped.
     try testing.expect(has(s, "if (try reader.readBool()) {"));
-    try testing.expect(has(s, "var _opt_maybe_x: i32 ="));
+    try testing.expect(has(s, "var _opt_maybe_x: @typeInfo(@FieldType(@This(), \"maybe_x\")).optional.child ="));
     try testing.expect(has(s, "out.maybe_x = _opt_maybe_x;"));
     try testing.expect(has(s, "out.maybe_x = null;"));
 }
