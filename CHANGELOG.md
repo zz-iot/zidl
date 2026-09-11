@@ -61,6 +61,18 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
     tests in `test/integration/zig_pl_cdr/` covering `@optional sequence<octet>` /
     `sequence<string>` / `octet[16]` decode, serialize, deinit, clone, and the
     absent-→-`null` path on all three decoder families.
+- **Zig backend: fixed a vendor-specific PID aliasing a standard `@id` in the PL_CDR
+  decoder's switch.** `deserializeFromPlCdr` dispatched on `_p.pid & 0x3FFF`, but RTPS 2.5
+  §9.6.4.2.1 reserves bit `0x8000` for vendor-specific PIDs whose low 15 bits are the
+  vendor's own private numbering — never one of the struct's `@id`s. A real-world hit:
+  RTI Connext sends a vendor PID `0x8021` (a compressed TypeObject blob) that
+  `0x8021 & 0x3FFF` maps to `0x0021`; a DDS core with `PID_PRESENTATION` at `@id(0x21)`
+  tried to parse the blob as that policy and failed. The switch discriminant now routes
+  any `0x8000`-flagged PID straight to the `else` (retain/skip) arm:
+  `const _stdpid: u32 = if ((_p.pid & 0x8000) != 0) 0x1_0000 else _p.pid & 0x3FFF;`. New
+  `VendorAliasRec` fixture + integration test (`test/integration/zig_pl_cdr/`) decodes a
+  vendor PID that aliases a modelled member and asserts the member is untouched and the
+  vendor bytes land in `unknown_params`; codegen substring test updated.
 
 ## v0.3.12-zig.0.16.0 — 2026-08-30
 

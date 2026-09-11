@@ -4055,8 +4055,16 @@ const Generator = struct {
             try self.write("        _ = &_seen_pl;\n");
             try self.ind();
             try self.write("        while (try reader.readPlParam(mode)) |_p| {\n");
+            // RTPS 2.5 §9.6.4.2.1: bit 0x8000 marks a vendor-specific PID whose
+            // low 15 bits are the vendor's own private numbering, never one of
+            // this struct's `@id`s. Force those to the `else` arm instead of
+            // letting them alias a standard PID (e.g. RTI Connext's 0x8021
+            // colliding with 0x0021 here, which corrupted decode of an
+            // unrelated member).
             try self.ind();
-            try self.write("            switch (_p.pid & 0x3FFF) {\n");
+            try self.write("            const _stdpid: u32 = if ((_p.pid & 0x8000) != 0) 0x1_0000 else _p.pid & 0x3FFF;\n");
+            try self.ind();
+            try self.write("            switch (_stdpid) {\n");
             for (s.members, 0..) |m, idx| {
                 const pid: u32 = memberIdAt(m, idx);
                 try self.ind();
@@ -9171,7 +9179,10 @@ test "zig_backend pl_cdr: deserializeFromPlCdr emitted for @mutable struct" {
     const s = out.items;
     try testing.expect(has(s, "pub fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator, mode: zidl_rt.PlMode) !void {"));
     try testing.expect(has(s, "readPlParam(mode)"));
-    try testing.expect(has(s, "switch (_p.pid & 0x3FFF) {"));
+    // Vendor-specific PIDs (bit 0x8000, RTPS 2.5 §9.6.4.2.1) must never alias a
+    // standard @id: the switch discriminant routes them to `else` up front.
+    try testing.expect(has(s, "const _stdpid: u32 = if ((_p.pid & 0x8000) != 0) 0x1_0000 else _p.pid & 0x3FFF;"));
+    try testing.expect(has(s, "switch (_stdpid) {"));
     try testing.expect(has(s, "seekTo(_p.end_pos)"));
     // Unknown-PID must-understand check is always emitted, retention is not.
     try testing.expect(has(s, "mode == .strict and (_p.pid & 0x4000) != 0) return error.UnknownMustUnderstand"));

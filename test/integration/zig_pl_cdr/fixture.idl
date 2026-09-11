@@ -48,3 +48,13 @@ struct OptSeqRecApp {
 struct WideRec {
     @id(16) long long w;
 };
+
+// `@id(0x21)` mirrors RTPS PID_PRESENTATION (0x0021). A vendor-specific PID
+// with the same low 15 bits (e.g. RTI Connext's 0x8021) must retain, not
+// dispatch into `guarded` — regression fixture for the vendor-PID/standard-PID
+// switch collision (RTPS 2.5 §9.6.4.2.1).
+@mutable @pl_retain_unknown
+struct VendorAliasRec {
+    @id(0x21) long guarded;
+    @id(5) string name;
+};
