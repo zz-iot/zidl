@@ -4011,6 +4011,18 @@ const Generator = struct {
 
             // deserializeFromPlCdr
             const pl_retain = self.plRetainsUnknown(s);
+            // A real PL_CDR PID is 16 bits, so `_p.pid & 0x3FFF` (the decode
+            // switch's discriminant for a non-vendor PID) never exceeds
+            // 0x3FFF; an `@id` above that can never be reached by a wire PID
+            // regardless of this change. It becomes actively dangerous now
+            // that vendor-specific PIDs are routed to the sentinel 0x1_0000
+            // (RTPS 2.5 §9.6.4.2.1, see below): an IDL author could declare
+            // `@id(0x1_0000)` and every vendor PID would decode into that
+            // member instead of being retained/skipped. Reject both cases at
+            // generation time.
+            for (s.members, 0..) |m, idx| {
+                if (memberIdAt(m, idx) > 0x3FFF) return error.PlCdrMemberIdOutOfRange;
+            }
             try self.ind();
             try self.write("    /// `out` must be a fresh `.{}` (a retaining type returns\n");
             try self.ind();
@@ -4055,8 +4067,16 @@ const Generator = struct {
             try self.write("        _ = &_seen_pl;\n");
             try self.ind();
             try self.write("        while (try reader.readPlParam(mode)) |_p| {\n");
+            // RTPS 2.5 §9.6.4.2.1: bit 0x8000 marks a vendor-specific PID whose
+            // low 15 bits are the vendor's own private numbering, never one of
+            // this struct's `@id`s. Force those to the `else` arm instead of
+            // letting them alias a standard PID (e.g. RTI Connext's 0x8021
+            // colliding with 0x0021 here, which corrupted decode of an
+            // unrelated member).
             try self.ind();
-            try self.write("            switch (_p.pid & 0x3FFF) {\n");
+            try self.write("            const _stdpid: u32 = if ((_p.pid & 0x8000) != 0) 0x1_0000 else _p.pid & 0x3FFF;\n");
+            try self.ind();
+            try self.write("            switch (_stdpid) {\n");
             for (s.members, 0..) |m, idx| {
                 const pid: u32 = memberIdAt(m, idx);
                 try self.ind();
@@ -9171,7 +9191,10 @@ test "zig_backend pl_cdr: deserializeFromPlCdr emitted for @mutable struct" {
     const s = out.items;
     try testing.expect(has(s, "pub fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator, mode: zidl_rt.PlMode) !void {"));
     try testing.expect(has(s, "readPlParam(mode)"));
-    try testing.expect(has(s, "switch (_p.pid & 0x3FFF) {"));
+    // Vendor-specific PIDs (bit 0x8000, RTPS 2.5 §9.6.4.2.1) must never alias a
+    // standard @id: the switch discriminant routes them to `else` up front.
+    try testing.expect(has(s, "const _stdpid: u32 = if ((_p.pid & 0x8000) != 0) 0x1_0000 else _p.pid & 0x3FFF;"));
+    try testing.expect(has(s, "switch (_stdpid) {"));
     try testing.expect(has(s, "seekTo(_p.end_pos)"));
     // Unknown-PID must-understand check is always emitted, retention is not.
     try testing.expect(has(s, "mode == .strict and (_p.pid & 0x4000) != 0) return error.UnknownMustUnderstand"));
@@ -9181,6 +9204,38 @@ test "zig_backend pl_cdr: deserializeFromPlCdr emitted for @mutable struct" {
     try testing.expect(has(s, "if (mode == .strict and _seen_pl[0]) return error.DuplicateParameter;"));
     // Per-parameter boundary check after each decoded member.
     try testing.expect(has(s, "if (mode == .strict and reader.pos > _p.end_pos) return error.TruncatedParameter;"));
+}
+
+test "zig_backend pl_cdr: an @id at the 0x3FFF boundary is accepted" {
+    var out = try testGenOpts("@mutable struct S { @id(0x3FFF) long x; };", "t", .{
+        .no_typeobject_support = true,
+        .pl_cdr = true,
+    });
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "16383 => {"));
+}
+
+test "zig_backend pl_cdr: an @id above 0x3FFF is rejected (unreachable, and would collide with the vendor-PID sentinel at 0x1_0000)" {
+    try testing.expectError(error.PlCdrMemberIdOutOfRange, testGenOpts(
+        "@mutable struct S { @id(0x4000) long x; };",
+        "t",
+        .{ .no_typeobject_support = true, .pl_cdr = true },
+    ));
+    try testing.expectError(error.PlCdrMemberIdOutOfRange, testGenOpts(
+        "@mutable struct S { @id(0x10000) long x; };",
+        "t",
+        .{ .no_typeobject_support = true, .pl_cdr = true },
+    ));
+    // Not rejected when no PL_CDR deserializer is generated for it.
+    {
+        var out = try testGenOpts(
+            "@mutable struct S { @id(0x10000) long x; };",
+            "t",
+            .{ .no_typeobject_support = true },
+        );
+        defer out.deinit(testing.allocator);
+        try testing.expect(!has(out.items, "deserializeFromPlCdr"));
+    }
 }
 
 test "zig_backend pl_cdr: @pl_retain_unknown emits unknown_params field + retain/replay" {

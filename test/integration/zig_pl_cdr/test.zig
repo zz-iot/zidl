@@ -14,6 +14,7 @@ const PlainRec = fixture.PlainRec;
 const WideRec = fixture.WideRec;
 const OptSeqRec = fixture.OptSeqRec;
 const OptSeqRecApp = fixture.OptSeqRecApp;
+const VendorAliasRec = fixture.VendorAliasRec;
 
 const UNKNOWN_IGNORABLE: u16 = 0x8055; // vendor bit set, must-understand clear
 const UNKNOWN_MUST_UNDERSTAND: u16 = 0x4099; // must-understand bit set
@@ -440,4 +441,38 @@ test "pl_cdr fixture: plain @mutable struct still honours strict must-understand
         error.UnknownMustUnderstand,
         PlainRec.deserializeFromPlCdr(&p_strict, &r_strict, alloc, .strict),
     );
+}
+
+test "pl_cdr fixture: a vendor-specific PID aliasing a standard @id is retained, not misdecoded" {
+    // RTI Connext-style vendor PID 0x8021: `0x8021 & 0x3FFF == 0x21 == guarded`'s
+    // @id. Before the switch fix this dispatched into `guarded` and corrupted it
+    // (or, for a struct member instead of a scalar, could misparse entirely).
+    const VENDOR_ALIASING: u16 = 0x8021;
+    const alloc = testing.allocator;
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(alloc);
+    var w = zidl_rt.PlCdrWriter.init(&buf, alloc);
+    try w.writeEncapHeader();
+    {
+        const h = try w.reservePlParam(VENDOR_ALIASING);
+        try w.writeBytes(&[_]u8{ 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04 });
+        try w.patchPlParam(h);
+    }
+    {
+        const h = try w.reservePlParam(5);
+        try w.writeString("n");
+        try w.patchPlParam(h);
+    }
+    try w.writePlSentinel();
+
+    var reader = try zidl_rt.CdrReader.init(buf.items);
+    var rec: VendorAliasRec = .{};
+    try VendorAliasRec.deserializeFromPlCdr(&rec, &reader, alloc, .lenient);
+    defer rec.deinit(alloc);
+
+    try testing.expectEqual(@as(i32, 0), rec.guarded); // untouched, not corrupted
+    try testing.expectEqualStrings("n", rec.name);
+    try testing.expectEqual(@as(usize, 1), rec.unknown_params.len);
+    try testing.expectEqual(VENDOR_ALIASING, rec.unknown_params[0].pid);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04 }, rec.unknown_params[0].bytes);
 }
