@@ -168,7 +168,10 @@ fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: st
   §9.6.4.2.1) into a modelled member: those PIDs' low 15 bits are the vendor's own private
   numbering and can coincide with a standard `@id` (e.g. RTI Connext's `0x8021` aliasing
   `0x0021`). The discriminant forces any `0x8000`-flagged PID to the `else` (retain/skip)
-  arm before masking.
+  arm before masking. A `@mutable`/`--zig-pl-cdr` struct member's `@id` must fit in the
+  switch's usable range (`<= 0x3FFF`) — generation fails with
+  `error.PlCdrMemberIdOutOfRange` otherwise, since a larger id both could never be matched
+  by a real 16-bit wire PID and would otherwise collide with the vendor-routing sentinel.
 
 **Tests:** codegen (`src/backend/zig.zig`), `zidl-rt` round-trip (`packages/zidl-rt/src/cdr.zig`),
 and a compile-and-run integration suite (`test/integration/zig_pl_cdr/`).

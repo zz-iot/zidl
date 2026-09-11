@@ -73,6 +73,13 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   `VendorAliasRec` fixture + integration test (`test/integration/zig_pl_cdr/`) decodes a
   vendor PID that aliases a modelled member and asserts the member is untouched and the
   vendor bytes land in `unknown_params`; codegen substring test updated.
+  - Since `@id` is an unbounded `u32`, a `@mutable`/`--zig-pl-cdr` struct could in
+    principle declare `@id(0x10000)` and collide with the `0x1_0000` sentinel above (every
+    vendor PID would then decode into that member instead of being retained/skipped). Any
+    `@id` above `0x3FFF` on such a struct is now rejected at generation time
+    (`error.PlCdrMemberIdOutOfRange`) — it was already unreachable by a real 16-bit wire
+    PID (`_p.pid & 0x3FFF` never exceeds `0x3FFF`), so this closes a latent gap rather than
+    a new restriction. (Greptile, PR #50.)
 
 ## v0.3.12-zig.0.16.0 — 2026-08-30
 
