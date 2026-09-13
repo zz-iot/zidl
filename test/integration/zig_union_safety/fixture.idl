@@ -1,0 +1,44 @@
+// Fixture for the union deinit/error-safety compile-and-run check.
+//
+// src/backend/zig.zig's union codegen tests only substring-match generated
+// text. This fixture is generated for real, compiled, and exercised in
+// test.zig so a regression in the generated union `deserializeInto` /
+// `deinit` interaction (discriminant committed before the payload is known
+// to be valid) is a real `zig build test` failure, not just a missing
+// substring.
+
+// `@final` (XCDR2, no DHEADER/EMHEADER framing): the discriminant is read
+// unconditionally before the case switch runs.
+union FinalStrUnion switch (long) {
+    case 0: long i;
+    default: string s; // heap-owning case
+};
+
+// `@mutable`: discriminant and case value arrive as separate EMHEADER-framed
+// members, in principle in either order. Uses an explicit `case 1:` rather
+// than `default:` for the heap-owning case -- `@mutable` union `serialize()`
+// has a pre-existing, unrelated bug computing the wire member_id for a
+// `default:` case (not touched by this fix; sidestepped here to keep this
+// fixture scoped to the deinit-safety regression).
+@mutable
+union MutableStrUnion switch (long) {
+    case 0: long i;
+    case 1: string s; // heap-owning case
+};
+
+// The discriminant's DEFAULT value (0, whatever `defaultForTypeRef` picks
+// for `long`) selects the heap-owning case here -- unlike the two unions
+// above, where it selects the non-owning `i`/`long` case. Regression for: a
+// fresh, never-decoded `.{}` value has `_u = undefined`; if `deserializeInto`
+// fails before ANY payload is published (fresh discriminant default still
+// in effect), `deinit()` must not follow that default into this owning arm.
+union OwningDefaultUnion switch (long) {
+    case 0: string s; // owning, AND the discriminant's default value
+    case 1: long i;
+};
+
+@mutable
+union MutableOwningDefaultUnion switch (long) {
+    case 0: string s; // owning, AND the discriminant's default value
+    case 1: long i;
+};

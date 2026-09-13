@@ -9,6 +9,58 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- **Zig backend: generated `deinit()` is now idempotent, and `deserializeInto` /
+  `deserializeFromPlCdr` self-clean on a mid-decode error.**
+  - A plain unbounded `string` field is now reset to `""` right after being freed
+    (`emitPlainStringFreeStmt`), matching the reset-after-free that sequence fields and
+    `@pl_retain_unknown`'s `unknown_params` already had. A second `deinit()` call — whether
+    from a caller's own stray double-call or from the new internal `errdefer` below racing a
+    caller's own `defer out.deinit(alloc)` — is now a safe no-op instead of a double-free.
+    Struct/union fields that delegate to a nested type's `.deinit()` inherit this
+    automatically (recursive, including inherited base structs), since the leaf fix is the
+    only place that was non-idempotent.
+  - Generated `deserializeInto` (struct and union) and `deserializeFromPlCdr` now carry
+    their own `errdefer out.deinit(allocator)`, so a mid-decode error leaves `out` fully
+    cleaned rather than merely safe-to-clean — closing the previously-documented
+    family-wide contract that relied on the caller's own `defer out.deinit(alloc)` idiom.
+    For `deserializeFromPlCdr` the `errdefer` is registered only after the
+    `error.RetainedOutputNotEmpty` freshness check, so rejecting a non-fresh `out` never
+    tears down state the caller still owns.
+  - **Union `deserializeInto` decodes the discriminant into a local instead of writing
+    `out._d` directly**, for both the `@final`/XCDR2 and `@mutable` EMHEADER-loop shapes. A
+    union's payload storage (`_u`) has no per-field safe default the way struct members do
+    (`= undefined`, since it's shared, untagged storage) — a heap-owning case's payload is
+    decoded into a local temporary and only assigned to `out._u` on success, so writing the
+    new discriminant into `out._d` any earlier would let a mid-case decode failure leave
+    `out._d` pointing at a case whose `out._u` is still genuinely undefined. Three Greptile
+    review rounds on this, each closing a distinct way the generated `errdefer
+    out.deinit(allocator)` could still reach that undefined memory:
+    1. The base case above (discriminant committed before the payload).
+    2. For the `@mutable` EMHEADER loop specifically (case values may be interleaved with
+       other members across iterations, unlike the single-shot `@final`/XCDR2 switch),
+       committing `out._d` once at the end of the loop instead of per-case left it stale
+       relative to an `out._u` a prior iteration already published, so a later, unrelated
+       iteration's failure could leak that payload or free the wrong arm.
+    3. A union whose discriminant *default* selects a heap-owning case (e.g. `union U
+       switch(long) { case 0: string s; ... }`) — a failure before anything is ever
+       published (reading the DHEADER or the discriminant itself) left `out._d` at that
+       default, so an unconditional `errdefer` would follow it into the owning arm and free
+       undefined memory regardless of points 1-2 being fixed.
+    Final shape: `errdefer` is registered ONCE at function scope — required for point 2,
+    since `errdefer` is block-scoped in Zig and one registered inside a loop iteration does
+    not carry over to protect a later iteration once the current one exits normally — guarded
+    by a local `_published` flag that starts `false` and is set `true` only in the same
+    statement group that commits both `out._u` and `out._d` together, closing points 1 and 3
+    without reopening point 2. New compile-and-run regression suite
+    `test/integration/zig_union_safety/` covering all three: a mid-case truncation, a
+    later-iteration failure after an earlier payload already published, a failure before the
+    discriminant is ever read on a union whose default case owns memory, and the
+    successful-decode path — each extensibility shape where it applies. A closely related,
+    deeper pre-existing hazard remains and is deliberately NOT fixed here: calling `deinit()`
+    directly on a genuinely fresh, never-decoded value of such a union (not via
+    `deserializeInto` at all) is still unsafe — see `docs/roadmap.md`.
+  - Unbounded `wstring` fields are unaffected — they have no generated cleanup at all yet,
+    a separate pre-existing gap (`docs/roadmap.md`).
 - **PL_CDR decode gained a strictness `mode` and an opt-in lossless-retention mode**
   (`--zig-pl-cdr`, `@mutable` types), for a DDS core adopting the generated codec for real
   RTPS SPDP/SEDP traffic instead of a hand-rolled parser.

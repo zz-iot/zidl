@@ -132,16 +132,39 @@ Features*.
   must match the process-wide `zidl_cdr_set_allocator` choice — only correct while an
   entity's own `_with_allocator` allocator equals the process-wide one; not structurally
   enforced. A full fix needs a C-ABI shape change. `zig.zig:2747`.
-- **Generated `deinit` is not uniformly idempotent.** Sequence fields (and PL_CDR
-  `unknown_params`) are reset to their empty value after being freed; plain unbounded
-  `string`/`wstring` fields are freed without a reset (`emitPlainStringFreeStmt`,
-  `zig.zig`), so a second `deinit` double-frees them and the struct holds a dangling
-  pointer with a live length in between. Make `deinit` reset every heap-owning field, then
-  add `errdefer out.deinit(allocator)` to the generated `deserializeInto` /
-  `deserializeFromPlCdr` so a mid-decode error leaves `out` clean instead of relying on the
-  caller — closing the "failed decode leaves allocations in `out`" gap that is currently
-  the documented family-wide contract. Needs a per-shape "deinit is idempotent" test and a
-  recursive check for base/nested structs. (Raised in PL_CDR-retention PR review.)
+- **Unbounded `wstring` struct/union fields have no generated cleanup at all** —
+  `typeRefHasUnboundedString` only recognizes `.string`, never `.wide_string`, so a `wstring`
+  member never contributes to `structNeedsCleanup`/`memberNeedsCleanup` and no free/reset is
+  ever emitted for it (independent of the deinit-idempotency fix in `CHANGELOG.md`). Bundle
+  with the wider `wstring` support gap (`wstring` constants also emit only a comment — see
+  the "All backends" section above) rather than fixing in isolation.
+- **`@mutable union` with a `default:` case emits an invalid wire member_id on `serialize`**
+  — found while adding `test/integration/zig_union_safety/`'s `@mutable` fixture: the
+  default case's EMHEADER is reserved with a `u32`-overflowing sentinel
+  (`reserveEmheader(4294967295, false)` in the generated output), a compile error whenever
+  that case actually needs allocator-owned cleanup (previously unexercised — no existing
+  test compiles a `@mutable union` whose `default:` case is heap-owning). Decode is
+  unaffected (any non-zero member_id already routes to the `else`/default arm). Sidestepped
+  in that fixture with an explicit `case N:` instead of `default:`; the `serialize`-side
+  member_id computation for a `@mutable` union default case needs its own fix.
+- **A union's `deinit()` is unsafe to call directly on a genuinely fresh, never-decoded `.{}`
+  value when the discriminant's default selects a heap-owning case** — `_u: union {...} =
+  undefined` (`emitUnion`) has no per-field safe default the way struct members do (`""`,
+  `.{}`), and Zig's own runtime safety check for a bare (non-`extern`) union panics
+  (`panic: invalid enum value`) on reading *any* field whose active field was never actually
+  written, independent of which case is selected. `deserializeInto`'s own generated
+  `errdefer` is now guarded against this (a local `_published` flag, only set once a case
+  arm has actually written both `out._u` and `out._d` together — see `CHANGELOG.md`), but a
+  caller who constructs `var v: SomeUnion = .{};` and calls `v.deinit(alloc)` *without* ever
+  successfully decoding into it first hits the same panic, for any union shaped this way.
+  Fixing this at the root would need a different `_u` representation (e.g. `extern union`
+  with a `std.mem.zeroes`-based default) — not attempted here: case payload types include
+  plain (non-`extern`) generated structs/unions, which Zig's `extern union` field-type rules
+  don't currently accept, so this needs its own design pass, not a quick patch.
+  `test/integration/zig_union_safety/fixture.idl`'s `OwningDefaultUnion` /
+  `MutableOwningDefaultUnion` are the regression fixtures for the `deserializeInto` half of
+  this (the half actually reachable from external input); they deliberately do not exercise
+  the direct-`deinit()`-on-a-bare-value half, since that is not yet safe by design.
 - **Idiomatic slice-friendly wrapper layer** over the generated C-ABI vtable — a planned
   ergonomic addition, not yet generated. `ecosystem.md`.
 - **`as_{Base}` convenience method for pure-Zig callers** — decided (emit a top-level
