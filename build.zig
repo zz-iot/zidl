@@ -223,6 +223,44 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_pl_cdr.step);
     }
 
+    // ── Union deinit/error-safety compile-and-run check ───────────────────────
+    // src/backend/zig.zig's union codegen tests only substring-match. This
+    // generates test/integration/zig_union_safety/fixture.idl, compiles the
+    // output, and exercises a mid-decode failure on a heap-owning case to
+    // catch a regression in the generated deserializeInto/deinit interaction
+    // (the discriminant must not be committed before the payload it now
+    // points at is known to actually be there).
+    {
+        const gen_union_safety = b.addRunArtifact(exe);
+        gen_union_safety.addArgs(&.{ "-b", "zig", "--no-typeobject-support", "-o" });
+        const union_safety_dir = gen_union_safety.addOutputDirectoryArg("zig-union-safety-gen");
+        gen_union_safety.addFileArg(b.path("test/integration/zig_union_safety/fixture.idl"));
+
+        const union_safety_fixture_mod = b.createModule(.{
+            .root_source_file = union_safety_dir.path(b, "fixture.zig"),
+            .target = target,
+            .sanitize_thread = sanitize_thread,
+            .imports = &.{
+                .{ .name = "zidl_rt", .module = zidl_rt_mod },
+            },
+        });
+
+        const union_safety_tests = b.addTest(.{
+            .name = "zidl-union-safety",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("test/integration/zig_union_safety/test.zig"),
+                .target = target,
+                .sanitize_thread = sanitize_thread,
+                .imports = &.{
+                    .{ .name = "zidl_rt", .module = zidl_rt_mod },
+                    .{ .name = "fixture", .module = union_safety_fixture_mod },
+                },
+            }),
+        });
+        const run_union_safety = b.addRunArtifact(union_safety_tests);
+        test_step.dependOn(&run_union_safety.step);
+    }
+
     // ── check_goldens tool ────────────────────────────────────────────────────
     // Bidirectional directory comparison; replaces `diff -rq` and works on all
     // platforms.  Always compiled for the host so it can run during the build.

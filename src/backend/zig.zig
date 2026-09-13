@@ -805,9 +805,34 @@ const Generator = struct {
             try self.write("        _ = allocator;\n");
         }
 
+        // The discriminant is decoded into a local `_d`, and `out._d` is only
+        // committed once the whole function is about to succeed -- NOT via
+        // `emitDiscReadZig(..., "out._d", ...)` directly. Reason: a
+        // heap-owning case's payload is decoded into a local `_tmp` and only
+        // assigned to `out._u` on success (`emitUnionCaseDeserializeAssign`);
+        // if `out._d` were updated before that assignment, a payload-decode
+        // failure would leave `out._d` pointing at a case whose `out._u`
+        // storage is still `undefined` (unions have no per-field safe
+        // default the way struct members do -- see `emitUnion`'s `_u: union
+        // {...} = undefined`). The `errdefer out.deinit(allocator)` below
+        // would then switch on that case and free undefined memory. Keeping
+        // `out._d` at its old value until the end means a failure never
+        // leaves it pointing at a case `out._u` doesn't actually hold.
+        const disc_zig = try self.typeRefToZig(u.discriminant);
+        defer self.alloc.free(disc_zig);
+
         if (mutable) {
             // @mutable union: read DHEADER, then EMHEADER loop.
             // Convention: member_id=0 is the discriminant; subsequent IDs are case values.
+            // `_d` starts at the same default `out._d` itself would (not
+            // `undefined`): a case-value EMHEADER arriving before the
+            // discriminant one is a pre-existing, well-defined (if
+            // semantically wrong) edge case switching on that default,
+            // which must stay well-defined now that `_d` is a local.
+            const disc_default = try self.defaultForTypeRef(u.discriminant);
+            defer self.alloc.free(disc_default);
+            try self.ind();
+            try self.print("        var _d: {s} = {s};\n", .{ disc_zig, disc_default });
             try self.ind();
             try self.write("        const _em_end = try reader.readMutableDheader();\n");
             try self.ind();
@@ -817,12 +842,12 @@ const Generator = struct {
             try self.ind();
             try self.write("            if (_emh.member_id == 0) {\n");
             // Discriminant
-            try self.emitDiscReadZig(u.discriminant, "out._d", "                ");
+            try self.emitDiscReadZig(u.discriminant, "_d", "                ");
             try self.ind();
             try self.write("            } else {\n");
             // Case values: switch on the already-read discriminant
             try self.ind();
-            try self.write("                switch (out._d) {\n");
+            try self.write("                switch (_d) {\n");
             for (u.cases, 0..) |cas, cas_idx| {
                 if (isDefaultUnionCase(cas)) continue;
                 try self.emitZigUnionCaseArmPattern(u.discriminant, cas, "                    ");
@@ -854,16 +879,22 @@ const Generator = struct {
             try self.write("            }\n");
             try self.ind();
             try self.write("        }\n");
+            try self.ind();
+            try self.write("        out._d = _d;\n");
         } else {
             if (appendable) {
                 try self.ind();
                 try self.write("        try reader.skipDheaderIfXcdr2();\n");
             }
-            // Read discriminant
-            try self.emitDiscReadZig(u.discriminant, "out._d", "        ");
+            // Read discriminant into a local -- unconditionally overwritten
+            // (or the function returns on error) before ever being read, so
+            // `undefined` is fine here (unlike the @mutable loop above).
+            try self.ind();
+            try self.print("        var _d: {s} = undefined;\n", .{disc_zig});
+            try self.emitDiscReadZig(u.discriminant, "_d", "        ");
             // Switch on discriminant
             try self.ind();
-            try self.write("        switch (out._d) {\n");
+            try self.write("        switch (_d) {\n");
             for (u.cases) |cas| {
                 if (isDefaultUnionCase(cas)) continue; // handled as else
                 try self.emitZigUnionCaseArmPattern(u.discriminant, cas, "            ");
@@ -884,6 +915,8 @@ const Generator = struct {
             }
             try self.ind();
             try self.write("        }\n");
+            try self.ind();
+            try self.write("        out._d = _d;\n");
         }
         try self.ind();
         try self.write("    }\n");
@@ -923,8 +956,6 @@ const Generator = struct {
                 try self.ind();
                 try self.write("        }\n");
             }
-            const disc_zig = try self.typeRefToZig(u.discriminant);
-            defer self.alloc.free(disc_zig);
             try self.ind();
             try self.print("        var _d: {s} = undefined;\n", .{disc_zig});
             try self.emitDiscReadZig(u.discriminant, "_d", "        ");
@@ -7697,7 +7728,8 @@ test "zig_backend: union CDR serialize/deserialize" {
     try testing.expect(has(s, "pub fn serialize(writer: anytype, value: @This()) !void {"));
     try testing.expect(has(s, "pub fn deserializeInto(out: *@This(), reader: *zidl_rt.CdrReader"));
     try testing.expect(has(s, "try writer.writeI32(value._d);"));
-    try testing.expect(has(s, "out._d = try reader.readI32();"));
+    try testing.expect(has(s, "_d = try reader.readI32();"));
+    try testing.expect(has(s, "out._d = _d;"));
     try testing.expect(has(s, "switch (value._d) {"));
     try testing.expect(has(s, "0 => {"));
     try testing.expect(has(s, "else => {"));

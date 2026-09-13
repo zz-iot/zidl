@@ -135,9 +135,18 @@ Features*.
 - **Unbounded `wstring` struct/union fields have no generated cleanup at all** —
   `typeRefHasUnboundedString` only recognizes `.string`, never `.wide_string`, so a `wstring`
   member never contributes to `structNeedsCleanup`/`memberNeedsCleanup` and no free/reset is
-  ever emitted for it, independent of the `deinit`-idempotency fix below. Bundle with the
-  wider `wstring` support gap (`wstring` constants also emit only a comment — see the
-  "All backends" section above) rather than fixing in isolation.
+  ever emitted for it (independent of the deinit-idempotency fix in `CHANGELOG.md`). Bundle
+  with the wider `wstring` support gap (`wstring` constants also emit only a comment — see
+  the "All backends" section above) rather than fixing in isolation.
+- **`@mutable union` with a `default:` case emits an invalid wire member_id on `serialize`**
+  — found while adding `test/integration/zig_union_safety/`'s `@mutable` fixture: the
+  default case's EMHEADER is reserved with a `u32`-overflowing sentinel
+  (`reserveEmheader(4294967295, false)` in the generated output), a compile error whenever
+  that case actually needs allocator-owned cleanup (previously unexercised — no existing
+  test compiles a `@mutable union` whose `default:` case is heap-owning). Decode is
+  unaffected (any non-zero member_id already routes to the `else`/default arm). Sidestepped
+  in that fixture with an explicit `case N:` instead of `default:`; the `serialize`-side
+  member_id computation for a `@mutable` union default case needs its own fix.
 - **Idiomatic slice-friendly wrapper layer** over the generated C-ABI vtable — a planned
   ergonomic addition, not yet generated. `ecosystem.md`.
 - **`as_{Base}` convenience method for pure-Zig callers** — decided (emit a top-level
