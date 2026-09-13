@@ -805,19 +805,29 @@ const Generator = struct {
             try self.write("        _ = allocator;\n");
         }
 
-        // The discriminant is decoded into a local `_d`, and `out._d` is only
-        // committed once the whole function is about to succeed -- NOT via
-        // `emitDiscReadZig(..., "out._d", ...)` directly. Reason: a
-        // heap-owning case's payload is decoded into a local `_tmp` and only
-        // assigned to `out._u` on success (`emitUnionCaseDeserializeAssign`);
-        // if `out._d` were updated before that assignment, a payload-decode
-        // failure would leave `out._d` pointing at a case whose `out._u`
-        // storage is still `undefined` (unions have no per-field safe
-        // default the way struct members do -- see `emitUnion`'s `_u: union
-        // {...} = undefined`). The `errdefer out.deinit(allocator)` below
-        // would then switch on that case and free undefined memory. Keeping
-        // `out._d` at its old value until the end means a failure never
-        // leaves it pointing at a case `out._u` doesn't actually hold.
+        // The discriminant is decoded into a local `_d` rather than via
+        // `emitDiscReadZig(..., "out._d", ...)` directly, and `out._d` is
+        // committed to `_d` ONLY in the same statement group that assigns
+        // `out._u` (immediately after `emitUnionCaseDeserializeAssign`).
+        // Reason: a heap-owning case's payload is decoded into a local
+        // `_tmp` and only assigned to `out._u` on success; if `out._d` were
+        // updated any earlier, a payload-decode failure would leave `out._d`
+        // pointing at a case whose `out._u` storage is still `undefined`
+        // (unions have no per-field safe default the way struct members do
+        // -- see `emitUnion`'s `_u: union {...} = undefined`), and the
+        // `errdefer out.deinit(allocator)` below would switch on that case
+        // and free undefined memory. `out._d`/`out._u` must also never go
+        // out of sync with each other for longer than one statement: for the
+        // `@mutable` EMHEADER loop (case values may be interleaved with
+        // other members across iterations, unlike the single-shot `@final`/
+        // XCDR2 switch below), committing `out._d` only once at the very end
+        // of the loop would leave it stale relative to an `out._u` a prior
+        // iteration already published, so a *later* iteration's failure
+        // would leak that payload or free the wrong arm through the stale
+        // discriminant (a real correctness gap, not just UB, caught on
+        // review) -- so each case arm inside the loop commits `out._d`
+        // itself, right after publishing to `out._u`, instead of the
+        // function committing once at the end.
         const disc_zig = try self.typeRefToZig(u.discriminant);
         defer self.alloc.free(disc_zig);
 
@@ -853,6 +863,8 @@ const Generator = struct {
                 try self.emitZigUnionCaseArmPattern(u.discriminant, cas, "                    ");
                 try self.write(" => {\n");
                 try self.emitUnionCaseDeserializeAssign("out", cas, "                        ");
+                try self.ind();
+                try self.write("                        out._d = _d;\n");
                 _ = cas_idx;
                 try self.ind();
                 try self.write("                    },\n");
@@ -861,6 +873,8 @@ const Generator = struct {
                 try self.ind();
                 try self.write("                    else => {\n");
                 try self.emitUnionCaseDeserializeAssign("out", dc, "                        ");
+                try self.ind();
+                try self.write("                        out._d = _d;\n");
                 try self.ind();
                 try self.write("                    },\n");
             } else {
@@ -879,8 +893,14 @@ const Generator = struct {
             try self.write("            }\n");
             try self.ind();
             try self.write("        }\n");
-            try self.ind();
-            try self.write("        out._d = _d;\n");
+            // No unconditional `out._d = _d;` here (unlike the @final/XCDR2
+            // branch below): each case arm above already committed `out._d`
+            // atomically with `out._u`. A message carrying only a
+            // discriminant EMHEADER with no matching case-value EMHEADER
+            // (spec-non-compliant -- `serialize` always emits both) would
+            // otherwise commit a new `out._d` with no corresponding `out._u`
+            // payload ever having been published, reintroducing the same
+            // undefined-payload hazard this whole scheme exists to avoid.
         } else {
             if (appendable) {
                 try self.ind();

@@ -64,6 +64,54 @@ test "MutableStrUnion: truncated string case leaves _d at its safe default, dein
     out.deinit(testing.allocator);
 }
 
+test "MutableStrUnion: a payload published earlier in the EMHEADER loop survives a later, unrelated read failure" {
+    // Regression for a second review round: committing `out._d` only once,
+    // after the whole EMHEADER loop finishes, left it stale relative to an
+    // `out._u` an *earlier* iteration already published -- so a *later*
+    // iteration's failure would leak that payload (or, worse, free it
+    // through whatever case the stale discriminant happened to select). The
+    // fix commits `out._d` atomically with `out._u`, inside the same case
+    // arm, so it never lags behind a real publish.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    try writer.writeEncapHeader();
+    try fixture.MutableStrUnion.serialize(&writer, .{ ._d = 1, ._u = .{ .s = "hello world" } });
+
+    // Corrupt the DHEADER (the 4 bytes right after the 4-byte encap header)
+    // to claim 4 more bytes of payload than actually follow, then append 4
+    // bytes that always decode as an invalid EMHEADER (`lc == 7`). This
+    // forces a THIRD loop iteration to fail *after* the real discriminant
+    // and case-value EMHEADERs (iterations 1-2) already ran and published to
+    // out._d/out._u.
+    var declared: u32 = std.mem.readInt(u32, buf.items[4..8], .little);
+    declared += 4;
+    std.mem.writeInt(u32, buf.items[4..8], declared, .little);
+    try buf.appendSlice(testing.allocator, &[_]u8{ 0xFF, 0xFF, 0xFF, 0xFF });
+
+    var reader = try zidl_rt.CdrReader.init(buf.items);
+    var out: fixture.MutableStrUnion = .{};
+    try testing.expectError(
+        error.InvalidEmheader,
+        fixture.MutableStrUnion.deserializeInto(&out, &reader, testing.allocator),
+    );
+
+    // `deserializeInto`'s own internal `errdefer out.deinit(allocator)` has
+    // already run by the time it returns the error -- so `out._u.s` is
+    // already freed and reset to `""` (that's the self-cleaning contract
+    // from the first review round), which is why this test does NOT assert
+    // its content. What it does prove: `out._d` still reads 1 (`deinit()`
+    // never resets the discriminant, only the payload it owns) -- if the
+    // pre-fix bug were present, `out._d` would have stayed at its stale
+    // pre-loop default (0) when the internal errdefer fired, so `deinit()`
+    // would have cleaned the non-owning `i` arm instead and silently leaked
+    // "hello world". `testing.allocator` is a leak-checking allocator: this
+    // whole test fails at teardown if that leak happens, without needing to
+    // inspect `out._u.s` directly.
+    try testing.expectEqual(@as(i32, 1), out._d);
+    out.deinit(testing.allocator); // idempotent no-op -- proves it, doesn't need to
+}
+
 test "FinalStrUnion: successful decode of the string case still round-trips and deinits cleanly" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
