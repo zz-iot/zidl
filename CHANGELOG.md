@@ -9,6 +9,25 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- **Zig backend: generated `deinit()` is now idempotent, and `deserializeInto` /
+  `deserializeFromPlCdr` self-clean on a mid-decode error.**
+  - A plain unbounded `string` field is now reset to `""` right after being freed
+    (`emitPlainStringFreeStmt`), matching the reset-after-free that sequence fields and
+    `@pl_retain_unknown`'s `unknown_params` already had. A second `deinit()` call — whether
+    from a caller's own stray double-call or from the new internal `errdefer` below racing a
+    caller's own `defer out.deinit(alloc)` — is now a safe no-op instead of a double-free.
+    Struct/union fields that delegate to a nested type's `.deinit()` inherit this
+    automatically (recursive, including inherited base structs), since the leaf fix is the
+    only place that was non-idempotent.
+  - Generated `deserializeInto` (struct and union) and `deserializeFromPlCdr` now carry
+    their own `errdefer out.deinit(allocator)`, so a mid-decode error leaves `out` fully
+    cleaned rather than merely safe-to-clean — closing the previously-documented
+    family-wide contract that relied on the caller's own `defer out.deinit(alloc)` idiom.
+    For `deserializeFromPlCdr` the `errdefer` is registered only after the
+    `error.RetainedOutputNotEmpty` freshness check, so rejecting a non-fresh `out` never
+    tears down state the caller still owns.
+  - Unbounded `wstring` fields are unaffected — they have no generated cleanup at all yet,
+    a separate pre-existing gap (`docs/roadmap.md`).
 - **PL_CDR decode gained a strictness `mode` and an opt-in lossless-retention mode**
   (`--zig-pl-cdr`, `@mutable` types), for a DDS core adopting the generated codec for real
   RTPS SPDP/SEDP traffic instead of a hand-rolled parser.

@@ -169,6 +169,64 @@ test "roundtrip: Sample with sequence" {
     try testing.expectEqualSlices(i32, src_slice, dst_slice);
 }
 
+// ── deinit idempotency / self-cleaning deserializeInto ────────────────────────
+
+test "idempotency: Sample.deinit can be called twice safely" {
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(testing.allocator);
+
+    const nums_items = try testing.allocator.dupe(i32, &.{ 1, 2, 3 });
+    defer testing.allocator.free(nums_items);
+
+    var src = types.Sample{ .str = "hello" };
+    src.nums = .{ ._length = 3, ._maximum = 3, ._buffer = nums_items.ptr, ._release = false };
+
+    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    try writer.writeEncapHeader();
+    try types.Sample.serialize(&writer, src);
+
+    var reader = try zidl_rt.CdrReader.init(buf.items);
+    var dst = types.Sample{};
+    try types.Sample.deserializeInto(&dst, &reader, testing.allocator);
+
+    // Both the string and sequence fields are heap-owned by the decode.
+    // A second `deinit()` call must be a safe no-op, not a double-free --
+    // testing.allocator (a checking allocator) fails the test otherwise.
+    dst.deinit(testing.allocator);
+    dst.deinit(testing.allocator);
+}
+
+test "deserializeInto self-cleans on a mid-decode error, no caller cleanup needed" {
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(testing.allocator);
+
+    const nums_items = try testing.allocator.dupe(i32, &.{ 1, 2, 3 });
+    defer testing.allocator.free(nums_items);
+
+    var src = types.Sample{ .str = "hello world" };
+    src.nums = .{ ._length = 3, ._maximum = 3, ._buffer = nums_items.ptr, ._release = false };
+
+    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    try writer.writeEncapHeader();
+    try types.Sample.serialize(&writer, src);
+
+    // Truncate the tail (`nested.y`, the last field written) so `str` and
+    // `nums` are already heap-allocated by the time the read fails.
+    var reader = try zidl_rt.CdrReader.init(buf.items[0 .. buf.items.len - 4]);
+    var dst = types.Sample{};
+    try testing.expectError(
+        error.EndOfStream,
+        types.Sample.deserializeInto(&dst, &reader, testing.allocator),
+    );
+
+    // No manual cleanup here at all: `deserializeInto`'s own
+    // `errdefer out.deinit(allocator)` already freed and reset `str`/`nums`
+    // on the way out. testing.allocator would flag a leak at test teardown
+    // if it hadn't.
+    try testing.expectEqualStrings("", dst.str);
+    try testing.expectEqual(@as(u32, 0), dst.nums._length);
+}
+
 // ── CDR round-trip: Frame (@appendable, DHEADER) ──────────────────────────────
 
 test "roundtrip: Frame @appendable DHEADER" {

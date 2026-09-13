@@ -154,9 +154,11 @@ fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: st
   PID with the must-understand flag (`pid & 0x4000`, RTPS 2.5 §9.6.4),
   `error.DuplicateParameter` for a repeated non-`@pl_repeated` PID, and
   `error.TruncatedParameter` when a known member's encoding reads past its parameter's
-  declared length (into the next parameter). `.strict` is memory-safe on any input; it does
-  not, on error, free allocations already stored in `out` (same contract as
-  `deserializeInto` — `out` must be a fresh `.{}` and the caller `deinit`s a partial result).
+  declared length (into the next parameter). `.strict` is memory-safe on any input; on error
+  it self-cleans via an internal `errdefer out.deinit(allocator)` (same as `deserializeInto`)
+  — `out` must still be a fresh `.{}` going in, but the caller no longer needs its own
+  `defer out.deinit(alloc)` to avoid leaking a partial decode (generated `deinit()` is
+  idempotent, so keeping that `defer` anyway is still safe).
 - `@pl_retain_unknown` on the struct: adds `unknown_params: []zidl_rt.RawParam`;
   `deserializeFromPlCdr` keeps each unrecognized parameter (value bytes, owned) and
   `serializePlCdr` replays them before the sentinel, so a decode → re-encode round trip

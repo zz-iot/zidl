@@ -790,10 +790,17 @@ const Generator = struct {
         try self.write("    }\n");
 
         // ── deserializeInto ──────────────────────────────────────────────────
+        const union_has_deinit = self.unionNeedsCleanup(u);
         try self.write("\n");
         try self.ind();
         try self.write("    pub fn deserializeInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {\n");
-        if (!needs_alloc) {
+        if (union_has_deinit) {
+            // See the matching comment on the struct backend's
+            // `deserializeInto` — safe because `deinit()` is idempotent
+            // against a caller's own `defer out.deinit(alloc)`.
+            try self.ind();
+            try self.write("        errdefer out.deinit(allocator);\n");
+        } else if (!needs_alloc) {
             try self.ind();
             try self.write("        _ = allocator;\n");
         }
@@ -3546,9 +3553,17 @@ const Generator = struct {
         try self.write("    }\n\n");
 
         // ── deserializeInto ──────────────────────────────────────────────────
+        const struct_has_deinit = self.structNeedsCleanup(s);
         try self.ind();
         try self.write("    pub fn deserializeInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {\n");
-        if (!needs_alloc) {
+        if (struct_has_deinit) {
+            // A mid-decode error leaves `out` self-cleaning instead of relying
+            // on the caller's `defer out.deinit(alloc)` idiom — safe because
+            // generated `deinit()` is idempotent, so the caller's own `defer`
+            // (if present) still fires harmlessly afterward.
+            try self.ind();
+            try self.write("        errdefer out.deinit(allocator);\n");
+        } else if (!needs_alloc) {
             try self.ind();
             try self.write("        _ = allocator;\n");
         }
@@ -4035,7 +4050,7 @@ const Generator = struct {
             try self.write("    /// `var v: @This() = .{}; defer v.deinit(a); try deserializeFromPlCdr(&v, ...);`.\n");
             try self.ind();
             try self.write("    pub fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator, mode: zidl_rt.PlMode) !void {\n");
-            if (!needs_alloc and !pl_retain) {
+            if (!needs_alloc and !pl_retain and !struct_has_deinit) {
                 try self.ind();
                 try self.write("        _ = allocator;\n");
             }
@@ -4044,9 +4059,19 @@ const Generator = struct {
                 // retained buffers belong to whichever allocator the previous
                 // decode used, which this call does not know. Require a fresh
                 // `out` rather than leak the old slice or free it through a
-                // possibly-different allocator.
+                // possibly-different allocator. This check must run before the
+                // `errdefer out.deinit()` below so rejecting a non-fresh `out`
+                // never tears down the caller's still-owned existing state.
                 try self.ind();
                 try self.write("        if (out.unknown_params.len != 0) return error.RetainedOutputNotEmpty;\n");
+            }
+            if (struct_has_deinit) {
+                // See the matching comment on `deserializeInto` — safe because
+                // `deinit()` is idempotent against a caller's own `defer`.
+                try self.ind();
+                try self.write("        errdefer out.deinit(allocator);\n");
+            }
+            if (pl_retain) {
                 try self.ind();
                 try self.write("        var _unknown: std.ArrayListUnmanaged(zidl_rt.RawParam) = .empty;\n");
                 try self.ind();
@@ -5056,15 +5081,20 @@ const Generator = struct {
         try self.write("    }\n");
     }
 
-    /// Emit `if (self.field.len != 0) alloc.free(self.field);`, gated on
-    /// `self._toml_applied` under `--zig-generate-toml-config` (a string field
-    /// has no ownership flag of its own, so without that guard, an untouched
-    /// `T{}` whose non-empty `@default` literal was never duped would have its
-    /// static storage passed to `alloc.free` here — undefined behavior; see
+    /// Emit `if (self.field.len != 0) alloc.free(self.field);` followed by an
+    /// unconditional `self.field = "";`, gated on `self._toml_applied` under
+    /// `--zig-generate-toml-config` (a string field has no ownership flag of
+    /// its own, so without that guard, an untouched `T{}` whose non-empty
+    /// `@default` literal was never duped would have its static storage
+    /// passed to `alloc.free` here — undefined behavior; see
     /// `Generator.memberNeedsCleanup`'s doc comment for why the *caller*
     /// already excludes this exact risk outside that flag by never reaching
     /// this function for such a field at all, so no equivalent guard is needed
-    /// here in that case).
+    /// here in that case). The unconditional reset makes a second `deinit()`
+    /// call a safe no-op (`len == 0` short-circuits the free) instead of a
+    /// double-free — the same idempotency `emitFieldSeqDeinit`'s `.sequence`
+    /// and `unknown_params` arms already have by resetting their field after
+    /// freeing.
     fn emitPlainStringFreeStmt(self: *Generator, field_name: []const u8, indent: []const u8) !void {
         try self.ind();
         if (self.opts.zig_generate_toml_config) {
@@ -5072,6 +5102,8 @@ const Generator = struct {
         } else {
             try self.print("{s}if (self.{s}.len != 0) alloc.free(self.{s});\n", .{ indent, field_name, field_name });
         }
+        try self.ind();
+        try self.print("{s}self.{s} = \"\";\n", .{ indent, field_name });
     }
 
     /// Emit the cleanup snippet for a single struct field whose type is or
@@ -7699,6 +7731,7 @@ test "zig_backend: union with a non-trivial case gets deinit/clone, every case g
         \\            },
         \\            else => {
         \\                if (self._u.s.len != 0) alloc.free(self._u.s);
+        \\                self._u.s = "";
         \\            },
         \\        }
     ));

@@ -116,6 +116,7 @@ pub const Sample = struct {
     }
 
     pub fn deserializeInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {
+        errdefer out.deinit(allocator);
         out.id = try reader.readU32();
         out.b = try reader.readBool();
         out.u8_val = try reader.readU8();
@@ -205,6 +206,7 @@ pub const Sample = struct {
 
     pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
         if (self.str.len != 0) alloc.free(self.str);
+        self.str = "";
         if (self.nums._release) {
             if (self.nums._buffer) |_buf| {
                 alloc.free(_buf[0..self.nums._maximum]);
@@ -257,6 +259,7 @@ pub const Frame = struct {
     }
 
     pub fn deserializeInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {
+        errdefer out.deinit(allocator);
         try reader.skipDheaderIfXcdr2();
         out.seq_num = try reader.readU32();
         out.topic = try reader.readString(allocator);
@@ -280,6 +283,7 @@ pub const Frame = struct {
 
     pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
         if (self.topic.len != 0) alloc.free(self.topic);
+        self.topic = "";
     }
 
     pub fn clone(self: @This(), alloc: std.mem.Allocator) !@This() {
@@ -312,6 +316,7 @@ pub const Beacon = struct {
     }
 
     pub fn deserializeInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {
+        errdefer out.deinit(allocator);
         try reader.skipDheaderIfXcdr2();
         out.id = try reader.readU32();
         out.payload = try reader.readString(allocator);
@@ -363,6 +368,7 @@ pub const Beacon = struct {
 
     pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
         if (self.payload.len != 0) alloc.free(self.payload);
+        self.payload = "";
     }
 
     pub fn clone(self: @This(), alloc: std.mem.Allocator) !@This() {

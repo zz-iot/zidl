@@ -107,7 +107,7 @@ test "pl_cdr fixture: serializePlCdr replays retained unknowns; second decode ma
     try testing.expectEqualSlices(u8, rec.unknown_params[1].bytes, rec2.unknown_params[1].bytes);
 }
 
-test "pl_cdr fixture: strict decode rejects an unknown must-understand parameter; caller cleans partial out" {
+test "pl_cdr fixture: strict decode rejects an unknown must-understand parameter; out self-cleans" {
     const alloc = testing.allocator;
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(alloc);
@@ -115,16 +115,17 @@ test "pl_cdr fixture: strict decode rejects an unknown must-understand parameter
 
     var reader = try zidl_rt.CdrReader.init(buf.items);
     var rec: RetainRec = .{};
-    // On error `out` holds whatever was decoded before the failing parameter
-    // (here `label` is already allocated) — same contract as deserializeInto.
-    // The generated errdefer releases the not-yet-published retained params;
-    // the caller releases `out`. testing.allocator fails on any leak/double-free.
+    // `deserializeFromPlCdr` now carries its own `errdefer out.deinit(allocator)`,
+    // so a mid-decode error (here `label` was already allocated before the
+    // failing parameter) leaves `out` fully cleaned — not merely safe-to-clean —
+    // without relying on the caller's own `defer rec.deinit(alloc)` idiom.
+    // Keeping that `defer` here proves it, too, is now a safe idempotent no-op.
     defer rec.deinit(alloc);
     try testing.expectError(
         error.UnknownMustUnderstand,
         RetainRec.deserializeFromPlCdr(&rec, &reader, alloc, .strict),
     );
-    try testing.expectEqualStrings("hi", rec.label); // partially decoded
+    try testing.expectEqualStrings("", rec.label); // freed + reset by the internal errdefer
     try testing.expectEqual(@as(usize, 0), rec.unknown_params.len); // never published
 }
 

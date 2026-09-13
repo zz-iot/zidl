@@ -132,16 +132,12 @@ Features*.
   must match the process-wide `zidl_cdr_set_allocator` choice — only correct while an
   entity's own `_with_allocator` allocator equals the process-wide one; not structurally
   enforced. A full fix needs a C-ABI shape change. `zig.zig:2747`.
-- **Generated `deinit` is not uniformly idempotent.** Sequence fields (and PL_CDR
-  `unknown_params`) are reset to their empty value after being freed; plain unbounded
-  `string`/`wstring` fields are freed without a reset (`emitPlainStringFreeStmt`,
-  `zig.zig`), so a second `deinit` double-frees them and the struct holds a dangling
-  pointer with a live length in between. Make `deinit` reset every heap-owning field, then
-  add `errdefer out.deinit(allocator)` to the generated `deserializeInto` /
-  `deserializeFromPlCdr` so a mid-decode error leaves `out` clean instead of relying on the
-  caller — closing the "failed decode leaves allocations in `out`" gap that is currently
-  the documented family-wide contract. Needs a per-shape "deinit is idempotent" test and a
-  recursive check for base/nested structs. (Raised in PL_CDR-retention PR review.)
+- **Unbounded `wstring` struct/union fields have no generated cleanup at all** —
+  `typeRefHasUnboundedString` only recognizes `.string`, never `.wide_string`, so a `wstring`
+  member never contributes to `structNeedsCleanup`/`memberNeedsCleanup` and no free/reset is
+  ever emitted for it, independent of the `deinit`-idempotency fix below. Bundle with the
+  wider `wstring` support gap (`wstring` constants also emit only a comment — see the
+  "All backends" section above) rather than fixing in isolation.
 - **Idiomatic slice-friendly wrapper layer** over the generated C-ABI vtable — a planned
   ergonomic addition, not yet generated. `ecosystem.md`.
 - **`as_{Base}` convenience method for pure-Zig callers** — decided (emit a top-level
