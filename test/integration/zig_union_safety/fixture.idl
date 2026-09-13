@@ -25,3 +25,20 @@ union MutableStrUnion switch (long) {
     case 0: long i;
     case 1: string s; // heap-owning case
 };
+
+// The discriminant's DEFAULT value (0, whatever `defaultForTypeRef` picks
+// for `long`) selects the heap-owning case here -- unlike the two unions
+// above, where it selects the non-owning `i`/`long` case. Regression for: a
+// fresh, never-decoded `.{}` value has `_u = undefined`; if `deserializeInto`
+// fails before ANY payload is published (fresh discriminant default still
+// in effect), `deinit()` must not follow that default into this owning arm.
+union OwningDefaultUnion switch (long) {
+    case 0: string s; // owning, AND the discriminant's default value
+    case 1: long i;
+};
+
+@mutable
+union MutableOwningDefaultUnion switch (long) {
+    case 0: string s; // owning, AND the discriminant's default value
+    case 1: long i;
+};

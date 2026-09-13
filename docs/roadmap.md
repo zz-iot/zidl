@@ -147,6 +147,24 @@ Features*.
   unaffected (any non-zero member_id already routes to the `else`/default arm). Sidestepped
   in that fixture with an explicit `case N:` instead of `default:`; the `serialize`-side
   member_id computation for a `@mutable` union default case needs its own fix.
+- **A union's `deinit()` is unsafe to call directly on a genuinely fresh, never-decoded `.{}`
+  value when the discriminant's default selects a heap-owning case** — `_u: union {...} =
+  undefined` (`emitUnion`) has no per-field safe default the way struct members do (`""`,
+  `.{}`), and Zig's own runtime safety check for a bare (non-`extern`) union panics
+  (`panic: invalid enum value`) on reading *any* field whose active field was never actually
+  written, independent of which case is selected. `deserializeInto`'s own generated
+  `errdefer` is now guarded against this (a local `_published` flag, only set once a case
+  arm has actually written both `out._u` and `out._d` together — see `CHANGELOG.md`), but a
+  caller who constructs `var v: SomeUnion = .{};` and calls `v.deinit(alloc)` *without* ever
+  successfully decoding into it first hits the same panic, for any union shaped this way.
+  Fixing this at the root would need a different `_u` representation (e.g. `extern union`
+  with a `std.mem.zeroes`-based default) — not attempted here: case payload types include
+  plain (non-`extern`) generated structs/unions, which Zig's `extern union` field-type rules
+  don't currently accept, so this needs its own design pass, not a quick patch.
+  `test/integration/zig_union_safety/fixture.idl`'s `OwningDefaultUnion` /
+  `MutableOwningDefaultUnion` are the regression fixtures for the `deserializeInto` half of
+  this (the half actually reachable from external input); they deliberately do not exercise
+  the direct-`deinit()`-on-a-bare-value half, since that is not yet safe by design.
 - **Idiomatic slice-friendly wrapper layer** over the generated C-ABI vtable — a planned
   ergonomic addition, not yet generated. `ecosystem.md`.
 - **`as_{Base}` convenience method for pure-Zig callers** — decided (emit a top-level

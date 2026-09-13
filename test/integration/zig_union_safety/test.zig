@@ -127,3 +127,70 @@ test "FinalStrUnion: successful decode of the string case still round-trips and 
     try testing.expectEqual(@as(i32, 99), out._d);
     try testing.expectEqualStrings("hello world", out._u.s);
 }
+
+// ── Default discriminant selects a heap-owning case ────────────────────────
+//
+// Regression for a third review round: `FinalStrUnion`/`MutableStrUnion`
+// above both have the heap-owning case OFF the discriminant's default value
+// (0 selects the non-owning `i`), so a failure before anything was published
+// left `out._d == 0` selecting a case that needs no cleanup either way --
+// never actually exercising what `deinit()` does with a still-`undefined`
+// `out._u`. `OwningDefaultUnion`/`MutableOwningDefaultUnion` put the
+// heap-owning case ON the default (0), so a genuinely early failure -- before
+// the discriminant (or even the DHEADER) has been read even once -- would,
+// without the fix, free that undefined memory.
+
+const encap_header_only = [_]u8{ 0x00, 0x03, 0x00, 0x00 };
+
+// NOTE: neither test below calls `out.deinit()` afterward, unlike the other
+// tests in this file. That's deliberate, not an oversight: `out` here is
+// genuinely untouched since construction (no field of `_u` was ever
+// actively written, not even to a case-appropriate zero value) -- and Zig's
+// own runtime safety check for a bare (non-extern) union panics on reading
+// *any* field of a value whose active field was never set, independent of
+// which one. Calling `.deinit()` on a truly fresh `.{}` value of a union
+// shaped this way (heap-owning default case) is a separate, pre-existing
+// hazard this PR does not fix (see `docs/roadmap.md`) -- proving the
+// function itself doesn't crash on the way out (below) is the scope of the
+// finding this fixture regresses.
+test "OwningDefaultUnion: a failure before the discriminant is ever read leaves the untouched default owning arm alone" {
+    var reader = try zidl_rt.CdrReader.init(&encap_header_only);
+    var out: fixture.OwningDefaultUnion = .{};
+    try testing.expectError(
+        error.EndOfStream,
+        fixture.OwningDefaultUnion.deserializeInto(&out, &reader, testing.allocator),
+    );
+
+    // out._d is still its untouched default (0, the owning `s` case).
+    // Before the fix, the internal errdefer fired unconditionally here and
+    // followed out._d into the owning arm, freeing undefined memory -- this
+    // assertion is reached at all only because that no longer happens.
+    try testing.expectEqual(@as(i32, 0), out._d);
+}
+
+test "MutableOwningDefaultUnion: a failure before the DHEADER is ever read leaves the untouched default owning arm alone" {
+    var reader = try zidl_rt.CdrReader.init(&encap_header_only);
+    var out: fixture.MutableOwningDefaultUnion = .{};
+    try testing.expectError(
+        error.EndOfStream,
+        fixture.MutableOwningDefaultUnion.deserializeInto(&out, &reader, testing.allocator),
+    );
+
+    try testing.expectEqual(@as(i32, 0), out._d);
+}
+
+test "OwningDefaultUnion: successful decode of the default owning case still round-trips and deinits cleanly" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(testing.allocator);
+    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    try writer.writeEncapHeader();
+    try fixture.OwningDefaultUnion.serialize(&writer, .{ ._d = 0, ._u = .{ .s = "hello world" } });
+
+    var reader = try zidl_rt.CdrReader.init(buf.items);
+    var out: fixture.OwningDefaultUnion = .{};
+    try fixture.OwningDefaultUnion.deserializeInto(&out, &reader, testing.allocator);
+    defer out.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(i32, 0), out._d);
+    try testing.expectEqualStrings("hello world", out._u.s);
+}

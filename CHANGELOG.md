@@ -32,18 +32,33 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
     (`= undefined`, since it's shared, untagged storage) — a heap-owning case's payload is
     decoded into a local temporary and only assigned to `out._u` on success, so writing the
     new discriminant into `out._d` any earlier would let a mid-case decode failure leave
-    `out._d` pointing at a case whose `out._u` is still genuinely undefined; the `errdefer
-    out.deinit(allocator)` added alongside this would then free that undefined memory
-    (invalid free / memory corruption for a realistic truncated payload). Caught by Greptile
-    review. For the `@mutable` EMHEADER loop specifically (case values may be interleaved
-    with other members across iterations, unlike the single-shot `@final`/XCDR2 switch),
-    `out._d` is committed atomically with `out._u` inside each case arm — not once, after
-    the whole loop — so a payload published in one iteration can't be leaked (or freed
-    through the wrong arm) by an unrelated later iteration's failure; a second Greptile
-    round caught the "once at the end" version of this fix leaking exactly that way. New
-    compile-and-run regression suite `test/integration/zig_union_safety/` (both
-    extensibility shapes: a mid-case truncation, a later-iteration failure after an earlier
-    payload already published, and the successful-decode path).
+    `out._d` pointing at a case whose `out._u` is still genuinely undefined. Three Greptile
+    review rounds on this, each closing a distinct way the generated `errdefer
+    out.deinit(allocator)` could still reach that undefined memory:
+    1. The base case above (discriminant committed before the payload).
+    2. For the `@mutable` EMHEADER loop specifically (case values may be interleaved with
+       other members across iterations, unlike the single-shot `@final`/XCDR2 switch),
+       committing `out._d` once at the end of the loop instead of per-case left it stale
+       relative to an `out._u` a prior iteration already published, so a later, unrelated
+       iteration's failure could leak that payload or free the wrong arm.
+    3. A union whose discriminant *default* selects a heap-owning case (e.g. `union U
+       switch(long) { case 0: string s; ... }`) — a failure before anything is ever
+       published (reading the DHEADER or the discriminant itself) left `out._d` at that
+       default, so an unconditional `errdefer` would follow it into the owning arm and free
+       undefined memory regardless of points 1-2 being fixed.
+    Final shape: `errdefer` is registered ONCE at function scope — required for point 2,
+    since `errdefer` is block-scoped in Zig and one registered inside a loop iteration does
+    not carry over to protect a later iteration once the current one exits normally — guarded
+    by a local `_published` flag that starts `false` and is set `true` only in the same
+    statement group that commits both `out._u` and `out._d` together, closing points 1 and 3
+    without reopening point 2. New compile-and-run regression suite
+    `test/integration/zig_union_safety/` covering all three: a mid-case truncation, a
+    later-iteration failure after an earlier payload already published, a failure before the
+    discriminant is ever read on a union whose default case owns memory, and the
+    successful-decode path — each extensibility shape where it applies. A closely related,
+    deeper pre-existing hazard remains and is deliberately NOT fixed here: calling `deinit()`
+    directly on a genuinely fresh, never-decoded value of such a union (not via
+    `deserializeInto` at all) is still unsafe — see `docs/roadmap.md`.
   - Unbounded `wstring` fields are unaffected — they have no generated cleanup at all yet,
     a separate pre-existing gap (`docs/roadmap.md`).
 - **PL_CDR decode gained a strictness `mode` and an opt-in lossless-retention mode**

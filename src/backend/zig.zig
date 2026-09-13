@@ -795,39 +795,56 @@ const Generator = struct {
         try self.ind();
         try self.write("    pub fn deserializeInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {\n");
         if (union_has_deinit) {
-            // See the matching comment on the struct backend's
-            // `deserializeInto` — safe because `deinit()` is idempotent
-            // against a caller's own `defer out.deinit(alloc)`.
+            // A plain unconditional `errdefer out.deinit(allocator)` (as the
+            // struct backend uses) is unsafe here in TWO ways specific to
+            // unions, both caught on review:
+            //
+            // 1. A union's payload storage (`_u`) has no per-field safe
+            //    default the way struct members do -- see `emitUnion`'s
+            //    `_u: union {...} = undefined`. If `out._d`'s own *default*
+            //    happens to select a heap-owning case (e.g. `union U
+            //    switch(long) { case 0: string s; ... }`, whose default
+            //    discriminant 0 IS the owning case), an unconditional
+            //    errdefer fires on ANY early failure -- reading the
+            //    DHEADER, the discriminant itself, or a case's own payload
+            //    -- none of which published anything to `out` -- and
+            //    `deinit()` would free that undefined memory.
+            // 2. For the `@mutable` EMHEADER loop, `errdefer` is
+            //    block-scoped: one registered inside a loop iteration does
+            //    NOT carry over to protect a *later* iteration once the
+            //    current one exits normally (verified against upstream Zig
+            //    semantics) -- so per-case-arm registration inside the loop
+            //    would silently stop protecting a payload published in an
+            //    earlier iteration against a later, unrelated iteration's
+            //    failure.
+            //
+            // Fix for both: register ONE `errdefer` at function scope (so it
+            // stays armed across every loop iteration, per point 2), guarded
+            // by a `_published` flag that starts false and is set true only
+            // once a case arm has actually committed both `out._u` and
+            // `out._d` together (per point 1) -- so it is a no-op until
+            // there is a real, fully-consistent payload for it to protect,
+            // and (via `deinit()`'s own idempotency, see the struct
+            // backend's matching fix) safe to leave armed across every
+            // subsequent iteration once that happens.
             try self.ind();
-            try self.write("        errdefer out.deinit(allocator);\n");
+            try self.write("        var _published = false;\n");
+            try self.ind();
+            try self.write("        errdefer if (_published) out.deinit(allocator);\n");
         } else if (!needs_alloc) {
             try self.ind();
             try self.write("        _ = allocator;\n");
         }
 
-        // The discriminant is decoded into a local `_d` rather than via
-        // `emitDiscReadZig(..., "out._d", ...)` directly, and `out._d` is
-        // committed to `_d` ONLY in the same statement group that assigns
-        // `out._u` (immediately after `emitUnionCaseDeserializeAssign`).
-        // Reason: a heap-owning case's payload is decoded into a local
-        // `_tmp` and only assigned to `out._u` on success; if `out._d` were
-        // updated any earlier, a payload-decode failure would leave `out._d`
-        // pointing at a case whose `out._u` storage is still `undefined`
-        // (unions have no per-field safe default the way struct members do
-        // -- see `emitUnion`'s `_u: union {...} = undefined`), and the
-        // `errdefer out.deinit(allocator)` below would switch on that case
-        // and free undefined memory. `out._d`/`out._u` must also never go
-        // out of sync with each other for longer than one statement: for the
-        // `@mutable` EMHEADER loop (case values may be interleaved with
-        // other members across iterations, unlike the single-shot `@final`/
-        // XCDR2 switch below), committing `out._d` only once at the very end
-        // of the loop would leave it stale relative to an `out._u` a prior
-        // iteration already published, so a *later* iteration's failure
-        // would leak that payload or free the wrong arm through the stale
-        // discriminant (a real correctness gap, not just UB, caught on
-        // review) -- so each case arm inside the loop commits `out._d`
-        // itself, right after publishing to `out._u`, instead of the
-        // function committing once at the end.
+        // The discriminant itself is decoded into a local `_d` rather than
+        // via `emitDiscReadZig(..., "out._d", ...)` directly, and `out._d`
+        // is committed to `_d` ONLY in the same statement group that
+        // assigns `out._u` (immediately followed by `_published = true`,
+        // above): a heap-owning case's payload is decoded into a local
+        // `_tmp` and only assigned to `out._u` on success, so writing the
+        // new discriminant (or flipping `_published`) any earlier would let
+        // a mid-case decode failure publish a discriminant with no matching
+        // payload behind it.
         const disc_zig = try self.typeRefToZig(u.discriminant);
         defer self.alloc.free(disc_zig);
 
@@ -865,6 +882,10 @@ const Generator = struct {
                 try self.emitUnionCaseDeserializeAssign("out", cas, "                        ");
                 try self.ind();
                 try self.write("                        out._d = _d;\n");
+                if (union_has_deinit) {
+                    try self.ind();
+                    try self.write("                        _published = true;\n");
+                }
                 _ = cas_idx;
                 try self.ind();
                 try self.write("                    },\n");
@@ -875,6 +896,10 @@ const Generator = struct {
                 try self.emitUnionCaseDeserializeAssign("out", dc, "                        ");
                 try self.ind();
                 try self.write("                        out._d = _d;\n");
+                if (union_has_deinit) {
+                    try self.ind();
+                    try self.write("                        _published = true;\n");
+                }
                 try self.ind();
                 try self.write("                    },\n");
             } else {
@@ -920,6 +945,10 @@ const Generator = struct {
                 try self.emitZigUnionCaseArmPattern(u.discriminant, cas, "            ");
                 try self.write(" => {\n");
                 try self.emitUnionCaseDeserializeAssign("out", cas, "                ");
+                if (union_has_deinit) {
+                    try self.ind();
+                    try self.write("                _published = true;\n");
+                }
                 try self.ind();
                 try self.write("            },\n");
             }
@@ -927,6 +956,10 @@ const Generator = struct {
                 try self.ind();
                 try self.write("            else => {\n");
                 try self.emitUnionCaseDeserializeAssign("out", dc, "                ");
+                if (union_has_deinit) {
+                    try self.ind();
+                    try self.write("                _published = true;\n");
+                }
                 try self.ind();
                 try self.write("            },\n");
             } else {
