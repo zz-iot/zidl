@@ -23,16 +23,18 @@ test "XRCE fixture round-trips bounded data on Zig 0.15.1" {
     try types.CounterStatus.serialize(&writer, sample);
 
     var reader = try zidl_rt.CdrReader.init(bytes.items);
-    const decoded = try types.CounterStatus.deserialize(&reader, allocator);
+    var decoded: types.CounterStatus = .{};
+    try types.CounterStatus.deserializeInto(&decoded, &reader, allocator);
 
     try std.testing.expectEqual(@as(u32, 42), decoded.counter);
     try std.testing.expectEqualSlices(u8, "pico-wh", decoded.board.slice());
     try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 5 }, decoded.payload.slice());
 
     var key_reader = try zidl_rt.CdrReader.init(bytes.items);
-    const key_only = try types.CounterStatus.deserializeKey(&key_reader, allocator);
+    var key_only: types.CounterStatus = .{};
+    try types.CounterStatus.deserializeKeyInto(&key_only, &key_reader, allocator);
     try std.testing.expectEqual(@as(u32, 42), key_only.counter);
 
-    const key_hash = types.CounterStatus.computeKeyHash(sample);
+    const key_hash = types.CounterStatus.computeKeyHash(&sample);
     try std.testing.expectEqual(@as(usize, 16), key_hash.len);
 }

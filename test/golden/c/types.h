@@ -70,6 +70,7 @@ int Sample_skip(ZidlCdrReader *_r);
 int Sample_serialize_key(ZidlCdrWriter *_w, const Sample *_v);
 int Sample_deserialize_key(ZidlCdrReader *_r, Sample *_v);
 int Sample_compute_key_hash(const Sample *_v, uint8_t _hash[16]);
+int Sample_compute_key_hash_from_cdr_key_only(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);
 int Sample_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);
 
 /* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. */
@@ -104,6 +105,7 @@ int Beacon_skip(ZidlCdrReader *_r);
 int Beacon_serialize_key(ZidlCdrWriter *_w, const Beacon *_v);
 int Beacon_deserialize_key(ZidlCdrReader *_r, Beacon *_v);
 int Beacon_compute_key_hash(const Beacon *_v, uint8_t _hash[16]);
+int Beacon_compute_key_hash_from_cdr_key_only(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);
 int Beacon_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);
 
 /* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. */

@@ -203,7 +203,10 @@ static void test_compute_key_hash_from_cdr(void) {
     check(Sample_compute_key_hash(&s, hash_from_struct), "Sample_compute_key_hash");
     assert(memcmp(hash_from_cdr, hash_from_struct, 16) == 0);
 
-    /* Beacon: key-only payload → same hash as from struct */
+    /* Beacon: genuine key-only payload -> Beacon_compute_key_hash_from_cdr_key_only,
+       not the unsuffixed (full-payload) function -- a key-only payload is
+       missing every other member's bytes, so feeding it to the full-payload
+       decoder (Beacon_deserialize) fails outright. */
     uint8_t kbuf[64];
     ZidlCdrWriter kw;
     zidl_cdr_writer_init_fixed(&kw, kbuf, sizeof(kbuf), ZIDL_XCDR2);
@@ -214,7 +217,7 @@ static void test_compute_key_hash_from_cdr(void) {
     check(Beacon_serialize_key(&kw, &b), "Beacon_serialize_key");
 
     uint8_t bhash_from_key[16], bhash_from_struct[16];
-    check(Beacon_compute_key_hash_from_cdr(kbuf, kw.len, bhash_from_key), "Beacon_compute_key_hash_from_cdr");
+    check(Beacon_compute_key_hash_from_cdr_key_only(kbuf, kw.len, bhash_from_key), "Beacon_compute_key_hash_from_cdr_key_only");
     check(Beacon_compute_key_hash(&b, bhash_from_struct), "Beacon_compute_key_hash");
     assert(memcmp(bhash_from_key, bhash_from_struct, 16) == 0);
 

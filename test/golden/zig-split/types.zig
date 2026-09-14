@@ -47,12 +47,6 @@ pub const Point = extern struct {
         out.y = try reader.readI32();
     }
 
-    pub fn deserialize(reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !@This() {
-        var _out: @This() = .{};
-        try @This().deserializeInto(&_out, reader, allocator);
-        return _out;
-    }
-
     pub fn skip(reader: *zidl_rt.CdrReader) !void {
         _ = try reader.readI32();
         _ = try reader.readI32();
@@ -154,12 +148,6 @@ pub const Sample = struct {
         try Point.deserializeInto(&out.nested, reader, allocator);
     }
 
-    pub fn deserialize(reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !@This() {
-        var _out: @This() = .{};
-        try @This().deserializeInto(&_out, reader, allocator);
-        return _out;
-    }
-
     pub fn skip(reader: *zidl_rt.CdrReader) !void {
         _ = try reader.readU32();
         _ = try reader.readBool();
@@ -187,20 +175,14 @@ pub const Sample = struct {
         try writer.writeU32(value.id);
     }
 
-    pub fn deserializeKey(reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !@This() {
-        var _out: @This() = .{};
-        try @This().deserializeKeyInto(&_out, reader, allocator);
-        return _out;
-    }
-
     pub fn deserializeKeyInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {
         _ = allocator;
         out.id = try reader.readU32();
     }
 
-    pub fn computeKeyHash(value: @This()) [16]u8 {
+    pub fn computeKeyHash(value: *const @This()) [16]u8 {
         var _khw = zidl_rt.KeyHashWriter.init();
-        @This().serializeKey(&_khw, value) catch unreachable;
+        @This().serializeKey(&_khw, value.*) catch unreachable;
         return _khw.final();
     }
 
@@ -265,12 +247,6 @@ pub const Frame = struct {
         out.topic = try reader.readString(allocator);
     }
 
-    pub fn deserialize(reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !@This() {
-        var _out: @This() = .{};
-        try @This().deserializeInto(&_out, reader, allocator);
-        return _out;
-    }
-
     pub fn skip(reader: *zidl_rt.CdrReader) !void {
         if (reader.xcdr_version == .xcdr2) {
             const _size = try reader.readDheader();
@@ -322,12 +298,6 @@ pub const Beacon = struct {
         out.payload = try reader.readString(allocator);
     }
 
-    pub fn deserialize(reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !@This() {
-        var _out: @This() = .{};
-        try @This().deserializeInto(&_out, reader, allocator);
-        return _out;
-    }
-
     pub fn skip(reader: *zidl_rt.CdrReader) !void {
         if (reader.xcdr_version == .xcdr2) {
             const _size = try reader.readDheader();
@@ -344,12 +314,6 @@ pub const Beacon = struct {
         writer.patchDheaderMaybe(_dh);
     }
 
-    pub fn deserializeKey(reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !@This() {
-        var _out: @This() = .{};
-        try @This().deserializeKeyInto(&_out, reader, allocator);
-        return _out;
-    }
-
     pub fn deserializeKeyInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {
         _ = allocator;
         const _key_end: ?usize = if (reader.xcdr_version == .xcdr2) blk: {
@@ -360,9 +324,9 @@ pub const Beacon = struct {
         if (_key_end) |_end| try reader.seekTo(_end);
     }
 
-    pub fn computeKeyHash(value: @This()) [16]u8 {
+    pub fn computeKeyHash(value: *const @This()) [16]u8 {
         var _khw = zidl_rt.KeyHashWriter.init();
-        @This().serializeKey(&_khw, value) catch unreachable;
+        @This().serializeKey(&_khw, value.*) catch unreachable;
         return _khw.final();
     }
 

@@ -86,6 +86,55 @@ test "deserializeSelected: extracts a non-leading @key, skips large non-key memb
     try testing.expectEqual(@as(fixture.KeyedBlob.FieldMask, 1 << 1), fixture.KeyedBlob.KEY_FIELD_MASK);
 }
 
+test "computeKeyHashFromCdr: full ALIVE payload with a non-leading @key hashes correctly" {
+    // Regression for the bug computeKeyHashFromCdr/computeKeyHashFromCdrKeyOnly
+    // were split to fix: the key-only decoder (deserializeKeyInto) assumes the
+    // wire bytes are *just* the key fields, back to back. Fed a full sample
+    // instead, it can't skip `prefix` first, so it would misread `id`'s bytes
+    // out of `prefix`'s length prefix/content. computeKeyHashFromCdr uses
+    // deserializeSelected(KEY_FIELD_MASK) instead, which skips non-key members
+    // properly regardless of where `@key` sits.
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(testing.allocator);
+    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    try writer.writeEncapHeaderDelimited();
+    const value = fixture.KeyedBlob{
+        .prefix = "a-prefix-that-should-be-skipped",
+        .id = 0x0BADF00D,
+        .blob = .{},
+    };
+    try fixture.KeyedBlob.serialize(&writer, value);
+
+    const alloc: std.mem.Allocator = testing.allocator;
+    const got = fixture.KeyedBlob.computeKeyHashFromCdr(@ptrCast(@constCast(&alloc)), buf.items);
+    const want = fixture.KeyedBlob.computeKeyHash(&value);
+    try testing.expectEqualSlices(u8, &want, &got);
+}
+
+test "computeKeyHashFromCdrKeyOnly: genuine key-only payload with a non-leading @key hashes correctly" {
+    // The key-only decoder's own contract (wire bytes are *just* the @key
+    // members) is unambiguous regardless of position -- serializeKey never
+    // emits non-key bytes to skip over. This is what the removed
+    // @compileError used to block outright for a non-leading @key on a
+    // @final struct; KeyedBlob is @appendable, but the underlying decode
+    // logic is the same "no skip needed" reasoning either way.
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(testing.allocator);
+    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    try writer.writeEncapHeaderDelimited();
+    const value = fixture.KeyedBlob{
+        .prefix = "irrelevant-to-a-key-only-payload",
+        .id = 0x0BADF00D,
+        .blob = .{},
+    };
+    try fixture.KeyedBlob.serializeKey(&writer, value);
+
+    const alloc: std.mem.Allocator = testing.allocator;
+    const got = fixture.KeyedBlob.computeKeyHashFromCdrKeyOnly(@ptrCast(@constCast(&alloc)), buf.items);
+    const want = fixture.KeyedBlob.computeKeyHash(&value);
+    try testing.expectEqualSlices(u8, &want, &got);
+}
+
 test "getFieldFromCdr: decodes only the referenced field, skips the rest" {
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(testing.allocator);

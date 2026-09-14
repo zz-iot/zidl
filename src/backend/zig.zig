@@ -974,19 +974,6 @@ const Generator = struct {
         try self.ind();
         try self.write("    }\n");
 
-        // ── deserialize (convenience) ─────────────────────────────────────────
-        try self.write("\n");
-        try self.ind();
-        try self.write("    pub fn deserialize(reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !@This() {\n");
-        try self.ind();
-        try self.write("        var _out: @This() = .{};\n");
-        try self.ind();
-        try self.write("        try @This().deserializeInto(&_out, reader, allocator);\n");
-        try self.ind();
-        try self.write("        return _out;\n");
-        try self.ind();
-        try self.write("    }\n");
-
         // ── skip ──────────────────────────────────────────────────────────────
         try self.write("\n");
         try self.ind();
@@ -3730,20 +3717,7 @@ const Generator = struct {
         try self.ind();
         try self.write("    }\n\n");
 
-        // deserialize (convenience wrapper)
-        try self.ind();
-        try self.write("    pub fn deserialize(reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !@This() {\n");
-        try self.ind();
-        try self.write("        var _out: @This() = .{};\n");
-        try self.ind();
-        try self.write("        try @This().deserializeInto(&_out, reader, allocator);\n");
-        try self.ind();
-        try self.write("        return _out;\n");
-        try self.ind();
-        try self.write("    }\n");
-
         // skip (allocation-free fast-forward over one full serialized sample)
-        try self.write("\n");
         try self.ind();
         try self.write("    pub fn skip(reader: *zidl_rt.CdrReader) !void {\n");
         if (mutable) {
@@ -3813,18 +3787,6 @@ const Generator = struct {
 
             try self.write("\n");
             try self.ind();
-            try self.write("    pub fn deserializeKey(reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !@This() {\n");
-            try self.ind();
-            try self.write("        var _out: @This() = .{};\n");
-            try self.ind();
-            try self.write("        try @This().deserializeKeyInto(&_out, reader, allocator);\n");
-            try self.ind();
-            try self.write("        return _out;\n");
-            try self.ind();
-            try self.write("    }\n");
-
-            try self.write("\n");
-            try self.ind();
             try self.write("    pub fn deserializeKeyInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {\n");
             if (!structKeyNeedsAllocator(s)) {
                 try self.ind();
@@ -3884,30 +3846,18 @@ const Generator = struct {
                         try self.print("        try {s}.skip(reader);\n", .{base_zig});
                     }
                 }
-                // @final structs have no DHEADER bound.  deserializeKeyInto
-                // expects a key-only payload whose bytes are the key fields in
-                // declaration order.  If a non-key member precedes a key member,
-                // the reader position is wrong for any full-payload caller.
-                // Emit a @compileError so the user gets a clear diagnosis.
-                if (!appendable) {
-                    var saw_non_key = false;
-                    for (s.members) |m| {
-                        if (m.annotations.is_key) {
-                            if (saw_non_key) {
-                                try self.ind();
-                                try self.print(
-                                    "        @compileError(\"zidl: @final struct '{s}' has non-leading @key member '{s}'; \" ++\n",
-                                    .{ s.name, m.name },
-                                );
-                                try self.ind();
-                                try self.write("            \"move all @key members before non-key members, or switch to @appendable\");\n");
-                                break;
-                            }
-                        } else {
-                            saw_non_key = true;
-                        }
-                    }
-                }
+                // @final structs have no DHEADER bound, so deserializeKeyInto
+                // just reads the key members in declaration order with no
+                // skips. That is unconditionally correct here, leading key or
+                // not: this function's contract is "the wire bytes are a
+                // key-only payload" (nothing but the @key members, back to
+                // back -- see serializeKey, which never emits non-key bytes),
+                // so there is nothing between two key members to skip
+                // regardless of their position in the full struct. A
+                // non-leading @key member only becomes a hazard if this
+                // function is fed a *full* sample instead -- that caller
+                // wants computeKeyHashFromCdr (deserializeSelected-based),
+                // not this one.
                 for (s.members) |m| {
                     if (m.annotations.is_key) {
                         const out_expr = try std.fmt.allocPrint(self.alloc, "out.{s}", .{m.name});
@@ -3925,11 +3875,11 @@ const Generator = struct {
 
             try self.write("\n");
             try self.ind();
-            try self.write("    pub fn computeKeyHash(value: @This()) [16]u8 {\n");
+            try self.write("    pub fn computeKeyHash(value: *const @This()) [16]u8 {\n");
             try self.ind();
             try self.write("        var _khw = zidl_rt.KeyHashWriter.init();\n");
             try self.ind();
-            try self.write("        @This().serializeKey(&_khw, value) catch unreachable;\n");
+            try self.write("        @This().serializeKey(&_khw, value.*) catch unreachable;\n");
             try self.ind();
             try self.write("        return _khw.final();\n");
             try self.ind();
@@ -3937,6 +3887,7 @@ const Generator = struct {
 
             if (self.opts.generate_zzdds_wrappers and isZzddsTopicStruct(s)) {
                 try self.emitComputeKeyHashFromCdr(s);
+                try self.emitComputeKeyHashFromCdrKeyOnly(s);
                 try self.emitGetFieldFromCdr(s);
                 try self.emitSelectiveFns(s);
             }
@@ -3979,18 +3930,6 @@ const Generator = struct {
 
             try self.write("\n");
             try self.ind();
-            try self.write("    pub fn deserializeKey(reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !@This() {\n");
-            try self.ind();
-            try self.write("        var _out: @This() = .{};\n");
-            try self.ind();
-            try self.write("        try @This().deserializeKeyInto(&_out, reader, allocator);\n");
-            try self.ind();
-            try self.write("        return _out;\n");
-            try self.ind();
-            try self.write("    }\n");
-
-            try self.write("\n");
-            try self.ind();
             try self.write("    pub fn deserializeKeyInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {\n");
             try self.ind();
             try self.write("        _ = out;\n");
@@ -4009,7 +3948,7 @@ const Generator = struct {
 
             try self.write("\n");
             try self.ind();
-            try self.write("    pub fn computeKeyHash(value: @This()) [16]u8 {\n");
+            try self.write("    pub fn computeKeyHash(value: *const @This()) [16]u8 {\n");
             try self.ind();
             try self.write("        _ = value;\n");
             try self.ind();
@@ -4018,6 +3957,7 @@ const Generator = struct {
             try self.write("    }\n");
 
             try self.emitComputeKeyHashFromCdr(s);
+            try self.emitComputeKeyHashFromCdrKeyOnly(s);
             try self.emitGetFieldFromCdr(s);
             try self.emitSelectiveFns(s);
         }
@@ -4282,27 +4222,35 @@ const Generator = struct {
     /// zidl-generated code can be passed directly to `_zzdds.registerTypeSupport`
     /// without the caller hand-writing the CDR-deserialize-then-hash glue.
     ///
+    /// Contract: `payload` is a **complete serialized sample** (an ALIVE
+    /// write), not a key-only payload. Uses `deserializeSelected(KEY_FIELD_MASK)`
+    /// (always generated alongside this function; see `emitSelectiveFns`),
+    /// which walks every member in declaration order, decoding the `@key`
+    /// ones and *skipping* (not decoding) the rest -- so a non-leading `@key`
+    /// member is read correctly regardless of what precedes it. This is the
+    /// name a caller should reach for by default; `computeKeyHashFromCdrKeyOnly`
+    /// below is the narrower sibling for a genuine key-only wire payload
+    /// (RTPS DISPOSE/UNREGISTER, the K flag case).
+    ///
     /// Unlike the C backend (which resolves its allocator from a global,
     /// process-wide override defaulting to malloc/free -- see zidl-cdr's
     /// `zidl_cdr_set_allocator`), this stays consistent with the rest of the
     /// Zig runtime's explicit-allocator idiom: `ctx` is a `*const
     /// std.mem.Allocator` supplied by the caller at registration time (via
     /// `TypeSupport.ctx`), used only for any variable-length key fields
-    /// `deserializeKey` needs to allocate. Keyless structs never dereference
-    /// it, matching `TypeSupport.ctx`'s existing "Zig-native implementations
-    /// that need no state may pass `undefined`" contract.
+    /// `deserializeSelected` needs to allocate. Keyless structs never
+    /// dereference it, matching `TypeSupport.ctx`'s existing "Zig-native
+    /// implementations that need no state may pass `undefined`" contract.
     ///
     /// `_key_value` is a fully local temporary -- nothing else ever sees it --
-    /// so whenever `s` has a generated `deinit()` (`structNeedsCleanup(s)`),
-    /// it's freed via `defer` before returning, regardless of whether the
-    /// heap-owned field that made `deinit()` exist is itself one of the `@key`
-    /// members `deserializeKey` actually populated (freeing an untouched,
-    /// still-zeroed field is always a safe no-op, matching how `deinit()`
-    /// itself handles it). Without this, every hash computation on a keyed
-    /// struct with a variable-length key field (a string or unbounded
-    /// sequence) would leak.
+    /// so `deinitSelected` runs via `defer` unconditionally, success or
+    /// failure: `deserializeSelected` zeroes `_key_value` before touching any
+    /// field, and `deinitSelected`'s own contract is "safe on a
+    /// zeroed-then-partially-filled value" (see `emitSelectiveFns`'s doc
+    /// comment) -- it never double-frees a field that decode never reached or
+    /// that failed before allocating.
     fn emitComputeKeyHashFromCdr(self: *Generator, s: *const ir.Struct) !void {
-        const needs_cleanup = self.structNeedsCleanup(s);
+        _ = s;
         try self.write("\n");
         try self.ind();
         try self.write("    pub fn computeKeyHashFromCdr(ctx: *anyopaque, payload: []const u8) [16]u8 {\n");
@@ -4311,13 +4259,45 @@ const Generator = struct {
         try self.ind();
         try self.write("        var _reader = zidl_rt.CdrReader.init(payload) catch return std.mem.zeroes([16]u8);\n");
         try self.ind();
-        try self.print("        {s} _key_value = @This().deserializeKey(&_reader, allocator.*) catch return std.mem.zeroes([16]u8);\n", .{if (needs_cleanup) "var" else "const"});
+        try self.write("        var _key_value: @This() = .{};\n");
+        try self.ind();
+        try self.write("        defer _key_value.deinitSelected(@This().KEY_FIELD_MASK, allocator.*);\n");
+        try self.ind();
+        try self.write("        @This().deserializeSelected(&_reader, @This().KEY_FIELD_MASK, &_key_value, allocator.*) catch return std.mem.zeroes([16]u8);\n");
+        try self.ind();
+        try self.write("        return @This().computeKeyHash(&_key_value);\n");
+        try self.ind();
+        try self.write("    }\n");
+    }
+
+    /// Emit `computeKeyHashFromCdrKeyOnly`, the narrow sibling of
+    /// `computeKeyHashFromCdr` above for a genuine key-only wire payload --
+    /// RTPS DISPOSE/UNREGISTER (the DATA submessage K flag case), where
+    /// `payload` contains *only* the `@key` members, back to back, nothing
+    /// else. Uses `deserializeKeyInto`, which assumes exactly that shape and
+    /// is correct for it regardless of where the `@key` members sit in the
+    /// struct's declared member order -- `serializeKey` never writes non-key
+    /// bytes, so there is nothing to skip. Do not call this with a full ALIVE
+    /// sample; use `computeKeyHashFromCdr` for that.
+    fn emitComputeKeyHashFromCdrKeyOnly(self: *Generator, s: *const ir.Struct) !void {
+        const needs_cleanup = self.structNeedsCleanup(s);
+        try self.write("\n");
+        try self.ind();
+        try self.write("    pub fn computeKeyHashFromCdrKeyOnly(ctx: *anyopaque, payload: []const u8) [16]u8 {\n");
+        try self.ind();
+        try self.write("        const allocator: *const std.mem.Allocator = @ptrCast(@alignCast(ctx));\n");
+        try self.ind();
+        try self.write("        var _reader = zidl_rt.CdrReader.init(payload) catch return std.mem.zeroes([16]u8);\n");
+        try self.ind();
+        try self.write("        var _key_value: @This() = .{};\n");
         if (needs_cleanup) {
             try self.ind();
             try self.write("        defer _key_value.deinit(allocator.*);\n");
         }
         try self.ind();
-        try self.write("        return @This().computeKeyHash(_key_value);\n");
+        try self.write("        @This().deserializeKeyInto(&_key_value, &_reader, allocator.*) catch return std.mem.zeroes([16]u8);\n");
+        try self.ind();
+        try self.write("        return @This().computeKeyHash(&_key_value);\n");
         try self.ind();
         try self.write("    }\n");
     }
@@ -4632,7 +4612,7 @@ const Generator = struct {
         // the DataWriter handle is not needed (C ABI accepts it for spec completeness but ignores it).
         try self.print("    pub fn register_instance(_: @This(), instance_data: {s}) _zzdds.DDS.InstanceHandle_t {{\n", .{type_name});
         try self.ind();
-        try self.print("        return _zzdds.registerInstanceRaw({s}.computeKeyHash(instance_data));\n", .{type_name});
+        try self.print("        return _zzdds.registerInstanceRaw({s}.computeKeyHash(&instance_data));\n", .{type_name});
         try self.ind();
         try self.write("    }\n");
 
@@ -4663,7 +4643,7 @@ const Generator = struct {
         try self.ind();
         try self.print("    pub fn lookup_instance(_: @This(), instance_data: {s}) _zzdds.DDS.InstanceHandle_t {{\n", .{type_name});
         try self.ind();
-        try self.print("        return _zzdds.lookupInstanceWriter({s}.computeKeyHash(instance_data));\n", .{type_name});
+        try self.print("        return _zzdds.lookupInstanceWriter({s}.computeKeyHash(&instance_data));\n", .{type_name});
         try self.ind();
         try self.write("    }\n");
 
@@ -4770,7 +4750,7 @@ const Generator = struct {
         try self.ind();
         try self.print("    pub fn lookup_instance(self: @This(), instance_data: {s}) ?_zzdds.DDS.InstanceHandle_t {{\n", .{type_name});
         try self.ind();
-        try self.print("        const _ih = _zzdds.registerInstanceRaw({s}.computeKeyHash(instance_data));\n", .{type_name});
+        try self.print("        const _ih = _zzdds.registerInstanceRaw({s}.computeKeyHash(&instance_data));\n", .{type_name});
         try self.ind();
         try self.write("        return _zzdds.lookupInstanceReader(self._dr, _ih);\n");
         try self.ind();
@@ -4811,7 +4791,7 @@ const Generator = struct {
         try self.ind();
         try self.write("        if (_raw.info.valid_data) {\n");
         try self.ind();
-        try self.print("            data_value.* = try {s}.deserialize(&_r, self._alloc);\n", .{type_name});
+        try self.print("            try {s}.deserializeInto(data_value, &_r, self._alloc);\n", .{type_name});
         try self.ind();
         try self.write("        } else {\n");
         if (needs_deinit) {
@@ -4954,23 +4934,21 @@ const Generator = struct {
         try self.ind();
         try self.write("            var _r = try zidl_rt.CdrReader.init(_s.data);\n");
         try self.ind();
-        try self.write("            const _v = if (_s.info.valid_data)\n");
+        try self.print("            var _v: {s} = .{{}};\n", .{type_name});
         try self.ind();
-        try self.print("                try {s}.deserialize(&_r, self._alloc)\n", .{type_name});
+        try self.write("            if (_s.info.valid_data) {\n");
         try self.ind();
-        try self.write("            else blk: {\n");
+        try self.print("                try {s}.deserializeInto(&_v, &_r, self._alloc);\n", .{type_name});
         try self.ind();
-        try self.print("                var _kv: {s} = .{{}};\n", .{type_name});
+        try self.write("            } else {\n");
         if (needs_deinit) {
             try self.ind();
-            try self.write("                errdefer _kv.deinit(self._alloc);\n");
+            try self.write("                errdefer _v.deinit(self._alloc);\n");
         }
         try self.ind();
-        try self.print("                try {s}.deserializeKeyInto(&_kv, &_r, self._alloc);\n", .{type_name});
+        try self.print("                try {s}.deserializeKeyInto(&_v, &_r, self._alloc);\n", .{type_name});
         try self.ind();
-        try self.write("                break :blk _kv;\n");
-        try self.ind();
-        try self.write("            };\n");
+        try self.write("            }\n");
         try self.ind();
         try self.write("            out.appendAssumeCapacity(.{ .value = _v, .info = _s.info });\n");
         try self.ind();
@@ -5032,7 +5010,7 @@ const Generator = struct {
         try self.ind();
         try self.write("        }\n");
         try self.ind();
-        try self.print("        const _hash = {s}.computeKeyHash({s});\n", .{ type_name, param_name });
+        try self.print("        const _hash = {s}.computeKeyHash(&{s});\n", .{ type_name, param_name });
         try self.ind();
         try self.print("        try {s}(self._dw, .{s}, _hash, _buf.items{s});\n", .{ write_fn, kind_str, ts_arg });
         try self.ind();
@@ -8032,9 +8010,8 @@ test "zig_backend: serialize @final struct primitives" {
     try testing.expect(has(s, "out.flag = try reader.readBool();"));
     // No allocator needed for scalars only
     try testing.expect(has(s, "_ = allocator;"));
-    // deserialize convenience wrapper
-    try testing.expect(has(s, "pub fn deserialize(reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !@This() {"));
-    try testing.expect(has(s, "var _out: @This() = .{};"));
+    // No value-returning deserialize convenience wrapper -- out-param only.
+    try testing.expect(!has(s, "pub fn deserialize(reader"));
     // No serializeKey (no @key)
     try testing.expect(!has(s, "serializeKey"));
 }
@@ -8071,26 +8048,32 @@ test "zig_backend: @appendable keyed struct emits DHEADER in serializeKey" {
     try testing.expect(has(s, "writer.patchDheaderMaybe(_dh);"));
 }
 
-test "zig_backend: keyed struct emits deserializeKey and computeKeyHash" {
+test "zig_backend: keyed struct emits deserializeKeyInto and computeKeyHash" {
     var out = try testGen("struct Msg { @key long id; string label; };", "msg");
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "pub fn deserializeKey(reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !@This() {"));
+    // Out-param only -- no value-returning deserializeKey.
+    try testing.expect(!has(s, "pub fn deserializeKey(reader"));
     try testing.expect(has(s, "pub fn deserializeKeyInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {"));
     try testing.expect(has(s, "out.id = try reader.readI32();"));
-    try testing.expect(has(s, "pub fn computeKeyHash(value: @This()) [16]u8 {"));
+    try testing.expect(has(s, "pub fn computeKeyHash(value: *const @This()) [16]u8 {"));
     try testing.expect(has(s, "var _khw = zidl_rt.KeyHashWriter.init();"));
 }
 
-test "zig_backend: @final struct with non-leading key emits compileError in deserializeKeyInto" {
+test "zig_backend: @final struct with non-leading key compiles cleanly (no compileError)" {
     var out = try testGen("struct Msg { string label; @key long id; };", "msg");
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // @compileError must appear in the generated deserializeKeyInto body.
-    try testing.expect(has(s, "@compileError(\"zidl: @final struct 'Msg' has non-leading @key member 'id'"));
+    // Non-leading @key on @final is legal: deserializeKeyInto's contract is
+    // "key-only wire bytes", which is unambiguous regardless of member
+    // position (serializeKey never emits non-key bytes to skip over). The
+    // compile-time guard this used to trip was removed once the full-payload
+    // path (computeKeyHashFromCdr) got its own correctly-skipping decoder.
+    try testing.expect(!has(s, "@compileError(\"zidl: @final struct"));
+    try testing.expect(has(s, "out.id = try reader.readI32();"));
     // serializeKey and computeKeyHash are still generated normally.
     try testing.expect(has(s, "pub fn serializeKey(writer: anytype, value: @This()) !void {"));
-    try testing.expect(has(s, "pub fn computeKeyHash(value: @This()) [16]u8 {"));
+    try testing.expect(has(s, "pub fn computeKeyHash(value: *const @This()) [16]u8 {"));
 }
 
 test "zig_backend: keyless struct does not emit key helpers" {
@@ -9605,7 +9588,7 @@ test "zig_backend: typed DataWriter/DataReader for keyed @appendable struct" {
     try testing.expect(has(s, "info: _zzdds.DDS.SampleInfo,"));
     try testing.expect(has(s, "pub fn take_next_sample(self: @This(), data_value: *ShapeType, sample_info: *_zzdds.DDS.SampleInfo) !bool {"));
     try testing.expect(has(s, "_zzdds.takeRaw(self._dr)"));
-    try testing.expect(has(s, "ShapeType.deserialize(&_r, self._alloc)"));
+    try testing.expect(has(s, "ShapeType.deserializeInto(data_value, &_r, self._alloc)"));
     // no SampledValue.deinit — ShapeType has no unbounded sequences
     try testing.expect(!has(s, "pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {"));
 }
@@ -9634,7 +9617,7 @@ test "zig_backend: typed DataReader gets take_w_condition/read_w_condition and t
 
     // Shared decode tail must still fire for the new methods too (proves the
     // emitReaderDecodeTmpTail extraction didn't drop anything).
-    try testing.expect(has(s, "ShapeType.deserialize(&_r, self._alloc)"));
+    try testing.expect(has(s, "ShapeType.deserializeInto(&_v, &_r, self._alloc)"));
 }
 
 test "zig_backend: typed DataWriter uses writeEncapHeader for @final struct" {
@@ -9668,10 +9651,11 @@ test "zig_backend: keyless struct gets trivial key helpers under --generate-zzdd
     var out = try testGenOpts("struct NoKey { long x; long y; };", "nk", .{ .generate_zzdds_wrappers = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "pub fn computeKeyHash(value: @This()) [16]u8 {"));
+    try testing.expect(has(s, "pub fn computeKeyHash(value: *const @This()) [16]u8 {"));
     try testing.expect(has(s, "return std.mem.zeroes([16]u8);"));
     try testing.expect(has(s, "pub fn serializeKey(writer: anytype, value: @This()) !void {"));
-    try testing.expect(has(s, "pub fn deserializeKey(reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !@This() {"));
+    // Out-param only -- no value-returning deserializeKey.
+    try testing.expect(!has(s, "pub fn deserializeKey(reader"));
     try testing.expect(has(s, "pub fn deserializeKeyInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {"));
 }
 

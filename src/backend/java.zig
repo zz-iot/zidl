@@ -1899,42 +1899,16 @@ const Generator = struct {
                         try self.print("    {s}.skip(_buf, _cdrBase, _xcdrVersion);\n", .{qname});
                     }
                 }
-                // Key-only payload — read key members, no skips. Throw if a
-                // non-key member precedes a key member; full-payload callers
-                // would silently read wrong bytes. Applies whenever there's
-                // no DHEADER to bound the read: @final always (unconditional
-                // -- final types never have a DHEADER, regardless of
-                // _xcdrVersion), @appendable only under XCDR1 (runtime-gated,
-                // since the same generated deserializeKeyInto handles both
-                // XCDR1 and XCDR2 calls for an appendable type).
-                const check_indent = if (appendable) "        " else "    ";
-                if (appendable) {
-                    try self.ind();
-                    try self.write("    if (_xcdrVersion != 2) {\n");
-                }
-                {
-                    var saw_non_key = false;
-                    for (s.members) |m| {
-                        if (m.annotations.is_key) {
-                            if (saw_non_key) {
-                                try self.ind();
-                                try self.print(
-                                    "{s}throw new UnsupportedOperationException(\"zidl: @{s} struct '{s}' has non-leading @key member '{s}'; \" +\n",
-                                    .{ check_indent, if (appendable) "appendable" else "final", s.name, m.name },
-                                );
-                                try self.ind();
-                                try self.print("{s}    \"move all @key members before non-key members, or use XCDR2\");\n", .{check_indent});
-                                break;
-                            }
-                        } else {
-                            saw_non_key = true;
-                        }
-                    }
-                }
-                if (appendable) {
-                    try self.ind();
-                    try self.write("    }\n");
-                }
+                // Key-only payload -- reads key members in order, no skips.
+                // Unconditionally correct here regardless of position: this
+                // method's contract is "the wire bytes are a key-only
+                // payload" (nothing but the @key members, back to back --
+                // see serializeKeyFields, which never emits non-key bytes),
+                // so there is nothing between two key members to skip. A
+                // non-leading @key member is only a hazard if this method is
+                // fed a *full* sample instead -- that caller wants
+                // computeKeyHashFromCdr (deserializeFrom-based, above), not
+                // deserializeKey/deserializeKeyInto.
                 for (s.members) |m| {
                     if (m.annotations.is_key) {
                         try self.emitMemberDeserializeKey(m, "_out", "    ");
@@ -2004,6 +1978,28 @@ const Generator = struct {
             try self.ind();
             try self.write("}\n");
 
+            // Narrower sibling of computeKeyHashFromCdr above, for a genuine
+            // key-only wire payload (RTPS DISPOSE/UNREGISTER: nothing but the
+            // @key members, back to back). Uses deserializeKey, which is
+            // correct for that shape regardless of where @key sits in the
+            // struct -- do not feed this a full sample; use the unsuffixed
+            // computeKeyHashFromCdr for that.
+            try self.write("\n");
+            try self.ind();
+            try self.print("public static byte[] computeKeyHashFromCdrKeyOnly(byte[] _payload) {{\n", .{});
+            try self.ind();
+            try self.write("    java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(_payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
+            try self.ind();
+            try self.write("    int _xcdrVersion = _cdrDetectXcdr(_payload);\n");
+            try self.ind();
+            try self.write("    _buf.position(4);\n");
+            try self.ind();
+            try self.print("    {s}{s} _obj = deserializeKey(_buf, 4, _xcdrVersion);\n", .{ self.opts.type_prefix, s.name });
+            try self.ind();
+            try self.write("    return _obj.computeKeyHash();\n");
+            try self.ind();
+            try self.write("}\n");
+
             try self.emitGetFieldFromCdr(s);
             try self.emitSelectiveFnsJava(s, appendable);
         } else if (self.opts.generate_zzdds_wrappers and isZzddsTopicStructJava(s)) {
@@ -2048,6 +2044,14 @@ const Generator = struct {
             try self.write("\n");
             try self.ind();
             try self.print("public static byte[] computeKeyHashFromCdr(byte[] _payload) {{\n", .{});
+            try self.ind();
+            try self.write("    return new byte[16];\n");
+            try self.ind();
+            try self.write("}\n");
+
+            try self.write("\n");
+            try self.ind();
+            try self.print("public static byte[] computeKeyHashFromCdrKeyOnly(byte[] _payload) {{\n", .{});
             try self.ind();
             try self.write("    return new byte[16];\n");
             try self.ind();
@@ -8711,7 +8715,7 @@ test "java: mutable struct DHEADER stays unconditional regardless of _xcdrVersio
     try testing.expect(std.mem.indexOf(u8, out.items, "if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); int _dhPos") == null);
 }
 
-test "java: appendable struct under XCDR1 falls back to per-member skip and enforces leading-@key order" {
+test "java: appendable struct under XCDR1 falls back to per-member skip" {
     const alloc = testing.allocator;
     // skip(): no DHEADER length to trust under XCDR1, so it must fall back
     // to reading (and discarding) each member individually -- this was a
@@ -8731,17 +8735,32 @@ test "java: appendable struct under XCDR1 falls back to per-member skip and enfo
     try testGen(alloc,
         \\@appendable struct S { long a; string b; };
     , "test", "_cdrReadString(_buf, _cdrBase);\n");
+}
 
-    // deserializeKeyInto(): same reasoning applies to key-only payloads, and
-    // the "@key members must be leading" constraint (previously enforced
-    // only for @final) must now also apply when an @appendable type is read
-    // as XCDR1, since there's equally no DHEADER to bound the read.
-    try testGen(alloc,
-        \\@appendable struct S { long a; @key long b; };
-    , "test", "if (_xcdrVersion != 2) {");
-    try testGen(alloc,
-        \\@appendable struct S { long a; @key long b; };
-    , "test", "throw new UnsupportedOperationException(\"zidl: @appendable struct 'S' has non-leading @key member 'b'; \" +");
+test "java: appendable struct with non-leading @key has no UnsupportedOperationException (guard removed)" {
+    // The removed guard used to throw at runtime for this IDL shape under
+    // XCDR1. Now legal: deserializeKey's key-only contract is unambiguous
+    // regardless of @key position (serializeKeyFields never emits non-key
+    // bytes), and a full-payload caller has its own correctly-decoding
+    // method (computeKeyHashFromCdr, deserializeFrom-based) to reach for
+    // instead.
+    const alloc = testing.allocator;
+    const idl = "@appendable struct S { long a; @key long b; };";
+    try testGen(alloc, idl, "test", "_out.b = _buf.getInt();");
+
+    var ast_arena = std.heap.ArenaAllocator.init(alloc);
+    defer ast_arena.deinit();
+    var p = parser_mod.Parser.init(idl, ast_arena.allocator());
+    const spec = try p.parseSpecification();
+    var az = try semantic_mod.Analyzer.init(alloc);
+    defer az.deinit();
+    try az.analyze(&spec);
+    var ir_spec = try ir.build(alloc, &spec, az.global_scope, &.{});
+    defer ir_spec.deinit();
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    try generateFile(alloc, &ir_spec, .{ .input_stem = "test" }, &out);
+    try testing.expect(std.mem.indexOf(u8, out.items, "UnsupportedOperationException") == null);
 }
 
 test "java: CDR @key serializeKey" {
