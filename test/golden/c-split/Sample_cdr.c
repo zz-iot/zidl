@@ -169,7 +169,7 @@ int Sample_compute_key_hash(const Sample *_v, uint8_t _hash[16]) {
     return _rc;
 }
 
-int Sample_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {
+int Sample_compute_key_hash_from_cdr_key_only(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {
     ZidlCdrReader _r_data;
     int _rc = zidl_cdr_reader_init(&_r_data, _payload, _len);
     if (_rc) return _rc;
@@ -180,6 +180,19 @@ int Sample_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8
     _rc = zidl_cdr_read_u32(_r, &_v->id);
     if (_rc) return _rc;
     return Sample_compute_key_hash(_v, _hash);
+}
+
+int Sample_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {
+    ZidlCdrReader _r_data;
+    int _rc = zidl_cdr_reader_init(&_r_data, _payload, _len);
+    if (_rc) return _rc;
+    Sample _v_data;
+    memset(&_v_data, 0, sizeof(Sample));
+    _rc = Sample_deserialize(&_r_data, &_v_data);
+    if (_rc) { Sample_free(&_v_data); return _rc; }
+    _rc = Sample_compute_key_hash(&_v_data, _hash);
+    Sample_free(&_v_data);
+    return _rc;
 }
 
 void Sample_default(Sample *_v) {

@@ -631,6 +631,15 @@ const Generator = struct {
             try self.print("{s}{s}int {s}_serialize_key(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, c_name });
             try self.print("{s}{s}int {s}_deserialize_key(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, c_name });
             try self.print("{s}{s}int {s}_compute_key_hash(const {s} *_v, uint8_t _hash[16]);\n", .{ em, sp, c_name, c_name });
+            // Genuine key-only wire payload (RTPS DISPOSE/UNREGISTER): nothing
+            // but the @key members, back to back. Do not feed this a full
+            // sample -- see _compute_key_hash_from_cdr below for that.
+            try self.print("{s}{s}int {s}_compute_key_hash_from_cdr_key_only(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);\n", .{ em, sp, c_name });
+            // Complete ALIVE sample -> key hash. Decodes the whole sample via
+            // _deserialize (so a non-leading @key member is read correctly --
+            // no key-only-decoder skip hazard) and extracts just the key. The
+            // name to reach for by default; see _compute_key_hash_from_cdr_key_only
+            // above for the narrower key-only case.
             try self.print("{s}{s}int {s}_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);\n", .{ em, sp, c_name });
         }
         // Selective-parse family (see zig.zig's emitSelectiveFns): decode only
@@ -1842,8 +1851,8 @@ const CdrGenerator = struct {
     indent_depth: u32 = 1,
 
     /// When non-null, emitRcCheck / emitReturnRc emit goto instead of return.
-    /// Used in _compute_key_hash_from_cdr to ensure all exit paths free
-    /// heap-allocated key fields before returning.
+    /// Used in _compute_key_hash_from_cdr_key_only to ensure all exit paths
+    /// free heap-allocated key fields before returning.
     goto_label: ?[]const u8 = null,
 
     fn write(self: *CdrGenerator, s: []const u8) !void {
@@ -2285,26 +2294,16 @@ const CdrGenerator = struct {
                     }
                     try self.writeI("if (_rc) return _rc;\n");
                 }
-                // @final: key-only payload — read key members, no skips.
-                // Emit _Static_assert if a non-key member precedes a key member;
-                // full-payload callers would silently read wrong bytes.
-                if (!appendable) {
-                    var saw_non_key = false;
-                    for (s.members) |m| {
-                        if (m.annotations.is_key) {
-                            if (saw_non_key) {
-                                try self.printI(
-                                    "_Static_assert(0, \"zidl: @final struct '{s}' has non-leading @key member '{s}'; \"\n",
-                                    .{ s.name, m.name },
-                                );
-                                try self.writeI("    \"move all @key members before non-key members, or use @appendable\");\n");
-                                break;
-                            }
-                        } else {
-                            saw_non_key = true;
-                        }
-                    }
-                }
+                // @final: key-only payload -- reads key members in order, no
+                // skips. Unconditionally correct here regardless of position:
+                // this function's contract is "the wire bytes are a key-only
+                // payload" (nothing but the @key members, back to back --
+                // see _serialize_key, which never emits non-key bytes), so
+                // there is nothing between two key members to skip. A
+                // non-leading @key member is only a hazard if this function
+                // is fed a *full* sample instead -- that caller wants
+                // _compute_key_hash_from_cdr (_deserialize_selected-based),
+                // not this one.
                 for (s.members, 0..) |m, idx| {
                     if (m.annotations.is_key) {
                         try self.emitReadPresentMember(m, optBitIdxForMember(s.*, idx));
@@ -2335,9 +2334,12 @@ const CdrGenerator = struct {
             try self.writeI("return _rc;\n");
             try self.write("}\n\n");
 
-            // _compute_key_hash_from_cdr: compute key hash from raw CDR wire bytes
-            // (4-byte encapsulation header included).  Suitable as the function-pointer
-            // type for a DDS implementation's C-ABI TypeSupport registration API.
+            // _compute_key_hash_from_cdr_key_only: compute key hash from a
+            // genuine key-only CDR wire payload (4-byte encapsulation header
+            // included) -- RTPS DISPOSE/UNREGISTER, nothing but the @key
+            // members. Do not feed this a full sample; see the unified
+            // _compute_key_hash_from_cdr (deserialize_selected-based, emitted
+            // below alongside the selective-parse family) for that.
 
             // Compute needs_cleanup first — required before setting goto_label.
             const needs_cleanup = blk: {
@@ -2351,7 +2353,7 @@ const CdrGenerator = struct {
                 break :blk any;
             };
 
-            try self.print("int {s}_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {{\n", .{c_name});
+            try self.print("int {s}_compute_key_hash_from_cdr_key_only(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {{\n", .{c_name});
             try self.writeI("ZidlCdrReader _r_data;\n");
             try self.writeI("int _rc = zidl_cdr_reader_init(&_r_data, _payload, _len);\n");
             try self.writeI("if (_rc) return _rc;\n");
@@ -2452,6 +2454,39 @@ const CdrGenerator = struct {
                 try self.printI("return {s}_compute_key_hash(_v, _hash);\n", .{c_name});
             }
             try self.write("}\n\n");
+
+            // _compute_key_hash_from_cdr: complete ALIVE sample's wire bytes
+            // in, key hash out -- the name a caller should reach for by
+            // default (see _compute_key_hash_from_cdr_key_only above for the
+            // narrower key-only case). Decodes the *whole* sample via the
+            // already-correct, already-leak-safe _deserialize (so a
+            // non-leading @key member is read correctly -- no key-only-decoder
+            // skip hazard) and extracts just the key from the result, then
+            // frees it. Costs decoding non-key members it doesn't need, but
+            // this is a fallback path (only reached when a peer omits the
+            // inline key hash), not the hot path -- simplicity and reusing
+            // proven decode machinery win over a hand-rolled selective walk
+            // here. _v_data starts zeroed, and _free is documented safe on a
+            // zeroed-or-partially-decoded value, so freeing it unconditionally
+            // (success or failure) needs no goto_label bookkeeping.
+            try self.print("int {s}_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {{\n", .{c_name});
+            try self.writeI("ZidlCdrReader _r_data;\n");
+            try self.writeI("int _rc = zidl_cdr_reader_init(&_r_data, _payload, _len);\n");
+            try self.writeI("if (_rc) return _rc;\n");
+            try self.printI("{s} _v_data;\n", .{c_name});
+            try self.printI("memset(&_v_data, 0, sizeof({s}));\n", .{c_name});
+            try self.printI("_rc = {s}_deserialize(&_r_data, &_v_data);\n", .{c_name});
+            if (structHasSequenceFields(s)) {
+                try self.writeI("if (_rc) { ");
+                try self.print("{s}_free(&_v_data); return _rc; }}\n", .{c_name});
+                try self.printI("_rc = {s}_compute_key_hash(&_v_data, _hash);\n", .{c_name});
+                try self.printI("{s}_free(&_v_data);\n", .{c_name});
+            } else {
+                try self.writeI("if (_rc) return _rc;\n");
+                try self.printI("_rc = {s}_compute_key_hash(&_v_data, _hash);\n", .{c_name});
+            }
+            try self.writeI("return _rc;\n");
+            try self.write("}\n\n");
         } else if (self.opts.generate_zzdds_wrappers and isZzddsTopicStructC(s)) {
             // Keyless topic type but --generate-zzdds-wrappers was requested:
             // emit trivial key functions so emitStructZzddsWrappers' codegen
@@ -2488,6 +2523,13 @@ const CdrGenerator = struct {
 
             try self.print("int {s}_compute_key_hash(const {s} *_v, uint8_t _hash[16]) {{\n", .{ c_name, c_name });
             try self.writeI("(void)_v;\n");
+            try self.writeI("memset(_hash, 0, 16);\n");
+            try self.writeI("return ZIDL_CDR_OK;\n");
+            try self.write("}\n\n");
+
+            try self.print("int {s}_compute_key_hash_from_cdr_key_only(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {{\n", .{c_name});
+            try self.writeI("(void)_payload;\n");
+            try self.writeI("(void)_len;\n");
             try self.writeI("memset(_hash, 0, 16);\n");
             try self.writeI("return ZIDL_CDR_OK;\n");
             try self.write("}\n\n");
@@ -2720,7 +2762,7 @@ const CdrGenerator = struct {
 
         try self.print("int {s}TypeSupport_register(DDS_DomainParticipant participant, const char *type_name) {{\n", .{c_name});
         // A1: fallback uses IDL-scoped name (e.g. "ovidds::Frame"), not C-flat "ovidds_Frame"
-        try self.printI("return zzdds_register_type_support(participant, type_name ? type_name : \"{s}\", {s}_compute_key_hash_from_cdr, {s}_get_field_from_cdr);\n", .{ s.qualified_name, c_name, c_name });
+        try self.printI("return zzdds_register_type_support(participant, type_name ? type_name : \"{s}\", {s}_compute_key_hash_from_cdr, {s}_compute_key_hash_from_cdr_key_only, {s}_get_field_from_cdr);\n", .{ s.qualified_name, c_name, c_name, c_name });
         try self.write("}\n\n");
 
         try self.print("void {s}DataWriter_init({s}DataWriter *self, DDS_DataWriter writer, int xcdr_version) {{\n", .{ c_name, c_name });
@@ -5621,7 +5663,7 @@ test "c_backend: get_field_from_cdr generated for int/float/string members, skip
     try testing.expect(!has(s, "memcmp(_field, \"seq\""));
     try testing.expect(has(s, "Topic_deinit_selected(&_v, _fmask);\n    return _matched;"));
     // TypeSupport_register wires the new function in
-    try testing.expect(has(s, "zzdds_register_type_support(participant, type_name ? type_name : \"Topic\", Topic_compute_key_hash_from_cdr, Topic_get_field_from_cdr);"));
+    try testing.expect(has(s, "zzdds_register_type_support(participant, type_name ? type_name : \"Topic\", Topic_compute_key_hash_from_cdr, Topic_compute_key_hash_from_cdr_key_only, Topic_get_field_from_cdr);"));
 }
 
 test "c_backend: get_field_from_cdr with no filterable members always returns false" {
@@ -5941,8 +5983,8 @@ test "c_backend cdr: serialize @key member emits serialize_key" {
     try testing.expect(has(s, "zidl_cdr_write_i32(_w, _v->id)"));
 }
 
-test "c_backend cdr: compute_key_hash_from_cdr frees @key unbounded string" {
-    // Greptile PR #5: _compute_key_hash_from_cdr must free heap allocations
+test "c_backend cdr: compute_key_hash_from_cdr_key_only frees @key unbounded string" {
+    // Greptile PR #5: _compute_key_hash_from_cdr_key_only must free heap allocations
     // made by emitReadMember before returning, or it leaks on every hash call.
     var c_src = try testGenCdr("@final struct Msg { @key string tag; long value; };", "msg");
     defer c_src.deinit(testing.allocator);
@@ -5958,7 +6000,7 @@ test "c_backend cdr: compute_key_hash_from_cdr frees @key unbounded string" {
     try testing.expect(has(s, "if (_rc) goto _kh_cleanup;"));
 }
 
-test "c_backend cdr: compute_key_hash_from_cdr with @key sequence<long> frees buffer only" {
+test "c_backend cdr: compute_key_hash_from_cdr_key_only with @key sequence<long> frees buffer only" {
     // Primitive element sequence: only the buffer needs freeing, no element loop.
     var c_src = try testGenCdr("@final struct Msg { @key sequence<long> ids; long value; };", "msg");
     defer c_src.deinit(testing.allocator);
@@ -5970,7 +6012,7 @@ test "c_backend cdr: compute_key_hash_from_cdr with @key sequence<long> frees bu
     try testing.expect(!has(s, "_fsi"));
 }
 
-test "c_backend cdr: compute_key_hash_from_cdr with @key sequence<string> frees elements then buffer" {
+test "c_backend cdr: compute_key_hash_from_cdr_key_only with @key sequence<string> frees elements then buffer" {
     // Greptile PR #5: sequence<string> must free each char* element before the buffer.
     var c_src = try testGenCdr("@final struct Msg { @key sequence<string> tags; long value; };", "msg");
     defer c_src.deinit(testing.allocator);
@@ -5981,7 +6023,7 @@ test "c_backend cdr: compute_key_hash_from_cdr with @key sequence<string> frees 
     try testing.expect(has(s, "zidl_cdr_free(_v->tags._buffer,"));
 }
 
-test "c_backend cdr: compute_key_hash_from_cdr with @key string array frees each element" {
+test "c_backend cdr: compute_key_hash_from_cdr_key_only with @key string array frees each element" {
     // Greptile PR #5: string[N] as @key must free each char* in a loop, not just comment.
     var c_src = try testGenCdr("@final struct Msg { @key string name[3]; long value; };", "msg");
     defer c_src.deinit(testing.allocator);
@@ -5995,7 +6037,7 @@ test "c_backend cdr: compute_key_hash_from_cdr with @key string array frees each
     try testing.expect(!has(s, "/* NOTE:"));
 }
 
-test "c_backend cdr: compute_key_hash_from_cdr with only primitive key has no cleanup" {
+test "c_backend cdr: compute_key_hash_from_cdr_key_only with only primitive key has no cleanup" {
     // Primitive @key fields don't allocate: direct return is correct.
     var c_src = try testGenCdr("@final struct Sample { @key unsigned long id; string name; };", "sample");
     defer c_src.deinit(testing.allocator);
@@ -6003,6 +6045,61 @@ test "c_backend cdr: compute_key_hash_from_cdr with only primitive key has no cl
     try testing.expect(has(s, "return Sample_compute_key_hash(_v, _hash)"));
     // No free/result split needed
     try testing.expect(!has(s, "free((void *)_v->name)")); // name is not @key
+}
+
+test "c_backend cdr: compute_key_hash_from_cdr (unsuffixed) uses full deserialize, not the key-only decoder" {
+    // Unconditional, like compute_key_hash_from_cdr_key_only -- no
+    // --generate-zzdds-wrappers needed. Non-leading @key: label precedes id.
+    // The key-only decoder would misread this from a full payload; the
+    // unsuffixed one must decode the whole sample instead.
+    var c_src = try testGenCdr("@appendable struct Msg { string label; @key long id; };", "msg");
+    defer c_src.deinit(testing.allocator);
+    const s = c_src.items;
+    try testing.expect(has(s, "int Msg_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {"));
+    try testing.expect(has(s, "Msg_deserialize(&_r_data, &_v_data)"));
+    try testing.expect(has(s, "Msg_compute_key_hash(&_v_data, _hash)"));
+    try testing.expect(has(s, "Msg_free(&_v_data)"));
+    // Must not fall back to the key-only decoder for the full-payload path.
+    const from_cdr = std.mem.indexOf(u8, s, "int Msg_compute_key_hash_from_cdr(").?;
+    const from_cdr_end = std.mem.indexOfPos(u8, s, from_cdr, "\n}\n").?;
+    try testing.expect(!has(s[from_cdr..from_cdr_end], "Msg_deserialize_key"));
+}
+
+test "c_backend cdr: compute_key_hash_from_cdr frees the full decode on failure, not just key fields" {
+    var c_src = try testGenCdr("@appendable struct Msg { @key string tag; sequence<long> nums; };", "msg");
+    defer c_src.deinit(testing.allocator);
+    const s = c_src.items;
+    const from_cdr = std.mem.indexOf(u8, s, "int Msg_compute_key_hash_from_cdr(").?;
+    const from_cdr_end = std.mem.indexOfPos(u8, s, from_cdr, "\n}\n").?;
+    const body = s[from_cdr..from_cdr_end];
+    // Msg_free (the whole-struct free) must run on both the error path and
+    // the success path -- Msg_deserialize does not self-clean, and _v_data
+    // starts zeroed so a partial decode is always safe to free.
+    try testing.expect(has(body, "if (_rc) { Msg_free(&_v_data); return _rc; }"));
+    try testing.expect(has(body, "_rc = Msg_compute_key_hash(&_v_data, _hash);"));
+    try testing.expect(has(body, "Msg_free(&_v_data);"));
+}
+
+test "c_backend cdr: compute_key_hash_from_cdr skips the free call when nothing needs freeing" {
+    var c_src = try testGenCdr("@final struct Msg { @key long id; double value; };", "msg");
+    defer c_src.deinit(testing.allocator);
+    const s = c_src.items;
+    const from_cdr = std.mem.indexOf(u8, s, "int Msg_compute_key_hash_from_cdr(").?;
+    const from_cdr_end = std.mem.indexOfPos(u8, s, from_cdr, "\n}\n").?;
+    try testing.expect(!has(s[from_cdr..from_cdr_end], "Msg_free"));
+}
+
+test "c_backend cdr: @final struct with non-leading key has no _Static_assert (guard removed)" {
+    // The removed guard used to hard-block this IDL shape at compile time.
+    // Now legal: compute_key_hash_from_cdr_key_only's key-only contract is
+    // unambiguous regardless of @key position (serialize_key never emits
+    // non-key bytes), and a full-payload caller has its own correctly-skipping
+    // function (compute_key_hash_from_cdr) to reach for instead.
+    var c_src = try testGenCdr("@final struct Msg { string label; @key long id; };", "msg");
+    defer c_src.deinit(testing.allocator);
+    const s = c_src.items;
+    try testing.expect(!has(s, "_Static_assert"));
+    try testing.expect(has(s, "zidl_cdr_read_i32(_r, &_v->id)"));
 }
 
 test "c_backend cdr: serialize unbounded string" {

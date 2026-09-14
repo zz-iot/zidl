@@ -39,7 +39,8 @@ test "roundtrip: Sample @final fields" {
     try types.Sample.serialize(&writer, src);
 
     var reader = try zidl_rt.CdrReader.init(buf.items);
-    const dst = try types.Sample.deserialize(&reader, testing.allocator);
+    var dst: types.Sample = .{};
+    try types.Sample.deserializeInto(&dst, &reader, testing.allocator);
     defer testing.allocator.free(dst.str);
 
     try testing.expectEqual(src.id, dst.id);
@@ -80,9 +81,13 @@ test "roundtrip: Sample key serialization" {
 // deserializeKeyInto is a key-only-payload reader.  Calling it on a full
 // sample payload only works when ALL key members precede ALL non-key members
 // (so the key bytes appear first in both the full payload and the key-only
-// payload).  Sample.id is declared first, so this test passes; a @final
-// struct with id declared after any non-key member would emit @compileError.
-test "roundtrip: Sample deserializeKey from full sample (key field is leading)" {
+// payload) -- Sample.id is declared first, so this test passes. This is
+// deliberate misuse for illustration only: a real full-payload caller should
+// use computeKeyHashFromCdr (deserializeSelected-based), which skips non-key
+// members correctly regardless of where @key sits; deserializeKeyInto's own
+// contract is "the wire bytes are a key-only payload", not "the leading
+// bytes of a full one".
+test "roundtrip: Sample deserializeKeyInto from full sample (key field is leading)" {
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(testing.allocator);
 
@@ -103,7 +108,8 @@ test "roundtrip: Sample deserializeKey from full sample (key field is leading)" 
     try types.Sample.serialize(&writer, src);
 
     var reader = try zidl_rt.CdrReader.init(buf.items);
-    const key = try types.Sample.deserializeKey(&reader, testing.allocator);
+    var key: types.Sample = .{};
+    try types.Sample.deserializeKeyInto(&key, &reader, testing.allocator);
 
     try testing.expectEqual(src.id, key.id);
     try testing.expectEqual(false, key.b);
@@ -114,7 +120,7 @@ test "roundtrip: Sample deserializeKey from full sample (key field is leading)" 
     // fields and leaves the non-key tail in the reader.
 }
 
-test "roundtrip: Sample deserializeKey from key-only payload" {
+test "roundtrip: Sample deserializeKeyInto from key-only payload" {
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(testing.allocator);
 
@@ -123,14 +129,16 @@ test "roundtrip: Sample deserializeKey from key-only payload" {
     try types.Sample.serializeKey(&writer, .{ .id = 0xDEADBEEF });
 
     var reader = try zidl_rt.CdrReader.init(buf.items);
-    const key = try types.Sample.deserializeKey(&reader, testing.allocator);
+    var key: types.Sample = .{};
+    try types.Sample.deserializeKeyInto(&key, &reader, testing.allocator);
 
     try testing.expectEqual(@as(u32, 0xDEADBEEF), key.id);
     try testing.expectEqual(@as(usize, 0), reader.remaining());
 }
 
 test "roundtrip: Sample computeKeyHash pads short PLAIN_CDR2 BE key" {
-    const hash = types.Sample.computeKeyHash(.{ .id = 0x01020304 });
+    const value = types.Sample{ .id = 0x01020304 };
+    const hash = types.Sample.computeKeyHash(&value);
     const expected = [_]u8{
         0x01, 0x02, 0x03, 0x04,
         0x00, 0x00, 0x00, 0x00,
@@ -240,7 +248,8 @@ test "roundtrip: Frame @appendable DHEADER" {
     try types.Frame.serialize(&writer, src);
 
     var reader = try zidl_rt.CdrReader.init(buf.items);
-    const dst = try types.Frame.deserialize(&reader, testing.allocator);
+    var dst: types.Frame = .{};
+    try types.Frame.deserializeInto(&dst, &reader, testing.allocator);
     defer testing.allocator.free(dst.topic);
 
     try testing.expectEqual(src.seq_num, dst.seq_num);
@@ -276,7 +285,8 @@ test "wire-bytes: Sample serialize_key / deserialize_key" {
     try testing.expectEqualSlices(u8, &expected, buf.items);
 
     var reader = try zidl_rt.CdrReader.init(buf.items);
-    const key = try types.Sample.deserializeKey(&reader, testing.allocator);
+    var key: types.Sample = .{};
+    try types.Sample.deserializeKeyInto(&key, &reader, testing.allocator);
     try testing.expectEqual(@as(u32, 0x01020304), key.id);
     try testing.expectEqual(@as(usize, 0), reader.remaining());
 }
@@ -297,11 +307,13 @@ test "wire-bytes: Beacon serialize_key / deserialize_key / computeKeyHash" {
     try testing.expectEqualSlices(u8, &expected, buf.items);
 
     var reader = try zidl_rt.CdrReader.init(buf.items);
-    const key = try types.Beacon.deserializeKey(&reader, testing.allocator);
+    var key: types.Beacon = .{};
+    try types.Beacon.deserializeKeyInto(&key, &reader, testing.allocator);
     try testing.expectEqual(@as(u32, 7), key.id);
     try testing.expectEqual(@as(usize, 0), reader.remaining());
 
-    const hash = types.Beacon.computeKeyHash(.{ .id = 7 });
+    const beacon_value = types.Beacon{ .id = 7 };
+    const hash = types.Beacon.computeKeyHash(&beacon_value);
     const expected_hash = [_]u8{
         0x00, 0x00, 0x00, 0x07,
         0x00, 0x00, 0x00, 0x00,

@@ -88,14 +88,32 @@ pub const MyStruct = struct {
     // Only with --zig-generate-toml-config — see §TOML config application below:
     pub fn applyToml(self: *MyStruct, alloc: std.mem.Allocator, table: anytype) !void { ... }
 
-    // CDR serialization (unless --no-typesupport):
+    // CDR serialization (unless --no-typesupport). Out-param only -- no
+    // value-returning convenience wrapper, matching the C/C++ backends'
+    // convention (deliberate: avoids an implicit temporary, and Zig's own
+    // hidden-pointer ABI for large struct returns means the value-returning
+    // form was never actually cheaper).
     pub fn serialize(writer: anytype, value: *const MyStruct) !void { ... }
-    pub fn deserialize(reader: anytype, alloc: std.mem.Allocator) !MyStruct { ... }
+    pub fn deserializeInto(out: *MyStruct, reader: anytype, alloc: std.mem.Allocator) !void { ... }
     // Only if at least one @key member:
     pub fn serializeKey(writer: anytype, value: *const MyStruct) !void { ... }
-    pub fn deserializeKey(reader: *zidl_rt.CdrReader, alloc: std.mem.Allocator) !MyStruct { ... }
+    // Genuine key-only wire payload (RTPS DISPOSE/UNREGISTER). Assumes the
+    // bytes are *just* the @key members, back to back -- correct regardless
+    // of where @key sits in the struct, since serializeKey never emits
+    // non-key bytes to skip over. Do not feed this a full sample.
     pub fn deserializeKeyInto(out: *MyStruct, reader: *zidl_rt.CdrReader, alloc: std.mem.Allocator) !void { ... }
-    pub fn computeKeyHash(value: MyStruct) [16]u8 { ... }
+    // Takes a pointer, not a value -- same reasoning as deserializeInto above.
+    pub fn computeKeyHash(value: *const MyStruct) [16]u8 { ... }
+    // Only with --generate-zzdds-wrappers: hash straight from wire bytes,
+    // matching zzdds's TypeSupport.compute_key_hash callback shape. Two
+    // variants for the two payload shapes a DDS implementation sees on the
+    // wire -- computeKeyHashFromCdr (a complete ALIVE sample; uses
+    // deserializeSelected(KEY_FIELD_MASK), which skips non-key members
+    // correctly) is the one to reach for by default. computeKeyHashFromCdrKeyOnly
+    // (a genuine key-only DISPOSE/UNREGISTER payload; uses deserializeKeyInto)
+    // is the narrower sibling.
+    pub fn computeKeyHashFromCdr(ctx: *anyopaque, payload: []const u8) [16]u8 { ... }
+    pub fn computeKeyHashFromCdrKeyOnly(ctx: *anyopaque, payload: []const u8) [16]u8 { ... }
 
     // Typed zzdds wrappers for keyed, non-mutable topic structs
     // (requires --generate-zzdds-wrappers flag and a `dds` adapter module):
@@ -416,7 +434,8 @@ try MyStruct.serialize(&w, &my_value);
 
 ```zig
 var r = try zidl_rt.CdrReader.init(cdr_bytes);
-var value = try MyStruct.deserialize(&r, alloc);
+var value: MyStruct = .{};
+try MyStruct.deserializeInto(&value, &r, alloc);
 defer value.deinit(alloc);  // frees sequence buffers where _release == true
 ```
 
@@ -442,15 +461,25 @@ try MyStruct.serializeKey(&w, &my_value);
 Generated keyed structs also provide:
 
 ```zig
-var r = try zidl_rt.CdrReader.init(full_sample_cdr);
-const key_only = try MyStruct.deserializeKey(&r, alloc);
-const key_hash: [16]u8 = MyStruct.computeKeyHash(key_only);
+var r = try zidl_rt.CdrReader.init(key_only_cdr);
+var key_only: MyStruct = .{};
+try MyStruct.deserializeKeyInto(&key_only, &r, alloc);
+const key_hash: [16]u8 = MyStruct.computeKeyHash(&key_only);
 ```
 
-`deserializeKey` reads key fields from a full serialized sample and skips non-key
-fields. `computeKeyHash` serializes only key fields as canonical PLAIN_CDR2
-big-endian and returns the RTPS key hash: zero-padded serialized key when the
-serialized key is at most 16 bytes, otherwise MD5.
+`deserializeKeyInto` expects `key_only_cdr` to be a **genuine key-only wire
+payload** (nothing but the `@key` members, back to back — what `serializeKey`
+produces, and what an RTPS DISPOSE/UNREGISTER submessage carries). It does
+*not* skip non-key members, so feeding it a full sample instead only works
+when every `@key` member happens to be leading; a non-leading `@key` member
+gets misread. For extracting a key hash straight from a **full** serialized
+sample (an ALIVE write), use the wrapper-generated
+`computeKeyHashFromCdr`/`computeKeyHashFromCdrKeyOnly` pair instead (only
+with `--generate-zzdds-wrappers`; see above) — `computeKeyHashFromCdr` uses
+the mask-driven `deserializeSelected`, which skips non-key members correctly
+regardless of position. `computeKeyHash` itself serializes only key fields as
+canonical PLAIN_CDR2 big-endian and returns the RTPS key hash: zero-padded
+serialized key when the serialized key is at most 16 bytes, otherwise MD5.
 
 ### @appendable and DHEADER
 
@@ -462,7 +491,7 @@ const dheader_off = try writer.reserveDheader();
 writer.patchDheader(dheader_off);
 ```
 
-On the reader side, `deserialize` calls `try reader.skipDheaderIfXcdr2()` at entry.
+On the reader side, `deserializeInto` calls `try reader.skipDheaderIfXcdr2()` at entry.
 
 ### @optional members
 

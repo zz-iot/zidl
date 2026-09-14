@@ -367,6 +367,14 @@ public class Types {
             return _obj.computeKeyHash();
         }
 
+        public static byte[] computeKeyHashFromCdrKeyOnly(byte[] _payload) {
+            java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(_payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            int _xcdrVersion = _cdrDetectXcdr(_payload);
+            _buf.position(4);
+            Sample _obj = deserializeKey(_buf, 4, _xcdrVersion);
+            return _obj.computeKeyHash();
+        }
+
         public static Object getFieldFromCdr(byte[] _payload, String _field) {
             java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(_payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
             int _xcdrVersion = _cdrDetectXcdr(_payload);
@@ -655,8 +663,6 @@ public class Types {
         protected static void deserializeKeyInto(Beacon _out, java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             int _keyEnd = 0;
             if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _keyEnd = _buf.position() + 4 + _buf.getInt(); }
-            if (_xcdrVersion != 2) {
-            }
             _cdrAlign(_buf, _cdrBase, 4); _out.id = _buf.getInt();
             if (_xcdrVersion == 2) { _buf.position(_keyEnd); }
         }
@@ -679,6 +685,14 @@ public class Types {
             int _xcdrVersion = _cdrDetectXcdr(_payload);
             _buf.position(4);
             Beacon _obj = deserializeFrom(_buf, 4, _xcdrVersion);
+            return _obj.computeKeyHash();
+        }
+
+        public static byte[] computeKeyHashFromCdrKeyOnly(byte[] _payload) {
+            java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(_payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            int _xcdrVersion = _cdrDetectXcdr(_payload);
+            _buf.position(4);
+            Beacon _obj = deserializeKey(_buf, 4, _xcdrVersion);
             return _obj.computeKeyHash();
         }
 

@@ -9,6 +9,56 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- **All four backends: split the `compute_key_hash_from_cdr` family so the default name is
+  the safe one, and removed the compile-time/runtime guards against a non-leading `@key`
+  member.** Found via a zzdds stress test (`instance` scenario, see zzdds's
+  `stress-tests/README.md`): the existing function assumed its wire-bytes argument was a
+  *key-only* payload (correct for RTPS DISPOSE/UNREGISTER), but zzdds's own fallback path
+  (used when a peer omits the inline `PID_KEY_HASH`) always fed it a *full* ALIVE sample —
+  silently misreading any `@key` member that wasn't leading.
+  - The unsuffixed name (`{Type}_compute_key_hash_from_cdr` / `computeKeyHashFromCdr`) is now
+    the full-payload-safe function everywhere — the one a caller should reach for by default.
+    The old key-only behavior moved to a new, explicitly-named sibling,
+    `{Type}_compute_key_hash_from_cdr_key_only` / `computeKeyHashFromCdrKeyOnly`.
+  - **Zig**: the new `computeKeyHashFromCdr` uses `deserializeSelected(KEY_FIELD_MASK)`
+    (already generated alongside it), which skips non-key members instead of assuming they
+    aren't there. Also removed `deserialize`/`deserializeKey` (value-returning; out-param
+    `deserializeInto`/`deserializeKeyInto` only now) and changed `computeKeyHash` to take
+    `*const @This()` instead of a value — bringing Zig in line with C/C++'s existing
+    out-param/by-pointer convention.
+  - **C**: the new `{Type}_compute_key_hash_from_cdr` decodes the whole sample via the
+    already-correct `{Type}_deserialize` and extracts the key from the result, then frees it
+    (`{Type}_free`, safe on a zeroed-or-partial value) — simpler and lower-risk than a
+    hand-rolled skip-aware walk, and unconditionally available (matching the old function's
+    scope; not gated behind `--generate-zzdds-wrappers`).
+  - **C++**: same shape as C, but no explicit free at all — `_v_data`'s members
+    (`std::string`, `std::vector`, ...) release themselves via RAII on any return path.
+  - **Java**: `computeKeyHashFromCdr` was already full-payload-correct (it always fully
+    `deserializeFrom`s before hashing), so it needed no behavior change — only the new
+    `computeKeyHashFromCdrKeyOnly` sibling (via the existing `deserializeKey`) was added.
+  - Removed the compile-time guard (C's `_Static_assert`, C++'s `static_assert`, Zig's
+    `@compileError`) and Java's runtime `UnsupportedOperationException`, each of which
+    rejected a `@final`/XCDR1-read `@appendable` struct with a non-leading `@key` member.
+    The guard was only ever protecting against the exact full-payload misuse this change
+    fixes at the root — the key-only decoder's own contract (wire bytes are *just* the key,
+    back to back) is unambiguous regardless of `@key` position, since `serialize_key` never
+    emits non-key bytes to skip over. A `@final` struct with a non-leading `@key` member,
+    previously a hard compile error in the C++ and Zig backends (and a runtime throw in
+    Java's XCDR1 path), is now legal in all four.
+  - `zzdds`-side follow-up landed same date: `resolveKeyHash`'s fallback now dispatches on
+    change kind (`compute_key_hash_from_cdr_key_only` for DISPOSE/UNREGISTER's genuine
+    key-only payload, `compute_key_hash_from_cdr` for ALIVE) instead of calling one function
+    regardless of kind. See zzdds's `CHANGELOG.md` 2026-09-14.
+
+- **C/C++ backends: the generated `{Type}TypeSupport_register(...)` wrapper now also passes
+  `{Type}_compute_key_hash_from_cdr_key_only`** to `zzdds_register_type_support`, which grew
+  a matching `compute_key_hash_key_only_fn` parameter (inserted right after
+  `compute_key_hash_fn`) — see zzdds's `CHANGELOG.md` 2026-09-14 for the C-ABI side. A C++
+  consumer (always routed through the generated wrapper) needs no source change. A C
+  consumer calling `zzdds_register_type_support` directly (zzdds's own `examples/c/*` do)
+  needs to add the new argument — a real signature break, consistent with this project's
+  pre-1.0 no-ABI-stability stance (`decisions.md`).
+
 - **Zig backend: generated `deinit()` is now idempotent, and `deserializeInto` /
   `deserializeFromPlCdr` self-clean on a mid-decode error.**
   - A plain unbounded `string` field is now reset to `""` right after being freed

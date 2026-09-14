@@ -189,7 +189,10 @@ static void test_compute_key_hash_from_cdr() {
     check(Beacon_serialize_key(&kw, &b), "Beacon_serialize_key");
 
     uint8_t bhash_from_key[16], bhash_from_struct[16];
-    check(Beacon_compute_key_hash_from_cdr(kbuf, kw.len, bhash_from_key), "Beacon_compute_key_hash_from_cdr");
+    // Genuine key-only payload -> the key-only decoder, not the unsuffixed
+    // (full-payload) function -- a key-only payload is missing every other
+    // member's bytes, so Beacon_deserialize would fail on it outright.
+    check(Beacon_compute_key_hash_from_cdr_key_only(kbuf, kw.len, bhash_from_key), "Beacon_compute_key_hash_from_cdr_key_only");
     check(Beacon_compute_key_hash(&b, bhash_from_struct), "Beacon_compute_key_hash");
     assert(std::memcmp(bhash_from_key, bhash_from_struct, 16) == 0);
 
