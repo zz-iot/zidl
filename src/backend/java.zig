@@ -1392,7 +1392,7 @@ const Generator = struct {
                 try self.emitWriteLoanBufferInterfaceOp(&op);
                 continue;
             }
-            if (isReadLoanBufferOp(iface.name, op.name)) {
+            if (isReadLoanBufferOp(iface.qualified_name, op.name)) {
                 try self.ind();
                 try self.emitReadLoanBufferInterfaceOp(&op);
                 continue;
@@ -1499,8 +1499,18 @@ const Generator = struct {
     /// consistent with `isWriteLoanBufferOp`'s own write-loan-only scope, and
     /// nothing in this project has ever used copy mode through these ops
     /// (see the coverage audit in `zzdds/docs/design/dcps-api-coverage-audit.md`).
-    fn isReadLoanBufferOp(iface_name: []const u8, op_name: []const u8) bool {
-        if (!std.mem.eql(u8, iface_name, "DataReader")) return false;
+    /// `iface_qualified_name` must be the *declaring* interface's qualified
+    /// name (`"DDS::DataReader"` exactly, not just the bare `"DataReader"`
+    /// leaf name) -- a bare-name check would also match an unrelated user
+    /// interface that happens to be named `DataReader` in some other module,
+    /// wrongly routing it through this DDS-specific loan-handle codegen
+    /// (Greptile review, zidl PR #53). Every call site resolves the real
+    /// declaring interface first (via `findDeclaringInterface` when the
+    /// interface being generated for might be a derived one like
+    /// `zzdds::DataReader : DDS::DataReader`, which inherits these ops
+    /// without redeclaring them) before calling this.
+    fn isReadLoanBufferOp(iface_qualified_name: []const u8, op_name: []const u8) bool {
+        if (!std.mem.eql(u8, iface_qualified_name, "DDS::DataReader")) return false;
         return std.mem.eql(u8, op_name, "take_raw") or
             std.mem.eql(u8, op_name, "read_raw") or
             std.mem.eql(u8, op_name, "take_next_instance_raw") or
@@ -3631,9 +3641,11 @@ fn emitZzddsDataReaderFile(
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.take_raw(_payloads, _hashes, _infos, _HANDLE_NIL, null, _ANY_STATE, _ANY_STATE, _ANY_STATE, 1, _loan);
         \\        if (_payloads.isEmpty()) return null;
-        \\        Sample _s = fromPayload(fromByteList(_payloads.get(0)), _infos.get(0));
-        \\        reader.return_loan_raw(_loan);
-        \\        return _s;
+        \\        try {{
+        \\            return fromPayload(fromByteList(_payloads.get(0)), _infos.get(0));
+        \\        }} finally {{
+        \\            reader.return_loan_raw(_loan);
+        \\        }}
         \\    }}
         \\
         \\    public Sample read(int maxSampleSize) {{
@@ -3643,9 +3655,11 @@ fn emitZzddsDataReaderFile(
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.read_raw(_payloads, _hashes, _infos, _HANDLE_NIL, null, _ANY_STATE, _ANY_STATE, _ANY_STATE, 1, _loan);
         \\        if (_payloads.isEmpty()) return null;
-        \\        Sample _s = fromPayload(fromByteList(_payloads.get(0)), _infos.get(0));
-        \\        reader.return_loan_raw(_loan);
-        \\        return _s;
+        \\        try {{
+        \\            return fromPayload(fromByteList(_payloads.get(0)), _infos.get(0));
+        \\        }} finally {{
+        \\            reader.return_loan_raw(_loan);
+        \\        }}
         \\    }}
         \\
         \\    public Sample take() {{ return take(65536); }}
@@ -3663,9 +3677,11 @@ fn emitZzddsDataReaderFile(
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.take_next_instance_raw(_payloads, _hashes, _infos, (int) prevHandle, null, _ANY_STATE, _ANY_STATE, _ANY_STATE, 1, _loan);
         \\        if (_payloads.isEmpty()) return null;
-        \\        Sample _s = fromPayload(fromByteList(_payloads.get(0)), _infos.get(0));
-        \\        reader.return_loan_raw(_loan);
-        \\        return _s;
+        \\        try {{
+        \\            return fromPayload(fromByteList(_payloads.get(0)), _infos.get(0));
+        \\        }} finally {{
+        \\            reader.return_loan_raw(_loan);
+        \\        }}
         \\    }}
         \\
         \\    public Sample read_next_instance(long prevHandle, int maxSampleSize) {{
@@ -3675,9 +3691,11 @@ fn emitZzddsDataReaderFile(
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.read_next_instance_raw(_payloads, _hashes, _infos, (int) prevHandle, null, _ANY_STATE, _ANY_STATE, _ANY_STATE, 1, _loan);
         \\        if (_payloads.isEmpty()) return null;
-        \\        Sample _s = fromPayload(fromByteList(_payloads.get(0)), _infos.get(0));
-        \\        reader.return_loan_raw(_loan);
-        \\        return _s;
+        \\        try {{
+        \\            return fromPayload(fromByteList(_payloads.get(0)), _infos.get(0));
+        \\        }} finally {{
+        \\            reader.return_loan_raw(_loan);
+        \\        }}
         \\    }}
         \\
         \\    public Sample take_next_instance(long prevHandle) {{ return take_next_instance(prevHandle, 65536); }}
@@ -3694,9 +3712,11 @@ fn emitZzddsDataReaderFile(
         \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.take_raw(_payloads, _hashes, _infos, _HANDLE_NIL, null, sampleStates, viewStates, instanceStates, max, _loan);
-        \\        Sample[] _s = fromPayloads(_payloads, _infos);
-        \\        reader.return_loan_raw(_loan);
-        \\        return _s;
+        \\        try {{
+        \\            return fromPayloads(_payloads, _infos);
+        \\        }} finally {{
+        \\            reader.return_loan_raw(_loan);
+        \\        }}
         \\    }}
         \\
         \\    public Sample[] read_n(int max, int sampleStates, int viewStates, int instanceStates) {{
@@ -3705,9 +3725,11 @@ fn emitZzddsDataReaderFile(
         \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.read_raw(_payloads, _hashes, _infos, _HANDLE_NIL, null, sampleStates, viewStates, instanceStates, max, _loan);
-        \\        Sample[] _s = fromPayloads(_payloads, _infos);
-        \\        reader.return_loan_raw(_loan);
-        \\        return _s;
+        \\        try {{
+        \\            return fromPayloads(_payloads, _infos);
+        \\        }} finally {{
+        \\            reader.return_loan_raw(_loan);
+        \\        }}
         \\    }}
         \\
         \\    /** Batch take/read restricted to one instance, same semantics as
@@ -3720,9 +3742,11 @@ fn emitZzddsDataReaderFile(
         \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.take_raw(_payloads, _hashes, _infos, (int) instanceHandle, null, sampleStates, viewStates, instanceStates, max, _loan);
-        \\        Sample[] _s = fromPayloads(_payloads, _infos);
-        \\        reader.return_loan_raw(_loan);
-        \\        return _s;
+        \\        try {{
+        \\            return fromPayloads(_payloads, _infos);
+        \\        }} finally {{
+        \\            reader.return_loan_raw(_loan);
+        \\        }}
         \\    }}
         \\
         \\    public Sample[] read_instance(long instanceHandle, int max, int sampleStates, int viewStates, int instanceStates) {{
@@ -3731,9 +3755,11 @@ fn emitZzddsDataReaderFile(
         \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.read_raw(_payloads, _hashes, _infos, (int) instanceHandle, null, sampleStates, viewStates, instanceStates, max, _loan);
-        \\        Sample[] _s = fromPayloads(_payloads, _infos);
-        \\        reader.return_loan_raw(_loan);
-        \\        return _s;
+        \\        try {{
+        \\            return fromPayloads(_payloads, _infos);
+        \\        }} finally {{
+        \\            reader.return_loan_raw(_loan);
+        \\        }}
         \\    }}
         \\
         \\    /** Batch take/read restricted to a {{@code ReadCondition}} (or a
@@ -3748,9 +3774,11 @@ fn emitZzddsDataReaderFile(
         \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.take_raw(_payloads, _hashes, _infos, _HANDLE_NIL, condition, _ANY_STATE, _ANY_STATE, _ANY_STATE, max, _loan);
-        \\        Sample[] _s = fromPayloads(_payloads, _infos);
-        \\        reader.return_loan_raw(_loan);
-        \\        return _s;
+        \\        try {{
+        \\            return fromPayloads(_payloads, _infos);
+        \\        }} finally {{
+        \\            reader.return_loan_raw(_loan);
+        \\        }}
         \\    }}
         \\
         \\    public Sample[] read_w_condition({[rc]s} condition, int max) {{
@@ -3759,9 +3787,11 @@ fn emitZzddsDataReaderFile(
         \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.read_raw(_payloads, _hashes, _infos, _HANDLE_NIL, condition, _ANY_STATE, _ANY_STATE, _ANY_STATE, max, _loan);
-        \\        Sample[] _s = fromPayloads(_payloads, _infos);
-        \\        reader.return_loan_raw(_loan);
-        \\        return _s;
+        \\        try {{
+        \\            return fromPayloads(_payloads, _infos);
+        \\        }} finally {{
+        \\            reader.return_loan_raw(_loan);
+        \\        }}
         \\    }}
         \\
         \\    /** Batch take/read restricted to {{@code condition}} AND scoped to the
@@ -3774,9 +3804,11 @@ fn emitZzddsDataReaderFile(
         \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.take_next_instance_raw(_payloads, _hashes, _infos, (int) prev, condition, _ANY_STATE, _ANY_STATE, _ANY_STATE, max, _loan);
-        \\        Sample[] _s = fromPayloads(_payloads, _infos);
-        \\        reader.return_loan_raw(_loan);
-        \\        return _s;
+        \\        try {{
+        \\            return fromPayloads(_payloads, _infos);
+        \\        }} finally {{
+        \\            reader.return_loan_raw(_loan);
+        \\        }}
         \\    }}
         \\
         \\    public Sample[] read_next_instance_w_condition({[rc]s} condition, long prev, int max) {{
@@ -3785,9 +3817,11 @@ fn emitZzddsDataReaderFile(
         \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.read_next_instance_raw(_payloads, _hashes, _infos, (int) prev, condition, _ANY_STATE, _ANY_STATE, _ANY_STATE, max, _loan);
-        \\        Sample[] _s = fromPayloads(_payloads, _infos);
-        \\        reader.return_loan_raw(_loan);
-        \\        return _s;
+        \\        try {{
+        \\            return fromPayloads(_payloads, _infos);
+        \\        }} finally {{
+        \\            reader.return_loan_raw(_loan);
+        \\        }}
         \\    }}
         \\
         \\    /** Returns the key fields for {{@code handle}}, or null if no alive
@@ -4523,7 +4557,14 @@ const ImplFileGenerator = struct {
 
     fn emitForwardingOp(self: *ImplFileGenerator, op: *const ir.Operation) !void {
         if (isWriteLoanBufferOp(self.iface.name, op.name)) return self.emitWriteLoanBufferForwardingOp(op);
-        if (Generator.isReadLoanBufferOp(self.iface.name, op.name)) return self.emitReadLoanBufferForwardingOp(op);
+        // self.iface may be a derived interface (e.g. zzdds::DataWriter :
+        // DDS::DataWriter) that inherits this op without redeclaring it --
+        // findDeclaringInterface resolves the real declaring interface so
+        // isReadLoanBufferOp can check its qualified name, not this
+        // (possibly unrelated) derived interface's bare leaf name (Greptile
+        // review, zidl PR #53).
+        const decl_iface = findDeclaringInterface(self.iface, op.name);
+        if (decl_iface != null and Generator.isReadLoanBufferOp(decl_iface.?.qualified_name, op.name)) return self.emitReadLoanBufferForwardingOp(op);
         const ret_java = if (op.return_type) |rt|
             try self.typeRefToJava(rt)
         else
@@ -4591,7 +4632,9 @@ const ImplFileGenerator = struct {
 
     fn emitNativeDecl(self: *ImplFileGenerator, op: *const ir.Operation) !void {
         if (isWriteLoanBufferOp(self.iface.name, op.name)) return self.emitWriteLoanBufferNativeDecl(op);
-        if (Generator.isReadLoanBufferOp(self.iface.name, op.name)) return self.emitReadLoanBufferNativeDecl(op);
+        // See emitForwardingOp's matching comment.
+        const decl_iface = findDeclaringInterface(self.iface, op.name);
+        if (decl_iface != null and Generator.isReadLoanBufferOp(decl_iface.?.qualified_name, op.name)) return self.emitReadLoanBufferNativeDecl(op);
         const ret_java = if (op.return_type) |rt|
             try self.typeRefToJava(rt)
         else
@@ -6283,7 +6326,10 @@ const JniBridgeGenerator = struct {
         op: *const ir.Operation,
     ) !void {
         if (isWriteLoanBufferOp(iface.name, op.name)) return self.emitWriteLoanBufferJniOp(iface, c_name, jni_class_prefix, op);
-        if (Generator.isReadLoanBufferOp(iface.name, op.name)) return self.emitReadLoanBufferJniOp(iface, c_name, jni_class_prefix, op);
+        // See emitForwardingOp's matching comment -- iface may be a derived
+        // interface here too.
+        const decl_iface = findDeclaringInterface(iface, op.name);
+        if (decl_iface != null and Generator.isReadLoanBufferOp(decl_iface.?.qualified_name, op.name)) return self.emitReadLoanBufferJniOp(iface, c_name, jni_class_prefix, op);
         const jni_ret = if (op.return_type) |rt| jniType(rt) else "void";
         const native_name = try std.fmt.allocPrint(self.alloc, "n_{s}", .{op.name});
         defer self.alloc.free(native_name);

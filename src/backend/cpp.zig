@@ -961,7 +961,7 @@ const Generator = struct {
         }
 
         for (iface.operations) |op| {
-            if (isRawLoanOp(iface.name, op.name)) {
+            if (isRawLoanOp(iface.qualified_name, op.name)) {
                 try self.emitRawLoanInterfaceOp(&op);
                 continue;
             }
@@ -1089,13 +1089,27 @@ const Generator = struct {
     /// kind, instance_handle/previous_handle, a_condition, the state masks,
     /// max_samples) keeps its normal generated type -- only the
     /// loan-identity-bearing params change.
-    fn isRawLoanOp(iface_name: []const u8, op_name: []const u8) bool {
-        if (std.mem.eql(u8, iface_name, "DataWriter")) {
+    /// `iface_qualified_name` must be the *declaring* interface's qualified
+    /// name (`"DDS::DataWriter"`/`"DDS::DataReader"` exactly, not just the
+    /// bare `"DataWriter"`/`"DataReader"` leaf name) -- a bare-name check
+    /// would also match an unrelated user interface that happens to be
+    /// named `DataWriter` in some other module (e.g. `MyModule::DataWriter`),
+    /// wrongly routing it through this DDS-specific raw-C-struct codegen
+    /// (Greptile review, zidl PR #53). Callers iterating an interface's own
+    /// `.operations` directly (the op can only be declared where it's
+    /// found) pass that interface's own `qualified_name`; callers walking a
+    /// *derived* interface's full (possibly-inherited) member list — e.g.
+    /// zzdds::DataWriter : DDS::DataWriter, which inherits these ops without
+    /// redeclaring them — must pass the op's actual declaring interface
+    /// (`OwnedOperation.owner.qualified_name`), not the derived interface
+    /// being generated for.
+    fn isRawLoanOp(iface_qualified_name: []const u8, op_name: []const u8) bool {
+        if (std.mem.eql(u8, iface_qualified_name, "DDS::DataWriter")) {
             return std.mem.eql(u8, op_name, "loan_raw") or
                 std.mem.eql(u8, op_name, "publish_loan_raw") or
                 std.mem.eql(u8, op_name, "return_loan_raw");
         }
-        if (std.mem.eql(u8, iface_name, "DataReader")) {
+        if (std.mem.eql(u8, iface_qualified_name, "DDS::DataReader")) {
             return std.mem.eql(u8, op_name, "take_raw") or
                 std.mem.eql(u8, op_name, "read_raw") or
                 std.mem.eql(u8, op_name, "take_next_instance_raw") or
@@ -4348,7 +4362,7 @@ const ConcreteImplGenerator = struct {
         }
 
         for (ops.items) |op| {
-            if (Generator.isRawLoanOp(iface.name, op.op.name)) {
+            if (Generator.isRawLoanOp(op.owner.qualified_name, op.op.name)) {
                 try self.emitRawLoanImplDecl(op.op);
                 continue;
             }
@@ -4529,7 +4543,7 @@ const ConcreteImplGenerator = struct {
 
         const listener_tr = listenerTypeOf(ops.items);
         for (ops.items) |op| {
-            if (Generator.isRawLoanOp(iface.name, op.op.name)) {
+            if (Generator.isRawLoanOp(op.owner.qualified_name, op.op.name)) {
                 try self.emitRawLoanImplOp(op.owner, iface.name, op.op);
                 continue;
             }
