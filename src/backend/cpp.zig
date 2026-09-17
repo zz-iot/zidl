@@ -961,6 +961,10 @@ const Generator = struct {
         }
 
         for (iface.operations) |op| {
+            if (isRawLoanOp(iface.name, op.name)) {
+                try self.emitRawLoanInterfaceOp(&op);
+                continue;
+            }
             try self.emitOperation(&op);
         }
         for (iface.attributes) |attr| {
@@ -1040,6 +1044,103 @@ const Generator = struct {
         try self.print("    virtual {s} {s}(", .{ ret, op.name });
         for (op.params, 0..) |p, i| {
             if (i > 0) try self.write(", ");
+            const p_cpp = try self.typeRefToCpp(p.type_ref);
+            defer self.alloc.free(p_cpp);
+            switch (p.mode) {
+                .in_ => try self.print("{s} {s}", .{ p_cpp, p.name }),
+                .out, .inout => try self.print("{s}& {s}", .{ p_cpp, p.name }),
+            }
+        }
+        try self.write(") = 0;\n");
+    }
+
+    /// `DataWriter::loan_raw`/`publish_loan_raw`/`return_loan_raw` and
+    /// `DataReader::take_raw`/`read_raw`/`take_next_instance_raw`/
+    /// `read_next_instance_raw`/`return_loan_raw` -- the raw/loaned ops from
+    /// `docs/design/raw-loan-api.md` whose `inout` `OctetSeq`/`OctetSeqSeq`/
+    /// `SampleInfoSeq` parameters carry a *loan's identity* across a call
+    /// pair (`loan_raw`'s output must be the exact same value handed back to
+    /// `publish_loan_raw`/`return_loan_raw`; likewise `take_raw`'s output
+    /// handed back to `return_loan_raw`) -- see dcps.idl's own doc comments
+    /// on these ops. `::DDS::OctetSeq` etc. are `std::vector`-based in this
+    /// backend (see `vectorTypeName`), and a `std::vector` cannot represent
+    /// "the exact same borrowed buffer a callee handed back" without a
+    /// copy -- any copy breaks the pointer-identity contract the underlying
+    /// C ABI's outstanding-loan bookkeeping depends on (confirmed via a real
+    /// build+run: the generic `std::vector`-based bridge fails every
+    /// `publish_loan_raw` call with `RETCODE_BAD_PARAMETER` and permanently
+    /// leaks the writer's quiesce refs -- see zzdds's
+    /// `docs/design/raw-loan-reference-app.md`, "A real bug found building
+    /// the C++ port"). This is the same failure class the Java backend
+    /// already found and fixed for its own write-loan path (see
+    /// `isWriteLoanBufferOp` in `java.zig`), broadened here to cover the
+    /// read side too, which Java's fix didn't need to touch (Java's generic
+    /// per-op JNI marshaling for `inout` sequence-of-sequence params happens
+    /// not to lose identity the same way -- not confirmed root-caused, just
+    /// observed that Java's `take_raw`/`return_loan_raw` were never flagged).
+    ///
+    /// Fix: these ops' identity-bearing `inout` params use the raw C ABI
+    /// struct type (`DDS_OctetSeq`/`DDS_OctetSeqSeq`/`DDS_SampleInfoSeq`)
+    /// directly instead of the generated `std::vector`-based C++ type --
+    /// exactly the shape `--generate-zzdds-wrappers`' typed
+    /// `{Type}DataReader::Loan` already uses successfully for the read-loan
+    /// convenience wrapper (see `emitReaderLoanClass`). Every other
+    /// parameter on these ops (size, key_hash as an `in` value, handle,
+    /// kind, instance_handle/previous_handle, a_condition, the state masks,
+    /// max_samples) keeps its normal generated type -- only the
+    /// loan-identity-bearing params change.
+    fn isRawLoanOp(iface_name: []const u8, op_name: []const u8) bool {
+        if (std.mem.eql(u8, iface_name, "DataWriter")) {
+            return std.mem.eql(u8, op_name, "loan_raw") or
+                std.mem.eql(u8, op_name, "publish_loan_raw") or
+                std.mem.eql(u8, op_name, "return_loan_raw");
+        }
+        if (std.mem.eql(u8, iface_name, "DataReader")) {
+            return std.mem.eql(u8, op_name, "take_raw") or
+                std.mem.eql(u8, op_name, "read_raw") or
+                std.mem.eql(u8, op_name, "take_next_instance_raw") or
+                std.mem.eql(u8, op_name, "read_next_instance_raw") or
+                std.mem.eql(u8, op_name, "return_loan_raw");
+        }
+        return false;
+    }
+
+    /// Raw C ABI type name for one of `isRawLoanOp`'s identity-bearing
+    /// params, or null if `p` isn't one (meaning: emit its normal generated
+    /// C++ type instead). Hardcoded to the three known `dcps.idl` sequence
+    /// typedefs these ops actually use -- this whole mechanism is already
+    /// scoped to `dcps.idl`'s `DataWriter`/`DataReader` by name (see
+    /// `isRawLoanOp`), so deriving the C prefix generically buys nothing a
+    /// real second caller would ever need.
+    fn rawLoanParamCType(p: ir.Parameter) ?[]const u8 {
+        if (p.mode != .inout) return null;
+        return switch (p.type_ref) {
+            .named => |td| switch (td) {
+                .typedef => |t| {
+                    if (std.mem.eql(u8, t.name, "OctetSeq")) return "DDS_OctetSeq";
+                    if (std.mem.eql(u8, t.name, "OctetSeqSeq")) return "DDS_OctetSeqSeq";
+                    if (std.mem.eql(u8, t.name, "SampleInfoSeq")) return "DDS_SampleInfoSeq";
+                    return null;
+                },
+                else => null,
+            },
+            else => null,
+        };
+    }
+
+    /// Interface-method declaration for one of `isRawLoanOp`'s ops -- see
+    /// that function's doc comment.
+    fn emitRawLoanInterfaceOp(self: *Generator, op: *const ir.Operation) !void {
+        const ret = if (op.return_type) |rt| try self.typeRefToCpp(rt) else try self.alloc.dupe(u8, "void");
+        defer self.alloc.free(ret);
+
+        try self.print("    virtual {s} {s}(", .{ ret, op.name });
+        for (op.params, 0..) |p, i| {
+            if (i > 0) try self.write(", ");
+            if (rawLoanParamCType(p)) |c_type| {
+                try self.print("{s}& {s}", .{ c_type, p.name });
+                continue;
+            }
             const p_cpp = try self.typeRefToCpp(p.type_ref);
             defer self.alloc.free(p_cpp);
             switch (p.mode) {
@@ -4247,6 +4348,10 @@ const ConcreteImplGenerator = struct {
         }
 
         for (ops.items) |op| {
+            if (Generator.isRawLoanOp(iface.name, op.op.name)) {
+                try self.emitRawLoanImplDecl(op.op);
+                continue;
+            }
             const sig = try self.opSignature(op.op);
             defer self.alloc.free(sig);
             try self.hdrPrint("    {s} override;\n", .{sig});
@@ -4269,6 +4374,35 @@ const ConcreteImplGenerator = struct {
             try self.hdrPrint("    {s} listener_;\n", .{cpp_listener});
         }
         try self.hdrPrint("    {s} ptr_;\n}};\n\n", .{c_name});
+    }
+
+    /// Header declaration for one of `isRawLoanOp`'s ops -- see that
+    /// function's doc comment and `emitRawLoanInterfaceOp`/
+    /// `emitRawLoanImplOp`. Must match `emitRawLoanInterfaceOp`'s
+    /// parameter types exactly, or the override wouldn't actually override
+    /// the (now differently-typed) pure virtual, leaving the concrete impl
+    /// class abstract -- confirmed the hard way (a real "invalid
+    /// new-expression of abstract class type" build failure) before this
+    /// declaration-side fix was added.
+    fn emitRawLoanImplDecl(self: *ConcreteImplGenerator, op: *const ir.Operation) !void {
+        const ret_cpp = if (op.return_type) |rt| try self.typeRefToCpp(rt) else try self.alloc.dupe(u8, "void");
+        defer self.alloc.free(ret_cpp);
+
+        try self.hdrPrint("    {s} {s}(", .{ ret_cpp, op.name });
+        for (op.params, 0..) |p, i| {
+            if (i > 0) try self.hdrWrite(", ");
+            if (Generator.rawLoanParamCType(p)) |c_type| {
+                try self.hdrPrint("{s}& {s}", .{ c_type, p.name });
+                continue;
+            }
+            const p_cpp = try self.typeRefToCpp(p.type_ref);
+            defer self.alloc.free(p_cpp);
+            switch (p.mode) {
+                .in_ => try self.hdrPrint("{s} {s}", .{ p_cpp, p.name }),
+                .out, .inout => try self.hdrPrint("{s}& {s}", .{ p_cpp, p.name }),
+            }
+        }
+        try self.hdrWrite(") override;\n");
     }
 
     // ── Entity Impl method implementations (source) ───────────────────────────
@@ -4395,6 +4529,10 @@ const ConcreteImplGenerator = struct {
 
         const listener_tr = listenerTypeOf(ops.items);
         for (ops.items) |op| {
+            if (Generator.isRawLoanOp(iface.name, op.op.name)) {
+                try self.emitRawLoanImplOp(op.owner, iface.name, op.op);
+                continue;
+            }
             try self.emitEntityMethod(iface, op.owner, iface.name, op.op, listener_tr);
         }
         for (attrs.items) |attr| {
@@ -4686,116 +4824,195 @@ const ConcreteImplGenerator = struct {
                     try self.srcPrint("reinterpret_cast<{s}*>(&{s})", .{ ct, p.name });
                 },
                 .complex_struct_in, .seq_in, .complex_struct_out, .seq_out => try self.srcPrint("&_c_{s}", .{p.name}),
-                .entity_in => {
-                    const ct = try self.typeRefToCType(p.type_ref);
-                    defer self.alloc.free(ct);
-                    // use_virtual requires iface to own its OWN fresh
-                    // native_handle() (return type == ct exactly) -- not just
-                    // "not excluded". An interface that instead inherits and
-                    // converts from a qualifying ancestor (nativeHandleBase
-                    // non-null, e.g. zzdds::X : DDS::X) has a native_handle()
-                    // returning the ANCESTOR's type, not ct, so it must still
-                    // go through the dynamic_cast + zidl_concrete_handle path.
-                    const use_virtual = switch (p.type_ref) {
-                        .named => |td| switch (td) {
-                            .interface => |iface| self.ifaceDeclaresNativeHandle(iface) and
-                                (try self.nativeHandleBase(iface)) == null,
-                            else => false,
-                        },
-                        else => false,
-                    };
-                    if (use_virtual) {
-                        try self.srcPrint(
-                            "({s} ? {s}->native_handle() : nullptr)",
-                            .{ p.name, p.name },
-                        );
-                    } else {
-                        const impl_name = try self.entityImplName(p.type_ref);
-                        defer self.alloc.free(impl_name);
-                        const target_iface: ?*const ir.Interface = switch (p.type_ref) {
-                            .named => |td| switch (td) {
-                                .interface => |iface| iface,
-                                else => null,
-                            },
-                            else => null,
-                        };
-                        const iface_name = if (target_iface) |ti| ti.qualified_name else ct;
-
-                        // Sibling interfaces that also implement iface_name
-                        // (see base_implementors's doc comment) -- e.g.
-                        // TopicDescription is implemented independently by
-                        // TopicDescriptionImpl, ContentFilteredTopicImpl, and
-                        // MultiTopicImpl, none of which inherit from each
-                        // other. A single dynamic_cast against impl_name
-                        // alone would wrongly reject a ContentFilteredTopic
-                        // passed where a TopicDescription is expected.
-                        const ExtraCandidate = struct { impl_name: []const u8, cast_expr: []const u8 };
-                        var extra_impls: std.ArrayListUnmanaged(ExtraCandidate) = .empty;
-                        defer {
-                            for (extra_impls.items) |e| {
-                                self.alloc.free(e.impl_name);
-                                self.alloc.free(e.cast_expr);
-                            }
-                            extra_impls.deinit(self.alloc);
-                        }
-                        if (target_iface) |ti| {
-                            if (self.base_implementors.get(ti.qualified_name)) |implementors| {
-                                for (implementors.items) |impl_iface| {
-                                    const extra_name = try self.entityImplName(.{ .named = .{ .interface = @constCast(impl_iface) } });
-                                    var dup = std.mem.eql(u8, extra_name, impl_name);
-                                    if (!dup) for (extra_impls.items) |existing| {
-                                        if (std.mem.eql(u8, existing.impl_name, extra_name)) {
-                                            dup = true;
-                                            break;
-                                        }
-                                    };
-                                    if (dup) {
-                                        self.alloc.free(extra_name);
-                                        continue;
-                                    }
-                                    // Real upcast through the C-ABI's own
-                                    // generated `X_as_Y` conversion (same
-                                    // mechanism this function already uses
-                                    // for inherited-method dispatch below) --
-                                    // NOT a reinterpret_cast: e.g.
-                                    // DDS_ContentFilteredTopic and
-                                    // DDS_TopicDescription are boxed with
-                                    // different vtables for the very same
-                                    // underlying entity, so treating one
-                                    // handle as the other without going
-                                    // through DDS_ContentFilteredTopic_as_
-                                    // DDS_TopicDescription silently breaks
-                                    // whatever the receiving C-ABI call does
-                                    // with the (mis-vtabled) handle.
-                                    const cast_expr = try self.handleExprForOwner(impl_iface, ti, "zidl_concrete_handle(*_impl)");
-                                    try extra_impls.append(self.alloc, .{ .impl_name = extra_name, .cast_expr = cast_expr });
-                                }
-                            }
-                        }
-
-                        try self.srcWrite("/* zidl: entity parameter adaptation uses dynamic_cast and requires RTTI. */");
-                        try self.srcPrint(
-                            "([](const auto& _p) -> {s} {{ if (!_p) return nullptr; if (auto* _impl = dynamic_cast<{s}*>(_p.get())) return zidl_concrete_handle(*_impl); ",
-                            .{ ct, impl_name },
-                        );
-                        for (extra_impls.items) |e| {
-                            try self.srcPrint(
-                                "if (auto* _impl = dynamic_cast<{s}*>(_p.get())) return {s}; ",
-                                .{ e.impl_name, e.cast_expr },
-                            );
-                        }
-                        try self.srcPrint(
-                            "throw std::invalid_argument(\"zidl: incompatible entity implementation for {s}\"); }})({s})",
-                            .{ iface_name, p.name },
-                        );
-                    }
-                },
+                .entity_in => try self.emitEntityInParamAdapt(p),
                 .listener_in => {
                     try self.srcPrint("_lp_{s}", .{p.name});
                 },
                 .todo => try self.srcPrint("/* TODO({s}) */", .{p.name}),
             }
         }
+    }
+
+    /// The `.entity_in` case of `emitAdaptedParams` -- extracted so
+    /// `emitRawLoanImplOp` can reuse it too (it needs the exact same
+    /// dynamic_cast + zidl_concrete_handle adaptation for `a_condition` as
+    /// every other entity-typed `in` param gets, without re-deriving the
+    /// `base_implementors`/`extra_impls` logic by hand).
+    fn emitEntityInParamAdapt(self: *ConcreteImplGenerator, p: ir.Parameter) !void {
+        const ct = try self.typeRefToCType(p.type_ref);
+        defer self.alloc.free(ct);
+        // use_virtual requires iface to own its OWN fresh
+        // native_handle() (return type == ct exactly) -- not just
+        // "not excluded". An interface that instead inherits and
+        // converts from a qualifying ancestor (nativeHandleBase
+        // non-null, e.g. zzdds::X : DDS::X) has a native_handle()
+        // returning the ANCESTOR's type, not ct, so it must still
+        // go through the dynamic_cast + zidl_concrete_handle path.
+        const use_virtual = switch (p.type_ref) {
+            .named => |td| switch (td) {
+                .interface => |iface| self.ifaceDeclaresNativeHandle(iface) and
+                    (try self.nativeHandleBase(iface)) == null,
+                else => false,
+            },
+            else => false,
+        };
+        if (use_virtual) {
+            try self.srcPrint(
+                "({s} ? {s}->native_handle() : nullptr)",
+                .{ p.name, p.name },
+            );
+            return;
+        }
+        const impl_name = try self.entityImplName(p.type_ref);
+        defer self.alloc.free(impl_name);
+        const target_iface: ?*const ir.Interface = switch (p.type_ref) {
+            .named => |td| switch (td) {
+                .interface => |iface| iface,
+                else => null,
+            },
+            else => null,
+        };
+        const iface_name = if (target_iface) |ti| ti.qualified_name else ct;
+
+        // Sibling interfaces that also implement iface_name
+        // (see base_implementors's doc comment) -- e.g.
+        // TopicDescription is implemented independently by
+        // TopicDescriptionImpl, ContentFilteredTopicImpl, and
+        // MultiTopicImpl, none of which inherit from each
+        // other. A single dynamic_cast against impl_name
+        // alone would wrongly reject a ContentFilteredTopic
+        // passed where a TopicDescription is expected.
+        const ExtraCandidate = struct { impl_name: []const u8, cast_expr: []const u8 };
+        var extra_impls: std.ArrayListUnmanaged(ExtraCandidate) = .empty;
+        defer {
+            for (extra_impls.items) |e| {
+                self.alloc.free(e.impl_name);
+                self.alloc.free(e.cast_expr);
+            }
+            extra_impls.deinit(self.alloc);
+        }
+        if (target_iface) |ti| {
+            if (self.base_implementors.get(ti.qualified_name)) |implementors| {
+                for (implementors.items) |impl_iface| {
+                    const extra_name = try self.entityImplName(.{ .named = .{ .interface = @constCast(impl_iface) } });
+                    var dup = std.mem.eql(u8, extra_name, impl_name);
+                    if (!dup) for (extra_impls.items) |existing| {
+                        if (std.mem.eql(u8, existing.impl_name, extra_name)) {
+                            dup = true;
+                            break;
+                        }
+                    };
+                    if (dup) {
+                        self.alloc.free(extra_name);
+                        continue;
+                    }
+                    // Real upcast through the C-ABI's own
+                    // generated `X_as_Y` conversion (same
+                    // mechanism this function already uses
+                    // for inherited-method dispatch below) --
+                    // NOT a reinterpret_cast: e.g.
+                    // DDS_ContentFilteredTopic and
+                    // DDS_TopicDescription are boxed with
+                    // different vtables for the very same
+                    // underlying entity, so treating one
+                    // handle as the other without going
+                    // through DDS_ContentFilteredTopic_as_
+                    // DDS_TopicDescription silently breaks
+                    // whatever the receiving C-ABI call does
+                    // with the (mis-vtabled) handle.
+                    const cast_expr = try self.handleExprForOwner(impl_iface, ti, "zidl_concrete_handle(*_impl)");
+                    try extra_impls.append(self.alloc, .{ .impl_name = extra_name, .cast_expr = cast_expr });
+                }
+            }
+        }
+
+        try self.srcWrite("/* zidl: entity parameter adaptation uses dynamic_cast and requires RTTI. */");
+        try self.srcPrint(
+            "([](const auto& _p) -> {s} {{ if (!_p) return nullptr; if (auto* _impl = dynamic_cast<{s}*>(_p.get())) return zidl_concrete_handle(*_impl); ",
+            .{ ct, impl_name },
+        );
+        for (extra_impls.items) |e| {
+            try self.srcPrint(
+                "if (auto* _impl = dynamic_cast<{s}*>(_p.get())) return {s}; ",
+                .{ e.impl_name, e.cast_expr },
+            );
+        }
+        try self.srcPrint(
+            "throw std::invalid_argument(\"zidl: incompatible entity implementation for {s}\"); }})({s})",
+            .{ iface_name, p.name },
+        );
+    }
+
+    /// Impl-bridge body for one of `isRawLoanOp`'s ops -- see that
+    /// function's doc comment and `emitRawLoanInterfaceOp`. Unlike the
+    /// generic `emitEntityMethod` path, raw-loan params are passed straight
+    /// through to the C ABI call by address (no `_c_{name}` copy, no
+    /// post-call copy-back) since they're already the exact
+    /// `DDS_OctetSeq`/`DDS_OctetSeqSeq`/`DDS_SampleInfoSeq` type the C ABI
+    /// expects -- that identity-preserving passthrough is the whole fix.
+    /// Every other param (size, key_hash, handle/instance_handle/
+    /// previous_handle, kind, a_condition, the state masks, max_samples)
+    /// reuses the exact same per-kind adaptation `emitAdaptedParams` uses,
+    /// just invoked directly here since this function only ever sees that
+    /// small known set of non-raw params across all 8 `isRawLoanOp` ops.
+    fn emitRawLoanImplOp(self: *ConcreteImplGenerator, owner: *const ir.Interface, class_name: []const u8, op: *const ir.Operation) !void {
+        const owner_c_name = try cNameOf(self.alloc, owner.qualified_name);
+        defer self.alloc.free(owner_c_name);
+        const ret_cpp = if (op.return_type) |rt| try self.typeRefToCpp(rt) else try self.alloc.dupe(u8, "void");
+        defer self.alloc.free(ret_cpp);
+
+        try self.srcPrint("{s} {s}Impl::{s}(", .{ ret_cpp, class_name, op.name });
+        for (op.params, 0..) |p, i| {
+            if (i > 0) try self.srcWrite(", ");
+            if (Generator.rawLoanParamCType(p)) |c_type| {
+                try self.srcPrint("{s}& {s}", .{ c_type, p.name });
+                continue;
+            }
+            const pt = try self.typeRefToCpp(p.type_ref);
+            defer self.alloc.free(pt);
+            switch (p.mode) {
+                .in_ => try self.srcPrint("{s} {s}", .{ pt, p.name }),
+                .out, .inout => try self.srcPrint("{s}& {s}", .{ pt, p.name }),
+            }
+        }
+        try self.srcWrite(") {\n");
+
+        // Setup locals: only the non-raw `seq_in` params (e.g. publish_loan_raw's
+        // `key_hash`) need one; raw-loan params are passed through directly below.
+        var seq_ctr: usize = 0;
+        for (op.params) |p| {
+            if (Generator.rawLoanParamCType(p) != null) continue;
+            if (paramAdaptKind(p) == .seq_in) try self.emitSeqParamAdaptIn(p, &seq_ctr);
+        }
+
+        if (op.return_type != null) {
+            try self.srcPrint("    return {s}_{s}(ptr_", .{ owner_c_name, op.name });
+        } else {
+            try self.srcPrint("    {s}_{s}(ptr_", .{ owner_c_name, op.name });
+        }
+        for (op.params) |p| {
+            try self.srcWrite(", ");
+            if (Generator.rawLoanParamCType(p) != null) {
+                try self.srcPrint("&{s}", .{p.name});
+                continue;
+            }
+            switch (paramAdaptKind(p)) {
+                .direct => {
+                    if (typeRefIsEnumLike(p.type_ref)) {
+                        const ct = try self.typeRefToCType(p.type_ref);
+                        defer self.alloc.free(ct);
+                        try self.srcPrint("static_cast<{s}>({s})", .{ ct, p.name });
+                    } else {
+                        try self.srcWrite(p.name);
+                    }
+                },
+                .seq_in => try self.srcPrint("&_c_{s}", .{p.name}),
+                .entity_in => try self.emitEntityInParamAdapt(p),
+                else => try self.srcPrint("/* TODO({s}) */", .{p.name}),
+            }
+        }
+        try self.srcWrite(");\n");
+        try self.srcWrite("}\n\n");
     }
 
     // ── Complex struct adaptation (C++ QoS in-params → C structs) ────────────
