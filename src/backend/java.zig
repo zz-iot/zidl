@@ -10568,7 +10568,9 @@ test "java: raw-loan read ops carry native loan identity through the impl and JN
         \\JNIEXPORT jint JNICALL Java_DataReaderImpl_n_1take_1raw(
         \\    JNIEnv *env, jobject self, jlong ptr, jobject cdr_payloads, jobject key_hashes, jobject sample_infos, jint instance_handle, jobject a_condition, jint sample_states, jint view_states, jint instance_states, jint max_samples, jobjectArray loanHandles)
     ) != null);
-    try testing.expect(std.mem.indexOf(u8, jni,
+    try testing.expect(std.mem.indexOf(
+        u8,
+        jni,
         "jobject _ph = _c_cdr_payloads._buffer ? (*env)->NewDirectByteBuffer(env, _c_cdr_payloads._buffer, (jlong)(_c_cdr_payloads._maximum * sizeof(DDS_OctetSeq))) : NULL;",
     ) != null);
     // a_condition's unboxing resolves to the plain zidl_java_unbox here (no
@@ -10587,7 +10589,9 @@ test "java: raw-loan read ops carry native loan identity through the impl and JN
         \\JNIEXPORT jint JNICALL Java_DataReaderImpl_n_1return_1loan_1raw(
         \\    JNIEnv *env, jobject self, jlong ptr, jobjectArray loanHandles)
     ) != null);
-    try testing.expect(std.mem.indexOf(u8, jni,
+    try testing.expect(std.mem.indexOf(
+        u8,
+        jni,
         "return (jint)DDS_DataReader_return_loan_raw((void *)(intptr_t)ptr, &_c_cdr_payloads, &_c_key_hashes, &_c_sample_infos);",
     ) != null);
 
