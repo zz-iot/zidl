@@ -10453,3 +10453,153 @@ test "java: CDR helpers include _cdrWriteFixed and _cdrReadFixed" {
     try testGen(alloc, "struct S { long x; };", "s", "private static void _cdrWriteFixed");
     try testGen(alloc, "struct S { long x; };", "s", "private static double _cdrReadFixed");
 }
+
+// ── isReadLoanBufferOp / raw-loan identity-preserving codegen (zidl PR #53) ──
+//
+// Same shape as the C++ fixture in cpp.zig's matching test section: a
+// minimal dcps.idl-shaped DDS::DataReader with the real raw-loan op
+// signatures, plus a same-named-but-unrelated Foo::DataReader as the
+// negative control for the qualified-name fix.
+const raw_loan_fixture =
+    \\module DDS {
+    \\    typedef sequence<octet> OctetSeq;
+    \\    typedef sequence<OctetSeq> OctetSeqSeq;
+    \\    struct SampleInfo { boolean valid_data; };
+    \\    typedef sequence<SampleInfo> SampleInfoSeq;
+    \\    interface ReadCondition {};
+    \\
+    \\    interface DataReader {
+    \\        long take_raw(inout OctetSeqSeq cdr_payloads, inout OctetSeq key_hashes, inout SampleInfoSeq sample_infos, in long instance_handle, in ReadCondition a_condition, in unsigned long sample_states, in unsigned long view_states, in unsigned long instance_states, in long max_samples);
+    \\        long return_loan_raw(inout OctetSeqSeq cdr_payloads, inout OctetSeq key_hashes, inout SampleInfoSeq sample_infos);
+    \\    };
+    \\};
+    \\module Foo {
+    \\    typedef sequence<octet> OctetSeq;
+    \\    typedef sequence<OctetSeq> OctetSeqSeq;
+    \\    struct SampleInfo { boolean valid_data; };
+    \\    typedef sequence<SampleInfo> SampleInfoSeq;
+    \\    interface ReadCondition {};
+    \\    interface DataReader {
+    \\        long take_raw(inout OctetSeqSeq cdr_payloads, inout OctetSeq key_hashes, inout SampleInfoSeq sample_infos, in long instance_handle, in ReadCondition a_condition, in unsigned long sample_states, in unsigned long view_states, in unsigned long instance_states, in long max_samples);
+    \\    };
+    \\};
+;
+
+test "java: raw-loan read ops get a trailing ByteBuffer[] loanHandles param in the interface declaration, only for the real DDS::DataReader" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc, raw_loan_fixture);
+    defer ir_spec.deinit();
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    const opts = interface.Options{ .input_stem = "dcps" };
+    try generateFile(alloc, &ir_spec, opts, &out);
+    const s = out.items;
+
+    // return_loan_raw drops the generic content params entirely -- nothing
+    // left to read content from, it only ever releases.
+    try testing.expect(std.mem.indexOf(u8, s, "int return_loan_raw(java.nio.ByteBuffer[] loanHandles);") != null);
+    // take_raw keeps its content params (typed against DDS.*, since this
+    // fixture's DataReader lives in module DDS) and gains the trailing
+    // loanHandles.
+    try testing.expect(std.mem.indexOf(u8, s, "int take_raw(java.util.List<java.util.List<Byte>> cdr_payloads, java.util.List<Byte> key_hashes, java.util.List<DDS.SampleInfo> sample_infos, int instance_handle, DDS.ReadCondition a_condition, int sample_states, int view_states, int instance_states, int max_samples, java.nio.ByteBuffer[] loanHandles);") != null);
+
+    // Foo::DataReader -- same op name, same param shape, unrelated module:
+    // must NOT get loanHandles. This is the regression test for the
+    // Greptile-flagged bare-name-matching bug -- isReadLoanBufferOp gates on
+    // the *declaring interface's qualified name*.
+    try testing.expect(std.mem.indexOf(u8, s, "int take_raw(java.util.List<java.util.List<Byte>> cdr_payloads, java.util.List<Byte> key_hashes, java.util.List<Foo.SampleInfo> sample_infos, int instance_handle, Foo.ReadCondition a_condition, int sample_states, int view_states, int instance_states, int max_samples);") != null);
+}
+
+test "java: raw-loan read ops carry native loan identity through the impl and JNI bridge, only for the real DDS::DataReader" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc, raw_loan_fixture);
+    defer ir_spec.deinit();
+
+    var ifaces = std.ArrayListUnmanaged(*const ir.Interface).empty;
+    defer ifaces.deinit(alloc);
+    try collectInterfaces(alloc, ir_spec.items, &ifaces);
+
+    var dds_reader: ?*const ir.Interface = null;
+    var foo_reader: ?*const ir.Interface = null;
+    for (ifaces.items) |iface| {
+        if (std.mem.eql(u8, iface.qualified_name, "DDS::DataReader")) dds_reader = iface;
+        if (std.mem.eql(u8, iface.qualified_name, "Foo::DataReader")) foo_reader = iface;
+    }
+    try testing.expect(dds_reader != null);
+    try testing.expect(foo_reader != null);
+
+    const stem_class = try stemToClassName(alloc, "dcps");
+    defer alloc.free(stem_class);
+
+    var impl_out = std.ArrayList(u8).empty;
+    defer impl_out.deinit(alloc);
+    const opts = interface.Options{ .input_stem = "dcps" };
+    try generateImplFile(alloc, &ir_spec, dds_reader.?, stem_class, opts, &impl_out);
+    try generateImplFile(alloc, &ir_spec, foo_reader.?, stem_class, opts, &impl_out);
+
+    var jni_out = std.ArrayList(u8).empty;
+    defer jni_out.deinit(alloc);
+    try generateJniSource(alloc, &ir_spec, opts, &jni_out);
+
+    const impl = impl_out.items;
+    const jni = jni_out.items;
+
+    // Impl: DDS::DataReader's take_raw/return_loan_raw carry the trailing
+    // loanHandles through the forwarding method and the native declaration.
+    try testing.expect(std.mem.indexOf(u8, impl,
+        \\public int take_raw(java.util.List<java.util.List<Byte>> cdr_payloads, java.util.List<Byte> key_hashes, java.util.List<Dcps.DDS.SampleInfo> sample_infos, int instance_handle, Dcps.DDS.ReadCondition a_condition, int sample_states, int view_states, int instance_states, int max_samples, java.nio.ByteBuffer[] loanHandles) {
+        \\        return n_take_raw(ptr_, cdr_payloads, key_hashes, sample_infos, instance_handle, a_condition, sample_states, view_states, instance_states, max_samples, loanHandles);
+    ) != null);
+    try testing.expect(std.mem.indexOf(u8, impl,
+        \\public int return_loan_raw(java.nio.ByteBuffer[] loanHandles) {
+        \\        return n_return_loan_raw(ptr_, loanHandles);
+    ) != null);
+    // Foo::DataReader's take_raw: no loanHandles anywhere in its signature.
+    try testing.expect(std.mem.indexOf(u8, impl,
+        \\public int take_raw(java.util.List<java.util.List<Byte>> cdr_payloads, java.util.List<Byte> key_hashes, java.util.List<Dcps.Foo.SampleInfo> sample_infos, int instance_handle, Dcps.Foo.ReadCondition a_condition, int sample_states, int view_states, int instance_states, int max_samples) {
+        \\        return n_take_raw(ptr_, cdr_payloads, key_hashes, sample_infos, instance_handle, a_condition, sample_states, view_states, instance_states, max_samples);
+    ) != null);
+
+    // JNI: DDS::DataReader's take_raw gains jobjectArray loanHandles, and
+    // populates it via NewDirectByteBuffer using the *real* native
+    // pointers/sizes.
+    try testing.expect(std.mem.indexOf(u8, jni,
+        \\JNIEXPORT jint JNICALL Java_DataReaderImpl_n_1take_1raw(
+        \\    JNIEnv *env, jobject self, jlong ptr, jobject cdr_payloads, jobject key_hashes, jobject sample_infos, jint instance_handle, jobject a_condition, jint sample_states, jint view_states, jint instance_states, jint max_samples, jobjectArray loanHandles)
+    ) != null);
+    try testing.expect(std.mem.indexOf(u8, jni,
+        "jobject _ph = _c_cdr_payloads._buffer ? (*env)->NewDirectByteBuffer(env, _c_cdr_payloads._buffer, (jlong)(_c_cdr_payloads._maximum * sizeof(DDS_OctetSeq))) : NULL;",
+    ) != null);
+    // a_condition's unboxing resolves to the plain zidl_java_unbox here (no
+    // widening dispatcher needed for this minimal fixture's ReadCondition) --
+    // proves entityUnboxFnName is being called (not a hardcoded, possibly
+    // undeclared-in-this-file zidl_java_unbox_as_DDS_ReadCondition, which is
+    // `static`/file-local and only emitted where a real widening need
+    // exists -- the bug this replaced).
+    try testing.expect(std.mem.indexOf(u8, jni, "void *_n_a_condition = zidl_java_unbox(env, a_condition);") != null);
+
+    // JNI: DDS::DataReader's return_loan_raw reconstructs the exact original
+    // three C structs from loanHandles (pointer + maximum recovered via
+    // GetDirectBufferAddress/Capacity) and calls the real C ABI function
+    // directly -- no _from_java conversion of freshly-reconstructed structs.
+    try testing.expect(std.mem.indexOf(u8, jni,
+        \\JNIEXPORT jint JNICALL Java_DataReaderImpl_n_1return_1loan_1raw(
+        \\    JNIEnv *env, jobject self, jlong ptr, jobjectArray loanHandles)
+    ) != null);
+    try testing.expect(std.mem.indexOf(u8, jni,
+        "return (jint)DDS_DataReader_return_loan_raw((void *)(intptr_t)ptr, &_c_cdr_payloads, &_c_key_hashes, &_c_sample_infos);",
+    ) != null);
+
+    // JNI: Foo::DataReader's take_raw uses the ordinary generic marshaling
+    // (Foo_OctetSeqSeq_from_java/_fill_java/_free) -- no loanHandles
+    // parameter, no NewDirectByteBuffer. Same regression test as the
+    // interface/impl levels above, at the JNI layer.
+    try testing.expect(std.mem.indexOf(u8, jni,
+        \\JNIEXPORT jint JNICALL Java_DataReaderImpl_n_1take_1raw(
+        \\    JNIEnv *env, jobject self, jlong ptr, jobject cdr_payloads, jobject key_hashes, jobject sample_infos, jint instance_handle, jobject a_condition, jint sample_states, jint view_states, jint instance_states, jint max_samples)
+        \\{
+        \\    (void)self;
+        \\    Foo_OctetSeqSeq _c_cdr_payloads; memset(&_c_cdr_payloads, 0, sizeof(_c_cdr_payloads)); Foo_OctetSeqSeq_from_java(env, cdr_payloads, &_c_cdr_payloads);
+    ) != null);
+}

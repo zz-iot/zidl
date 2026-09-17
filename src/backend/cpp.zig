@@ -10030,3 +10030,103 @@ test "cpp_backend: listener_in uses _lp_ null pointer, not address-of zero struc
     try testing.expect(has(src, "_lp_l"));
     try testing.expect(!has(src, "l ? &_l_l : nullptr"));
 }
+
+// ── isRawLoanOp / raw-loan identity-preserving codegen (zidl PR #53) ─────────
+//
+// A minimal dcps.idl-shaped fixture, reused by the interface- and impl-level
+// tests below: DDS::DataWriter/DataReader with the real raw-loan op
+// signatures, plus a same-named-but-unrelated Foo::DataWriter (own OctetSeq
+// typedef, same op name and param shape) as the negative control for the
+// qualified-name fix -- if isRawLoanOp ever regressed back to a bare-name
+// check, Foo::DataWriter's loan_raw would also get the DDS_OctetSeq&
+// treatment below, which it must never do.
+const raw_loan_fixture =
+    \\module DDS {
+    \\    interface Entity { long enable(); };
+    \\    typedef sequence<octet> OctetSeq;
+    \\    typedef sequence<OctetSeq> OctetSeqSeq;
+    \\    struct SampleInfo { boolean valid_data; };
+    \\    typedef sequence<SampleInfo> SampleInfoSeq;
+    \\    interface ReadCondition {};
+    \\    enum WriteKind { ALIVE_WRITE_KIND, DISPOSE_WRITE_KIND, UNREGISTER_WRITE_KIND };
+    \\
+    \\    interface DataWriter : Entity {
+    \\        long loan_raw(in unsigned long size, inout OctetSeq cdr_payload);
+    \\        long publish_loan_raw(inout OctetSeq cdr_payload, in OctetSeq key_hash, in long handle, in WriteKind kind);
+    \\        long return_loan_raw(inout OctetSeq cdr_payload);
+    \\    };
+    \\
+    \\    interface DataReader : Entity {
+    \\        long take_raw(inout OctetSeqSeq cdr_payloads, inout OctetSeq key_hashes, inout SampleInfoSeq sample_infos, in long instance_handle, in ReadCondition a_condition, in unsigned long sample_states, in unsigned long view_states, in unsigned long instance_states, in long max_samples);
+    \\        long return_loan_raw(inout OctetSeqSeq cdr_payloads, inout OctetSeq key_hashes, inout SampleInfoSeq sample_infos);
+    \\    };
+    \\};
+    \\module Foo {
+    \\    typedef sequence<octet> OctetSeq;
+    \\    interface DataWriter {
+    \\        long loan_raw(in unsigned long size, inout OctetSeq cdr_payload);
+    \\    };
+    \\};
+;
+
+test "cpp_backend: raw-loan ops get identity-preserving C struct params in the interface declaration, only for the real DDS::DataWriter/DataReader" {
+    var out = try testGenOpts(raw_loan_fixture, "dcps", .{ .generate_interfaces = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+
+    // DDS::DataWriter's three raw-loan ops: the identity-bearing inout
+    // OctetSeq param is the raw C struct type; the in-mode key_hash (never
+    // round-tripped, so never needed the fix) stays the normal vectorized
+    // ::DDS::OctetSeq.
+    try testing.expect(has(s, "loan_raw(uint32_t size, DDS_OctetSeq& cdr_payload) = 0;"));
+    try testing.expect(has(s, "publish_loan_raw(DDS_OctetSeq& cdr_payload, ::DDS::OctetSeq key_hash,"));
+    try testing.expect(has(s, "return_loan_raw(DDS_OctetSeq& cdr_payload) = 0;"));
+
+    // DDS::DataReader: all three identity-bearing params (cdr_payloads,
+    // key_hashes, sample_infos -- all inout here, unlike the writer's single
+    // key_hash) get the raw types.
+    try testing.expect(has(s, "take_raw(DDS_OctetSeqSeq& cdr_payloads, DDS_OctetSeq& key_hashes, DDS_SampleInfoSeq& sample_infos,"));
+    try testing.expect(has(s, "return_loan_raw(DDS_OctetSeqSeq& cdr_payloads, DDS_OctetSeq& key_hashes, DDS_SampleInfoSeq& sample_infos) = 0;"));
+
+    // Foo::DataWriter -- same op name, same param shape, unrelated module:
+    // gets the ordinary vectorized type, not DDS_OctetSeq. This is the
+    // regression test for the Greptile-flagged bare-name-matching bug --
+    // isRawLoanOp gates on the *declaring interface's qualified name*, so a
+    // same-named interface elsewhere is never routed through this path.
+    try testing.expect(has(s, "loan_raw(uint32_t size, ::Foo::OctetSeq& cdr_payload) = 0;"));
+}
+
+test "cpp_backend: raw-loan ops pass identity-preserving params straight through in the impl (no _c_ adaptation copy), only for the real DDS::DataWriter/DataReader" {
+    var res = try testGenConcreteImpl(raw_loan_fixture);
+    defer res.deinit();
+    const hdr = res.hdr.items;
+    const src = res.src.items;
+
+    // Impl header declarations (emitRawLoanImplDecl) match the interface's
+    // raw types exactly -- otherwise the override wouldn't compile (this is
+    // exactly the "invalid new-expression of abstract class type" failure
+    // mode a mismatch here caused during development).
+    try testing.expect(has(hdr, "loan_raw(uint32_t size, DDS_OctetSeq& cdr_payload) override;"));
+    try testing.expect(has(hdr, "take_raw(DDS_OctetSeqSeq& cdr_payloads, DDS_OctetSeq& key_hashes, DDS_SampleInfoSeq& sample_infos,"));
+
+    // Impl bodies (emitRawLoanImplOp) pass the raw params straight through
+    // by address -- no "_c_cdr_payload" adaptation-copy local, unlike every
+    // other seq-shaped param (see the non-loan a_condition/key_hash/state-mask
+    // params below, which *do* still go through the normal adaptation path
+    // this reuses via emitEntityInParamAdapt/emitSeqParamAdaptIn).
+    try testing.expect(has(src, "DDS_DataWriter_loan_raw(ptr_, size, &cdr_payload)"));
+    try testing.expect(has(src, "DDS_DataReader_take_raw(ptr_, &cdr_payloads, &key_hashes, &sample_infos,"));
+    // a_condition still gets the normal entity-param adaptation
+    // (emitEntityInParamAdapt, extracted from emitAdaptedParams so this path
+    // could reuse it) -- proves the refactor didn't silently drop it. This
+    // minimal fixture's ReadCondition has no ambiguity (no QueryCondition
+    // sibling), so it takes the fast virtual-dispatch branch rather than the
+    // dynamic_cast fallback -- both are emitEntityInParamAdapt's own code,
+    // just different branches of it.
+    try testing.expect(has(src, "(a_condition ? a_condition->native_handle() : nullptr)"));
+
+    // Foo::DataWriter's loan_raw: ordinary adapted-copy path, not the raw
+    // passthrough -- same regression test as the interface-level one above,
+    // at the impl layer.
+    try testing.expect(has(src, "Foo_DataWriter_loan_raw(ptr_, size, &_c_cdr_payload)"));
+}
