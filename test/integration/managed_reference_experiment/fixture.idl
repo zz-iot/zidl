@@ -1,0 +1,4 @@
+module Probe {
+ @experimental_managed_reference interface Value { long get_value(); long replace(inout Value result); };
+ @experimental_managed_config struct Config { Value group; Value other; };
+};

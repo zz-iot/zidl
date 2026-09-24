@@ -1366,6 +1366,7 @@ const Generator = struct {
     // ── Interface ─────────────────────────────────────────────────────────────
 
     fn emitInterface(self: *Generator, iface: *const ir.Interface) anyerror!void {
+        if (@import("managed_reference_experiment.zig").enabled(iface)) return error.UnsupportedManagedReferenceExperiment;
         const pfx = self.opts.type_prefix;
         try self.ind();
         try self.print("public interface {s}{s}", .{ pfx, iface.name });

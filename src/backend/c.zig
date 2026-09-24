@@ -521,6 +521,15 @@ const Generator = struct {
         const c_name = try self.prefixedCName(s.qualified_name);
         defer self.alloc.free(c_name);
 
+        const managed = @import("managed_reference_experiment.zig");
+        if (managed.configEnabled(s)) {
+            if (!self.opts.generate_interfaces or !self.opts.no_typesupport or self.opts.type_prefix.len != 0) return error.UnsupportedManagedReferenceExperiment;
+            const generated = try managed.configC(self.alloc, s, c_name);
+            defer self.alloc.free(generated);
+            try self.write(generated);
+            return;
+        }
+
         var opt_count: u32 = 0;
         for (s.members) |m| {
             if (m.annotations.is_optional) {
@@ -919,6 +928,15 @@ const Generator = struct {
     fn emitInterface(self: *Generator, iface: *const ir.Interface) !void {
         const c_name = try self.prefixedCName(iface.qualified_name);
         defer self.alloc.free(c_name);
+
+        const managed = @import("managed_reference_experiment.zig");
+        if (managed.enabled(iface)) {
+            if (!self.opts.generate_interfaces or !self.opts.no_typesupport) return error.UnsupportedManagedReferenceExperiment;
+            const generated = try managed.c(self.alloc, iface, c_name);
+            defer self.alloc.free(generated);
+            try self.write(generated);
+            return;
+        }
 
         if (!self.opts.generate_interfaces) {
             try self.print(

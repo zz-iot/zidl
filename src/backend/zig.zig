@@ -449,6 +449,16 @@ const Generator = struct {
 
     fn emitStruct(self: *Generator, s: *const ir.Struct) !void {
         const pfx = self.opts.type_prefix;
+        const managed = @import("managed_reference_experiment.zig");
+        if (managed.configEnabled(s)) {
+            if (!self.opts.generate_interfaces or !self.opts.no_typesupport or pfx.len != 0 or self.opts.zig_generate_toml_config) return error.UnsupportedManagedReferenceExperiment;
+            const cname = try self.cApiQualName(s.qualified_name, pfx);
+            defer self.alloc.free(cname);
+            const generated = try managed.configZig(self.alloc, s, s.name, cname);
+            defer self.alloc.free(generated);
+            try self.write(generated);
+            return;
+        }
         try self.ind();
         const kw: []const u8 = if (structIsCExternCompatible(s)) "extern struct" else "struct";
         try self.print("pub const {s}{s} = {s} {{\n", .{ pfx, s.name, kw });
@@ -1650,6 +1660,19 @@ const Generator = struct {
 
     fn emitInterface(self: *Generator, iface: *const ir.Interface) anyerror!void {
         const pfx = self.opts.type_prefix;
+
+        const managed = @import("managed_reference_experiment.zig");
+        if (managed.enabled(iface)) {
+            if (!self.opts.generate_interfaces or !self.opts.no_typesupport) return error.UnsupportedManagedReferenceExperiment;
+            const cname = try self.cApiQualName(iface.qualified_name, pfx);
+            defer self.alloc.free(cname);
+            const name = try std.fmt.allocPrint(self.alloc, "{s}{s}", .{pfx, iface.name});
+            defer self.alloc.free(name);
+            const generated = try managed.zig(self.alloc, iface, name, cname);
+            defer self.alloc.free(generated);
+            try self.write(generated);
+            return;
+        }
 
         // @callback interfaces: C callback struct + noop constant only.
         // No fat-pointer vtable entity — the C struct IS the type.

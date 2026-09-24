@@ -911,6 +911,7 @@ const Generator = struct {
     // ── Interface ─────────────────────────────────────────────────────────────
 
     fn emitInterface(self: *Generator, iface: *const ir.Interface) anyerror!void {
+        if (@import("managed_reference_experiment.zig").enabled(iface)) return error.UnsupportedManagedReferenceExperiment;
         // Emit nested type declarations before the class body.
         for (iface.type_decls) |td| {
             try self.emitTypeDecl(td);

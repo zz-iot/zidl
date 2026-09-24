@@ -25,6 +25,14 @@ Features*.
 
 ### All backends
 
+- **Generic construction-reference bindings (zzdds concurrency prerequisite)** —
+  [Requirements and validation gates](design/construction-reference-bindings.md).
+  Fix interface out/inout replacement and aggregate C-ABI conversion; specify safe
+  reference defaults/ownership and fallible cleanup; support explicitly construction-only
+  configuration fields without serializing live handles. Validate all four bindings
+  with a non-DDS reference core. Consumer runtime/group semantics stay outside zidl.
+  Plugin extraction remains the separate later project below.
+
 - **Union discriminant of a complex type** (`wstring` / `fixed_pt` / named-non-enum /
   typedef-of-complex) emits `/* TODO: unsupported discriminant */` in every backend.
   `c.zig:3316`, `cpp.zig:2947`, `zig.zig:969`; Boolean union switch also unhandled in Java
@@ -130,6 +138,19 @@ Features*.
   caught only by rebuilding zzdds's Java binding. `java.zig:3940`.
 
 ### Zig backend
+
+- **Broker codec admission/representation follow-ups (2026-09-17):** mutable
+  decoding currently accepts absent required fields and duplicate singleton members.
+  Add generic validation or an explicit validated-decoder facility before consumers
+  treat decoding as untrusted-message admission. Bounded sequences use inline storage;
+  provide/review a bounded allocated or borrowed mapping for large wire ceilings rather
+  than forcing embedded clients to reserve the maximum in every native value.
+- **Nested/unsupported sequence element decoding:** `emitSequenceElementRead` can
+  emit TODO-only bodies for nested sequences and array typedef elements. Diagnose
+  unsupported shapes or implement correct reads/cleanup; successful generation must
+  not silently consume no elements. Found during broker codec regression work; the
+  broker draft avoids these element shapes. Separate from the corrected allocator
+  forwarding for supported bounded sequences of structs.
 
 - **Sequence element that resolves to an array typedef** emits a `// TODO` in the
   deserialize path. `zig.zig:5877`.
