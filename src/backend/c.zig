@@ -194,6 +194,11 @@ const Generator = struct {
     /// safely included together.  Always true: prevents conflicts when multiple
     /// generated headers (e.g. dcps.h and shape.h) define the same sequence type.
     guarded_seqs: bool = true,
+    /// Split-file mode: C name of the one type this header defines. Every other
+    /// named type is declared by a dependency header this one `#include`s, so
+    /// only this type may be forward-declared or hoisted here (a sequence of
+    /// itself); re-declaring anything else is a duplicate typedef under C99.
+    split_self_c_name: ?[]const u8 = null,
 
     // ── Low-level output helpers ──────────────────────────────────────────────
 
@@ -1060,6 +1065,13 @@ const Generator = struct {
         }
     }
 
+    /// True when `c_name` is declared by an included dependency header (split
+    /// mode) rather than by this header -- see `split_self_c_name`.
+    fn declaredByDependencyHeader(self: *const Generator, c_name: []const u8) bool {
+        const own = self.split_self_c_name orelse return false;
+        return !std.mem.eql(u8, own, c_name);
+    }
+
     fn emitForwardDeclIfStruct(self: *Generator, tr: ir.TypeRef) !void {
         switch (tr) {
             .named => |td| switch (td) {
@@ -1070,6 +1082,7 @@ const Generator = struct {
                     const c_name = try self.prefixedCName(qn);
                     defer self.alloc.free(c_name);
                     if (self.forward_decl_emitted.get(c_name) != null) return;
+                    if (self.declaredByDependencyHeader(c_name)) return;
                     const k = try self.alloc.dupe(u8, c_name);
                     errdefer self.alloc.free(k);
                     try self.forward_decl_emitted.put(self.alloc, k, {});
@@ -1114,6 +1127,7 @@ const Generator = struct {
         defer self.alloc.free(c_name);
         if (self.forward_decl_emitted.get(c_name) != null) return;
         if (self.scalar_typedef_emitted.get(c_name) != null) return;
+        if (self.declaredByDependencyHeader(c_name)) return;
 
         switch (t.type_ref) {
             .sequence => |seq| try self.ensureSeqTypedef(seq.element.*),
@@ -4738,6 +4752,9 @@ fn generateTypeHeader(
         .enum_emitted = .empty,
         .guarded_seqs = true,
     };
+    const self_c_name = try gen.prefixedCName(qname);
+    defer alloc.free(self_c_name);
+    gen.split_self_c_name = self_c_name;
     defer {
         var it = gen.seq_emitted.keyIterator();
         while (it.next()) |k| alloc.free(k.*);
@@ -4763,7 +4780,8 @@ fn generateTypeHeader(
     try gen.write("#include <stdbool.h>\n");
     if (!opts.no_typesupport) {
         switch (td) {
-            .struct_ => try gen.write("#include \"zidl_cdr.h\"\n"),
+            // Unions declare CDR prototypes too (`emitUnionCdrProtos`).
+            .struct_, .union_ => try gen.write("#include \"zidl_cdr.h\"\n"),
             else => {},
         }
     }
@@ -4903,18 +4921,22 @@ pub fn generateSplitFiles(
         defer alloc.free(h_filename);
         try writeOutputFile(alloc, io, opts, h_filename, h_content.items);
 
-        // CDR source (structs and exceptions only).
+        // CDR source: structs, exceptions and unions get serialize/deserialize
+        // (+ `_free`); an unbounded sequence typedef gets its `_free`, which its
+        // header declares, unless `--c-no-free`.
         if (!opts.no_typesupport) {
-            switch (td) {
-                .struct_, .exception => {
-                    var c_content = std.ArrayList(u8).empty;
-                    defer c_content.deinit(alloc);
-                    try generateTypeCdrSource(alloc, td, opts, type_stem, &c_content);
-                    const c_filename = try std.fmt.allocPrint(alloc, "{s}_cdr.c", .{type_stem});
-                    defer alloc.free(c_filename);
-                    try writeOutputFile(alloc, io, opts, c_filename, c_content.items);
-                },
-                else => {},
+            const wants_cdr = switch (td) {
+                .struct_, .exception, .union_ => true,
+                .typedef => |t| isUnboundedSeqTypedef(t) and !opts.c_no_free,
+                else => false,
+            };
+            if (wants_cdr) {
+                var c_content = std.ArrayList(u8).empty;
+                defer c_content.deinit(alloc);
+                try generateTypeCdrSource(alloc, td, opts, type_stem, &c_content);
+                const c_filename = try std.fmt.allocPrint(alloc, "{s}_cdr.c", .{type_stem});
+                defer alloc.free(c_filename);
+                try writeOutputFile(alloc, io, opts, c_filename, c_content.items);
             }
         }
     }
@@ -7025,4 +7047,41 @@ test "c_backend cdr: @optional member is marked present over zeroed storage befo
     const mark = std.mem.indexOfPos(u8, c, zero, "_v->_present |= (1ULL << 0u);") orelse return error.TestUnexpectedResult;
     const read = std.mem.indexOfPos(u8, c, mark, "_rc = zidl_cdr_read_u32(_r, &_sl);") orelse return error.TestUnexpectedResult;
     try testing.expect(zero < mark and mark < read);
+}
+
+test "c_backend split: sequence elements come from dependency headers, not re-declared" {
+    const idl =
+        \\struct Named { string label; };
+        \\union Choice switch (long) { case 0: long i; case 1: string s; };
+        \\typedef string Label;
+        \\struct H { sequence<Named> n; sequence<Choice> c; sequence<Label> l; };
+    ;
+    var out = try testGenTypeHeader(idl, "t", 3);
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "#include \"Named.h\""));
+    try testing.expect(has(s, "#include \"Choice.h\""));
+    try testing.expect(has(s, "#include \"Label.h\""));
+    // Re-declaring any of these duplicates a typedef, which C99 rejects.
+    try testing.expect(!has(s, "typedef struct Named_s Named;"));
+    try testing.expect(!has(s, "typedef struct Choice_s Choice;"));
+    try testing.expect(!has(s, "typedef char *Label;"));
+}
+
+test "c_backend split: a self-referencing sequence still forward-declares its own type" {
+    var out = try testGenTypeHeader(
+        \\struct Node { long v; sequence<Node> kids; };
+    , "t", 0);
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "typedef struct Node_s Node;"));
+    try testing.expect(has(out.items, "struct Node_s {"));
+}
+
+test "c_backend split: union header includes zidl_cdr.h for its CDR prototypes" {
+    var out = try testGenTypeHeader(
+        \\union Choice switch (long) { case 0: long i; case 1: string s; };
+    , "t", 0);
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "#include \"zidl_cdr.h\""));
+    try testing.expect(has(out.items, "int Choice_serialize(ZidlCdrWriter *_w, const Choice *_v);"));
 }

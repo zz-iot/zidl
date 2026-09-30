@@ -13,7 +13,10 @@ derived from the IDL source file.
 | `<name>.h` | Type declarations, CDR function prototypes, include guards |
 | `<name>_cdr.c` | CDR serialize/deserialize implementations |
 
-`--split-files` produces one `.h`/`.c` pair per top-level named type.
+`--split-files` produces one `<Type>.h` per top-level named type, plus `<stem>_all.h`
+that includes them all. Each header `#include`s the headers of the types it uses. Structs,
+exceptions and unions also get `<Type>_cdr.c`. So does an unbounded `typedef sequence<T>`,
+for its `_free`, unless `--c-no-free` is set.
 
 ---
 

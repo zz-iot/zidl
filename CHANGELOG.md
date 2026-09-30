@@ -64,10 +64,17 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
     `_free` releases whatever a failed read already allocated instead of leaking it.
   - A union's `_skip` read its discriminant into a shadowing local and then switched on
     an uninitialized one, so skipping a union consumed the wrong number of bytes.
+  - `--split-files` output compiles and links for these shapes.
+    - Split headers re-declared struct (and now union and alias) element types that
+      their dependency headers already provide. That is a duplicate typedef under C99,
+      so any split header with a sequence of structs failed to compile.
+    - Union headers did not include `zidl_cdr.h`.
+    - Unions and unbounded sequence typedefs got no `_cdr.c`, leaving union CDR
+      functions and the typedef `_free` undefined.
 
   `Foo_deserialize` still expects a zeroed or default-initialized `Foo`. The new C
   integration test runs every truncation point and every allocation failure through a
-  tracking allocator.
+  tracking allocator, against both single-file and `--split-files` output.
 - **C++ backend: unions and `@optional` members compile.**
   - A union's CDR prototypes were declared once with C++ linkage after the class and
     again in the header's `extern "C"` block. Any IDL with a union and type support

@@ -375,6 +375,54 @@ pub fn build(b: *std.Build) void {
         const c_test = b.addExecutable(.{ .name = "zidl-sequence-elements-c", .root_module = c_mod });
         test_step.dependOn(&b.addRunArtifact(c_test).step);
 
+        // The same C test against `--split-files` output (one header and
+        // `_cdr.c` per type): split headers must not re-declare types their
+        // dependency headers provide, and unions / sequence typedefs need
+        // their own `_cdr.c`. `fixture.h` is shimmed onto `fixture_all.h`.
+        const gen_c_split = b.addRunArtifact(exe);
+        gen_c_split.addArgs(&.{ "-b", "c", "--split-files", "-o" });
+        const c_split_dir = gen_c_split.addOutputDirectoryArg("sequence-elements-c-split");
+        gen_c_split.addFileArg(seq_idl);
+        const c_split_shim = b.addWriteFiles().add("fixture.h", "#include \"fixture_all.h\"\n");
+        const c_split_mod = b.createModule(.{
+            .root_source_file = null,
+            .target = target,
+            .optimize = .Debug,
+            .sanitize_thread = sanitize_thread,
+            .link_libc = true,
+        });
+        c_split_mod.addCSourceFile(.{
+            .file = b.path("test/integration/sequence_elements/test.c"),
+            .flags = &.{ "-std=c99", "-Wall", "-Werror" },
+        });
+        // Every type in fixture.idl that gets a `_cdr.c` in split mode
+        // (structs, unions, unbounded sequence typedefs). A stale entry fails
+        // the build; a missing one fails the link.
+        const split_cdr_stems = [_][]const u8{
+            "Point",                  "Named",                "Choice",
+            "AliasHolder",            "NamedHolder",          "ChoiceHolder",
+            "ColorHolder",            "AppendableHolder",     "MutableHolder",
+            "SeqCase",                "NamedSeq",             "UnboundedHolder",
+            "TypedefUnboundedHolder", "TypedefBoundedHolder", "Outer",
+            "LabelList",              "AliasElementHolder",   "OptionalHolder",
+            "PeopleCase",
+        };
+        for (split_cdr_stems) |stem| {
+            c_split_mod.addCSourceFile(.{
+                .file = c_split_dir.path(b, b.fmt("{s}_cdr.c", .{stem})),
+                .flags = &.{ "-std=c99", "-Wall", "-Werror" },
+            });
+        }
+        c_split_mod.addCSourceFile(.{
+            .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"),
+            .flags = &.{"-std=c99"},
+        });
+        c_split_mod.addIncludePath(c_split_shim.dirname());
+        c_split_mod.addIncludePath(c_split_dir);
+        c_split_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+        const c_split_test = b.addExecutable(.{ .name = "zidl-sequence-elements-c-split", .root_module = c_split_mod });
+        test_step.dependOn(&b.addRunArtifact(c_split_test).step);
+
         const gen_cpp = b.addRunArtifact(exe);
         gen_cpp.addArgs(&.{ "-b", "cpp", "-o" });
         const cpp_dir = gen_cpp.addOutputDirectoryArg("sequence-elements-cpp");
