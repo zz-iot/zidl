@@ -298,6 +298,7 @@ const Generator = struct {
         }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructCpp(spec.items)) {
             try self.write("#include \"zzdds_c.h\"\n");
+            try self.write("#include \"dcps.hpp\"\n");
             try self.write("#include <unordered_map>\n");
         }
         for (spec.imports) |import_name| {
@@ -564,10 +565,10 @@ const Generator = struct {
         try self.print("    int read_n({s} *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{cpp_qname});
         try self.print("    int take_instance(DDS_InstanceHandle_t instance_handle, {s} *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{cpp_qname});
         try self.print("    int read_instance(DDS_InstanceHandle_t instance_handle, {s} *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{cpp_qname});
-        try self.print("    int take_w_condition(DDS_ReadCondition condition, {s} *values, DDS_SampleInfo *infos, int max);\n", .{cpp_qname});
-        try self.print("    int read_w_condition(DDS_ReadCondition condition, {s} *values, DDS_SampleInfo *infos, int max);\n", .{cpp_qname});
-        try self.print("    int take_next_instance_w_condition(DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, DDS_SampleInfo *infos, int max);\n", .{cpp_qname});
-        try self.print("    int read_next_instance_w_condition(DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, DDS_SampleInfo *infos, int max);\n", .{cpp_qname});
+        try self.print("    int take_w_condition(std::shared_ptr<::DDS::ReadCondition> condition, {s} *values, DDS_SampleInfo *infos, int max);\n", .{cpp_qname});
+        try self.print("    int read_w_condition(std::shared_ptr<::DDS::ReadCondition> condition, {s} *values, DDS_SampleInfo *infos, int max);\n", .{cpp_qname});
+        try self.print("    int take_next_instance_w_condition(std::shared_ptr<::DDS::ReadCondition> condition, DDS_InstanceHandle_t prev, {s} *values, DDS_SampleInfo *infos, int max);\n", .{cpp_qname});
+        try self.print("    int read_next_instance_w_condition(std::shared_ptr<::DDS::ReadCondition> condition, DDS_InstanceHandle_t prev, {s} *values, DDS_SampleInfo *infos, int max);\n", .{cpp_qname});
         try self.write("    DDS_ReturnCode_t take_loaned(Loan& out);\n");
         try self.write("private:\n");
         try self.write("    DDS_DataReader reader_;\n");
@@ -1599,6 +1600,7 @@ const CdrGenerator = struct {
         try self.write("#include \"zidl_cdr.h\"\n");
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructCpp(spec.items)) {
             try self.write("#include \"zzdds_c.h\"\n");
+            try self.write("#include \"dcps_impl.hpp\"\n");
         }
         try self.write("#include <cstring>\n");
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructCpp(spec.items)) {
@@ -2673,46 +2675,52 @@ const CdrGenerator = struct {
         try self.print("{s}_reader_n_instance_impl(reader_, instance_handle, values, infos, max, ss, vs, is, false);\n", .{class_name});
         try self.write("}\n\n");
 
-        try self.print("static int {s}_reader_w_condition_impl(DDS_DataReader reader, DDS_ReadCondition condition, {s} *values, DDS_SampleInfo *infos, int max, bool destructive) {{\n", .{ class_name, cpp_qname });
+        try self.print("static int {s}_reader_w_condition_impl(DDS_DataReader reader, std::shared_ptr<::DDS::ReadCondition> condition, {s} *values, DDS_SampleInfo *infos, int max, bool destructive) {{\n", .{ class_name, cpp_qname });
+        // Reuse the entity bridge's complete ReadCondition/QueryCondition
+        // adaptation. Never rewrap the condition or bypass its identity cache.
+        try self.writeI("if (!reader) return -1;\n");
         try self.writeI("DDS_OctetSeqSeq _c_payloads = { 1, 0, NULL, false };\n");
         try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
         try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
         try self.writeI("DDS_ReturnCode_t _rc0 = destructive ?\n");
         self.indent_depth += 1;
-        try self.writeI("DDS_DataReader_take_raw(reader, &_c_payloads, &_c_hashes, &_c_infos, DDS_HANDLE_NIL, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max) :\n");
-        try self.writeI("DDS_DataReader_read_raw(reader, &_c_payloads, &_c_hashes, &_c_infos, DDS_HANDLE_NIL, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max);\n");
+        try self.writeI("::DDS::DataReaderImpl::_getOrCreate(reader)->take_raw(_c_payloads, _c_hashes, _c_infos, DDS_HANDLE_NIL, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max) :\n");
+        try self.writeI("::DDS::DataReaderImpl::_getOrCreate(reader)->read_raw(_c_payloads, _c_hashes, _c_infos, DDS_HANDLE_NIL, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max);\n");
         self.indent_depth -= 1;
         try self.writeI("if (_rc0 != DDS_RETCODE_OK) return -1;\n");
         try self.printI("return {s}_reader_decode_batch(reader, &_c_payloads, &_c_hashes, &_c_infos, values, infos);\n", .{class_name});
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader::take_w_condition(DDS_ReadCondition condition, {s} *values, DDS_SampleInfo *infos, int max) {{\n", .{ class_name, cpp_qname });
+        try self.print("int {s}DataReader::take_w_condition(std::shared_ptr<::DDS::ReadCondition> condition, {s} *values, DDS_SampleInfo *infos, int max) {{\n", .{ class_name, cpp_qname });
         try self.writeI("return ");
         try self.print("{s}_reader_w_condition_impl(reader_, condition, values, infos, max, true);\n", .{class_name});
         try self.write("}\n\n");
-        try self.print("int {s}DataReader::read_w_condition(DDS_ReadCondition condition, {s} *values, DDS_SampleInfo *infos, int max) {{\n", .{ class_name, cpp_qname });
+        try self.print("int {s}DataReader::read_w_condition(std::shared_ptr<::DDS::ReadCondition> condition, {s} *values, DDS_SampleInfo *infos, int max) {{\n", .{ class_name, cpp_qname });
         try self.writeI("return ");
         try self.print("{s}_reader_w_condition_impl(reader_, condition, values, infos, max, false);\n", .{class_name});
         try self.write("}\n\n");
 
-        try self.print("static int {s}_reader_next_instance_w_condition_impl(DDS_DataReader reader, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, DDS_SampleInfo *infos, int max, bool destructive) {{\n", .{ class_name, cpp_qname });
+        try self.print("static int {s}_reader_next_instance_w_condition_impl(DDS_DataReader reader, std::shared_ptr<::DDS::ReadCondition> condition, DDS_InstanceHandle_t prev, {s} *values, DDS_SampleInfo *infos, int max, bool destructive) {{\n", .{ class_name, cpp_qname });
+        // Reuse the entity bridge's complete ReadCondition/QueryCondition
+        // adaptation. Never rewrap the condition or bypass its identity cache.
+        try self.writeI("if (!reader) return -1;\n");
         try self.writeI("DDS_OctetSeqSeq _c_payloads = { 1, 0, NULL, false };\n");
         try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
         try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
         try self.writeI("DDS_ReturnCode_t _rc0 = destructive ?\n");
         self.indent_depth += 1;
-        try self.writeI("DDS_DataReader_take_next_instance_raw(reader, &_c_payloads, &_c_hashes, &_c_infos, prev, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max) :\n");
-        try self.writeI("DDS_DataReader_read_next_instance_raw(reader, &_c_payloads, &_c_hashes, &_c_infos, prev, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max);\n");
+        try self.writeI("::DDS::DataReaderImpl::_getOrCreate(reader)->take_next_instance_raw(_c_payloads, _c_hashes, _c_infos, prev, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max) :\n");
+        try self.writeI("::DDS::DataReaderImpl::_getOrCreate(reader)->read_next_instance_raw(_c_payloads, _c_hashes, _c_infos, prev, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max);\n");
         self.indent_depth -= 1;
         try self.writeI("if (_rc0 != DDS_RETCODE_OK) return -1;\n");
         try self.printI("return {s}_reader_decode_batch(reader, &_c_payloads, &_c_hashes, &_c_infos, values, infos);\n", .{class_name});
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader::take_next_instance_w_condition(DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, DDS_SampleInfo *infos, int max) {{\n", .{ class_name, cpp_qname });
+        try self.print("int {s}DataReader::take_next_instance_w_condition(std::shared_ptr<::DDS::ReadCondition> condition, DDS_InstanceHandle_t prev, {s} *values, DDS_SampleInfo *infos, int max) {{\n", .{ class_name, cpp_qname });
         try self.writeI("return ");
         try self.print("{s}_reader_next_instance_w_condition_impl(reader_, condition, prev, values, infos, max, true);\n", .{class_name});
         try self.write("}\n\n");
-        try self.print("int {s}DataReader::read_next_instance_w_condition(DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, DDS_SampleInfo *infos, int max) {{\n", .{ class_name, cpp_qname });
+        try self.print("int {s}DataReader::read_next_instance_w_condition(std::shared_ptr<::DDS::ReadCondition> condition, DDS_InstanceHandle_t prev, {s} *values, DDS_SampleInfo *infos, int max) {{\n", .{ class_name, cpp_qname });
         try self.writeI("return ");
         try self.print("{s}_reader_next_instance_w_condition_impl(reader_, condition, prev, values, infos, max, false);\n", .{class_name});
         try self.write("}\n\n");
@@ -8609,13 +8617,15 @@ test "cpp_backend: zzdds wrapper declarations include the _w_condition family, b
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
+    try testing.expect(has(s, "#include \"dcps.hpp\""));
+    try testing.expect(!has(s, "DDS_ReadCondition condition"));
     try testing.expect(has(s, "DDS_InstanceHandle_t register_instance_w_timestamp(const ::Topic& key, DDS_Time_t timestamp);"));
     try testing.expect(has(s, "int take_instance(DDS_InstanceHandle_t instance_handle, ::Topic *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);"));
     try testing.expect(has(s, "int read_instance(DDS_InstanceHandle_t instance_handle, ::Topic *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);"));
-    try testing.expect(has(s, "int take_w_condition(DDS_ReadCondition condition, ::Topic *values, DDS_SampleInfo *infos, int max);"));
-    try testing.expect(has(s, "int read_w_condition(DDS_ReadCondition condition, ::Topic *values, DDS_SampleInfo *infos, int max);"));
-    try testing.expect(has(s, "int take_next_instance_w_condition(DDS_ReadCondition condition, DDS_InstanceHandle_t prev, ::Topic *values, DDS_SampleInfo *infos, int max);"));
-    try testing.expect(has(s, "int read_next_instance_w_condition(DDS_ReadCondition condition, DDS_InstanceHandle_t prev, ::Topic *values, DDS_SampleInfo *infos, int max);"));
+    try testing.expect(has(s, "int take_w_condition(std::shared_ptr<::DDS::ReadCondition> condition, ::Topic *values, DDS_SampleInfo *infos, int max);"));
+    try testing.expect(has(s, "int read_w_condition(std::shared_ptr<::DDS::ReadCondition> condition, ::Topic *values, DDS_SampleInfo *infos, int max);"));
+    try testing.expect(has(s, "int take_next_instance_w_condition(std::shared_ptr<::DDS::ReadCondition> condition, DDS_InstanceHandle_t prev, ::Topic *values, DDS_SampleInfo *infos, int max);"));
+    try testing.expect(has(s, "int read_next_instance_w_condition(std::shared_ptr<::DDS::ReadCondition> condition, DDS_InstanceHandle_t prev, ::Topic *values, DDS_SampleInfo *infos, int max);"));
 }
 
 test "cpp_backend cdr: register_instance_w_timestamp ignores its timestamp and delegates to register_instance" {
@@ -8644,7 +8654,7 @@ test "cpp_backend cdr: take_instance/read_instance call the instance-scoped raw 
     try testing.expect(has(s, "int TopicDataReader::take_instance(DDS_InstanceHandle_t instance_handle, ::Topic *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is) {"));
 }
 
-test "cpp_backend cdr: take_w_condition/read_w_condition call DDS_DataReader_take_raw/read_raw with the condition" {
+test "cpp_backend cdr: take_w_condition/read_w_condition delegate C++ conditions to the entity bridge" {
     var out = try testGenCdrOpts(
         "@appendable struct Topic { @key long id; };",
         "topic",
@@ -8652,12 +8662,15 @@ test "cpp_backend cdr: take_w_condition/read_w_condition call DDS_DataReader_tak
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "DDS_DataReader_take_raw(reader, &_c_payloads, &_c_hashes, &_c_infos, DDS_HANDLE_NIL, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max) :"));
-    try testing.expect(has(s, "DDS_DataReader_read_raw(reader, &_c_payloads, &_c_hashes, &_c_infos, DDS_HANDLE_NIL, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max);"));
-    try testing.expect(has(s, "int TopicDataReader::take_w_condition(DDS_ReadCondition condition, ::Topic *values, DDS_SampleInfo *infos, int max) {"));
+    try testing.expect(has(s, "#include \"dcps_impl.hpp\""));
+    try testing.expect(!has(s, "condition->native_handle()"));
+    try testing.expect(has(s, "if (!reader) return -1;"));
+    try testing.expect(has(s, "::DDS::DataReaderImpl::_getOrCreate(reader)->take_raw(_c_payloads, _c_hashes, _c_infos, DDS_HANDLE_NIL, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max) :"));
+    try testing.expect(has(s, "::DDS::DataReaderImpl::_getOrCreate(reader)->read_raw(_c_payloads, _c_hashes, _c_infos, DDS_HANDLE_NIL, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max);"));
+    try testing.expect(has(s, "int TopicDataReader::take_w_condition(std::shared_ptr<::DDS::ReadCondition> condition, ::Topic *values, DDS_SampleInfo *infos, int max) {"));
 }
 
-test "cpp_backend cdr: take_next_instance_w_condition/read_next_instance_w_condition call the matching raw ops" {
+test "cpp_backend cdr: next-instance condition operations delegate to the matching entity bridge ops" {
     var out = try testGenCdrOpts(
         "@appendable struct Topic { @key long id; };",
         "topic",
@@ -8665,9 +8678,9 @@ test "cpp_backend cdr: take_next_instance_w_condition/read_next_instance_w_condi
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "DDS_DataReader_take_next_instance_raw(reader, &_c_payloads, &_c_hashes, &_c_infos, prev, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max) :"));
-    try testing.expect(has(s, "DDS_DataReader_read_next_instance_raw(reader, &_c_payloads, &_c_hashes, &_c_infos, prev, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max);"));
-    try testing.expect(has(s, "int TopicDataReader::take_next_instance_w_condition(DDS_ReadCondition condition, DDS_InstanceHandle_t prev, ::Topic *values, DDS_SampleInfo *infos, int max) {"));
+    try testing.expect(has(s, "::DDS::DataReaderImpl::_getOrCreate(reader)->take_next_instance_raw(_c_payloads, _c_hashes, _c_infos, prev, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max) :"));
+    try testing.expect(has(s, "::DDS::DataReaderImpl::_getOrCreate(reader)->read_next_instance_raw(_c_payloads, _c_hashes, _c_infos, prev, condition, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, max);"));
+    try testing.expect(has(s, "int TopicDataReader::take_next_instance_w_condition(std::shared_ptr<::DDS::ReadCondition> condition, DDS_InstanceHandle_t prev, ::Topic *values, DDS_SampleInfo *infos, int max) {"));
 }
 
 test "cpp_backend cdr: _reader_decode_batch cleans up partial samples on deserialization failure (instance)" {

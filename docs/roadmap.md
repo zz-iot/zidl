@@ -98,6 +98,19 @@ Features*.
   a proxy for "the base owns its own handle" — no cross-file registry. A wrong assumption
   for some future IDL would surface as a loud C++ compile error, not silent breakage.
   `cpp.zig:5952`.
+- **Resolved: per-type condition operations now accept C++ conditions.**
+  `take_w_condition`, `read_w_condition`, `take_next_instance_w_condition`, and
+  `read_next_instance_w_condition` accept `std::shared_ptr<::DDS::ReadCondition>`;
+  `QueryCondition` arguments upcast implicitly. The implementations delegate to
+  the generated `DataReaderImpl` raw operations, reusing their null-safe entity
+  adaptation and preserving existing condition wrappers and family-cache identity.
+  A direct `ReadCondition::native_handle()` call is not valid for the full DDS
+  hierarchy: the abstract base omits it so derived interfaces can expose their
+  own opaque handle types. Compiled regression coverage checks all four adapters,
+  query/read/null arguments, shared ownership through the `Condition` family cache,
+  and rejection of guard/status conditions as read conditions. Downstream callers
+  must regenerate their topic bindings and replace raw-handle arguments with C++
+  condition objects; zzdds migration remains separate.
 
 ### Java backend
 
