@@ -60,9 +60,9 @@ pub const Parser = struct {
     /// Two-token lookahead ring. Valid entries are buf[0..buf_len].
     buf: [2]Token,
     buf_len: u8,
-    /// Non-zero while parsing a template argument bound (`string<N>`,
-    /// `sequence<T, N>`, ...): there a `>` closes the template, so `> >` is
-    /// never a shift (as in C++11; parenthesize a shift inside a bound).
+    /// Non-zero while a template argument bound (`string<N>`, `sequence<T, N>`,
+    /// ...) is parsed with `>` closing the template, so `> >` is not a shift
+    /// there (see `parseTemplateBound`).
     template_bound_depth: u32 = 0,
 
     /// Initialise a parser over `source` text, allocating AST nodes with `alloc`.
@@ -593,7 +593,7 @@ pub const Parser = struct {
         var lhs = try self.parseAddExpr();
         while (true) {
             // Check for >> (shift right): two consecutive .gt tokens -- except
-            // in a template bound, where the first `>` closes the template.
+            // when a template bound is being read with `>` closing it.
             if (self.template_bound_depth == 0 and self.peek().kind == .gt and self.peek2().kind == .gt) {
                 _ = self.advance(); // first >
                 _ = self.advance(); // second >
@@ -1061,7 +1061,7 @@ pub const Parser = struct {
         const elem_ptr = try self.create(ast.TypeSpec, elem);
         var bound_ptr: ?*ast.ConstExpr = null;
         if (self.eat(.comma) != null) {
-            const b = try self.parseTemplateBound();
+            const b = try self.parseTemplateBound(.gt);
             bound_ptr = try self.create(ast.ConstExpr, b);
         }
         const gt = try self.expect(.gt);
@@ -1072,9 +1072,36 @@ pub const Parser = struct {
         } };
     }
 
-    /// Parse a template argument bound (a `positive_int_const`): a const
-    /// expression in which `> >` closes the template instead of shifting.
-    fn parseTemplateBound(self: *Parser) ParseError!ast.ConstExpr {
+    /// Parse a template argument bound (a `positive_int_const`) that must be
+    /// followed by `terminator` (`>`, or `,` for `fixed`'s digits).
+    ///
+    /// The lexer never merges `>>`, so `> >` in a bound is either a shift
+    /// (`sequence<long, 8 >> 1>`) or this template's closing `>` followed by
+    /// an enclosing one (`sequence<string<5>> s;`). The bound is first parsed
+    /// as an ordinary const expression; that reading stands when the bound
+    /// then ends at `terminator`. Otherwise it is parsed again with `>`
+    /// closing the template. The readings never both fit valid IDL: after the
+    /// enclosing template closes, a declarator follows, never `>` or `,`. (A
+    /// bound that needs both -- a shift, then the closing `>` of `>>` -- is
+    /// written with parentheses: `sequence<string<(8 >> 1)>>`.)
+    /// The AST is arena-allocated, so the discarded attempt only needs its
+    /// diagnostics dropped.
+    fn parseTemplateBound(self: *Parser, terminator: TokenKind) ParseError!ast.ConstExpr {
+        const lexer = self.lexer;
+        const buf = self.buf;
+        const buf_len = self.buf_len;
+        const diags_len = self.diags.items.len;
+        if (self.parseConstExpr()) |e| {
+            if (self.peek().kind == terminator) return e;
+        } else |err| switch (err) {
+            error.OutOfMemory => return err,
+            error.UnexpectedToken => {},
+        }
+        self.lexer = lexer;
+        self.buf = buf;
+        self.buf_len = buf_len;
+        self.diags.shrinkRetainingCapacity(diags_len);
+
         self.template_bound_depth += 1;
         defer self.template_bound_depth -= 1;
         return self.parseConstExpr();
@@ -1087,7 +1114,7 @@ pub const Parser = struct {
         var bound_ptr: ?*ast.ConstExpr = null;
         var end_span = start;
         if (self.eat(.lt) != null) {
-            const b = try self.parseTemplateBound();
+            const b = try self.parseTemplateBound(.gt);
             bound_ptr = try self.create(ast.ConstExpr, b);
             end_span = (try self.expect(.gt)).span;
         }
@@ -1104,7 +1131,7 @@ pub const Parser = struct {
         var bound_ptr: ?*ast.ConstExpr = null;
         var end_span = start;
         if (self.eat(.lt) != null) {
-            const b = try self.parseTemplateBound();
+            const b = try self.parseTemplateBound(.gt);
             bound_ptr = try self.create(ast.ConstExpr, b);
             end_span = (try self.expect(.gt)).span;
         }
@@ -1119,10 +1146,10 @@ pub const Parser = struct {
         const start = self.peek().span;
         _ = try self.expect(.kw_fixed);
         _ = try self.expect(.lt);
-        const digits = try self.parseTemplateBound();
+        const digits = try self.parseTemplateBound(.comma);
         const digits_ptr = try self.create(ast.ConstExpr, digits);
         _ = try self.expect(.comma);
-        const scale = try self.parseTemplateBound();
+        const scale = try self.parseTemplateBound(.gt);
         const scale_ptr = try self.create(ast.ConstExpr, scale);
         const gt = try self.expect(.gt);
         return .{ .fixed_pt = .{
@@ -1144,7 +1171,7 @@ pub const Parser = struct {
         const val_ptr = try self.create(ast.TypeSpec, val);
         var bound_ptr: ?*ast.ConstExpr = null;
         if (self.eat(.comma) != null) {
-            const b = try self.parseTemplateBound();
+            const b = try self.parseTemplateBound(.gt);
             bound_ptr = try self.create(ast.ConstExpr, b);
         }
         const gt = try self.expect(.gt);
@@ -3698,20 +3725,42 @@ test "const expr: shift right" {
     try testing.expectEqual(ast.BinaryOp.shift_right, expr.binary.op);
 }
 
-test "template bounds: `>>` closes nested templates; parenthesized shifts still work" {
+test "template bounds: `>>` closes nested templates or shifts, whichever fits" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     inline for (.{
+        // `>` closes the template.
         "struct S { sequence<string<5>> a; };",
         "struct S { sequence<string<5> > a; };",
-        "struct S { sequence<sequence<long, 5>> a; };",
+        "struct S { sequence<sequence<long, 5>> a, b; };",
         "struct S { sequence<wstring<3>, 2> a; };",
+        "const long K = 2; struct S { map<string, sequence<long, K>> a, b; };",
+        "struct S { sequence<fixed<5, 2>> a; };",
+        // `>>` shifts.
+        "struct S { sequence<long, 8 >> 1> a; };",
+        "struct S { sequence<long, 8 >> 1 >> 1> a; };",
         "struct S { sequence<string<(8 >> 1)>> a; };",
+        "const long K = 1; struct S { string<8 >> K> a; };",
+        "struct S { fixed<16 >> 1, 2> a; };",
+        "struct S { map<long, long, 8 >> 1 | 1> a; };",
     }) |src| {
         var p = testParser(src, arena.allocator());
         _ = try p.parseSpecification();
         try testing.expectEqual(@as(usize, 0), p.diags.items.len);
     }
+}
+
+test "template bounds: a shift bound parses as a shift, a closing `>>` as a close" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var p = testParser("sequence<long, 8 >> 1>", arena.allocator());
+    const ts = try p.parseTypeSpec();
+    try testing.expectEqual(ast.BinaryOp.shift_right, ts.template.sequence.bound.?.binary.op);
+    try testing.expect(p.peek().kind == .eof);
+    var q = testParser("sequence<string<5>>", arena.allocator());
+    const ts2 = try q.parseTypeSpec();
+    try testing.expectEqual(@as(i64, 5), ts2.template.sequence.element_type.template.string.bound.?.literal.value.integer);
+    try testing.expect(q.peek().kind == .eof);
 }
 
 test "const expr: shift left" {

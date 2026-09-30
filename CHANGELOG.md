@@ -53,9 +53,10 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   corrupted memory (C, C++: nested loops shadowed their counters). Collection code now
   names its locals by nesting depth, and:
   - **Parser:** a nested template whose inner bound is followed by the closing `>` no
-    longer fails to parse (`sequence<string<5>>`, `sequence<sequence<long, 5> >`): inside
-    a template bound, `> >` closes the template rather than forming a shift, as in C++11
-    (parenthesize a shift there, e.g. `string<(8 >> 1)>`).
+    longer fails to parse (`sequence<string<5>>`, `sequence<sequence<long, 5> >`). A
+    `>>` in a bound is still a shift when the bound then ends where it must
+    (`sequence<long, 8 >> 1>`); a bound needing both a shift and the closing `>` of a
+    `>>` takes parentheses (`sequence<string<(8 >> 1)>>`).
   - **Zig:** unbounded sequences of bounded strings compile (their buffer elements are
     inline `BoundedArray`s, not C strings).
   - **Zig:** bounded sequences of strings, sequences and array typedefs decode (they were
