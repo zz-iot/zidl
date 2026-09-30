@@ -120,8 +120,9 @@ test "an element count above the bound is rejected" {
     const bytes = try encode(fixture.AliasHolder, value);
     defer testing.allocator.free(bytes);
 
-    // The sequence length immediately follows the 4-byte encapsulation header.
-    std.mem.writeInt(u32, bytes[4..8], 5, .little);
+    // XCDR2: after the 4-byte encapsulation header comes the collection's
+    // DHEADER (its elements are structs), then the element count.
+    std.mem.writeInt(u32, bytes[8..12], 5, .little);
     var reader = try zidl_rt.CdrReader.init(bytes);
     var out: fixture.AliasHolder = .{};
     try testing.expectError(error.SequenceTooLong, fixture.AliasHolder.deserializeInto(&out, &reader, testing.allocator));

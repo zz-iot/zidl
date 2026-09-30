@@ -1213,6 +1213,14 @@ const Builder = struct {
             const name = simpleName(a.name.parts);
             if (std.ascii.eqlIgnoreCase(name, "bit_bound")) {
                 result.bit_bound = extractU16Param(&a.params);
+            } else if (std.ascii.eqlIgnoreCase(name, "final")) {
+                result.extensibility = .final;
+            } else if (std.ascii.eqlIgnoreCase(name, "appendable")) {
+                result.extensibility = .appendable;
+            } else if (std.ascii.eqlIgnoreCase(name, "mutable")) {
+                result.extensibility = .mutable;
+            } else if (std.ascii.eqlIgnoreCase(name, "extensibility")) {
+                if (parseExtensibilityParam(&a.params)) |ext| result.extensibility = ext;
             } else {
                 try raw.append(self.alloc, .{
                     .name = try self.alloc.dupe(u8, name),
@@ -2026,4 +2034,20 @@ test "builder: @default named form with unknown key leaves default_value null" {
     defer ir_spec.deinit();
     const m = ir_spec.items[0].type_decl.struct_.members[0];
     try testing.expect(m.annotations.default_value == null);
+}
+
+test "builder: enum and bitmask extensibility annotations" {
+    var ir_spec = try testBuild(
+        \\enum Plain { A };
+        \\@final enum F { A };
+        \\@appendable enum App { A };
+        \\@mutable bitmask Mut { B0 };
+        \\@extensibility(APPENDABLE) enum Ext { A };
+    );
+    defer ir_spec.deinit();
+    try testing.expectEqual(ir.Extensibility.final, ir_spec.items[0].type_decl.enum_.annotations.extensibility);
+    try testing.expectEqual(ir.Extensibility.final, ir_spec.items[1].type_decl.enum_.annotations.extensibility);
+    try testing.expectEqual(ir.Extensibility.appendable, ir_spec.items[2].type_decl.enum_.annotations.extensibility);
+    try testing.expectEqual(ir.Extensibility.mutable, ir_spec.items[3].type_decl.bitmask.annotations.extensibility);
+    try testing.expectEqual(ir.Extensibility.appendable, ir_spec.items[4].type_decl.enum_.annotations.extensibility);
 }

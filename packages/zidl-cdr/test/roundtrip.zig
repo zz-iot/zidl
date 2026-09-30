@@ -1076,3 +1076,74 @@ test "a truncated aligned primitive read reports TRUNCATED, not an out-of-bounds
     try testing.expectEqual(@as(c_int, c.ZIDL_CDR_TRUNCATED), c.zidl_cdr_read_u64(&r, &v));
     try testing.expect(r.pos <= r.data_len);
 }
+
+test "emheader: LC 5-7 peek NEXTINT as the start of the member value" {
+    // EMHEADER words and member bytes using length codes 5-7 (XCDR2 LE):
+    //   id 1, LC=5: sequence<string> ["m"]; NEXTINT is the collection DHEADER
+    //   id 2, LC=6: sequence<long> [1, 2]; NEXTINT is the element count
+    //   id 4, LC=7: sequence<long long> [5]; NEXTINT is the element count
+    const bytes = [_]u8{ 0x00, 0x07, 0x00, 0x00 } ++
+        [_]u8{ 0x01, 0x00, 0x00, 0x50, 0x0a, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x6d, 0x00, 0x00, 0x00 } ++
+        [_]u8{ 0x02, 0x00, 0x00, 0x60, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00 } ++
+        [_]u8{ 0x04, 0x00, 0x00, 0x70, 0x01, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    var r: c.ZidlCdrReader = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.zidl_cdr_reader_init(&r, &bytes, bytes.len));
+
+    var em: c.ZidlEmHeader = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.zidl_cdr_read_emheader(&r, &em));
+    try std.testing.expectEqual(@as(u32, 1), em.member_id);
+    try std.testing.expectEqual(@as(u32, 4 + 10), em.payload_bytes);
+    var dheader: u32 = 0;
+    try std.testing.expectEqual(@as(c_int, 0), c.zidl_cdr_read_dheader(&r, &dheader)); // value starts at the NEXTINT
+    try std.testing.expectEqual(@as(u32, 10), dheader);
+    try std.testing.expectEqual(@as(c_int, 0), c.zidl_cdr_skip(&r, 10));
+
+    try std.testing.expectEqual(@as(c_int, 0), c.zidl_cdr_read_emheader(&r, &em));
+    try std.testing.expectEqual(@as(u32, 4 + 2 * 4), em.payload_bytes);
+    try std.testing.expectEqual(@as(c_int, 0), c.zidl_cdr_skip_emheader_payload(&r, &em));
+
+    try std.testing.expectEqual(@as(c_int, 0), c.zidl_cdr_read_emheader(&r, &em));
+    try std.testing.expectEqual(@as(u32, 4), em.member_id);
+    try std.testing.expectEqual(@as(u32, 4 + 1 * 8), em.payload_bytes);
+    try std.testing.expectEqual(@as(c_int, 0), c.zidl_cdr_skip_emheader_payload(&r, &em));
+    try std.testing.expectEqual(bytes.len, r.pos);
+}
+
+test "dheader: reserved after unaligned data, pads first and counts only the payload" {
+    var buf: [32]u8 = undefined;
+    var w: c.ZidlCdrWriter = undefined;
+    c.zidl_cdr_writer_init_fixed(&w, &buf, buf.len, c.ZIDL_XCDR2);
+    try std.testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_encap(&w));
+    try std.testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_u8(&w, 0xAA));
+    var off: usize = 0;
+    try std.testing.expectEqual(@as(c_int, 0), c.zidl_cdr_reserve_dheader(&w, &off));
+    try std.testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_u32(&w, 7));
+    c.zidl_cdr_patch_dheader(&w, off);
+    try std.testing.expectEqualSlices(u8, &.{ 0xAA, 0, 0, 0, 4, 0, 0, 0, 7, 0, 0, 0 }, buf[4 .. 4 + w.pos]);
+}
+
+test "encap: XCDR2 appendable/mutable ids are written by kind and accepted by the reader" {
+    const cases = [_]struct { ext: c_int, id: u8 }{
+        .{ .ext = c.ZIDL_EXT_FINAL, .id = 0x07 },
+        .{ .ext = c.ZIDL_EXT_APPENDABLE, .id = 0x09 },
+        .{ .ext = c.ZIDL_EXT_MUTABLE, .id = 0x0b },
+    };
+    for (cases) |k| {
+        var buf: [8]u8 = undefined;
+        var w: c.ZidlCdrWriter = undefined;
+        c.zidl_cdr_writer_init_fixed(&w, &buf, buf.len, c.ZIDL_XCDR2);
+        try std.testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_encap_kind(&w, k.ext));
+        try std.testing.expectEqualSlices(u8, &.{ 0, k.id, 0, 0 }, buf[0..4]);
+        var r: c.ZidlCdrReader = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), c.zidl_cdr_reader_init(&r, &buf, 4));
+        try std.testing.expectEqual(@as(c_int, c.ZIDL_XCDR2), r.xcdr_version);
+    }
+    // Big-endian D_CDR2 / PL_CDR2 are XCDR2 big-endian.
+    for ([_]u8{ 0x08, 0x0a }) |id| {
+        const hdr = [_]u8{ 0x00, id, 0x00, 0x00 };
+        var r: c.ZidlCdrReader = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), c.zidl_cdr_reader_init(&r, &hdr, hdr.len));
+        try std.testing.expectEqual(@as(c_int, c.ZIDL_XCDR2), r.xcdr_version);
+        try std.testing.expectEqual(@as(c_int, c.ZIDL_CDR_BE), r.byte_order);
+    }
+}

@@ -97,9 +97,8 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 |---|---|
 | `wstring` constants | Emits comment — `[]const u16` literals not supported in Zig |
 | PL_CDR (RTPS ParameterList) | Only via `--zig-pl-cdr` flag; distinct from the default XCDR2 EMHEADER path |
-| TypeObject for `union`, `bitset`, `typedef` | Deferred — emits TK_NONE placeholder |
+| TypeObject constants | Emitted for structs only (minimal; unions, enums, bitmasks, bitsets and aliases are encoded as dependencies); complete TypeObjects not generated |
 | Union discriminant `wstring` / `fixed_pt` type | Emits TODO comment |
-| Sequence element read: array-typedef elements | Emits TODO comment (rare case) |
 
 ---
 
@@ -249,7 +248,6 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 | Feature | Status |
 |---|---|
 | `any` / `object` / `value_base` member access | Emits `// TODO: any/object` |
-| Sequence element CDR deserialization (non-primitive elements) | Emits `// TODO: seq elem deserialize` stub |
 
 ---
 

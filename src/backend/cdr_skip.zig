@@ -12,6 +12,7 @@
 //!   - `writeI([]const u8) !void`           -- indent + write a line
 //!   - `printI(comptime []const u8, args) !void`
 //!   - `indent_depth: <integer, mutable>`
+//!   - `coll_depth: <integer, mutable>`     -- nesting of collection elements
 //!   - `alloc: std.mem.Allocator`
 //!   - `prefixedCName([]const u8) ![]u8`     -- qualified IDL name -> C name
 //! Both backends' `CdrGenerator` structs satisfy it.
@@ -58,6 +59,78 @@ fn bitBoundWidth(bound: ?u16) usize {
     return if (b <= 8) 1 else if (b <= 16) 2 else if (b <= 32) 4 else 8;
 }
 
+// ── XCDR2 collection rules (shared by the C and C++ backends) ────────────────
+
+/// Follow dimension-less typedefs to the aliased type. Stops at an array
+/// typedef, which is a distinct (array) type.
+pub fn resolveAlias(tr: ir.TypeRef) ir.TypeRef {
+    var t = tr;
+    while (true) {
+        switch (t) {
+            .named => |td| switch (td) {
+                .typedef => |td2| if (td2.dimensions.len == 0) {
+                    t = td2.type_ref;
+                    continue;
+                },
+                else => {},
+            },
+            else => {},
+        }
+        return t;
+    }
+}
+
+/// The array typedef `tr` names (through dimension-less aliases), if any.
+pub fn arrayTypedefOf(tr: ir.TypeRef) ?*const ir.Typedef {
+    return switch (resolveAlias(tr)) {
+        .named => |td| switch (td) {
+            .typedef => |t| if (t.dimensions.len > 0) t else null,
+            else => null,
+        },
+        else => null,
+    };
+}
+
+/// Innermost element of an array: XCDR flattens array typedefs used as array
+/// elements into the enclosing array's dimensions.
+pub fn arrayInnermost(tr: ir.TypeRef) ir.TypeRef {
+    var t = tr;
+    while (arrayTypedefOf(t)) |td| t = td.type_ref;
+    return resolveAlias(t);
+}
+
+/// XCDR2 prefixes a sequence, array or map with a DHEADER unless its element
+/// type is primitive: integers, floating point, boolean, char/octet and wchar.
+/// Enums, bitmasks, strings, aggregates and collections all get one.
+pub fn isPrimitiveElement(tr: ir.TypeRef) bool {
+    return resolveAlias(tr) == .base;
+}
+
+/// Collection-local name for nesting depth `depth`: `base` at depth 0,
+/// `base{depth}` inside nested collections so an inner loop never shadows an
+/// outer one. Caller frees.
+pub fn collName(alloc: std.mem.Allocator, base: []const u8, depth: anytype) ![]u8 {
+    if (depth == 0) return alloc.dupe(u8, base);
+    return std.fmt.allocPrint(alloc, "{s}{d}", .{ base, depth });
+}
+
+/// Array loop variable `{base}{dim}`, qualified by collection depth when
+/// nested. Caller frees.
+pub fn arrayVar(alloc: std.mem.Allocator, base: []const u8, depth: anytype, dim: usize) ![]u8 {
+    if (depth == 0) return std.fmt.allocPrint(alloc, "{s}{d}", .{ base, dim });
+    return std.fmt.allocPrint(alloc, "{s}{d}_{d}", .{ base, depth, dim });
+}
+
+/// `ZIDL_EXT_*` constant for `zidl_cdr_write_encap_kind`: the XCDR2
+/// representation id a top-level sample needs (CDR2 / D_CDR2 / PL_CDR2).
+pub fn encapKindC(s: *const ir.Struct) []const u8 {
+    return switch (s.annotations.extensibility) {
+        .final => "ZIDL_EXT_FINAL",
+        .appendable => "ZIDL_EXT_APPENDABLE",
+        .mutable => "ZIDL_EXT_MUTABLE",
+    };
+}
+
 // ── Skip emitters ────────────────────────────────────────────────────────────
 
 pub fn emitSkipMember(self: anytype, m: ir.StructMember) anyerror!void {
@@ -87,8 +160,12 @@ pub fn emitSkipMember(self: anytype, m: ir.StructMember) anyerror!void {
 }
 
 pub fn emitSkipArray(self: anytype, elem_tr: ir.TypeRef, dims: []const u64, dim_idx: usize) anyerror!void {
-    // Fixed-size primitive element with all dims known → one bulk advance.
     if (dim_idx == 0) {
+        // XCDR2: one DHEADER covers the whole (flattened) array.
+        if (!isPrimitiveElement(arrayInnermost(elem_tr))) {
+            try self.writeI("_rc = zidl_cdr_skip_dheader_if_xcdr2(_r); if (_rc) return _rc;\n");
+        }
+        // Fixed-size primitive element with all dims known → one bulk advance.
         if (typeRefPrimWireSize(elem_tr)) |sz| {
             var total: u64 = 1;
             for (dims) |d| total *= d;
@@ -96,17 +173,24 @@ pub fn emitSkipArray(self: anytype, elem_tr: ir.TypeRef, dims: []const u64, dim_
             return;
         }
     }
-    const var_name = try std.fmt.allocPrint(self.alloc, "_ski{d}", .{dim_idx});
+    try emitSkipArrayDims(self, elem_tr, dims, dim_idx);
+}
+
+fn emitSkipArrayDims(self: anytype, elem_tr: ir.TypeRef, dims: []const u64, dim_idx: usize) anyerror!void {
+    if (dims.len == 0) {
+        // An array typedef element continues the enclosing array.
+        if (arrayTypedefOf(elem_tr)) |t| return emitSkipArrayDims(self, t.type_ref, t.dimensions, dim_idx);
+        self.coll_depth += 1;
+        defer self.coll_depth -= 1;
+        return emitSkipForTypeRef(self, elem_tr);
+    }
+    const var_name = try arrayVar(self.alloc, "_ski", self.coll_depth, dim_idx);
     defer self.alloc.free(var_name);
     try self.printI("{{ uint32_t {s}; for ({s} = 0; {s} < {d}u; {s}++) {{\n", .{
         var_name, var_name, var_name, dims[0], var_name,
     });
     self.indent_depth += 1;
-    if (dims.len > 1) {
-        try emitSkipArray(self, elem_tr, dims[1..], dim_idx + 1);
-    } else {
-        try emitSkipForTypeRef(self, elem_tr);
-    }
+    try emitSkipArrayDims(self, elem_tr, dims[1..], dim_idx + 1);
     self.indent_depth -= 1;
     try self.writeI("}\n");
     try self.writeI("}\n");
@@ -130,16 +214,26 @@ pub fn emitSkipForTypeRef(self: anytype, tr: ir.TypeRef) anyerror!void {
             try self.writeI("{ uint32_t _wl; _rc = zidl_cdr_read_u32(_r, &_wl); if (_rc) return _rc; for (uint32_t _wi = 0; _wi < _wl; _wi++) { uint16_t _wc; _rc = zidl_cdr_read_u16(_r, &_wc); if (_rc) return _rc; } }\n");
         },
         .sequence => |seq| {
-            try self.writeI("{ uint32_t _sl;\n");
+            const sl = try collName(self.alloc, "_sl", self.coll_depth);
+            defer self.alloc.free(sl);
+            const si = try collName(self.alloc, "_si", self.coll_depth);
+            defer self.alloc.free(si);
+            try self.printI("{{ uint32_t {s};\n", .{sl});
             self.indent_depth += 1;
-            try self.writeI("_rc = zidl_cdr_read_u32(_r, &_sl);\n");
+            if (!isPrimitiveElement(seq.element.*)) {
+                try self.writeI("_rc = zidl_cdr_skip_dheader_if_xcdr2(_r);\n");
+                try self.writeI("if (_rc) return _rc;\n");
+            }
+            try self.printI("_rc = zidl_cdr_read_u32(_r, &{s});\n", .{sl});
             try self.writeI("if (_rc) return _rc;\n");
             if (typeRefPrimWireSize(seq.element.*)) |sz| {
-                try self.printI("_rc = zidl_cdr_skip_primitives(_r, _sl, {d}); if (_rc) return _rc;\n", .{sz});
+                try self.printI("_rc = zidl_cdr_skip_primitives(_r, {s}, {d}); if (_rc) return _rc;\n", .{ sl, sz });
             } else {
-                try self.writeI("for (uint32_t _si = 0; _si < _sl; _si++) {\n");
+                try self.printI("for (uint32_t {s} = 0; {s} < {s}; {s}++) {{\n", .{ si, si, sl, si });
                 self.indent_depth += 1;
+                self.coll_depth += 1;
                 try emitSkipForTypeRef(self, seq.element.*);
+                self.coll_depth -= 1;
                 self.indent_depth -= 1;
                 try self.writeI("}\n");
             }
@@ -147,14 +241,24 @@ pub fn emitSkipForTypeRef(self: anytype, tr: ir.TypeRef) anyerror!void {
             try self.writeI("}\n");
         },
         .map => |m| {
-            try self.writeI("{ uint32_t _ml;\n");
+            const ml = try collName(self.alloc, "_ml", self.coll_depth);
+            defer self.alloc.free(ml);
+            const mi = try collName(self.alloc, "_mi", self.coll_depth);
+            defer self.alloc.free(mi);
+            try self.printI("{{ uint32_t {s};\n", .{ml});
             self.indent_depth += 1;
-            try self.writeI("_rc = zidl_cdr_read_u32(_r, &_ml);\n");
+            if (!(isPrimitiveElement(m.key.*) and isPrimitiveElement(m.value.*))) {
+                try self.writeI("_rc = zidl_cdr_skip_dheader_if_xcdr2(_r);\n");
+                try self.writeI("if (_rc) return _rc;\n");
+            }
+            try self.printI("_rc = zidl_cdr_read_u32(_r, &{s});\n", .{ml});
             try self.writeI("if (_rc) return _rc;\n");
-            try self.writeI("for (uint32_t _mi = 0; _mi < _ml; _mi++) {\n");
+            try self.printI("for (uint32_t {s} = 0; {s} < {s}; {s}++) {{\n", .{ mi, mi, ml, mi });
             self.indent_depth += 1;
+            self.coll_depth += 1;
             try emitSkipForTypeRef(self, m.key.*);
             try emitSkipForTypeRef(self, m.value.*);
+            self.coll_depth -= 1;
             self.indent_depth -= 1;
             try self.writeI("}\n");
             self.indent_depth -= 1;

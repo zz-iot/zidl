@@ -100,6 +100,10 @@ pub const MemberAnnotations = struct {
 pub const EnumAnnotations = struct {
     /// `@bit_bound(N)` — explicit storage width.  Null = implementation default.
     bit_bound: ?u16 = null,
+    /// `@final` / `@appendable` / `@mutable` / `@extensibility` on an enum or
+    /// bitmask. It does not change the encoding, only type assignability
+    /// (and so the XTypes TypeObject flags).
+    extensibility: Extensibility = .final,
     raw: []const RawAnnotation = &.{},
 };
 

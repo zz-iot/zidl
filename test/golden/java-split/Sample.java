@@ -143,7 +143,7 @@ public class Sample implements java.io.Serializable {
         for (int _d0 = 0; _d0 < 3; _d0++) {
             _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.arr[_d0]);
         }
-        _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.clr.getValue());
+        _cdrAlign(_buf, _cdrBase, 4); _buf.putInt((int)(this.clr.getValue()));
         this.nested.serialize(_buf, _cdrBase, _xcdrVersion);
     }
 
@@ -171,7 +171,7 @@ public class Sample implements java.io.Serializable {
         for (int _d0 = 0; _d0 < 3; _d0++) {
             _cdrAlign(_buf, _cdrBase, 4); _out.arr[_d0] = _buf.getInt();
         }
-        _cdrAlign(_buf, _cdrBase, 4); _out.clr = Color.valueOf(_buf.getInt());
+        _cdrAlign(_buf, _cdrBase, 4); _out.clr = Color.valueOf((int) _buf.getInt());
         _out.nested = Point.deserializeFrom(_buf, _cdrBase, _xcdrVersion);
         return _out;
     }
@@ -392,7 +392,7 @@ public class Sample implements java.io.Serializable {
             }
         }
         if ((_want & (1L << 15)) != 0) {
-            _cdrAlign(_buf, _cdrBase, 4); _out.clr = Color.valueOf(_buf.getInt());
+            _cdrAlign(_buf, _cdrBase, 4); _out.clr = Color.valueOf((int) _buf.getInt());
         } else {
             _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
         }

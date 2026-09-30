@@ -42,7 +42,8 @@ for its `_free`, unless `--c-no-free` is set.
 | `string<N>` (bounded) | `char[N+1]` |
 | `wstring` (unbounded) | `uint16_t *` |
 | `wstring<N>` (bounded) | `uint16_t[N+1]` |
-| `sequence<T>` | `typedef struct { T *data; uint32_t size; uint32_t maximum; } FooSeq;` |
+| `sequence<T>` | `typedef struct { uint32_t _maximum; uint32_t _length; T *_buffer; bool _release; } T_seq;` (e.g. `int32_t_seq`; nested: `int32_t_seq_seq`) |
+| `sequence<string<N>>` | `stringN_seq` with inline elements: `char (*_buffer)[N + 1]` (like a bounded string struct field) |
 | `T[N]` | `T name[N]` |
 | `map<K,V>` | **Not supported** — error at codegen time |
 | `@optional T` | Supported — see [`@optional` members](#optional-members) below |
