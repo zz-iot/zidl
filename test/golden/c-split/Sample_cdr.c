@@ -89,11 +89,16 @@ int Sample_deserialize(ZidlCdrReader *_r, Sample *_v) {
     { uint32_t _sl;
         _rc = zidl_cdr_read_u32(_r, &_sl);
         if (_rc) return _rc;
+        if ((size_t)_sl > SIZE_MAX / sizeof(int32_t)) {
+            return ZIDL_CDR_OVERFLOW;
+        }
         _v->nums._length = _sl;
         _v->nums._maximum = _sl;
         _v->nums._release = true;
         _v->nums._buffer = (int32_t *)zidl_cdr_alloc(_sl * sizeof(int32_t));
         if (!_v->nums._buffer && _sl > 0) {
+            _v->nums._length = 0;
+            _v->nums._maximum = 0;
             return ZIDL_CDR_OVERFLOW;
         }
         { uint32_t _si; for (_si = 0; _si < _sl; _si++) {

@@ -119,6 +119,13 @@ int Foo_serialize(ZidlCdrWriter *w, const Foo *v);
 int Foo_deserialize(ZidlCdrReader *r, Foo *v);
 ```
 
+Pass a zeroed or `Foo_default`-initialized `Foo`. On failure, `Foo_free`
+(when generated) releases whatever the decode had already allocated. That
+includes sequence elements that were never read (their buffer is zeroed
+before decoding) and a partially read `@optional` member (it is marked
+present before it is read). An unbounded `typedef sequence<T> X;` also gets
+an `X_free`.
+
 ---
 
 ## Key Serialization

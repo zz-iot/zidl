@@ -9,6 +9,75 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- **Zig backend: bounded sequences of struct/union/bitset elements no longer generate
+  uncompilable decoders.** A bounded sequence stores its elements inline, so
+  `typeRefNeedsAllocator` treated it as allocation-free. However, the element read for
+  struct, union, bitset and exception elements (directly or through a typedef) forwards
+  `allocator` to the element's own `deserializeInto`. A struct, union or key decoder
+  whose only such member was a bounded sequence therefore emitted `_ = allocator;` and
+  then used `allocator`, which Zig rejects ("pointless discard of function parameter").
+  The allocator check now also looks through bounded sequences to their element decoder.
+  Scalar, enum and bitmask elements are unchanged. Added the
+  `test/integration/sequence_elements/` compile-and-run fixture (typedef'd, heap-owning,
+  union and enum elements; appendable/mutable holders; a union case; an over-bound
+  count) and a codegen regression test. Found while generating the zzdds discovery-broker
+  control schema.
+- **Zig backend: sequences now release and deep-copy heap-owning elements.** Sequence
+  cleanup handled only the element buffer (plus plain string elements), so struct and
+  union elements that own strings or buffers leaked, and `clone` copied them shallowly:
+  - A struct or union whose only heap-owning content is a bounded sequence of such
+    elements (directly, through a typedef, `@optional`, or in a union case) got no
+    `deinit`/`clone` at all. It now gets both: `deinit` releases each element in place,
+    and `clone` rebuilds the array from element clones, releasing partial copies on
+    failure.
+  - Unbounded sequences (anonymous and typedef'd) now call each heap-owning element's
+    `deinit` before freeing an owned (`_release == true`) buffer. `clone` deep-copies
+    elements instead of `@memcpy`, with rollback on failure.
+  - Decoding an unbounded sequence of heap-owning elements initializes every element to
+    its default before reading, so a failure part-way leaves `deinit` safe to call.
+    `@pl_repeated` appends do the same for the element being read.
+  - Behaviour change: an owned unbounded sequence now also owns its struct/union
+    elements' contents. Code that builds such a sequence around borrowed element
+    strings or buffers must leave `_release` false.
+
+  Plain scalar/enum/POD-struct element sequences generate the same code as before. The
+  integration fixture covers every sequence form, clone independence,
+  allocation-failure rollback for clone and decode, and truncated input.
+- **C backend: sequences of union and alias elements compile, and a failed decode stays
+  freeable.**
+  - Headers no longer name union or typedef-alias element types before declaring them.
+    The hoisted `X_seq` struct forward-declared only struct elements, so
+    `sequence<SomeUnion>` or `sequence<SomeAlias>` (struct, union, string or enum alias,
+    or an alias chain) did not compile.
+  - `typedef sequence<T> X;` now gets an `X_free` definition in `_cdr.c`, matching the
+    declaration the header already had (omitted under `--c-no-free`, like the struct and
+    union `_free` functions).
+  - Sequence decode zeroes a heap-owning element buffer before reading into it. `_length`
+    already covers every slot, so a failure part-way used to leave `_free` walking
+    uninitialized elements and freeing garbage pointers.
+  - When the buffer allocation fails, the sequence is left empty instead of pointing
+    `_length` slots at a NULL buffer.
+  - A wire length whose byte size overflows `size_t` is rejected with
+    `ZIDL_CDR_OVERFLOW` before allocating. On 32-bit targets the multiplication could
+    wrap to a short buffer that the element loop then overran.
+  - An `@optional` member is marked present, over zeroed storage, before it is read, so
+    `_free` releases whatever a failed read already allocated instead of leaking it.
+  - A union's `_skip` read its discriminant into a shadowing local and then switched on
+    an uninitialized one, so skipping a union consumed the wrong number of bytes.
+
+  `Foo_deserialize` still expects a zeroed or default-initialized `Foo`. The new C
+  integration test runs every truncation point and every allocation failure through a
+  tracking allocator.
+- **C++ backend: unions and `@optional` members compile.**
+  - A union's CDR prototypes were declared once with C++ linkage after the class and
+    again in the header's `extern "C"` block. Any IDL with a union and type support
+    failed to compile. They are now declared once, with C linkage.
+  - A struct with an `@optional` member of any type produced a `_cdr.cpp` that did not
+    compile. The presence flag was an `int8_t` passed as `bool *`, and the absent
+    branch emitted a stray `{`.
+
+  The shared fixture is now also compiled and run for C++.
+
 - **All four backends: split the `compute_key_hash_from_cdr` family so the default name is
   the safe one, and removed the compile-time/runtime guards against a non-leading `@key`
   member.** Found via a zzdds stress test (`instance` scenario, see zzdds's
