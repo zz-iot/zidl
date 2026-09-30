@@ -46,6 +46,7 @@
 //!   Getter: `get_memberName()`, setter: `set_memberName(value)`.
 
 const std = @import("std");
+const cdr_skip = @import("cdr_skip.zig");
 const ast = @import("../ast.zig");
 const ir = @import("../ir/root.zig");
 const interface = @import("interface.zig");
@@ -146,6 +147,9 @@ pub fn generateFile(
 // ── Generator (private implementation) ───────────────────────────────────────
 
 const Generator = struct {
+    /// Nesting depth of the collection whose element code is being emitted;
+    /// suffixes loop locals, since Java rejects a local that shadows another.
+    coll_depth: u32 = 0,
     alloc: std.mem.Allocator,
     opts: interface.Options,
     out: *std.ArrayList(u8),
@@ -340,9 +344,9 @@ const Generator = struct {
     /// Parses a received sample's own 4-byte CDR encapsulation header to
     /// determine whether it's XCDR1 or XCDR2, rather than assuming one --
     /// mirrors zidl_cdr.c's zidl_cdr_reader_init, which does the same from
-    /// the encapsulation id (only the two little-endian ids zzdds/zidl
-    /// actually produce are recognized here: CDR1_LE=0x0001, CDR2_LE=0x0007;
-    /// big-endian and PL_CDR/delimited-CDR2 aren't in scope). This is what
+    /// the encapsulation id (little-endian ids only: CDR1_LE=0x0001 and the
+    /// XCDR2 CDR2_LE=0x0007, D_CDR2_LE=0x0009 (appendable) and PL_CDR2_LE=0x000b
+    /// (mutable); big-endian and XCDR1 PL_CDR aren't in scope). This is what
     /// lets a single generated deserializeFrom/skip/take() correctly handle
     /// samples from a peer that chose either representation, instead of
     /// hardcoding one (the bug this whole xcdr_version threading fixes).
@@ -354,7 +358,8 @@ const Generator = struct {
         try self.ind();
         try self.write("    if (_id == 0x0001) return 1;\n");
         try self.ind();
-        try self.write("    if (_id == 0x0007) return 2;\n");
+        // CDR2 / D_CDR2 (appendable) / PL_CDR2 (mutable), little-endian.
+        try self.write("    if (_id == 0x0007 || _id == 0x0009 || _id == 0x000b) return 2;\n");
         try self.ind();
         try self.write("    throw new IllegalArgumentException(\"zidl: unsupported CDR encapsulation id 0x\" + Integer.toHexString(_id));\n");
         try self.ind();
@@ -852,7 +857,7 @@ const Generator = struct {
             try self.ind();
             try self.write("_cdrAlign(_buf, _cdrBase, 4); int _emWord = _buf.getInt(); int _memberId = _emWord & 0x0FFFFFFF;\n");
             try self.ind();
-            try self.write("int _emLc = (_emWord >>> 28) & 0x7; int _emPayload; if (_emLc == 0) _emPayload = 1; else if (_emLc == 1) _emPayload = 2; else if (_emLc == 2) _emPayload = 4; else if (_emLc == 3) _emPayload = 8; else _emPayload = _buf.getInt();\n");
+            try self.write("int _emLc = (_emWord >>> 28) & 0x7; int _emPayload; if (_emLc == 0) _emPayload = 1; else if (_emLc == 1) _emPayload = 2; else if (_emLc == 2) _emPayload = 4; else if (_emLc == 3) _emPayload = 8; else if (_emLc == 4) _emPayload = _buf.getInt(); else { int _emNext = _buf.getInt(_buf.position()); _emPayload = 4 + (_emLc == 5 ? _emNext : _emLc == 6 ? _emNext * 4 : _emNext * 8); }\n");
             try self.ind();
             try self.write("if (_memberId == 0) {\n");
             self.depth += 1;
@@ -1759,7 +1764,7 @@ const Generator = struct {
             try self.ind();
             try self.write("        _cdrAlign(_buf, _cdrBase, 4); int _emWord = _buf.getInt(); int _memberId = _emWord & 0x0FFFFFFF;\n");
             try self.ind();
-            try self.write("        int _emLc = (_emWord >>> 28) & 0x7; int _emPayload; if (_emLc == 0) _emPayload = 1; else if (_emLc == 1) _emPayload = 2; else if (_emLc == 2) _emPayload = 4; else if (_emLc == 3) _emPayload = 8; else _emPayload = _buf.getInt();\n");
+            try self.write("        int _emLc = (_emWord >>> 28) & 0x7; int _emPayload; if (_emLc == 0) _emPayload = 1; else if (_emLc == 1) _emPayload = 2; else if (_emLc == 2) _emPayload = 4; else if (_emLc == 3) _emPayload = 8; else if (_emLc == 4) _emPayload = _buf.getInt(); else { int _emNext = _buf.getInt(_buf.position()); _emPayload = 4 + (_emLc == 5 ? _emNext : _emLc == 6 ? _emNext * 4 : _emNext * 8); }\n");
             try self.ind();
             try self.write("        switch (_memberId) {\n");
             for (s.members, 0..) |m, idx| {
@@ -1935,7 +1940,7 @@ const Generator = struct {
                 try self.ind();
                 try self.write("        _cdrAlign(_buf, _cdrBase, 4); int _emWord = _buf.getInt(); int _memberId = _emWord & 0x0FFFFFFF;\n");
                 try self.ind();
-                try self.write("        int _emLc = (_emWord >>> 28) & 0x7; int _emPayload; if (_emLc == 0) _emPayload = 1; else if (_emLc == 1) _emPayload = 2; else if (_emLc == 2) _emPayload = 4; else if (_emLc == 3) _emPayload = 8; else _emPayload = _buf.getInt();\n");
+                try self.write("        int _emLc = (_emWord >>> 28) & 0x7; int _emPayload; if (_emLc == 0) _emPayload = 1; else if (_emLc == 1) _emPayload = 2; else if (_emLc == 2) _emPayload = 4; else if (_emLc == 3) _emPayload = 8; else if (_emLc == 4) _emPayload = _buf.getInt(); else { int _emNext = _buf.getInt(_buf.position()); _emPayload = 4 + (_emLc == 5 ? _emNext : _emLc == 6 ? _emNext * 4 : _emNext * 8); }\n");
                 try self.ind();
                 try self.write("        switch (_memberId) {\n");
                 for (s.members, 0..) |m, idx| {
@@ -2401,6 +2406,35 @@ const Generator = struct {
         }
     }
 
+    /// Collection-local name for the current nesting depth (see cdr_skip.collName).
+    fn collName(self: *Generator, base: []const u8) ![]u8 {
+        return cdr_skip.collName(self.alloc, base, self.coll_depth);
+    }
+
+    /// Reserve a collection DHEADER when XCDR2 needs one: emits
+    /// `int _cdh = -1; if (_xcdrVersion == 2) { ...; _cdh = pos; putInt(0); }`
+    /// and returns the local's name (caller frees via closeCollectionDheader).
+    fn openCollectionDheader(self: *Generator, needed: bool, extra: []const u8) !?[]u8 {
+        if (!needed) return null;
+        const name = try self.collName("_cdh");
+        try self.ind();
+        try self.print("{s}{{ int {s} = -1; if (_xcdrVersion == 2) {{ _cdrAlign(_buf, _cdrBase, 4); {s} = _buf.position(); _buf.putInt(0); }}\n", .{ extra, name, name });
+        return name;
+    }
+
+    fn closeCollectionDheader(self: *Generator, name: ?[]u8, extra: []const u8) !void {
+        const n = name orelse return;
+        defer self.alloc.free(n);
+        try self.ind();
+        try self.print("{s}if ({s} >= 0) _buf.putInt({s}, _buf.position() - {s} - 4); }}\n", .{ extra, n, n, n });
+    }
+
+    fn emitSkipCollectionDheader(self: *Generator, needed: bool, extra: []const u8) !void {
+        if (!needed) return;
+        try self.ind();
+        try self.print("{s}if (_xcdrVersion == 2) {{ _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); }}\n", .{extra});
+    }
+
     fn emitSkipArray(
         self: *Generator,
         elem_tr: ir.TypeRef,
@@ -2408,7 +2442,24 @@ const Generator = struct {
         extra: []const u8,
         depth: usize,
     ) anyerror!void {
-        const idx = try std.fmt.allocPrint(self.alloc, "_sk{d}", .{depth});
+        if (depth == 0) try self.emitSkipCollectionDheader(!cdr_skip.isPrimitiveElement(cdr_skip.arrayInnermost(elem_tr)), extra);
+        try self.emitSkipArrayDims(elem_tr, dims, extra, depth);
+    }
+
+    fn emitSkipArrayDims(
+        self: *Generator,
+        elem_tr: ir.TypeRef,
+        dims: []const u64,
+        extra: []const u8,
+        depth: usize,
+    ) anyerror!void {
+        if (dims.len == 0) {
+            if (cdr_skip.arrayTypedefOf(elem_tr)) |t| return self.emitSkipArrayDims(t.type_ref, t.dimensions, extra, depth);
+            self.coll_depth += 1;
+            defer self.coll_depth -= 1;
+            return self.emitSkipForTypeRef(elem_tr, extra);
+        }
+        const idx = try cdr_skip.arrayVar(self.alloc, "_sk", self.coll_depth, depth);
         defer self.alloc.free(idx);
         try self.ind();
         try self.print(
@@ -2417,11 +2468,7 @@ const Generator = struct {
         );
         const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
         defer self.alloc.free(inner);
-        if (dims.len > 1) {
-            try self.emitSkipArray(elem_tr, dims[1..], inner, depth + 1);
-        } else {
-            try self.emitSkipForTypeRef(elem_tr, inner);
-        }
+        try self.emitSkipArrayDims(elem_tr, dims[1..], inner, depth + 1);
         try self.ind();
         try self.print("{s}}}\n", .{extra});
     }
@@ -2444,42 +2491,56 @@ const Generator = struct {
                 try self.print("{s}_cdrReadString(_buf, _cdrBase);\n", .{extra});
             },
             .sequence => |seq| {
+                const n = try self.collName("_n");
+                defer self.alloc.free(n);
+                const i = try self.collName("_i");
+                defer self.alloc.free(i);
+                try self.emitSkipCollectionDheader(!cdr_skip.isPrimitiveElement(seq.element.*), extra);
                 try self.ind();
-                try self.print("{s}{{ _cdrAlign(_buf, _cdrBase, 4); int _n = _buf.getInt();\n", .{extra});
+                try self.print("{s}{{ _cdrAlign(_buf, _cdrBase, 4); int {s} = _buf.getInt();\n", .{ extra, n });
                 try self.ind();
-                try self.print("{s}  for (int _i = 0; _i < _n; _i++) {{\n", .{extra});
+                try self.print("{s}  for (int {s} = 0; {s} < {s}; {s}++) {{\n", .{ extra, i, i, n, i });
                 const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
                 defer self.alloc.free(inner);
+                self.coll_depth += 1;
                 try self.emitSkipForTypeRef(seq.element.*, inner);
+                self.coll_depth -= 1;
                 try self.ind();
                 try self.print("{s}  }}\n", .{extra});
                 try self.ind();
                 try self.print("{s}}}\n", .{extra});
             },
             .map => |m| {
+                const n = try self.collName("_n");
+                defer self.alloc.free(n);
+                const i = try self.collName("_i");
+                defer self.alloc.free(i);
+                try self.emitSkipCollectionDheader(!(cdr_skip.isPrimitiveElement(m.key.*) and cdr_skip.isPrimitiveElement(m.value.*)), extra);
                 try self.ind();
-                try self.print("{s}{{ _cdrAlign(_buf, _cdrBase, 4); int _n = _buf.getInt();\n", .{extra});
+                try self.print("{s}{{ _cdrAlign(_buf, _cdrBase, 4); int {s} = _buf.getInt();\n", .{ extra, n });
                 try self.ind();
-                try self.print("{s}  for (int _i = 0; _i < _n; _i++) {{\n", .{extra});
+                try self.print("{s}  for (int {s} = 0; {s} < {s}; {s}++) {{\n", .{ extra, i, i, n, i });
                 const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
                 defer self.alloc.free(inner);
+                self.coll_depth += 1;
                 try self.emitSkipForTypeRef(m.key.*, inner);
                 try self.emitSkipForTypeRef(m.value.*, inner);
+                self.coll_depth -= 1;
                 try self.ind();
                 try self.print("{s}  }}\n", .{extra});
                 try self.ind();
                 try self.print("{s}}}\n", .{extra});
             },
             .named => |td| switch (td) {
-                .enum_ => {
+                .enum_ => |e| {
                     try self.ind();
-                    try self.print("{s}_cdrAlign(_buf, _cdrBase, 4); _buf.getInt();\n", .{extra});
+                    try self.writeAlignCall(enumWireBase(e.annotations), extra);
+                    try self.print("{s}\n", .{enumSkipStmt(e.annotations)});
                 },
                 .bitmask => |bm| {
-                    const storage = bitmaskJavaType(bm.annotations);
-                    const method = if (std.mem.eql(u8, storage, "long")) "getLong" else "getInt";
                     try self.ind();
-                    try self.print("{s}_cdrAlign(_buf, _cdrBase, 4); _buf.{s}();\n", .{ extra, method });
+                    try self.writeAlignCall(enumWireBase(bm.annotations), extra);
+                    try self.print("{s}\n", .{enumSkipStmt(bm.annotations)});
                 },
                 .typedef => |t| {
                     if (t.dimensions.len > 0) {
@@ -2543,6 +2604,10 @@ const Generator = struct {
                 );
             },
             .sequence => |seq| {
+                // XCDR2 prefixes a collection of non-primitive elements with a DHEADER.
+                const cdh = try self.openCollectionDheader(!cdr_skip.isPrimitiveElement(seq.element.*), extra);
+                const e = try self.collName("_e");
+                defer self.alloc.free(e);
                 try self.ind();
                 try self.print(
                     "{s}_cdrAlign(_buf, _cdrBase, 4); _buf.putInt({s}.size());\n",
@@ -2552,32 +2617,28 @@ const Generator = struct {
                 defer self.alloc.free(elem_java);
                 try self.ind();
                 try self.print(
-                    "{s}for ({s} _e : {s}) {{\n",
-                    .{ extra, elem_java, access },
+                    "{s}for ({s} {s} : {s}) {{\n",
+                    .{ extra, elem_java, e, access },
                 );
                 const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
                 defer self.alloc.free(inner);
-                try self.emitSerializeForTypeRef(seq.element.*, "_e", inner);
+                self.coll_depth += 1;
+                try self.emitSerializeForTypeRef(seq.element.*, e, inner);
+                self.coll_depth -= 1;
                 try self.ind();
                 try self.print("{s}}}\n", .{extra});
+                try self.closeCollectionDheader(cdh, extra);
             },
             .named => |td| switch (td) {
-                .enum_ => {
+                .enum_ => |e| {
                     try self.ind();
-                    try self.print(
-                        "{s}_cdrAlign(_buf, _cdrBase, 4); _buf.putInt({s}.getValue());\n",
-                        .{ extra, access },
-                    );
+                    try self.writeAlignCall(enumWireBase(e.annotations), extra);
+                    try self.print("{s}{s}.getValue()));\n", .{ enumPutPrefix(e.annotations), access });
                 },
                 .bitmask => |bm| {
-                    const storage = bitmaskJavaType(bm.annotations);
-                    const method = if (std.mem.eql(u8, storage, "long")) "putLong" else "putInt";
-                    const align_v: u8 = if (std.mem.eql(u8, storage, "long")) 4 else 4;
                     try self.ind();
-                    try self.print(
-                        "{s}_cdrAlign(_buf, _cdrBase, {d}); _buf.{s}({s});\n",
-                        .{ extra, align_v, method, access },
-                    );
+                    try self.writeAlignCall(enumWireBase(bm.annotations), extra);
+                    try self.print("{s}{s}));\n", .{ enumPutPrefix(bm.annotations), access });
                 },
                 .typedef => |t| {
                     if (t.dimensions.len > 0) {
@@ -2609,16 +2670,26 @@ const Generator = struct {
                 defer self.alloc.free(key_elem);
                 const val_elem = try self.typeRefToJavaElem(m.value.*);
                 defer self.alloc.free(val_elem);
+                const cdh = try self.openCollectionDheader(!(cdr_skip.isPrimitiveElement(m.key.*) and cdr_skip.isPrimitiveElement(m.value.*)), extra);
+                const me = try self.collName("_me");
+                defer self.alloc.free(me);
+                const mk = try std.fmt.allocPrint(self.alloc, "{s}.getKey()", .{me});
+                defer self.alloc.free(mk);
+                const mv = try std.fmt.allocPrint(self.alloc, "{s}.getValue()", .{me});
+                defer self.alloc.free(mv);
                 try self.ind();
                 try self.print("{s}_cdrAlign(_buf, _cdrBase, 4); _buf.putInt({s}.size());\n", .{ extra, access });
                 try self.ind();
-                try self.print("{s}for (java.util.Map.Entry<{s},{s}> _me : {s}.entrySet()) {{\n", .{ extra, key_elem, val_elem, access });
+                try self.print("{s}for (java.util.Map.Entry<{s},{s}> {s} : {s}.entrySet()) {{\n", .{ extra, key_elem, val_elem, me, access });
                 const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
                 defer self.alloc.free(inner);
-                try self.emitSerializeForTypeRef(m.key.*, "_me.getKey()", inner);
-                try self.emitSerializeForTypeRef(m.value.*, "_me.getValue()", inner);
+                self.coll_depth += 1;
+                try self.emitSerializeForTypeRef(m.key.*, mk, inner);
+                try self.emitSerializeForTypeRef(m.value.*, mv, inner);
+                self.coll_depth -= 1;
                 try self.ind();
                 try self.print("{s}}}\n", .{extra});
+                try self.closeCollectionDheader(cdh, extra);
             },
         }
     }
@@ -2652,6 +2723,7 @@ const Generator = struct {
                 const i_var = try std.fmt.allocPrint(self.alloc, "_i_{s}", .{safe_name});
                 defer self.alloc.free(i_var);
 
+                try self.emitSkipCollectionDheader(!cdr_skip.isPrimitiveElement(seq.element.*), extra);
                 try self.ind();
                 try self.print(
                     "{s}_cdrAlign(_buf, _cdrBase, 4); int {s} = _buf.getInt();\n",
@@ -2673,7 +2745,9 @@ const Generator = struct {
                 );
                 const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
                 defer self.alloc.free(inner);
+                self.coll_depth += 1;
                 try self.emitSequenceElemDeserialize(seq.element.*, out_expr, inner);
+                self.coll_depth -= 1;
                 try self.ind();
                 try self.print("{s}}}\n", .{extra});
             },
@@ -2682,19 +2756,13 @@ const Generator = struct {
                     const e_java = try self.qualNameToJava(e.qualified_name);
                     defer self.alloc.free(e_java);
                     try self.ind();
-                    try self.print(
-                        "{s}_cdrAlign(_buf, _cdrBase, 4); {s} = {s}.valueOf(_buf.getInt());\n",
-                        .{ extra, out_expr, e_java },
-                    );
+                    try self.writeAlignCall(enumWireBase(e.annotations), extra);
+                    try self.print("{s} = {s}.valueOf((int) {s});\n", .{ out_expr, e_java, enumGetExpr(e.annotations) });
                 },
                 .bitmask => |bm| {
-                    const storage = bitmaskJavaType(bm.annotations);
-                    const method = if (std.mem.eql(u8, storage, "long")) "getLong" else "getInt";
                     try self.ind();
-                    try self.print(
-                        "{s}_cdrAlign(_buf, _cdrBase, 4); {s} = _buf.{s}();\n",
-                        .{ extra, out_expr, method },
-                    );
+                    try self.writeAlignCall(enumWireBase(bm.annotations), extra);
+                    try self.print("{s} = ({s}) {s};\n", .{ out_expr, bitmaskJavaType(bm.annotations), enumGetExpr(bm.annotations) });
                 },
                 .typedef => |t| {
                     if (t.dimensions.len > 0) {
@@ -2748,6 +2816,7 @@ const Generator = struct {
                 defer self.alloc.free(key_elem);
                 const val_elem = try self.typeRefToJavaElem(m.value.*);
                 defer self.alloc.free(val_elem);
+                try self.emitSkipCollectionDheader(!(cdr_skip.isPrimitiveElement(m.key.*) and cdr_skip.isPrimitiveElement(m.value.*)), extra);
                 try self.ind();
                 try self.print("{s}_cdrAlign(_buf, _cdrBase, 4); int {s} = _buf.getInt();\n", .{ extra, n_var });
                 try self.ind();
@@ -2795,14 +2864,21 @@ const Generator = struct {
                     const e_java = try self.qualNameToJava(e.qualified_name);
                     defer self.alloc.free(e_java);
                     try self.ind();
-                    try self.print(
-                        "{s}_cdrAlign(_buf, _cdrBase, 4); {s}.add({s}.valueOf(_buf.getInt()));\n",
-                        .{ extra, seq_expr, e_java },
-                    );
+                    try self.writeAlignCall(enumWireBase(e.annotations), extra);
+                    try self.print("{s}.add({s}.valueOf((int) {s}));\n", .{ seq_expr, e_java, enumGetExpr(e.annotations) });
+                },
+                .bitmask => |bm| {
+                    try self.ind();
+                    try self.writeAlignCall(enumWireBase(bm.annotations), extra);
+                    try self.print("{s}.add(({s}) {s});\n", .{ seq_expr, bitmaskJavaType(bm.annotations), enumGetExpr(bm.annotations) });
                 },
                 .typedef => |t| {
-                    // Follow typedef chain for element
-                    try self.emitSequenceElemDeserialize(t.type_ref, seq_expr, extra);
+                    if (t.dimensions.len > 0) {
+                        try self.emitSequenceElemDeserializeViaTemp(elem_tr, seq_expr, extra);
+                    } else {
+                        // Follow typedef chain for element
+                        try self.emitSequenceElemDeserialize(t.type_ref, seq_expr, extra);
+                    }
                 },
                 else => {
                     const qname = try self.qualNameToJava(ir.typeDeclQualifiedName(td));
@@ -2814,13 +2890,29 @@ const Generator = struct {
                     );
                 },
             },
-            else => {
-                try self.ind();
-                try self.print("{s}// TODO: seq elem deserialize\n", .{extra});
-            },
+            else => try self.emitSequenceElemDeserializeViaTemp(elem_tr, seq_expr, extra),
         }
     }
 
+    /// Decode a sequence element of any kind (nested sequence, array typedef,
+    /// map, fixed) into a temporary, then add it.
+    fn emitSequenceElemDeserializeViaTemp(self: *Generator, elem_tr: ir.TypeRef, seq_expr: []const u8, extra: []const u8) anyerror!void {
+        const ev = try self.collName("_ev");
+        defer self.alloc.free(ev);
+        const elem_java = try self.typeRefToJavaElem(elem_tr);
+        defer self.alloc.free(elem_java);
+        const dflt = try self.defaultForTypeRef(elem_tr);
+        defer self.alloc.free(dflt);
+        try self.ind();
+        try self.print("{s}{s} {s} = {s};\n", .{ extra, elem_java, ev, dflt });
+        try self.emitDeserializeForTypeRef(elem_tr, ev, extra);
+        try self.ind();
+        try self.print("{s}{s}.add({s});\n", .{ extra, seq_expr, ev });
+    }
+
+    /// Serialize an IDL array (member dimensions or array typedef). XCDR
+    /// flattens array typedefs used as elements into one array, so a single
+    /// DHEADER covers it when the innermost element type is non-primitive.
     fn emitSerializeArray(
         self: *Generator,
         elem_tr: ir.TypeRef,
@@ -2829,11 +2921,27 @@ const Generator = struct {
         extra: []const u8,
         depth: usize,
     ) anyerror!void {
+        const cdh = try self.openCollectionDheader(depth == 0 and !cdr_skip.isPrimitiveElement(cdr_skip.arrayInnermost(elem_tr)), extra);
+        try self.emitSerializeArrayDims(elem_tr, access, dims, extra, depth);
+        try self.closeCollectionDheader(cdh, extra);
+    }
+
+    fn emitSerializeArrayDims(
+        self: *Generator,
+        elem_tr: ir.TypeRef,
+        access: []const u8,
+        dims: []const u64,
+        extra: []const u8,
+        depth: usize,
+    ) anyerror!void {
         if (dims.len == 0) {
+            if (cdr_skip.arrayTypedefOf(elem_tr)) |t| return self.emitSerializeArrayDims(t.type_ref, access, t.dimensions, extra, depth);
+            self.coll_depth += 1;
+            defer self.coll_depth -= 1;
             try self.emitSerializeForTypeRef(elem_tr, access, extra);
             return;
         }
-        const idx = try std.fmt.allocPrint(self.alloc, "_d{d}", .{depth});
+        const idx = try cdr_skip.arrayVar(self.alloc, "_d", self.coll_depth, depth);
         defer self.alloc.free(idx);
         try self.ind();
         try self.print(
@@ -2844,11 +2952,12 @@ const Generator = struct {
         defer self.alloc.free(inner);
         const elem_access = try std.fmt.allocPrint(self.alloc, "{s}[{s}]", .{ access, idx });
         defer self.alloc.free(elem_access);
-        try self.emitSerializeArray(elem_tr, elem_access, dims[1..], inner, depth + 1);
+        try self.emitSerializeArrayDims(elem_tr, elem_access, dims[1..], inner, depth + 1);
         try self.ind();
         try self.print("{s}}}\n", .{extra});
     }
 
+    /// Deserialize an IDL array (see `emitSerializeArray`).
     fn emitDeserializeArray(
         self: *Generator,
         elem_tr: ir.TypeRef,
@@ -2857,11 +2966,26 @@ const Generator = struct {
         extra: []const u8,
         depth: usize,
     ) anyerror!void {
+        if (depth == 0) try self.emitSkipCollectionDheader(!cdr_skip.isPrimitiveElement(cdr_skip.arrayInnermost(elem_tr)), extra);
+        try self.emitDeserializeArrayDims(elem_tr, base_access, dims, extra, depth);
+    }
+
+    fn emitDeserializeArrayDims(
+        self: *Generator,
+        elem_tr: ir.TypeRef,
+        base_access: []const u8,
+        dims: []const u64,
+        extra: []const u8,
+        depth: usize,
+    ) anyerror!void {
         if (dims.len == 0) {
+            if (cdr_skip.arrayTypedefOf(elem_tr)) |t| return self.emitDeserializeArrayDims(t.type_ref, base_access, t.dimensions, extra, depth);
+            self.coll_depth += 1;
+            defer self.coll_depth -= 1;
             try self.emitDeserializeForTypeRef(elem_tr, base_access, extra);
             return;
         }
-        const idx = try std.fmt.allocPrint(self.alloc, "_d{d}", .{depth});
+        const idx = try cdr_skip.arrayVar(self.alloc, "_d", self.coll_depth, depth);
         defer self.alloc.free(idx);
         try self.ind();
         try self.print(
@@ -2872,7 +2996,7 @@ const Generator = struct {
         defer self.alloc.free(inner);
         const elem_access = try std.fmt.allocPrint(self.alloc, "{s}[{s}]", .{ base_access, idx });
         defer self.alloc.free(elem_access);
-        try self.emitDeserializeArray(elem_tr, elem_access, dims[1..], inner, depth + 1);
+        try self.emitDeserializeArrayDims(elem_tr, elem_access, dims[1..], inner, depth + 1);
         try self.ind();
         try self.print("{s}}}\n", .{extra});
     }
@@ -2939,7 +3063,8 @@ const Generator = struct {
             .base => |b| self.alloc.dupe(u8, baseToJavaBoxedType(b)),
             .string, .wstring => self.alloc.dupe(u8, "String"),
             .named => |td| switch (td) {
-                .typedef => |t| self.typeRefToJavaElem(t.type_ref),
+                .typedef => |t| if (t.dimensions.len > 0) self.typeRefToJava(t.type_ref, t.dimensions) else self.typeRefToJavaElem(t.type_ref),
+                .bitmask => |bm| self.alloc.dupe(u8, if (std.mem.eql(u8, bitmaskJavaType(bm.annotations), "long")) "Long" else "Integer"),
                 else => self.qualNameToJava(ir.typeDeclQualifiedName(td)),
             },
             else => self.typeRefToJavaBase(tr),
@@ -3072,13 +3197,26 @@ const Generator = struct {
 
     /// Build a `new T[N1][N2]...` allocation expression.
     fn makeJavaNewArray(self: *Generator, tr: ir.TypeRef, dims: []const u64) anyerror![]u8 {
-        const base = try self.typeRefToJavaBase(tr);
+        // An array of array typedefs is one multi-dimensional Java array:
+        // `Triple a[2]` with `typedef long Triple[3]` is `new int[2][3]`.
+        var all = std.ArrayList(u64).empty;
+        defer all.deinit(self.alloc);
+        try all.appendSlice(self.alloc, dims);
+        var elem = tr;
+        while (cdr_skip.arrayTypedefOf(elem)) |t| {
+            try all.appendSlice(self.alloc, t.dimensions);
+            elem = t.type_ref;
+        }
+        const base = try self.typeRefToJavaBase(elem);
         defer self.alloc.free(base);
         var buf = std.ArrayList(u8).empty;
         defer buf.deinit(self.alloc);
         try buf.appendSlice(self.alloc, "new ");
-        try buf.appendSlice(self.alloc, base);
-        for (dims) |d| {
+        // Java can't create generic arrays: use the raw type (an unchecked
+        // conversion when assigned to e.g. `List<Integer>[]`).
+        const raw = if (std.mem.indexOfScalar(u8, base, '<')) |lt| base[0..lt] else base;
+        try buf.appendSlice(self.alloc, raw);
+        for (all.items) |d| {
             const s = try std.fmt.allocPrint(self.alloc, "[{d}]", .{d});
             defer self.alloc.free(s);
             try buf.appendSlice(self.alloc, s);
@@ -3196,7 +3334,12 @@ fn lcForJavaTypeRef(type_ref: ir.TypeRef, dimensions: []const u64) ?u2 {
             else => null, // long_double, any, etc.
         },
         .named => |td| switch (td) {
-            .enum_ => 2, // enums serialize as int32
+            .enum_ => |e| switch (enumWireBytes(e.annotations)) {
+                1 => 0,
+                2 => 1,
+                4 => 2,
+                else => 3,
+            },
             else => null,
         },
         else => null, // string, wstring, sequence, etc.
@@ -3364,7 +3507,14 @@ fn generateZzddsWrapperFiles(
         try writeOutputFile(alloc, io, opts, ts_filename, buf.items);
 
         buf.clearRetainingCapacity();
-        try emitZzddsDataWriterFile(alloc, opts, &buf, c_name, type_java, writer_iface, write_kind_iface, time_t_iface, retcode_oor_qname);
+        // XCDR2 representation id for the top-level extensibility (CDR2 /
+        // D_CDR2 / PL_CDR2); peers reject a mismatched one.
+        const xcdr2_id: []const u8 = switch (s.annotations.extensibility) {
+            .final => "0x07",
+            .appendable => "0x09",
+            .mutable => "0x0b",
+        };
+        try emitZzddsDataWriterFile(alloc, opts, &buf, c_name, type_java, writer_iface, write_kind_iface, time_t_iface, retcode_oor_qname, xcdr2_id);
         const writer_filename = try std.fmt.allocPrint(alloc, "{s}DataWriter.java", .{c_name});
         defer alloc.free(writer_filename);
         try writeOutputFile(alloc, io, opts, writer_filename, buf.items);
@@ -3420,6 +3570,7 @@ fn emitZzddsDataWriterFile(
     write_kind_iface: []const u8,
     time_t_iface: []const u8,
     retcode_oor_qname: []const u8,
+    xcdr2_id: []const u8,
 ) !void {
     try emitZzddsPackageHeader(opts, out, alloc);
     const s = try std.fmt.allocPrint(alloc,
@@ -3442,7 +3593,7 @@ fn emitZzddsDataWriterFile(
         \\            java.nio.ByteBuffer _buf = java.nio.ByteBuffer.allocate(_cap).order(java.nio.ByteOrder.LITTLE_ENDIAN);
         \\            try {{
         \\                if (xcdrVersion == XCDR1) {{ _buf.put((byte)0x00); _buf.put((byte)0x01); _buf.put((byte)0x00); _buf.put((byte)0x00); }}
-        \\                else {{ _buf.put((byte)0x00); _buf.put((byte)0x07); _buf.put((byte)0x00); _buf.put((byte)0x00); }}
+        \\                else {{ _buf.put((byte)0x00); _buf.put((byte){[x2]s}); _buf.put((byte)0x00); _buf.put((byte)0x00); }}
         \\                if (keyOnly) value.serializeKey(_buf, 4, xcdrVersion); else value.serialize(_buf, 4, xcdrVersion);
         \\                byte[] _out = new byte[_buf.position()];
         \\                _buf.rewind(); _buf.get(_out);
@@ -3527,7 +3678,7 @@ fn emitZzddsDataWriterFile(
         \\    private static int xcdrVersionOf(byte[] payload) {{
         \\        int _id = ((payload[0] & 0xFF) << 8) | (payload[1] & 0xFF);
         \\        if (_id == 0x0001) return 1;
-        \\        if (_id == 0x0007) return 2;
+        \\        if (_id == 0x0007 || _id == 0x0009 || _id == 0x000b) return 2;
         \\        throw new IllegalArgumentException("zidl: unsupported CDR encapsulation id 0x" + Integer.toHexString(_id));
         \\    }}
         \\
@@ -3554,7 +3705,7 @@ fn emitZzddsDataWriterFile(
         \\    }}
         \\}}
         \\
-    , .{ .c = c_name, .t = type_java, .wi = writer_iface, .wk = write_kind_iface, .tt = time_t_iface, .oor = retcode_oor_qname });
+    , .{ .c = c_name, .t = type_java, .wi = writer_iface, .wk = write_kind_iface, .tt = time_t_iface, .oor = retcode_oor_qname, .x2 = xcdr2_id });
     defer alloc.free(s);
     try out.appendSlice(alloc, s);
 }
@@ -3600,12 +3751,12 @@ fn emitZzddsDataReaderFile(
         \\    }}
         \\
         \\    /** Determines XCDR1 vs XCDR2 from the payload's own 4-byte CDR
-        \\     * encapsulation header (id bytes: CDR1_LE=0x0001, CDR2_LE=0x0007)
+        \\     * encapsulation header (CDR1_LE=0x0001; CDR2_LE/D_CDR2_LE/PL_CDR2_LE=0x0007/9/b)
         \\     * instead of assuming one -- a peer may choose either. */
         \\    private static int xcdrVersionOf(byte[] payload) {{
         \\        int _id = ((payload[0] & 0xFF) << 8) | (payload[1] & 0xFF);
         \\        if (_id == 0x0001) return 1;
-        \\        if (_id == 0x0007) return 2;
+        \\        if (_id == 0x0007 || _id == 0x0009 || _id == 0x000b) return 2;
         \\        throw new IllegalArgumentException("zidl: unsupported CDR encapsulation id 0x" + Integer.toHexString(_id));
         \\    }}
         \\
@@ -4002,6 +4153,55 @@ fn bitsetFieldJavaType(width: u8) []const u8 {
 }
 
 /// Return the Java integer type for a bitmask based on @bit_bound.
+/// Wire width in bytes of an enum or bitmask: 1, 2, 4 or 8 by `@bit_bound`
+/// (default 32), as XTypes (and zidl's C/Zig backends) encode it.
+fn enumWireBytes(ann: ir.EnumAnnotations) u8 {
+    const b = ann.bit_bound orelse 32;
+    return if (b <= 8) 1 else if (b <= 16) 2 else if (b <= 32) 4 else 8;
+}
+
+/// Base type of that width, for alignment (`writeAlignCall`).
+fn enumWireBase(ann: ir.EnumAnnotations) ast.BaseTypeSpec {
+    return switch (enumWireBytes(ann)) {
+        1 => .octet,
+        2 => .unsigned_short,
+        4 => .unsigned_long,
+        else => .unsigned_long_long,
+    };
+}
+
+/// `_buf.put…(` prefix writing a Java int/long at the enum/bitmask width
+/// (close with `))`).
+fn enumPutPrefix(ann: ir.EnumAnnotations) []const u8 {
+    return switch (enumWireBytes(ann)) {
+        1 => "_buf.put((byte)(int)(",
+        2 => "_buf.putShort((short)(int)(",
+        4 => "_buf.putInt((int)(",
+        else => "_buf.putLong((long)(",
+    };
+}
+
+/// Statement consuming an enum/bitmask value of that width (skip).
+fn enumSkipStmt(ann: ir.EnumAnnotations) []const u8 {
+    return switch (enumWireBytes(ann)) {
+        1 => "_buf.get();",
+        2 => "_buf.getShort();",
+        4 => "_buf.getInt();",
+        else => "_buf.getLong();",
+    };
+}
+
+/// Expression reading an enum/bitmask value of that width as an unsigned
+/// Java int (or long for 64-bit bitmasks).
+fn enumGetExpr(ann: ir.EnumAnnotations) []const u8 {
+    return switch (enumWireBytes(ann)) {
+        1 => "(_buf.get() & 0xFF)",
+        2 => "(_buf.getShort() & 0xFFFF)",
+        4 => "_buf.getInt()",
+        else => "_buf.getLong()",
+    };
+}
+
 fn bitmaskJavaType(ann: ir.EnumAnnotations) []const u8 {
     if (ann.bit_bound) |n| {
         if (n > 32) return "long";
@@ -8122,7 +8322,7 @@ fn generateCdrUtils(
     try gen.write("    public static int _cdrDetectXcdr(byte[] _payload) {\n");
     try gen.write("        int _id = ((_payload[0] & 0xFF) << 8) | (_payload[1] & 0xFF);\n");
     try gen.write("        if (_id == 0x0001) return 1;\n");
-    try gen.write("        if (_id == 0x0007) return 2;\n");
+    try gen.write("        if (_id == 0x0007 || _id == 0x0009 || _id == 0x000b) return 2;\n");
     try gen.write("        throw new IllegalArgumentException(\"zidl: unsupported CDR encapsulation id 0x\" + Integer.toHexString(_id));\n");
     try gen.write("    }\n");
     try gen.write("}\n");
@@ -8801,7 +9001,8 @@ test "java: --generate-zzdds-wrappers DataWriter selects XCDR1/XCDR2 encapsulati
     // Both encapsulation headers must be selectable at write time, not just
     // one hardcoded choice.
     try testing.expect(std.mem.indexOf(u8, writer_content, "_buf.put((byte)0x01)") != null);
-    try testing.expect(std.mem.indexOf(u8, writer_content, "_buf.put((byte)0x07)") != null);
+    // `Foo` is @appendable: its XCDR2 samples are D_CDR2 (0x0009).
+    try testing.expect(std.mem.indexOf(u8, writer_content, "_buf.put((byte)0x09)") != null);
     try testing.expect(std.mem.indexOf(u8, writer_content, "value.serialize(_buf, 4, xcdrVersion)") != null);
 }
 
@@ -9017,7 +9218,7 @@ test "java: --generate-zzdds-wrappers DataReader auto-detects xcdr version from 
     // used to always do `_buf.position(4)` with no idea what it just skipped).
     try testing.expect(std.mem.indexOf(u8, reader_content, "xcdrVersionOf(byte[] payload)") != null);
     try testing.expect(std.mem.indexOf(u8, reader_content, "if (_id == 0x0001) return 1;") != null);
-    try testing.expect(std.mem.indexOf(u8, reader_content, "if (_id == 0x0007) return 2;") != null);
+    try testing.expect(std.mem.indexOf(u8, reader_content, "if (_id == 0x0007 || _id == 0x0009 || _id == 0x000b) return 2;") != null);
     try testing.expect(std.mem.indexOf(u8, reader_content, "int _xcdrVersion = xcdrVersionOf(payload);") != null);
     try testing.expect(std.mem.indexOf(u8, reader_content, "Foo.deserializeSelected(_buf, 4, _xcdrVersion, Foo.KEY_FIELD_MASK)") != null);
 }
@@ -9130,11 +9331,28 @@ test "java: CDR enum field" {
     try testGen(alloc,
         \\enum Color { RED, GREEN, BLUE };
         \\struct S { Color c; };
-    , "test", "_cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.c.getValue());");
+    , "test", "_cdrAlign(_buf, _cdrBase, 4); _buf.putInt((int)(this.c.getValue()));");
     try testGen(alloc,
         \\enum Color { RED, GREEN, BLUE };
         \\struct S { Color c; };
-    , "test", "_out.c = Color.valueOf(_buf.getInt());");
+    , "test", "_out.c = Color.valueOf((int) _buf.getInt());");
+}
+
+test "java: CDR enum and bitmask wire width follows @bit_bound" {
+    // XTypes encodes enums/bitmasks in 1/2/4/8 bytes by @bit_bound; Java used
+    // to write every one as a 4-byte int.
+    const alloc = testing.allocator;
+    const idl =
+        \\@bit_bound(8) enum Small { A, B };
+        \\@bit_bound(8) bitmask Flags { F0, F1 };
+        \\@bit_bound(16) bitmask Wide { W0 };
+        \\struct S { Small e; Flags f; Wide w; sequence<Flags> fs; };
+    ;
+    try testGen(alloc, idl, "test", "_buf.put((byte)(int)(this.e.getValue()));");
+    try testGen(alloc, idl, "test", "_out.e = Small.valueOf((int) (_buf.get() & 0xFF));");
+    try testGen(alloc, idl, "test", "_buf.put((byte)(int)(this.f));");
+    try testGen(alloc, idl, "test", "_cdrAlign(_buf, _cdrBase, 2); _buf.putShort((short)(int)(this.w));");
+    try testGen(alloc, idl, "test", "_out.fs.add((int) (_buf.get() & 0xFF));");
 }
 
 test "java: CDR no typesupport" {

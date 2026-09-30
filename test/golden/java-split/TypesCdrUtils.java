@@ -36,7 +36,7 @@ public class TypesCdrUtils {
     public static int _cdrDetectXcdr(byte[] _payload) {
         int _id = ((_payload[0] & 0xFF) << 8) | (_payload[1] & 0xFF);
         if (_id == 0x0001) return 1;
-        if (_id == 0x0007) return 2;
+        if (_id == 0x0007 || _id == 0x0009 || _id == 0x000b) return 2;
         throw new IllegalArgumentException("zidl: unsupported CDR encapsulation id 0x" + Integer.toHexString(_id));
     }
 }

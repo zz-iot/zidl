@@ -18,10 +18,20 @@ The first two bytes encode the representation identifier (big-endian); the last 
 | CDR1 BE | `0x0000` | `0x00 0x00 0x00 0x00` |
 | CDR2 LE | `0x0007` | `0x00 0x07 0x00 0x00` |
 | CDR2 BE | `0x0006` | `0x00 0x06 0x00 0x00` |
+| D_CDR2 LE | `0x0009` | `0x00 0x09 0x00 0x00` |
+| D_CDR2 BE | `0x0008` | `0x00 0x08 0x00 0x00` |
+| PL_CDR2 LE | `0x000b` | `0x00 0x0b 0x00 0x00` |
+| PL_CDR2 BE | `0x000a` | `0x00 0x0a 0x00 0x00` |
+| PL_CDR LE | `0x0003` | `0x00 0x03 0x00 0x00` |
+| PL_CDR BE | `0x0002` | `0x00 0x02 0x00 0x00` |
 
-Confirmed against Cyclone DDS 11.0.1:
-- XCDR1 LE = `0x0001`
-- XCDR2 LE = `0x0007`
+In XCDR2 the identifier follows the **top-level type's extensibility**: CDR2 for
+`@final`, D_CDR2 for `@appendable`, PL_CDR2 for `@mutable`. Implementations may reject
+a received sample whose identifier doesn't match the topic type, so the generated zzdds
+writers pick it by extensibility (Zig `writeEncapHeader` / `writeEncapHeaderDelimited` /
+`writeEncapHeaderMutable`; C `zidl_cdr_write_encap_kind`; Java `…DataWriter`). The
+readers accept all six XCDR2 identifiers. XCDR1 `@mutable` samples should be PL_CDR
+(a ParameterList encoding), which zidl does not generate yet; see `roadmap.md`.
 
 **After writing the encap header, CDR position resets to 0.**
 All alignment pads are computed from this reset position (the start of the CDR payload),
@@ -94,12 +104,22 @@ Alignment: 4-byte aligned for the count; 2-byte aligned for each wchar.
 ## Sequence Encoding
 
 ```
+[4]  DHEADER: u32          XCDR2 only, and only when the element type is non-primitive
 [4]  element_count: u32   (4-byte aligned)
 […]  elements back-to-back (each element at its natural alignment from pos)
 ```
 
 Bounded sequences (`sequence<T, N>`): the length still comes first; the CDR format is identical.
 Bound enforcement is at the application level (serialization checks `count <= N`).
+
+**Collection DHEADER (XCDR2).** A sequence, array or map whose element type is not
+*primitive* is prefixed by a DHEADER: a 4-byte-aligned `u32` holding the byte length
+of what follows (count and elements for a sequence; elements for an array). Primitive
+means integers, floating point, `boolean`, `char`/`octet` and `wchar`; enums,
+bitmasks, strings, structs, unions, sequences and arrays are non-primitive. A map gets
+one unless both key and value are primitive. XCDR1 never has one.
+`test/integration/xcdr_known_answer/` checks every zidl backend against reference
+encodings from an independent implementation.
 
 ---
 
@@ -108,14 +128,19 @@ Bound enforcement is at the application level (serialization checks `count <= N`
 No length field. Elements written back-to-back, each at natural alignment.
 For multi-dimensional arrays: row-major order (C-style, rightmost index varies fastest).
 
+An array whose elements are an array typedef is flattened into one multi-dimensional
+array (`typedef long Triple[3]; Triple a[2];` encodes as `long[2][3]`), so XCDR2 writes
+at most one DHEADER per array, decided by the innermost element type. A *sequence* of
+an array typedef is a collection of arrays (non-primitive) and gets a DHEADER on the
+sequence.
+
 ---
 
-## Enum Encoding
+## Enum and Bitmask Encoding
 
-Enums serialize as `uint32_t` (4 bytes, 4-byte aligned) regardless of declared bit_bound,
-unless `@bit_bound(N)` annotation maps to a smaller integer.
-
-Default: `uint32_t`.
+Enums and bitmasks serialize as an unsigned integer whose width follows `@bit_bound`:
+1 byte for bound ≤ 8, 2 for ≤ 16, 4 for ≤ 32 (the default), 8 above that — each at its
+natural alignment.
 
 ---
 
@@ -127,6 +152,10 @@ If the struct has a base type (`struct Derived : Base`), base members serialize 
 ---
 
 ## XCDR2 DHEADER (for @appendable types)
+
+A DHEADER is 4-byte aligned: a writer reserving one after unaligned data pads first and
+counts only the bytes after the DHEADER (never the padding before it). Collections of
+non-primitive elements get one too; see *Sequence Encoding*.
 
 A DHEADER is a `uint32_t` placed before the payload of each `@appendable` struct or union.
 Its value = byte count of the payload (bytes after the DHEADER itself).
@@ -162,19 +191,24 @@ a must-understand flag, and the length code (LC) that determines how to decode t
      bits [31]:   must_understand flag
      bits [30:28]: LC (length code, 0..7)
      bits [27:0]:  member_id (28 bits)
-[4]  NEXTINT: u32   present only when LC >= 4; encodes payload byte count
+[4]  NEXTINT: u32   present only when LC >= 4 (see below)
 […]  payload
 ```
 
-LC decoding:
+LC decoding (XTypes 1.3 §7.4.3.4.8):
 - LC=0: payload = 1 byte
 - LC=1: payload = 2 bytes
 - LC=2: payload = 4 bytes
 - LC=3: payload = 8 bytes
-- LC=4: NEXTINT present; payload = NEXTINT bytes (for any-length members)
-- LC=5: NEXTINT present; payload = 4 * NEXTINT bytes
-- LC=6: NEXTINT present; payload = 8 * NEXTINT bytes
-- LC=7: reserved
+- LC=4: a separate NEXTINT follows; payload = NEXTINT bytes
+- LC=5: the NEXTINT is the **first word of the payload itself** (its DHEADER, string
+  length or sequence length); payload = 4 + NEXTINT bytes
+- LC=6: as LC=5; payload = 4 + 4 × NEXTINT bytes (e.g. a sequence of 4-byte elements)
+- LC=7: as LC=5; payload = 4 + 8 × NEXTINT bytes
+
+For LC 5–7 the reader must *peek* the NEXTINT and leave it in place as the start of the
+member value. zidl writers use LC 0–4 only; other implementations write LC 5–7 for
+string and collection members, which every zidl reader accepts.
 
 `@mutable` serialization is supported in the Zig backend (XCDR2).
 The `ZidlEmHeader` struct in `zidl_cdr.h` and `zidl_cdr_read_emheader()` support decoding.

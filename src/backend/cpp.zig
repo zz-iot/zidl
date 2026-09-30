@@ -47,6 +47,7 @@ const std = @import("std");
 const ast = @import("../ast.zig");
 const ir = @import("../ir/root.zig");
 const cdr_skip = @import("cdr_skip.zig");
+const encapKindC = cdr_skip.encapKindC;
 const interface = @import("interface.zig");
 
 // Stack buffer size for get_key_value; zzdds returns an error if the serialized
@@ -1516,6 +1517,9 @@ fn bitsetCdrFnSuffix(bs: *const ir.Bitset) []const u8 {
 // ── CDR source generation ─────────────────────────────────────────────────────
 
 const CdrGenerator = struct {
+    /// Nesting depth of the collection whose element code is being emitted;
+    /// suffixes loop locals so nested loops never shadow (see cdr_skip.collName).
+    coll_depth: u32 = 0,
     alloc: std.mem.Allocator,
     opts: interface.Options,
     out: *std.ArrayList(u8),
@@ -2342,7 +2346,7 @@ const CdrGenerator = struct {
         try self.writeI("if (_rc) return _rc;\n");
         try self.writeI("ZidlCdrWriter _cw;\n");
         try self.writeI("zidl_cdr_writer_init_counting(&_cw, xcdr_version);\n");
-        try self.writeI("_rc = zidl_cdr_write_encap(&_cw);\n");
+        try self.printI("_rc = zidl_cdr_write_encap_kind(&_cw, {s});\n", .{encapKindC(s)});
         try self.printI("if (!_rc) _rc = key_only ? {s}_serialize_key(&_cw, &value) : {s}_serialize(&_cw, &value);\n", .{ c_name, c_name });
         try self.writeI("if (_rc) return _rc;\n");
         try self.writeI("DDS_OctetSeq _c_payload = {0};\n");
@@ -2350,7 +2354,7 @@ const CdrGenerator = struct {
         try self.writeI("if (_rc) return _rc;\n");
         try self.writeI("ZidlCdrWriter _w;\n");
         try self.writeI("zidl_cdr_writer_init_fixed(&_w, _c_payload._buffer, _c_payload._maximum, xcdr_version);\n");
-        try self.writeI("_rc = zidl_cdr_write_encap(&_w);\n");
+        try self.printI("_rc = zidl_cdr_write_encap_kind(&_w, {s});\n", .{encapKindC(s)});
         try self.printI("if (!_rc) _rc = key_only ? {s}_serialize_key(&_w, &value) : {s}_serialize(&_w, &value);\n", .{ c_name, c_name });
         try self.writeI("if (_rc) {\n");
         self.indent_depth += 1;
@@ -2392,7 +2396,7 @@ const CdrGenerator = struct {
         try self.writeI("uint8_t _hash[16];\n");
         try self.writeI("int _rc = zidl_cdr_writer_init(&_w, xcdr_version);\n");
         try self.writeI("if (_rc) return _rc;\n");
-        try self.writeI("_rc = zidl_cdr_write_encap(&_w);\n");
+        try self.printI("_rc = zidl_cdr_write_encap_kind(&_w, {s});\n", .{encapKindC(s)});
         try self.printI("if (!_rc) _rc = key_only ? {s}_serialize_key(&_w, &value) : {s}_serialize(&_w, &value);\n", .{ c_name, c_name });
         try self.printI("if (!_rc) _rc = {s}_compute_key_hash(&value, _hash);\n", .{c_name});
         try self.printI("if (!_rc) _rc = {s}_write_raw(writer, kind, _hash, handle, _w.buf, _w.len, timestamp);\n", .{class_name});
@@ -2408,7 +2412,7 @@ const CdrGenerator = struct {
         try self.print("static int {s}_write_kind_w_hash(DDS_DataWriter writer, int xcdr_version, DDS_WriteKind kind, const {s}& value, bool key_only, const uint8_t *hash, DDS_InstanceHandle_t handle) {{\n", .{ class_name, cpp_qname });
         try self.writeI("ZidlCdrWriter _cw;\n");
         try self.writeI("zidl_cdr_writer_init_counting(&_cw, xcdr_version);\n");
-        try self.writeI("int _rc = zidl_cdr_write_encap(&_cw);\n");
+        try self.printI("int _rc = zidl_cdr_write_encap_kind(&_cw, {s});\n", .{encapKindC(s)});
         try self.printI("if (!_rc) _rc = key_only ? {s}_serialize_key(&_cw, &value) : {s}_serialize(&_cw, &value);\n", .{ c_name, c_name });
         try self.writeI("if (_rc) return _rc;\n");
         try self.writeI("DDS_OctetSeq _c_payload = {0};\n");
@@ -2416,7 +2420,7 @@ const CdrGenerator = struct {
         try self.writeI("if (_rc) return _rc;\n");
         try self.writeI("ZidlCdrWriter _w;\n");
         try self.writeI("zidl_cdr_writer_init_fixed(&_w, _c_payload._buffer, _c_payload._maximum, xcdr_version);\n");
-        try self.writeI("_rc = zidl_cdr_write_encap(&_w);\n");
+        try self.printI("_rc = zidl_cdr_write_encap_kind(&_w, {s});\n", .{encapKindC(s)});
         try self.printI("if (!_rc) _rc = key_only ? {s}_serialize_key(&_w, &value) : {s}_serialize(&_w, &value);\n", .{ c_name, c_name });
         try self.writeI("if (_rc) {\n");
         self.indent_depth += 1;
@@ -3583,16 +3587,24 @@ const CdrGenerator = struct {
                 try self.writeI("}\n");
             },
             .sequence => |seq| {
+                // XCDR2 prefixes a collection of non-primitive elements with a
+                // DHEADER (no-op for XCDR1 writers).
+                const dh = try self.openCollectionDheader(!cdr_skip.isPrimitiveElement(seq.element.*));
+                const si = try cdr_skip.collName(self.alloc, "_si", self.coll_depth);
+                defer self.alloc.free(si);
                 try self.printI("_rc = zidl_cdr_write_u32(_w, (uint32_t){s}.size());\n", .{access});
                 try self.writeI("if (_rc) return _rc;\n");
-                try self.printI("{{ uint32_t _si; for (_si = 0; _si < (uint32_t){s}.size(); _si++) {{\n", .{access});
+                try self.printI("{{ uint32_t {s}; for ({s} = 0; {s} < (uint32_t){s}.size(); {s}++) {{\n", .{ si, si, si, access, si });
                 self.indent_depth += 1;
-                const elem_access = try std.fmt.allocPrint(self.alloc, "{s}[_si]", .{access});
+                const elem_access = try std.fmt.allocPrint(self.alloc, "{s}[{s}]", .{ access, si });
                 defer self.alloc.free(elem_access);
+                self.coll_depth += 1;
                 try self.emitWriteForTypeRef(seq.element.*, field_name, elem_access);
+                self.coll_depth -= 1;
                 self.indent_depth -= 1;
                 try self.writeI("}\n");
                 try self.writeI("}\n");
+                try self.closeCollectionDheader(dh);
             },
             .named => |td| try self.emitWriteNamed(td, field_name, access),
             .fixed_pt => |fp| {
@@ -3686,6 +3698,9 @@ const CdrGenerator = struct {
         }
     }
 
+    /// Write an IDL array (member dimensions or array typedef). XCDR flattens
+    /// array typedefs used as elements into one array, so a single DHEADER
+    /// covers it when the innermost element type is non-primitive.
     fn emitWriteArray(
         self: *CdrGenerator,
         elem_tr: ir.TypeRef,
@@ -3693,7 +3708,25 @@ const CdrGenerator = struct {
         dims: []const u64,
         dim_idx: usize,
     ) anyerror!void {
-        const var_name = try std.fmt.allocPrint(self.alloc, "_ai{d}", .{dim_idx});
+        const dh = try self.openCollectionDheader(dim_idx == 0 and !cdr_skip.isPrimitiveElement(cdr_skip.arrayInnermost(elem_tr)));
+        try self.emitWriteArrayDims(elem_tr, access, dims, dim_idx);
+        try self.closeCollectionDheader(dh);
+    }
+
+    fn emitWriteArrayDims(
+        self: *CdrGenerator,
+        elem_tr: ir.TypeRef,
+        access: []const u8,
+        dims: []const u64,
+        dim_idx: usize,
+    ) anyerror!void {
+        if (dims.len == 0) {
+            if (cdr_skip.arrayTypedefOf(elem_tr)) |t| return self.emitWriteArrayDims(t.type_ref, access, t.dimensions, dim_idx);
+            self.coll_depth += 1;
+            defer self.coll_depth -= 1;
+            return self.emitWriteForTypeRef(elem_tr, "_elem", access);
+        }
+        const var_name = try cdr_skip.arrayVar(self.alloc, "_ai", self.coll_depth, dim_idx);
         defer self.alloc.free(var_name);
         try self.printI("{{ uint32_t {s}; for ({s} = 0; {s} < {d}u; {s}++) {{\n", .{
             var_name, var_name, var_name, dims[0], var_name,
@@ -3701,13 +3734,30 @@ const CdrGenerator = struct {
         self.indent_depth += 1;
         const elem_access = try std.fmt.allocPrint(self.alloc, "{s}[{s}]", .{ access, var_name });
         defer self.alloc.free(elem_access);
-        if (dims.len > 1) {
-            try self.emitWriteArray(elem_tr, elem_access, dims[1..], dim_idx + 1);
-        } else {
-            try self.emitWriteForTypeRef(elem_tr, "_elem", elem_access);
-        }
+        try self.emitWriteArrayDims(elem_tr, elem_access, dims[1..], dim_idx + 1);
         self.indent_depth -= 1;
         try self.writeI("}\n");
+        try self.writeI("}\n");
+    }
+
+    /// Open `{ size_t _cdh; reserve_dheader_maybe` for a collection XCDR2
+    /// prefixes with a DHEADER; returns the local's name (caller passes it to
+    /// closeCollectionDheader) or null when no DHEADER applies.
+    fn openCollectionDheader(self: *CdrGenerator, needed: bool) !?[]u8 {
+        if (!needed) return null;
+        const name = try cdr_skip.collName(self.alloc, "_cdh", self.coll_depth);
+        try self.printI("{{ size_t {s};\n", .{name});
+        self.indent_depth += 1;
+        try self.printI("_rc = zidl_cdr_reserve_dheader_maybe(_w, &{s});\n", .{name});
+        try self.writeI("if (_rc) return _rc;\n");
+        return name;
+    }
+
+    fn closeCollectionDheader(self: *CdrGenerator, name: ?[]u8) !void {
+        const n = name orelse return;
+        defer self.alloc.free(n);
+        try self.printI("zidl_cdr_patch_dheader_maybe(_w, {s});\n", .{n});
+        self.indent_depth -= 1;
         try self.writeI("}\n");
     }
 
@@ -3826,16 +3876,36 @@ const CdrGenerator = struct {
                 try self.writeI("}\n");
             },
             .sequence => |seq| {
-                try self.writeI("{ uint32_t _sl;\n");
+                const sl = try cdr_skip.collName(self.alloc, "_sl", self.coll_depth);
+                defer self.alloc.free(sl);
+                const si = try cdr_skip.collName(self.alloc, "_si", self.coll_depth);
+                defer self.alloc.free(si);
+                try self.printI("{{ uint32_t {s};\n", .{sl});
                 self.indent_depth += 1;
-                try self.writeI("_rc = zidl_cdr_read_u32(_r, &_sl);\n");
+                if (!cdr_skip.isPrimitiveElement(seq.element.*)) {
+                    try self.writeI("_rc = zidl_cdr_skip_dheader_if_xcdr2(_r);\n");
+                    try self.writeI("if (_rc) return _rc;\n");
+                }
+                try self.printI("_rc = zidl_cdr_read_u32(_r, &{s});\n", .{sl});
                 try self.writeI("if (_rc) return _rc;\n");
-                try self.printI("{s}.resize(_sl);\n", .{lval});
-                try self.writeI("{ uint32_t _si; for (_si = 0; _si < _sl; _si++) {\n");
+                try self.printI("{s}.resize({s});\n", .{ lval, sl });
+                try self.printI("{{ uint32_t {s}; for ({s} = 0; {s} < {s}; {s}++) {{\n", .{ si, si, si, sl, si });
                 self.indent_depth += 1;
-                const elem_lval = try std.fmt.allocPrint(self.alloc, "{s}[_si]", .{lval});
+                const elem_lval = try std.fmt.allocPrint(self.alloc, "{s}[{s}]", .{ lval, si });
                 defer self.alloc.free(elem_lval);
-                try self.emitReadForTypeRef(seq.element.*, field_name, elem_lval);
+                const is_bool = switch (cdr_skip.resolveAlias(seq.element.*)) {
+                    .base => |b| b == .boolean,
+                    else => false,
+                };
+                if (is_bool) {
+                    // std::vector<bool> elements are proxies, not addressable bools.
+                    try self.writeI("{ bool _bv; _rc = zidl_cdr_read_bool(_r, &_bv); if (_rc) return _rc; ");
+                    try self.print("{s} = _bv; }}\n", .{elem_lval});
+                } else {
+                    self.coll_depth += 1;
+                    try self.emitReadForTypeRef(seq.element.*, field_name, elem_lval);
+                    self.coll_depth -= 1;
+                }
                 self.indent_depth -= 1;
                 try self.writeI("}\n");
                 try self.writeI("}\n");
@@ -3945,6 +4015,7 @@ const CdrGenerator = struct {
         }
     }
 
+    /// Read an IDL array (see `emitWriteArray`).
     fn emitReadArray(
         self: *CdrGenerator,
         elem_tr: ir.TypeRef,
@@ -3953,7 +4024,28 @@ const CdrGenerator = struct {
         dims: []const u64,
         dim_idx: usize,
     ) anyerror!void {
-        const var_name = try std.fmt.allocPrint(self.alloc, "_ai{d}", .{dim_idx});
+        if (dim_idx == 0 and !cdr_skip.isPrimitiveElement(cdr_skip.arrayInnermost(elem_tr))) {
+            try self.writeI("_rc = zidl_cdr_skip_dheader_if_xcdr2(_r);\n");
+            try self.writeI("if (_rc) return _rc;\n");
+        }
+        try self.emitReadArrayDims(elem_tr, field_name, lval, dims, dim_idx);
+    }
+
+    fn emitReadArrayDims(
+        self: *CdrGenerator,
+        elem_tr: ir.TypeRef,
+        field_name: []const u8,
+        lval: []const u8,
+        dims: []const u64,
+        dim_idx: usize,
+    ) anyerror!void {
+        if (dims.len == 0) {
+            if (cdr_skip.arrayTypedefOf(elem_tr)) |t| return self.emitReadArrayDims(t.type_ref, field_name, lval, t.dimensions, dim_idx);
+            self.coll_depth += 1;
+            defer self.coll_depth -= 1;
+            return self.emitReadForTypeRef(elem_tr, field_name, lval);
+        }
+        const var_name = try cdr_skip.arrayVar(self.alloc, "_ai", self.coll_depth, dim_idx);
         defer self.alloc.free(var_name);
         try self.printI("{{ uint32_t {s}; for ({s} = 0; {s} < {d}u; {s}++) {{\n", .{
             var_name, var_name, var_name, dims[0], var_name,
@@ -3961,11 +4053,7 @@ const CdrGenerator = struct {
         self.indent_depth += 1;
         const elem_lval = try std.fmt.allocPrint(self.alloc, "{s}[{s}]", .{ lval, var_name });
         defer self.alloc.free(elem_lval);
-        if (dims.len > 1) {
-            try self.emitReadArray(elem_tr, field_name, elem_lval, dims[1..], dim_idx + 1);
-        } else {
-            try self.emitReadForTypeRef(elem_tr, field_name, elem_lval);
-        }
+        try self.emitReadArrayDims(elem_tr, field_name, elem_lval, dims[1..], dim_idx + 1);
         self.indent_depth -= 1;
         try self.writeI("}\n");
         try self.writeI("}\n");

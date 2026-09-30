@@ -183,6 +183,10 @@ const Encoder = struct {
 
 // ── Public hashing helpers ────────────────────────────────────────────────────
 
+/// Length of the XCDR2 encapsulation header the `encodeMinimal*` functions
+/// prepend to the TypeObject bytes.
+pub const encap_header_len = 4;
+
 /// First 4 bytes of MD5 of the UTF-8 member name (no null terminator).
 /// Used as NameHash in MinimalMemberDetail and for @hashid member-ID computation.
 pub fn nameHash(name: []const u8) [4]u8 {
@@ -196,6 +200,10 @@ pub fn nameHash(name: []const u8) [4]u8 {
 /// EquivalenceHash = first 14 bytes of MD5 of the serialized TypeObject.
 /// This is the on-wire identifier used by other DDS implementations (Cyclone,
 /// FastDDS, etc.) to match types.  §7.3.4.5 DDS-XTypes v1.3.
+/// `type_object_bytes` is the XCDR2 TypeObject itself, *without* the 4-byte
+/// encapsulation header the `encodeMinimal*` functions prepend (pass
+/// `encoded[encap_header_len..]`); the header is not part of the hashed
+/// TypeObject.
 pub fn computeEquivalenceHash(type_object_bytes: []const u8) EquivalenceHash {
     var md5 = std.crypto.hash.Md5.init(.{});
     md5.update(type_object_bytes);
@@ -336,7 +344,10 @@ fn typeRefIsFullyDescriptive(tr: ir.TypeRef) bool {
         .base => true, // all primitives: TK_NONE…TK_CHAR16
         // strings/wstrings are plain (their TI encodes the bound):
         .string, .wstring => true,
-        else => false, // named, sequence, array, map → needs TypeObject or recursive TI
+        // A plain sequence is fully described by its TypeIdentifier when its
+        // element is (e.g. `sequence<sequence<long>>`).
+        .sequence => |seq| typeRefIsFullyDescriptive(seq.element.*),
+        else => false, // named types (incl. aliases), map → needs a TypeObject
     };
 }
 
@@ -344,7 +355,9 @@ fn typeRefIsFullyDescriptive(tr: ir.TypeRef) bool {
 fn baseTypeKind(b: ast.BaseTypeSpec) u8 {
     return switch (b) {
         .boolean => TK_BOOLEAN,
-        .octet, .uint8 => TK_UINT8,
+        // IDL `octet` is the XTypes Byte type; only `uint8` is TK_UINT8.
+        .octet => TK_BYTE,
+        .uint8 => TK_UINT8,
         .char => TK_CHAR8,
         .wchar => TK_CHAR16,
         .int8 => TK_INT8,
@@ -368,7 +381,7 @@ fn baseTypeKind(b: ast.BaseTypeSpec) u8 {
 fn computeNamedEquivalenceHash(alloc: std.mem.Allocator, td: ir.TypeDecl) !EquivalenceHash {
     const bytes = try encodeMinimalTypeDecl(alloc, td);
     defer alloc.free(bytes);
-    return computeEquivalenceHash(bytes);
+    return computeEquivalenceHash(bytes[encap_header_len..]);
 }
 
 /// Encode a MinimalTypeObject for any named type.
@@ -380,7 +393,8 @@ pub fn encodeMinimalTypeDecl(alloc: std.mem.Allocator, td: ir.TypeDecl) anyerror
         .union_ => |u| encodeMinimalUnion(alloc, u),
         .bitmask => |b| encodeMinimalBitmask(alloc, b),
         .bitset => |b| encodeMinimalBitset(alloc, b),
-        // TODO: alias (typedef), native, exception, interface TypeObjects
+        .typedef => |t| encodeMinimalAlias(alloc, t),
+        // TODO: native, exception, interface TypeObjects
         else => encodeMinimalFallback(alloc, TK_NONE),
     };
 }
@@ -401,8 +415,9 @@ pub fn encodeMinimalTypeDecl(alloc: std.mem.Allocator, td: ir.TypeDecl) anyerror
 //           [4]  DHEADER
 //           [1+…]  base_type TypeIdentifier (TK_NONE if no base)
 //           [MinimalTypeDetail — @final, empty]
-//         [sequence<MinimalStructMember> — count + elements]:
-//           [4]  count (u32, 4-byte aligned)
+//         [sequence<MinimalStructMember>]:
+//           [4]  DHEADER (a collection of non-primitive elements)
+//           [4]  count (u32)
 //           for each member:
 //             [MinimalStructMember — @appendable]:
 //               [4]  DHEADER
@@ -443,12 +458,15 @@ pub fn encodeMinimalStruct(alloc: std.mem.Allocator, s: *const ir.Struct) ![]u8 
     // MinimalTypeDetail is @final and empty — nothing to write
     enc.patchDheader(msh_dh);
 
-    // MinimalStructMemberSeq: sequence<MinimalStructMember>
+    // MinimalStructMemberSeq: sequence<MinimalStructMember> — a collection of
+    // non-primitive elements, so XCDR2 prefixes it with a DHEADER.
     const base_count = baseStructMemberCount(s.base);
+    const seq_dh = try enc.reserveDheader(alloc);
     try enc.writeU32Le(alloc, @intCast(s.members.len));
     for (s.members, 0..) |m, i| {
         try encodeMinimalStructMember(&enc, alloc, &m, @intCast(base_count + i));
     }
+    enc.patchDheader(seq_dh);
 
     enc.patchDheader(to_dh);
     return enc.buf.toOwnedSlice(alloc);
@@ -519,7 +537,8 @@ fn memberFlags(ann: ir.MemberAnnotations) u16 {
 //           [4]  DHEADER
 //           [CommonEnumeratedHeader — @final]: bit_bound (u16)
 //         [sequence<MinimalEnumeratedLiteral>]:
-//           [4]  count (u32, 4-byte aligned)
+//           [4]  DHEADER (a collection of non-primitive elements)
+//           [4]  count (u32)
 //           for each literal (sorted by value per spec):
 //             [MinimalEnumeratedLiteral — @appendable]:
 //               [4]  DHEADER
@@ -545,7 +564,7 @@ pub fn encodeMinimalEnum(alloc: std.mem.Allocator, e: *const ir.Enum) ![]u8 {
     try enc.writeU8(alloc, TK_ENUM);
 
     // MinimalEnumeratedType (@final struct)
-    try enc.writeU16Le(alloc, 0); // enum_flags: unused
+    try enc.writeU16Le(alloc, extensibilityFlag(e.annotations.extensibility)); // enum_flags
 
     // MinimalEnumeratedHeader (@appendable)
     const meh_dh = try enc.reserveDheader(alloc);
@@ -558,6 +577,7 @@ pub fn encodeMinimalEnum(alloc: std.mem.Allocator, e: *const ir.Enum) ![]u8 {
     // Spec: ordered by numeric value (ascending).
     // IR enumerators are in declaration order with sequential auto-values;
     // explicit values might be out of order — we sort a local copy.
+    const default_literal = defaultEnumLiteral(e);
     const sorted = try alloc.dupe(ir.Enumerator, e.enumerators);
     defer alloc.free(sorted);
     std.mem.sort(ir.Enumerator, sorted, {}, struct {
@@ -566,6 +586,7 @@ pub fn encodeMinimalEnum(alloc: std.mem.Allocator, e: *const ir.Enum) ![]u8 {
         }
     }.lt);
 
+    const seq_dh = try enc.reserveDheader(alloc); // collection of non-primitives
     try enc.writeU32Le(alloc, @intCast(sorted.len));
     for (sorted) |en| {
         // MinimalEnumeratedLiteral (@appendable)
@@ -574,7 +595,8 @@ pub fn encodeMinimalEnum(alloc: std.mem.Allocator, e: *const ir.Enum) ![]u8 {
         // CommonEnumeratedLiteral (@appendable)
         const cel_dh = try enc.reserveDheader(alloc);
         try enc.writeI32Le(alloc, @intCast(en.value));
-        try enc.writeU16Le(alloc, 0); // flags: EnumeratedLiteralFlag, unused
+        // EnumeratedLiteralFlag: IS_DEFAULT_LITERAL on the default literal.
+        try enc.writeU16Le(alloc, if (std.mem.eql(u8, en.name, default_literal)) IS_DEFAULT else 0);
         enc.patchDheader(cel_dh);
 
         // MinimalMemberDetail (@final): name_hash [4]u8
@@ -583,6 +605,7 @@ pub fn encodeMinimalEnum(alloc: std.mem.Allocator, e: *const ir.Enum) ![]u8 {
 
         enc.patchDheader(mel_dh);
     }
+    enc.patchDheader(seq_dh);
 
     enc.patchDheader(to_dh);
     return enc.buf.toOwnedSlice(alloc);
@@ -609,7 +632,8 @@ pub fn encodeMinimalEnum(alloc: std.mem.Allocator, e: *const ir.Enum) ![]u8 {
 //             [2]  member_flags (UnionDiscriminatorFlag u16)
 //             [1+…]  type_id (TypeIdentifier of discriminant)
 //         [sequence<MinimalUnionMember>]:
-//           [4]  count (u32, 4-byte aligned)
+//           [4]  DHEADER (a collection of non-primitive elements)
+//           [4]  count (u32)
 //           for each member (ordered by member_id):
 //             [MinimalUnionMember — @appendable]:
 //               [4]  DHEADER
@@ -649,7 +673,8 @@ pub fn encodeMinimalUnion(alloc: std.mem.Allocator, u: *const ir.Union) ![]u8 {
     // MinimalDiscriminatorMember (@appendable)
     const mdm_dh = try enc.reserveDheader(alloc);
     // CommonDiscriminatorMember (@final): member_flags (u16), type_id
-    try enc.writeU16Le(alloc, TRY_CONSTRUCT_DISCARD); // UnionDiscriminatorFlag
+    // UnionDiscriminatorFlag: the discriminator is always must-understand.
+    try enc.writeU16Le(alloc, TRY_CONSTRUCT_DISCARD | IS_MUST_UNDERSTAND);
     try writeTypeIdentifier(&enc, alloc, u.discriminant, &.{});
     enc.patchDheader(mdm_dh);
 
@@ -661,7 +686,9 @@ pub fn encodeMinimalUnion(alloc: std.mem.Allocator, u: *const ir.Union) ![]u8 {
     for (u.cases, 0..) |c, i| {
         indices[i] = .{
             .seq_idx = @intCast(i),
-            .member_id = c.annotations.id orelse @as(u32, @intCast(i)),
+            // The discriminator is member 0; cases default to index + 1, as
+            // the @mutable wire encoding numbers them.
+            .member_id = c.annotations.id orelse @as(u32, @intCast(i + 1)),
         };
     }
     std.mem.sort(Idx, indices, {}, struct {
@@ -670,11 +697,13 @@ pub fn encodeMinimalUnion(alloc: std.mem.Allocator, u: *const ir.Union) ![]u8 {
         }
     }.lt);
 
+    const seq_dh = try enc.reserveDheader(alloc); // collection of non-primitives
     try enc.writeU32Le(alloc, @intCast(u.cases.len));
     for (indices) |idx| {
         const c = &u.cases[idx.seq_idx];
         try encodeMinimalUnionMember(&enc, alloc, c, idx.member_id, u.discriminant);
     }
+    enc.patchDheader(seq_dh);
 
     enc.patchDheader(to_dh);
     return enc.buf.toOwnedSlice(alloc);
@@ -768,7 +797,8 @@ fn resolveLabelValue(label: ir.UnionLabel, discriminant: ir.TypeRef) i64 {
 //           [CommonEnumeratedHeader — @final]:
 //             [2]  bit_bound (u16; default 32)
 //         [sequence<MinimalBitflag>]:
-//           [4]  count (u32, 4-byte aligned)
+//           [4]  DHEADER (a collection of non-primitive elements)
+//           [4]  count (u32)
 //           for each bit (ordered by position = declaration index):
 //             [MinimalBitflag — @appendable]:
 //               [4]  DHEADER
@@ -795,7 +825,7 @@ pub fn encodeMinimalBitmask(alloc: std.mem.Allocator, b: *const ir.Bitmask) ![]u
 
     // MinimalBitmaskType (@appendable struct) — has its own DHEADER
     const mbt_dh = try enc.reserveDheader(alloc);
-    try enc.writeU16Le(alloc, 0); // bitmask_flags: unused
+    try enc.writeU16Le(alloc, extensibilityFlag(b.annotations.extensibility)); // bitmask_flags
 
     // MinimalBitmaskHeader (@appendable) = MinimalEnumeratedHeader
     const mbh_dh = try enc.reserveDheader(alloc);
@@ -805,6 +835,7 @@ pub fn encodeMinimalBitmask(alloc: std.mem.Allocator, b: *const ir.Bitmask) ![]u
     enc.patchDheader(mbh_dh);
 
     // MinimalBitflagSeq: sequence<MinimalBitflag>, ordered by position (= index).
+    const seq_dh = try enc.reserveDheader(alloc); // collection of non-primitives
     try enc.writeU32Le(alloc, @intCast(b.bits.len));
     for (b.bits, 0..) |bit, i| {
         const position: u16 = @intCast(i);
@@ -817,6 +848,7 @@ pub fn encodeMinimalBitmask(alloc: std.mem.Allocator, b: *const ir.Bitmask) ![]u
         try enc.writeBytes(alloc, &nameHash(bit.name));
         enc.patchDheader(mbf_dh);
     }
+    enc.patchDheader(seq_dh);
 
     enc.patchDheader(mbt_dh);
     enc.patchDheader(to_dh);
@@ -839,7 +871,8 @@ pub fn encodeMinimalBitmask(alloc: std.mem.Allocator, b: *const ir.Bitmask) ![]u
 //         [MinimalBitsetHeader — @appendable, empty]:
 //           [4]  DHEADER (payload = 0)
 //         [sequence<MinimalBitfield>]:
-//           [4]  count (u32, 4-byte aligned)
+//           [4]  DHEADER (a collection of non-primitive elements)
+//           [4]  count (u32)
 //           for each named bitfield (ordered by bit position):
 //             [MinimalBitfield — @appendable]:
 //               [4]  DHEADER
@@ -878,6 +911,7 @@ pub fn encodeMinimalBitset(alloc: std.mem.Allocator, b: *const ir.Bitset) ![]u8 
     for (b.fields) |f| total_names += f.names.len;
 
     // MinimalBitfieldSeq: sequence<MinimalBitfield>, ordered by position.
+    const seq_dh = try enc.reserveDheader(alloc); // collection of non-primitives
     try enc.writeU32Le(alloc, @intCast(total_names));
     var bit_pos: u16 = 0;
     for (b.fields) |f| {
@@ -902,8 +936,72 @@ pub fn encodeMinimalBitset(alloc: std.mem.Allocator, b: *const ir.Bitset) ![]u8 
         }
         bit_pos += @as(u16, f.bits);
     }
+    enc.patchDheader(seq_dh);
 
     enc.patchDheader(mbt_dh);
+    enc.patchDheader(to_dh);
+    return enc.buf.toOwnedSlice(alloc);
+}
+
+/// TypeObject extensibility flag for an enum or bitmask (same bits as
+/// StructTypeFlag).
+fn extensibilityFlag(ext: ir.Extensibility) u16 {
+    return switch (ext) {
+        .final => IS_FINAL,
+        .appendable => IS_APPENDABLE,
+        .mutable => IS_MUTABLE,
+    };
+}
+
+/// The enumerator annotated `@default_literal`, else the first declared one.
+fn defaultEnumLiteral(e: *const ir.Enum) []const u8 {
+    for (e.enumerators) |en| {
+        for (en.raw) |a| if (std.ascii.eqlIgnoreCase(a.name, "default_literal")) return en.name;
+    }
+    return if (e.enumerators.len > 0) e.enumerators[0].name else "";
+}
+
+// ── MinimalAliasType encoding ─────────────────────────────────────────────────
+//
+// A typedef is a distinct named type in the TypeObject representation: a
+// member declared through it is identified by the alias's hash, not by the
+// aliased type's identifier.
+//
+//   [4]  Encap header
+//   [TypeObject — @appendable union]:
+//     [4]  DHEADER
+//     [1]  EK_MINIMAL
+//     [MinimalTypeObject — @final union]:
+//       [1]  TK_ALIAS
+//       [MinimalAliasType — @final struct]:
+//         [2]  alias_flags (u16, unused = 0)
+//         [MinimalAliasHeader — @appendable, empty]: [4] DHEADER (0)
+//         [MinimalAliasBody — @appendable]:
+//           [4]  DHEADER
+//           [CommonAliasBody — @final]:
+//             [2]  related_flags (u16, unused = 0)
+//             [1+…]  related_type (TypeIdentifier, including array dimensions)
+
+/// Encode the full XCDR2 LE MinimalTypeObject for an IDL typedef.
+/// Caller owns the returned slice.
+pub fn encodeMinimalAlias(alloc: std.mem.Allocator, t: *const ir.Typedef) ![]u8 {
+    var enc = Encoder{};
+    defer enc.deinit(alloc);
+
+    try enc.writeEncapHeader(alloc);
+    const to_dh = try enc.reserveDheader(alloc);
+    try enc.writeU8(alloc, EK_MINIMAL);
+    try enc.writeU8(alloc, TK_ALIAS);
+    try enc.writeU16Le(alloc, 0); // alias_flags: unused
+
+    const header_dh = try enc.reserveDheader(alloc); // MinimalAliasHeader: empty
+    enc.patchDheader(header_dh);
+
+    const body_dh = try enc.reserveDheader(alloc);
+    try enc.writeU16Le(alloc, 0); // related_flags: unused
+    try writeTypeIdentifier(&enc, alloc, t.type_ref, t.dimensions);
+    enc.patchDheader(body_dh);
+
     enc.patchDheader(to_dh);
     return enc.buf.toOwnedSlice(alloc);
 }

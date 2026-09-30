@@ -453,6 +453,125 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(cpp_test).step);
     }
 
+    // ── XCDR known-answer checks ──────────────────────────────────────────────
+    // test/integration/xcdr_known_answer/ka.idl covers every collection kind
+    // (primitive / non-primitive / nested / array-typedef elements, multi-
+    // dimensional arrays) in final, appendable and mutable holders. Each
+    // backend encodes the samples to the exact reference bytes in vectors.txt
+    // (from an independent XTypes implementation), decodes the reference
+    // bytes, and (Zig) reproduces the reference minimal TypeObject hashes.
+    {
+        const ka_idl = b.path("test/integration/xcdr_known_answer/ka.idl");
+
+        const gen_zig = b.addRunArtifact(exe);
+        gen_zig.addArgs(&.{ "-b", "zig", "-o" });
+        const zig_dir = gen_zig.addOutputDirectoryArg("xcdr-known-answer-zig");
+        gen_zig.addFileArg(ka_idl);
+        const zig_fixture_mod = b.createModule(.{
+            .root_source_file = zig_dir.path(b, "ka.zig"),
+            .target = target,
+            .sanitize_thread = sanitize_thread,
+            .imports = &.{
+                .{ .name = "zidl_rt", .module = zidl_rt_mod },
+            },
+        });
+        const zig_tests = b.addTest(.{
+            .name = "zidl-xcdr-known-answer",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("test/integration/xcdr_known_answer/test.zig"),
+                .target = target,
+                .sanitize_thread = sanitize_thread,
+                .imports = &.{
+                    .{ .name = "zidl_rt", .module = zidl_rt_mod },
+                    .{ .name = "fixture", .module = zig_fixture_mod },
+                },
+            }),
+        });
+        test_step.dependOn(&b.addRunArtifact(zig_tests).step);
+
+        const vectors = b.path("test/integration/xcdr_known_answer/vectors.txt");
+
+        const gen_c = b.addRunArtifact(exe);
+        gen_c.addArgs(&.{ "-b", "c", "-o" });
+        const c_dir = gen_c.addOutputDirectoryArg("xcdr-known-answer-c");
+        gen_c.addFileArg(ka_idl);
+        const c_mod = b.createModule(.{
+            .root_source_file = null,
+            .target = target,
+            .optimize = .Debug,
+            .sanitize_thread = sanitize_thread,
+            .link_libc = true,
+        });
+        c_mod.addCSourceFile(.{
+            .file = b.path("test/integration/xcdr_known_answer/test.c"),
+            .flags = &.{ "-std=c99", "-Wall", "-Werror" },
+        });
+        c_mod.addCSourceFile(.{
+            .file = c_dir.path(b, "ka_cdr.c"),
+            .flags = &.{ "-std=c99", "-Wall", "-Werror" },
+        });
+        c_mod.addCSourceFile(.{
+            .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"),
+            .flags = &.{"-std=c99"},
+        });
+        c_mod.addIncludePath(c_dir);
+        c_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+        const c_test = b.addExecutable(.{ .name = "zidl-xcdr-known-answer-c", .root_module = c_mod });
+        const run_c = b.addRunArtifact(c_test);
+        run_c.addFileArg(vectors);
+        test_step.dependOn(&run_c.step);
+
+        const gen_cpp = b.addRunArtifact(exe);
+        gen_cpp.addArgs(&.{ "-b", "cpp", "-o" });
+        const cpp_dir = gen_cpp.addOutputDirectoryArg("xcdr-known-answer-cpp");
+        gen_cpp.addFileArg(ka_idl);
+        const cpp_mod = b.createModule(.{
+            .root_source_file = null,
+            .target = target,
+            .optimize = .Debug,
+            .sanitize_thread = sanitize_thread,
+            .link_libc = true,
+            .link_libcpp = true,
+        });
+        cpp_mod.addCSourceFile(.{
+            .file = b.path("test/integration/xcdr_known_answer/test.cpp"),
+            .flags = &.{ "-std=c++17", "-Wall", "-Werror" },
+        });
+        cpp_mod.addCSourceFile(.{
+            .file = cpp_dir.path(b, "ka_cdr.cpp"),
+            .flags = &.{ "-std=c++17", "-Wall", "-Werror" },
+        });
+        cpp_mod.addCSourceFile(.{
+            .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"),
+            .flags = &.{"-std=c99"},
+        });
+        cpp_mod.addIncludePath(cpp_dir);
+        cpp_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+        const cpp_test = b.addExecutable(.{ .name = "zidl-xcdr-known-answer-cpp", .root_module = cpp_mod });
+        const run_cpp = b.addRunArtifact(cpp_test);
+        run_cpp.addFileArg(vectors);
+        test_step.dependOn(&run_cpp.step);
+
+        // Java: only when a JDK is on PATH.
+        const maybe_javac = b.findProgram(&.{"javac"}, &.{}) catch null;
+        const maybe_java = b.findProgram(&.{"java"}, &.{}) catch null;
+        if (maybe_javac != null and maybe_java != null) {
+            const gen_java = b.addRunArtifact(exe);
+            gen_java.addArgs(&.{ "-b", "java", "-o" });
+            const java_dir = gen_java.addOutputDirectoryArg("xcdr-known-answer-java");
+            gen_java.addFileArg(ka_idl);
+            const compile_java = b.addSystemCommand(&.{ maybe_javac.?, "-d" });
+            const java_classes = compile_java.addOutputDirectoryArg("xcdr-known-answer-java-classes");
+            compile_java.addFileArg(java_dir.path(b, "Ka.java"));
+            compile_java.addFileArg(b.path("test/integration/xcdr_known_answer/KaTest.java"));
+            const run_java = b.addSystemCommand(&.{ maybe_java.?, "-cp" });
+            run_java.addDirectoryArg(java_classes);
+            run_java.addArg("KaTest");
+            run_java.addFileArg(vectors);
+            test_step.dependOn(&run_java.step);
+        }
+    }
+
     // ── check_goldens tool ────────────────────────────────────────────────────
     // Bidirectional directory comparison; replaces `diff -rq` and works on all
     // platforms.  Always compiled for the host so it can run during the build.

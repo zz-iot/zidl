@@ -36,18 +36,24 @@ after the type (e.g. `MyStruct.java`, `MyEnum.java`).
 | `long double` | `double` |
 | `fixed<D,S>` | literal value |
 | `string` / `wstring` | `String` |
-| `sequence<T>` | `java.util.ArrayList<T>` |
+| `sequence<T>` | `java.util.List<T>` (an `ArrayList`); a sequence of an array typedef is `List<int[]>` etc. |
 | `T[N]` | `T[]` |
 | `map<K,V>` | `java.util.Map<K, V>` |
 | `@optional T` | nullable field (`T` reference, default `null`) |
 | `enum` | Java `enum` with `int value` field and `fromValue(int)` factory |
-| `bitmask` | Java `enum` with `int value` field |
+| `bitmask` | `int` (`long` above `@bit_bound(32)`), with a constants class of flag values |
 | `bitset` | Java `class` with integer storage field |
 | `struct` | Java `class` (public fields, default constructor, copy constructor) |
 | `union` | Java `class` with discriminant field + typed case methods |
 | IDL module | Java package (with `--java-package` prefix prepended) |
 
 ---
+
+Enums and bitmasks are encoded in 1, 2, 4 or 8 bytes by `@bit_bound` (default 32),
+matching the other backends and XTypes. An array of an array typedef is one
+multi-dimensional Java array (`Triple a[2]` with `typedef long Triple[3]` is
+`int[2][3]`); an array of sequences uses a raw `java.util.List[]`, since Java cannot
+create generic arrays.
 
 ## Generated File Structure
 

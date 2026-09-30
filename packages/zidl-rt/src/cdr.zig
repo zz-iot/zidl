@@ -65,6 +65,12 @@ pub const ENCAP_CDR2_BE: u16 = 0x0006;
 pub const ENCAP_DELIMITED_CDR2_LE: u16 = 0x0009;
 /// XCDR2 Delimited CDR big-endian → header bytes [0x00, 0x08, 0x00, 0x00]
 pub const ENCAP_DELIMITED_CDR2_BE: u16 = 0x0008;
+/// XCDR2 ParameterList CDR little-endian → header bytes [0x00, 0x0b, 0x00, 0x00]
+/// The XCDR2 representation of an @mutable top-level type (EMHEADER framing);
+/// peers may reject a mutable sample under any other id.
+pub const ENCAP_PL_CDR2_LE: u16 = 0x000b;
+/// XCDR2 ParameterList CDR big-endian → header bytes [0x00, 0x0a, 0x00, 0x00]
+pub const ENCAP_PL_CDR2_BE: u16 = 0x000a;
 /// PL_CDR (XCDR1 ParameterList) little-endian → header bytes [0x00, 0x03, 0x00, 0x00]
 pub const ENCAP_PL_CDR_LE: u16 = 0x0003;
 /// PL_CDR (XCDR1 ParameterList) big-endian → header bytes [0x00, 0x02, 0x00, 0x00]
@@ -192,6 +198,18 @@ pub fn CdrWriter(comptime xcdr_version: XcdrVersion) type {
             // Reset pos to 0: CDR alignment is from the start of the CDR payload
             // (after the 4-byte encap header), not from the start of the buffer.
             // Without this, 8-byte XCDR1 alignment calculations would be off by 4.
+            self.pos = 0;
+        }
+
+        /// Like writeEncapHeader but uses ENCAP_PL_CDR2_LE (0x000b) for XCDR2, as
+        /// required for @mutable top-level types. XCDR1 is unchanged (a
+        /// ParameterList XCDR1 encoding is not generated).
+        pub fn writeEncapHeaderMutable(self: *Self) !void {
+            const id: u16 = switch (xcdr_version) {
+                .xcdr1 => ENCAP_CDR1_LE,
+                .xcdr2 => ENCAP_PL_CDR2_LE,
+            };
+            try self.writeBytes(&[_]u8{ @truncate(id >> 8), @truncate(id), 0x00, 0x00 });
             self.pos = 0;
         }
 
@@ -375,6 +393,9 @@ pub fn CdrWriter(comptime xcdr_version: XcdrVersion) type {
         ///   w.patchDheader(dh);
         ///   ```
         pub fn reserveDheader(self: *Self) !usize {
+            // Align first: the DHEADER is a 4-byte-aligned u32, and the offset
+            // must name the placeholder itself, not any padding before it.
+            try self.writePad(align_(4));
             const off = self.buf.items.len;
             try self.writeU32(0);
             return off;
@@ -694,6 +715,19 @@ pub const PlCdrWriter = struct {
     }
 
     /// Write the PID_SENTINEL (0x0001, 0) to terminate the parameter list.
+    /// PL_CDR is XCDR1-framed: no DHEADERs (for collections or aggregates)
+    /// inside parameter values.
+    pub fn reserveDheaderMaybe(self: *PlCdrWriter) !?usize {
+        _ = self;
+        return null;
+    }
+
+    /// No-op counterpart to reserveDheaderMaybe.
+    pub fn patchDheaderMaybe(self: *PlCdrWriter, offset: ?usize) void {
+        _ = self;
+        _ = offset;
+    }
+
     pub fn writePlSentinel(self: *PlCdrWriter) !void {
         try self.inner.buf.appendSlice(self.inner.alloc, &[_]u8{ 0x01, 0x00, 0x00, 0x00 });
         self.inner.pos += 4;
@@ -801,17 +835,19 @@ pub const CdrReader = struct {
     ///   0x0007 → XCDR2 little-endian
     ///   0x0008 → XCDR2 Delimited CDR big-endian  (@appendable, same as 0x0006 here)
     ///   0x0009 → XCDR2 Delimited CDR little-endian (@appendable, same as 0x0007 here)
+    ///   0x000a → XCDR2 ParameterList CDR big-endian  (@mutable, same as 0x0006 here)
+    ///   0x000b → XCDR2 ParameterList CDR little-endian (@mutable, same as 0x0007 here)
     pub fn init(data: []const u8) !CdrReader {
         if (data.len < 4) return error.InvalidEncapsulation;
         const id: u16 = (@as(u16, data[0]) << 8) | @as(u16, data[1]);
         const byte_order: ByteOrder = switch (id) {
-            ENCAP_CDR1_LE, ENCAP_CDR2_LE, ENCAP_DELIMITED_CDR2_LE, ENCAP_PL_CDR_LE => .little,
-            ENCAP_CDR1_BE, ENCAP_CDR2_BE, ENCAP_DELIMITED_CDR2_BE, ENCAP_PL_CDR_BE => .big,
+            ENCAP_CDR1_LE, ENCAP_CDR2_LE, ENCAP_DELIMITED_CDR2_LE, ENCAP_PL_CDR2_LE, ENCAP_PL_CDR_LE => .little,
+            ENCAP_CDR1_BE, ENCAP_CDR2_BE, ENCAP_DELIMITED_CDR2_BE, ENCAP_PL_CDR2_BE, ENCAP_PL_CDR_BE => .big,
             else => return error.InvalidEncapsulation,
         };
         const xcdr_version: XcdrVersion = switch (id) {
             ENCAP_CDR1_LE, ENCAP_CDR1_BE, ENCAP_PL_CDR_LE, ENCAP_PL_CDR_BE => .xcdr1,
-            ENCAP_CDR2_LE, ENCAP_CDR2_BE, ENCAP_DELIMITED_CDR2_LE, ENCAP_DELIMITED_CDR2_BE => .xcdr2,
+            ENCAP_CDR2_LE, ENCAP_CDR2_BE, ENCAP_DELIMITED_CDR2_LE, ENCAP_DELIMITED_CDR2_BE, ENCAP_PL_CDR2_LE, ENCAP_PL_CDR2_BE => .xcdr2,
             else => unreachable,
         };
         const is_pl_cdr = (id == ENCAP_PL_CDR_LE or id == ENCAP_PL_CDR_BE);
@@ -1055,11 +1091,13 @@ pub const CdrReader = struct {
     pub const EmHeader = struct {
         member_id: u28,
         must_understand: bool,
-        /// Raw length code (0–6). 0=1B, 1=2B, 2=4B, 3=8B, 4–6=NEXTINT-encoded.
+        /// Raw length code (0–7). 0=1B, 1=2B, 2=4B, 3=8B, 4–7=NEXTINT-encoded.
         lc: u3,
-        /// Byte count of this member's payload.  Always set:
-        ///   LC=0 → 1, LC=1 → 2, LC=2 → 4, LC=3 → 8, LC=4 → NEXTINT,
-        ///   LC=5 → NEXTINT×4, LC=6 → NEXTINT×8.
+        /// Byte count of this member's payload, counted from the reader
+        /// position `readEmheader` leaves (the start of the member value).
+        /// Always set: LC=0 → 1, LC=1 → 2, LC=2 → 4, LC=3 → 8,
+        /// LC=4 → NEXTINT, LC=5 → 4 + NEXTINT, LC=6 → 4 + 4×NEXTINT,
+        /// LC=7 → 4 + 8×NEXTINT.
         payload_bytes: u32,
     };
 
@@ -1071,7 +1109,13 @@ pub const CdrReader = struct {
     ///   bits 0–27: member-id
     ///
     /// LC < 4: no NEXTINT; inline length (0=1B, 1=2B, 2=4B, 3=8B).
-    /// LC >= 4: NEXTINT follows; LC=4→bytes, 5→4×, 6→8×, 7→reserved(invalid).
+    /// LC = 4: a separate NEXTINT follows holding the member's byte length;
+    ///   it is consumed.
+    /// LC 5–7: the NEXTINT is the first word of the member value itself (its
+    ///   DHEADER, string length or sequence length), so it is only peeked and
+    ///   the reader stays at the start of the value. Length = 4 + NEXTINT,
+    ///   4 + 4×NEXTINT or 4 + 8×NEXTINT (XTypes 1.3 §7.4.3.4.8). Other
+    ///   implementations write these for string and collection members.
     pub fn readEmheader(self: *CdrReader) !EmHeader {
         const word = try self.readU32();
         const must_understand = (word & 0x8000_0000) != 0;
@@ -1084,15 +1128,19 @@ pub const CdrReader = struct {
             2 => 4,
             3 => 8,
             4 => try self.readU32(),
-            5 => blk: {
+            5, 6, 7 => blk: {
+                const start = self.pos;
                 const n = try self.readU32();
-                break :blk n * 4;
+                self.pos = start;
+                const shift: u6 = switch (lc) {
+                    5 => 0,
+                    6 => 2,
+                    else => 3,
+                };
+                const bytes = (@as(u64, n) << shift) + 4;
+                if (bytes > std.math.maxInt(u32)) return error.InvalidEmheader;
+                break :blk @intCast(bytes);
             },
-            6 => blk: {
-                const n = try self.readU32();
-                break :blk n * 8;
-            },
-            7 => return error.InvalidEmheader,
         };
 
         return .{
@@ -1741,6 +1789,65 @@ test "emheader: skipEmheaderPayload for unknown fixed-size member" {
     try testing.expectEqual(@as(u28, 99), em.member_id);
     try r.skipEmheaderPayload(em);
     try testing.expectEqual(@as(i32, 100), try r.readI32());
+}
+
+test "encap: PL_CDR2 (mutable) is written by writeEncapHeaderMutable and read as XCDR2" {
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(testing.allocator);
+    var w = mkWriter(.xcdr2, &buf);
+    try w.writeEncapHeaderMutable();
+    try testing.expectEqualSlices(u8, &.{ 0x00, 0x0b, 0x00, 0x00 }, buf.items);
+    const r = try CdrReader.init(buf.items);
+    try testing.expectEqual(XcdrVersion.xcdr2, r.xcdr_version);
+    const be = try CdrReader.init(&.{ 0x00, 0x0a, 0x00, 0x00 });
+    try testing.expectEqual(ByteOrder.big, be.byte_order);
+}
+
+test "dheader: reserved after unaligned data, pads first and counts only the payload" {
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(testing.allocator);
+    var w = mkWriter(.xcdr2, &buf);
+    try w.writeEncapHeader();
+    try w.writeU8(0xAA); // leaves the stream 1 byte past a 4-byte boundary
+    const dh = try w.reserveDheader();
+    try w.writeU32(7);
+    w.patchDheader(dh);
+    try testing.expectEqualSlices(u8, &.{ 0xAA, 0, 0, 0, 4, 0, 0, 0, 7, 0, 0, 0 }, buf.items[4..]);
+
+    var r = try CdrReader.init(buf.items);
+    try testing.expectEqual(@as(u8, 0xAA), try r.readU8());
+    try testing.expectEqual(@as(u32, 4), try r.readDheader());
+    try testing.expectEqual(@as(u32, 7), try r.readU32());
+}
+
+test "emheader: LC 5-7 peek NEXTINT as the start of the member value" {
+    // EMHEADER words and member bytes using length codes 5-7 (XCDR2 LE):
+    //   id 1, LC=5: sequence<string> ["m"]; NEXTINT is the collection DHEADER
+    //   id 2, LC=6: sequence<long> [1, 2]; NEXTINT is the element count
+    //   id 4, LC=7: sequence<long long> [5]; NEXTINT is the element count
+    const bytes = [_]u8{ 0x00, 0x07, 0x00, 0x00 } ++
+        [_]u8{ 0x01, 0x00, 0x00, 0x50, 0x0a, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x6d, 0x00, 0x00, 0x00 } ++
+        [_]u8{ 0x02, 0x00, 0x00, 0x60, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00 } ++
+        [_]u8{ 0x04, 0x00, 0x00, 0x70, 0x01, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    var r = try CdrReader.init(&bytes);
+
+    const s_str = try r.readEmheader();
+    try testing.expectEqual(@as(u28, 1), s_str.member_id);
+    try testing.expectEqual(@as(u32, 4 + 10), s_str.payload_bytes);
+    try testing.expectEqual(@as(u32, 10), try r.readDheader()); // value starts at the NEXTINT
+    try testing.expectEqual(@as(u32, 1), try r.readU32());
+    try testing.expectEqualStrings("m", try r.readStringZeroCopy());
+
+    const s_long = try r.readEmheader();
+    try testing.expectEqual(@as(u32, 4 + 2 * 4), s_long.payload_bytes);
+    try r.skipEmheaderPayload(s_long); // unknown-member skip lands on the next EMHEADER
+
+    const s_ll = try r.readEmheader();
+    try testing.expectEqual(@as(u28, 4), s_ll.member_id);
+    try testing.expectEqual(@as(u32, 4 + 1 * 8), s_ll.payload_bytes);
+    try testing.expectEqual(@as(u32, 1), try r.readU32());
+    try testing.expectEqual(@as(i64, 5), try r.readI64());
+    try testing.expectEqual(bytes.len, r.pos);
 }
 
 test "emheader: mutableHasMore + readMutableDheader loop" {

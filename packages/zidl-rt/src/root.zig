@@ -58,6 +58,11 @@ pub const ByteOrder = cdr.ByteOrder;
 pub const CdrWriter = cdr.CdrWriter;
 pub const CdrReader = cdr.CdrReader;
 pub const BoundedArray = cdr.BoundedArray;
+
+const owned = @import("owned.zig");
+pub const SeqElem = owned.SeqElem;
+pub const deinitOwned = owned.deinitOwned;
+pub const cloneOwned = owned.cloneOwned;
 pub const KeyHashWriter = cdr.KeyHashWriter;
 
 pub const PlCdrWriter = cdr.PlCdrWriter;

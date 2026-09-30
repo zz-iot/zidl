@@ -276,6 +276,9 @@ const Generator = struct {
     toml_applied_structs: std.AutoHashMapUnmanaged(*const ir.Struct, void) = .{},
     /// Recursion guard for `aggregateNeedsCleanup` (see there).
     cleanup_depth: u8 = 0,
+    /// Nesting depth of the collection (sequence/array/map) whose element code
+    /// is being emitted; suffixes loop locals so nested loops never shadow.
+    coll_depth: u8 = 0,
 
     fn deinit(self: *Generator) void {
         self.toml_applied_structs.deinit(self.alloc);
@@ -1160,7 +1163,7 @@ const Generator = struct {
             if (self.caseNeedsCleanup(cas)) {
                 const field_name = try std.fmt.allocPrint(self.alloc, "_u.{s}", .{cas.name});
                 defer self.alloc.free(field_name);
-                try self.emitFieldSeqDeinit(field_name, cas.type_ref, "                ");
+                try self.emitFieldSeqDeinit(field_name, cas.type_ref, cas.dimensions, "                ");
             }
             try self.ind();
             try self.write("            },\n");
@@ -1171,7 +1174,7 @@ const Generator = struct {
             if (self.caseNeedsCleanup(dc)) {
                 const field_name = try std.fmt.allocPrint(self.alloc, "_u.{s}", .{dc.name});
                 defer self.alloc.free(field_name);
-                try self.emitFieldSeqDeinit(field_name, dc.type_ref, "                ");
+                try self.emitFieldSeqDeinit(field_name, dc.type_ref, dc.dimensions, "                ");
             }
         }
         try self.ind();
@@ -1208,8 +1211,8 @@ const Generator = struct {
             if (self.caseNeedsCleanup(cas)) {
                 const field_name = try std.fmt.allocPrint(self.alloc, "_u.{s}", .{cas.name});
                 defer self.alloc.free(field_name);
-                try self.emitFieldSeqCloneStmt(field_name, cas.type_ref, "                ");
-                try self.emitFieldSeqCloneErrdefer(field_name, cas.type_ref, "                ");
+                try self.emitFieldSeqCloneStmt(field_name, cas.type_ref, cas.dimensions, "                ");
+                try self.emitFieldSeqCloneErrdefer(field_name, cas.type_ref, cas.dimensions, "                ");
             }
             try self.ind();
             try self.write("            },\n");
@@ -1220,8 +1223,8 @@ const Generator = struct {
             if (self.caseNeedsCleanup(dc)) {
                 const field_name = try std.fmt.allocPrint(self.alloc, "_u.{s}", .{dc.name});
                 defer self.alloc.free(field_name);
-                try self.emitFieldSeqCloneStmt(field_name, dc.type_ref, "                ");
-                try self.emitFieldSeqCloneErrdefer(field_name, dc.type_ref, "                ");
+                try self.emitFieldSeqCloneStmt(field_name, dc.type_ref, dc.dimensions, "                ");
+                try self.emitFieldSeqCloneErrdefer(field_name, dc.type_ref, dc.dimensions, "                ");
             }
         }
         try self.ind();
@@ -1435,6 +1438,10 @@ const Generator = struct {
             const seq = t.type_ref.sequence;
             const buf_elem = try self.seqBufElemZig(seq.element.*);
             defer self.alloc.free(buf_elem);
+            // Nested sequence elements are anonymous `extern struct`s that
+            // can't be spelled a second time; clone derives the element type.
+            const elem_ty: []const u8 = if (std.mem.indexOf(u8, buf_elem, "extern struct") != null) "zidl_rt.SeqElem(@This())" else buf_elem;
+            const generic = self.elemUsesGenericOwnership(seq.element.*, false);
             try self.ind();
             try self.print("pub const {s}{s} = extern struct {{\n", .{ pfx, t.name });
             try self.ind();
@@ -1453,7 +1460,10 @@ const Generator = struct {
             try self.ind();
             try self.write("        if (self._buffer) |_buf| {\n");
             // An owned buffer also owns its heap-owning elements' contents.
-            if (self.aggregateNeedsCleanup(seq.element.*)) {
+            if (generic) {
+                try self.ind();
+                try self.write("            for (_buf[0..self._length]) |*_e| zidl_rt.deinitOwned(_e, alloc);\n");
+            } else if (self.aggregateNeedsCleanup(seq.element.*)) {
                 try self.ind();
                 try self.write("            for (_buf[0..self._length]) |*_e| _e.deinit(alloc);\n");
             }
@@ -1482,7 +1492,32 @@ const Generator = struct {
             try self.write("    pub fn clone(self: @This(), alloc: std.mem.Allocator) !@This() {\n");
             try self.ind();
             try self.write("        if (self._length == 0) return self;\n");
-            if (seq.element.* == .string) {
+            if (generic) {
+                try self.ind();
+                try self.print("        const _buf = try alloc.alloc({s}, self._length);\n", .{elem_ty});
+                try self.ind();
+                try self.write("        var _n: u32 = 0;\n");
+                try self.ind();
+                try self.write("        errdefer {\n");
+                try self.ind();
+                try self.write("            for (_buf[0.._n]) |*_e| zidl_rt.deinitOwned(_e, alloc);\n");
+                try self.ind();
+                try self.write("            alloc.free(_buf);\n");
+                try self.ind();
+                try self.write("        }\n");
+                try self.ind();
+                try self.write("        if (self._buffer) |_sb| {\n");
+                try self.ind();
+                try self.write("            for (_sb[0..self._length]) |_src| {\n");
+                try self.ind();
+                try self.write("                _buf[_n] = try zidl_rt.cloneOwned(_src, alloc);\n");
+                try self.ind();
+                try self.write("                _n += 1;\n");
+                try self.ind();
+                try self.write("            }\n");
+                try self.ind();
+                try self.write("        }\n");
+            } else if (seq.element.* == .string) {
                 try self.ind();
                 try self.print("        const _buf = try alloc.alloc({s}, self._length);\n", .{buf_elem});
                 try self.ind();
@@ -1541,7 +1576,7 @@ const Generator = struct {
                 try self.write("        }\n");
             } else {
                 try self.ind();
-                try self.print("        const _buf = try alloc.alloc({s}, self._length);\n", .{buf_elem});
+                try self.print("        const _buf = try alloc.alloc({s}, self._length);\n", .{elem_ty});
                 try self.ind();
                 try self.write("        if (self._buffer) |_sb| @memcpy(_buf, _sb[0..self._length]);\n");
             }
@@ -4569,7 +4604,7 @@ const Generator = struct {
                 if (!self.memberNeedsCleanup(m)) continue;
                 try self.ind();
                 try self.print("        if (want & (1 << {d}) != 0) {{\n", .{idx});
-                try self.emitFieldSeqDeinit(m.name, m.type_ref, "            ");
+                try self.emitFieldSeqDeinit(m.name, m.type_ref, m.dimensions, "            ");
                 try self.ind();
                 try self.write("        }\n");
             }
@@ -4601,7 +4636,7 @@ const Generator = struct {
         const pfx = self.opts.type_prefix;
         const type_name = try std.fmt.allocPrint(self.alloc, "{s}{s}", .{ pfx, s.name });
         defer self.alloc.free(type_name);
-        const appendable = s.annotations.extensibility == .appendable;
+        const ext = s.annotations.extensibility;
         const needs_deinit = structNeedsSeqDeinit(s);
 
         // ── DataWriter ────────────────────────────────────────────────────────
@@ -4629,14 +4664,14 @@ const Generator = struct {
         try self.write("    }\n");
 
         // write / write_w_timestamp
-        try self.emitTypedWriterMethod(type_name, "write", "instance_data", "alive", false, appendable, false);
-        try self.emitTypedWriterMethod(type_name, "write_w_timestamp", "instance_data", "alive", false, appendable, true);
+        try self.emitTypedWriterMethod(type_name, "write", "instance_data", "alive", false, ext, false);
+        try self.emitTypedWriterMethod(type_name, "write_w_timestamp", "instance_data", "alive", false, ext, true);
         // dispose / dispose_w_timestamp
-        try self.emitTypedWriterMethod(type_name, "dispose", "instance_data", "dispose", true, appendable, false);
-        try self.emitTypedWriterMethod(type_name, "dispose_w_timestamp", "instance_data", "dispose", true, appendable, true);
+        try self.emitTypedWriterMethod(type_name, "dispose", "instance_data", "dispose", true, ext, false);
+        try self.emitTypedWriterMethod(type_name, "dispose_w_timestamp", "instance_data", "dispose", true, ext, true);
         // unregister_instance / unregister_instance_w_timestamp
-        try self.emitTypedWriterMethod(type_name, "unregister_instance", "instance_data", "unregister", true, appendable, false);
-        try self.emitTypedWriterMethod(type_name, "unregister_instance_w_timestamp", "instance_data", "unregister", true, appendable, true);
+        try self.emitTypedWriterMethod(type_name, "unregister_instance", "instance_data", "unregister", true, ext, false);
+        try self.emitTypedWriterMethod(type_name, "unregister_instance_w_timestamp", "instance_data", "unregister", true, ext, true);
 
         // register_instance
         try self.write("\n");
@@ -4999,7 +5034,7 @@ const Generator = struct {
         param_name: []const u8,
         kind_str: []const u8,
         use_key: bool,
-        appendable: bool,
+        ext: ir.Extensibility,
         with_timestamp: bool,
     ) !void {
         const ts_param = if (with_timestamp) ", timestamp: _zzdds.DDS.Time_t" else "";
@@ -5017,10 +5052,12 @@ const Generator = struct {
         try self.ind();
         try self.write("            var _w = zidl_rt.CdrWriter(.xcdr2).init(&_buf, self._alloc);\n");
         try self.ind();
-        if (appendable) {
-            try self.write("            try _w.writeEncapHeaderDelimited();\n");
-        } else {
-            try self.write("            try _w.writeEncapHeader();\n");
+        // XCDR2 representation id follows the top-level extensibility
+        // (CDR2 / D_CDR2 / PL_CDR2); peers reject a mismatched one.
+        switch (ext) {
+            .final => try self.write("            try _w.writeEncapHeader();\n"),
+            .appendable => try self.write("            try _w.writeEncapHeaderDelimited();\n"),
+            .mutable => try self.write("            try _w.writeEncapHeaderMutable();\n"),
         }
         try self.ind();
         if (use_key) {
@@ -5076,6 +5113,7 @@ const Generator = struct {
     /// before this fix), not a new regression — rather than risk freeing static
     /// memory.
     fn memberNeedsCleanup(self: *Generator, m: ir.StructMember) bool {
+        if (self.usesGenericOwnership(m.type_ref, m.dimensions)) return true;
         if (typeRefNeedsSeqDeinit(m.type_ref)) return true;
         if (self.boundedSeqNeedsElementCleanup(m.type_ref)) return true;
         if (self.aggregateNeedsCleanup(m.type_ref)) return true;
@@ -5112,6 +5150,7 @@ const Generator = struct {
 
     /// Union-case analog of `memberNeedsCleanup`.
     fn caseNeedsCleanup(self: *Generator, cas: ir.UnionCase) bool {
+        if (self.usesGenericOwnership(cas.type_ref, cas.dimensions)) return true;
         if (typeRefNeedsSeqDeinit(cas.type_ref)) return true;
         if (self.boundedSeqNeedsElementCleanup(cas.type_ref)) return true;
         if (self.aggregateNeedsCleanup(cas.type_ref)) return true;
@@ -5194,11 +5233,11 @@ const Generator = struct {
                 defer self.alloc.free(fa);
                 try self.ind();
                 try self.print("        if (self.{s} != null) {{\n", .{m.name});
-                try self.emitFieldSeqDeinit(fa, m.type_ref, "            ");
+                try self.emitFieldSeqDeinit(fa, m.type_ref, m.dimensions, "            ");
                 try self.ind();
                 try self.write("        }\n");
             } else {
-                try self.emitFieldSeqDeinit(m.name, m.type_ref, "        ");
+                try self.emitFieldSeqDeinit(m.name, m.type_ref, m.dimensions, "        ");
             }
         }
         if (self.plRetainsUnknown(s)) {
@@ -5240,7 +5279,12 @@ const Generator = struct {
 
     /// Emit the cleanup snippet for a single struct field whose type is or
     /// contains an unbounded sequence, or an unbounded string.
-    fn emitFieldSeqDeinit(self: *Generator, field_name: []const u8, tr: ir.TypeRef, indent: []const u8) !void {
+    fn emitFieldSeqDeinit(self: *Generator, field_name: []const u8, tr: ir.TypeRef, dims: []const u64, indent: []const u8) !void {
+        if (self.usesGenericOwnership(tr, dims)) {
+            try self.ind();
+            try self.print("{s}zidl_rt.deinitOwned(&self.{s}, alloc);\n", .{ indent, field_name });
+            return;
+        }
         // A bounded sequence (direct or typedef'd) is an inline BoundedArray
         // with no methods of its own: release each element in place, then
         // empty it so a second deinit() is a no-op.
@@ -5354,21 +5398,21 @@ const Generator = struct {
                 try self.print("        if (self.{s} != null) {{\n", .{m.name});
                 try self.ind();
                 try self.print("            result.{s} = .{{}};\n", .{m.name});
-                try self.emitFieldSeqCloneStmt(fa, m.type_ref, "            ");
+                try self.emitFieldSeqCloneStmt(fa, m.type_ref, m.dimensions, "            ");
                 try self.ind();
                 try self.write("        }\n");
                 try self.ind();
                 try self.write("        errdefer {\n");
                 try self.ind();
                 try self.print("            if (result.{s} != null) {{\n", .{m.name});
-                try self.emitFieldSeqCloneErrdeferBody(fa, m.type_ref, "            ");
+                try self.emitFieldSeqCloneErrdeferBody(fa, m.type_ref, m.dimensions, "            ");
                 try self.ind();
                 try self.write("            }\n");
                 try self.ind();
                 try self.write("        }\n");
             } else {
-                try self.emitFieldSeqCloneStmt(m.name, m.type_ref, "        ");
-                try self.emitFieldSeqCloneErrdefer(m.name, m.type_ref, "        ");
+                try self.emitFieldSeqCloneStmt(m.name, m.type_ref, m.dimensions, "        ");
+                try self.emitFieldSeqCloneErrdefer(m.name, m.type_ref, m.dimensions, "        ");
             }
         }
         if (self.plRetainsUnknown(s)) {
@@ -5402,7 +5446,12 @@ const Generator = struct {
     }
 
     /// Emit the copy snippet for a single struct field (the `result.field = ...` part).
-    fn emitFieldSeqCloneStmt(self: *Generator, field_name: []const u8, tr: ir.TypeRef, indent: []const u8) !void {
+    fn emitFieldSeqCloneStmt(self: *Generator, field_name: []const u8, tr: ir.TypeRef, dims: []const u64, indent: []const u8) !void {
+        if (self.usesGenericOwnership(tr, dims)) {
+            try self.ind();
+            try self.print("{s}result.{s} = try zidl_rt.cloneOwned(self.{s}, alloc);\n", .{ indent, field_name, field_name });
+            return;
+        }
         // Bounded sequence (direct or typedef'd): `var result = self;` copied
         // the inline elements shallowly. Rebuild the array from deep element
         // clones; a failure part-way releases the clones made so far.
@@ -5539,7 +5588,12 @@ const Generator = struct {
     /// Emit the errdefer cleanup snippet for a field already cloned by
     /// `emitFieldSeqCloneStmt`.  Must be emitted immediately after the clone
     /// statement so that failures in subsequent fields trigger this cleanup.
-    fn emitFieldSeqCloneErrdefer(self: *Generator, field_name: []const u8, tr: ir.TypeRef, indent: []const u8) !void {
+    fn emitFieldSeqCloneErrdefer(self: *Generator, field_name: []const u8, tr: ir.TypeRef, dims: []const u64, indent: []const u8) !void {
+        if (self.usesGenericOwnership(tr, dims)) {
+            try self.ind();
+            try self.print("{s}errdefer zidl_rt.deinitOwned(&result.{s}, alloc);\n", .{ indent, field_name });
+            return;
+        }
         // Simple single-statement forms stay `errdefer <stmt>;`; the sequence
         // form needs a block. `emitFieldSeqCloneErrdeferBody` writes the body
         // targeting `result.<field_name>` — here always at function scope.
@@ -5547,7 +5601,7 @@ const Generator = struct {
             if (self.aggregateNeedsCleanup(seq.element.*)) {
                 try self.ind();
                 try self.print("{s}errdefer {{\n", .{indent});
-                try self.emitFieldSeqCloneErrdeferBody(field_name, tr, indent);
+                try self.emitFieldSeqCloneErrdeferBody(field_name, tr, dims, indent);
                 try self.ind();
                 try self.print("{s}}}\n", .{indent});
             }
@@ -5557,20 +5611,20 @@ const Generator = struct {
             .string => |bound| if (bound == null) {
                 try self.ind();
                 try self.print("{s}errdefer ", .{indent});
-                try self.emitFieldSeqCloneErrdeferBody(field_name, tr, "");
+                try self.emitFieldSeqCloneErrdeferBody(field_name, tr, dims, "");
             },
             .named => |td| switch (td) {
                 .typedef, .struct_, .union_ => {
                     try self.ind();
                     try self.print("{s}errdefer ", .{indent});
-                    try self.emitFieldSeqCloneErrdeferBody(field_name, tr, "");
+                    try self.emitFieldSeqCloneErrdeferBody(field_name, tr, dims, "");
                 },
                 else => {},
             },
             .sequence => {
                 try self.ind();
                 try self.print("{s}errdefer {{\n", .{indent});
-                try self.emitFieldSeqCloneErrdeferBody(field_name, tr, indent);
+                try self.emitFieldSeqCloneErrdeferBody(field_name, tr, dims, indent);
                 try self.ind();
                 try self.print("{s}}}\n", .{indent});
             },
@@ -5582,7 +5636,12 @@ const Generator = struct {
     /// `result.<field_name>`. Callers wrap in `errdefer { ... }` (function
     /// scope) or `errdefer { if (result.<name> != null) { ... } }` for an
     /// `@optional` member whose `field_name` is `<name>.?`.
-    fn emitFieldSeqCloneErrdeferBody(self: *Generator, field_name: []const u8, tr: ir.TypeRef, indent: []const u8) !void {
+    fn emitFieldSeqCloneErrdeferBody(self: *Generator, field_name: []const u8, tr: ir.TypeRef, dims: []const u64, indent: []const u8) !void {
+        if (self.usesGenericOwnership(tr, dims)) {
+            if (indent.len != 0) try self.ind();
+            try self.print("{s}zidl_rt.deinitOwned(&result.{s}, alloc);\n", .{ indent, field_name });
+            return;
+        }
         // The single-statement forms are emitted inline after `errdefer ` when
         // `indent` is empty (function-scope caller), and on their own indented
         // line when it isn't (the `@optional` wrapper caller). The multi-line
@@ -6023,7 +6082,7 @@ const Generator = struct {
         const bytes = try zig_to.encodeMinimalStruct(self.alloc, s);
         defer self.alloc.free(bytes);
 
-        const eq_hash = zig_to.computeEquivalenceHash(bytes);
+        const eq_hash = zig_to.computeEquivalenceHash(bytes[zig_to.encap_header_len..]);
         const type_id = zig_to.computeTypeIdentifier(bytes);
 
         try self.write("\n");
@@ -6058,6 +6117,87 @@ const Generator = struct {
     /// Emit a single CDR write statement for the given type.
     /// `access` is the value expression (e.g. "value.x").
     /// `extra` is the fixed indentation beyond `ind()` (e.g. "        " for method body).
+    /// Collection-local name for the current nesting depth: `base` at depth 0
+    /// (single-level output is unchanged), `base{depth}` inside nested
+    /// collections so an inner loop never shadows an outer one.
+    fn collName(self: *Generator, base: []const u8) ![]u8 {
+        if (self.coll_depth == 0) return self.alloc.dupe(u8, base);
+        return std.fmt.allocPrint(self.alloc, "{s}{d}", .{ base, self.coll_depth });
+    }
+
+    /// Array loop variable `{base}{dim}`, qualified by collection depth when
+    /// nested so arrays inside sequence elements don't reuse the outer names.
+    fn arrayVar(self: *Generator, base: []const u8, dim: usize) ![]u8 {
+        if (self.coll_depth == 0) return std.fmt.allocPrint(self.alloc, "{s}{d}", .{ base, dim });
+        return std.fmt.allocPrint(self.alloc, "{s}{d}_{d}", .{ base, self.coll_depth, dim });
+    }
+
+    /// Open `{ const _cdh = try writer.reserveDheaderMaybe();` for a collection
+    /// that XCDR2 prefixes with a DHEADER; returns the DHEADER local's name
+    /// (caller frees) or null when no DHEADER applies.
+    fn openCollectionDheader(self: *Generator, needed: bool, extra: []const u8) !?[]u8 {
+        if (!needed) return null;
+        const name = try self.collName("_cdh");
+        try self.ind();
+        try self.print("{s}{{\n", .{extra});
+        try self.ind();
+        try self.print("{s}    const {s} = try writer.reserveDheaderMaybe();\n", .{ extra, name });
+        return name;
+    }
+
+    fn closeCollectionDheader(self: *Generator, name: ?[]u8, extra: []const u8) !void {
+        const n = name orelse return;
+        defer self.alloc.free(n);
+        try self.ind();
+        try self.print("{s}    writer.patchDheaderMaybe({s});\n", .{ extra, n });
+        try self.ind();
+        try self.print("{s}}}\n", .{extra});
+    }
+
+    /// True when a value of `tr` owns heap memory in its Zig representation.
+    fn typeOwnsHeap(self: *Generator, tr: ir.TypeRef) bool {
+        if (self.cleanup_depth >= 64) return false;
+        self.cleanup_depth += 1;
+        defer self.cleanup_depth -= 1;
+        return switch (tr) {
+            .string, .wstring => |b| b == null,
+            .sequence => |seq| seq.bound == null or self.typeOwnsHeap(seq.element.*),
+            .map => true,
+            .named => |td| switch (td) {
+                .typedef => |t| self.typeOwnsHeap(t.type_ref),
+                .struct_ => |st| self.structNeedsCleanup(st),
+                .union_ => |u| self.unionNeedsCleanup(u),
+                else => false,
+            },
+            else => false,
+        };
+    }
+
+    /// Sequence elements the per-shape field code doesn't release or copy
+    /// itself: nested sequences, array typedefs, aliases of strings, and
+    /// strings held inline by a bounded sequence. These go through
+    /// `zidl_rt.deinitOwned` / `zidl_rt.cloneOwned`.
+    fn elemUsesGenericOwnership(self: *Generator, elem: ir.TypeRef, bounded: bool) bool {
+        if (!self.typeOwnsHeap(elem)) return false;
+        const r = resolveAlias(elem);
+        return switch (r) {
+            .sequence, .wstring => true,
+            .string => bounded or elem != .string,
+            .named => |td| td == .typedef, // resolveAlias stops only at array typedefs
+            else => false,
+        };
+    }
+
+    /// A member or union case the per-shape field code doesn't cover: arrays
+    /// (member dimensions or array typedefs) that own heap memory, and
+    /// sequences whose elements need generic ownership.
+    fn usesGenericOwnership(self: *Generator, tr: ir.TypeRef, dims: []const u64) bool {
+        if (!self.typeOwnsHeap(tr)) return false;
+        if (dims.len > 0 or arrayTypedefOf(tr) != null) return true;
+        const seq = resolvedSequence(tr) orelse return false;
+        return self.elemUsesGenericOwnership(seq.element.*, seq.bound != null);
+    }
+
     fn emitWriteForTypeRef(self: *Generator, tr: ir.TypeRef, access: []const u8, extra: []const u8) anyerror!void {
         switch (tr) {
             .base => |b| {
@@ -6082,25 +6222,36 @@ const Generator = struct {
                 }
             },
             .sequence => |seq| {
-                try self.ind();
+                // XCDR2 prefixes a collection of non-primitive elements with a
+                // DHEADER (a no-op for XCDR1 and key-hash writers).
+                const cdh = try self.openCollectionDheader(!isPrimitiveElement(seq.element.*), extra);
+                const body = if (cdh != null) try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra}) else try self.alloc.dupe(u8, extra);
+                defer self.alloc.free(body);
+                const sb = try self.collName("_sb");
+                defer self.alloc.free(sb);
+                const se = try self.collName("_se");
+                defer self.alloc.free(se);
+                self.coll_depth += 1;
                 if (seq.bound != null) {
-                    try self.print("{s}try writer.writeU32(@intCast({s}.slice().len));\n", .{ extra, access });
                     try self.ind();
-                    try self.print("{s}for ({s}.slice()) |_se| {{\n", .{ extra, access });
-                    const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
+                    try self.print("{s}try writer.writeU32(@intCast({s}.slice().len));\n", .{ body, access });
+                    try self.ind();
+                    try self.print("{s}for ({s}.slice()) |{s}| {{\n", .{ body, access, se });
+                    const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{body});
                     defer self.alloc.free(inner);
-                    try self.emitWriteForTypeRef(seq.element.*, "_se", inner);
+                    try self.emitWriteForTypeRef(seq.element.*, se, inner);
                     try self.ind();
-                    try self.print("{s}}}\n", .{extra});
+                    try self.print("{s}}}\n", .{body});
                 } else {
                     // Unbounded extern struct: check _buffer before iterating.
-                    try self.print("{s}try writer.writeU32({s}._length);\n", .{ extra, access });
                     try self.ind();
-                    try self.print("{s}if ({s}._buffer) |_sb| {{\n", .{ extra, access });
-                    const inner = try std.fmt.allocPrint(self.alloc, "{s}        ", .{extra});
+                    try self.print("{s}try writer.writeU32({s}._length);\n", .{ body, access });
+                    try self.ind();
+                    try self.print("{s}if ({s}._buffer) |{s}| {{\n", .{ body, access, sb });
+                    const inner = try std.fmt.allocPrint(self.alloc, "{s}        ", .{body});
                     defer self.alloc.free(inner);
                     try self.ind();
-                    try self.print("{s}    for (_sb[0..{s}._length]) |_se| {{\n", .{ extra, access });
+                    try self.print("{s}    for ({s}[0..{s}._length]) |{s}| {{\n", .{ body, sb, access, se });
                     // String elements in C-ABI buffers are [*:0]const u8; span them for writeString.
                     const is_c_str_elem_w = switch (seq.element.*) {
                         .string => |b| b == null,
@@ -6108,15 +6259,17 @@ const Generator = struct {
                     };
                     if (is_c_str_elem_w) {
                         try self.ind();
-                        try self.print("{s}try writer.writeString(std.mem.span(_se));\n", .{inner});
+                        try self.print("{s}try writer.writeString(std.mem.span({s}));\n", .{ inner, se });
                     } else {
-                        try self.emitWriteForTypeRef(seq.element.*, "_se", inner);
+                        try self.emitWriteForTypeRef(seq.element.*, se, inner);
                     }
                     try self.ind();
-                    try self.print("{s}    }}\n", .{extra}); // close for
+                    try self.print("{s}    }}\n", .{body}); // close for
                     try self.ind();
-                    try self.print("{s}}}\n", .{extra}); // close if
+                    try self.print("{s}}}\n", .{body}); // close if
                 }
+                self.coll_depth -= 1;
+                try self.closeCollectionDheader(cdh, extra);
             },
             .named => |td| switch (td) {
                 .enum_ => |e| {
@@ -6176,16 +6329,26 @@ const Generator = struct {
                 },
             },
             .map => |m| {
+                const cdh = try self.openCollectionDheader(!(isPrimitiveElement(m.key.*) and isPrimitiveElement(m.value.*)), extra);
+                const body = if (cdh != null) try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra}) else try self.alloc.dupe(u8, extra);
+                defer self.alloc.free(body);
+                const mk = try self.collName("_mk");
+                defer self.alloc.free(mk);
+                const mv = try self.collName("_mv");
+                defer self.alloc.free(mv);
                 try self.ind();
-                try self.print("{s}try writer.writeU32(@intCast({s}.count()));\n", .{ extra, access });
+                try self.print("{s}try writer.writeU32(@intCast({s}.count()));\n", .{ body, access });
                 try self.ind();
-                try self.print("{s}for ({s}.keys(), {s}.values()) |_mk, _mv| {{\n", .{ extra, access, access });
-                const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
+                try self.print("{s}for ({s}.keys(), {s}.values()) |{s}, {s}| {{\n", .{ body, access, access, mk, mv });
+                const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{body});
                 defer self.alloc.free(inner);
-                try self.emitWriteForTypeRef(m.key.*, "_mk", inner);
-                try self.emitWriteForTypeRef(m.value.*, "_mv", inner);
+                self.coll_depth += 1;
+                try self.emitWriteForTypeRef(m.key.*, mk, inner);
+                try self.emitWriteForTypeRef(m.value.*, mv, inner);
+                self.coll_depth -= 1;
                 try self.ind();
-                try self.print("{s}}}\n", .{extra});
+                try self.print("{s}}}\n", .{body});
+                try self.closeCollectionDheader(cdh, extra);
             },
             .fixed_pt => |fp| {
                 try self.ind();
@@ -6250,63 +6413,98 @@ const Generator = struct {
                 try self.print("{s}{{\n", .{extra});
                 const ii = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
                 defer self.alloc.free(ii);
+                const n = try self.collName("_n");
+                defer self.alloc.free(n);
+                const buf = try self.collName("_buf");
+                defer self.alloc.free(buf);
+                const se = try self.collName("_se");
+                defer self.alloc.free(se);
+                if (!isPrimitiveElement(seq.element.*)) {
+                    try self.ind();
+                    try self.print("{s}try reader.skipDheaderIfXcdr2();\n", .{ii});
+                }
                 try self.ind();
-                try self.print("{s}const _n = try reader.readU32();\n", .{ii});
+                try self.print("{s}const {s} = try reader.readU32();\n", .{ ii, n });
+                self.coll_depth += 1;
+                defer self.coll_depth -= 1;
                 if (seq.bound) |bound| {
                     try self.ind();
-                    try self.print("{s}if (_n > {d}) return error.SequenceTooLong;\n", .{ ii, bound });
+                    try self.print("{s}if ({s} > {d}) return error.SequenceTooLong;\n", .{ ii, n, bound });
                     try self.ind();
                     try self.print("{s}{s}.clearRetainingCapacity();\n", .{ ii, out_expr });
                     try self.ind();
-                    try self.print("{s}for (0.._n) |_| {{\n", .{ii});
+                    try self.print("{s}for (0..{s}) |_| {{\n", .{ ii, n });
                     const iii = try std.fmt.allocPrint(self.alloc, "{s}    ", .{ii});
                     defer self.alloc.free(iii);
                     try self.emitSequenceElementRead(seq.element.*, out_expr, iii);
                     try self.ind();
                     try self.print("{s}}}\n", .{ii});
                 } else {
-                    // Unbounded sequence: allocate a buffer, then read elements into it.
-                    const buf_elem = try self.seqBufElemZig(seq.element.*);
+                    // Unbounded sequence: allocate a buffer, then read elements
+                    // into it. `_length` counts only fully read elements, so a
+                    // failure part-way leaves the owner's deinit() visiting
+                    // exactly what was decoded.
+                    const buf_elem_raw = try self.seqBufElemZig(seq.element.*);
+                    defer self.alloc.free(buf_elem_raw);
+                    // An element type containing an anonymous unbounded sequence
+                    // can't be spelled again (each `extern struct {...}` is a new
+                    // type), so derive it from the field.
+                    const buf_elem = if (std.mem.indexOf(u8, buf_elem_raw, "extern struct") != null)
+                        try std.fmt.allocPrint(self.alloc, "zidl_rt.SeqElem(@TypeOf({s}))", .{out_expr})
+                    else
+                        try self.alloc.dupe(u8, buf_elem_raw);
                     defer self.alloc.free(buf_elem);
+                    const generic = self.elemUsesGenericOwnership(seq.element.*, false);
                     try self.ind();
-                    try self.print("{s}{s}._length = _n;\n", .{ ii, out_expr });
+                    try self.print("{s}{s}._length = 0;\n", .{ ii, out_expr });
                     try self.ind();
-                    try self.print("{s}{s}._maximum = _n;\n", .{ ii, out_expr });
+                    try self.print("{s}{s}._maximum = {s};\n", .{ ii, out_expr, n });
                     try self.ind();
-                    try self.print("{s}if (_n > 0) {{\n", .{ii});
+                    try self.print("{s}if ({s} > 0) {{\n", .{ ii, n });
                     const iii = try std.fmt.allocPrint(self.alloc, "{s}    ", .{ii});
                     defer self.alloc.free(iii);
                     try self.ind();
-                    try self.print("{s}const _buf = try allocator.alloc({s}, _n);\n", .{ iii, buf_elem });
-                    if (self.aggregateNeedsCleanup(seq.element.*)) {
-                        // `_length` is already _n, so a failure part-way through
-                        // lets the owner's deinit() visit every element: start
-                        // them all at a safely destructible default.
-                        try self.ind();
-                        try self.print("{s}for (_buf) |*_se| _se.* = .{{}};\n", .{iii});
-                    }
+                    try self.print("{s}const {s} = try allocator.alloc({s}, {s});\n", .{ iii, buf, buf_elem, n });
                     try self.ind();
-                    try self.print("{s}{s}._buffer = _buf.ptr;\n", .{ iii, out_expr });
+                    try self.print("{s}{s}._buffer = {s}.ptr;\n", .{ iii, out_expr, buf });
                     try self.ind();
                     try self.print("{s}{s}._release = true;\n", .{ iii, out_expr });
                     try self.ind();
-                    try self.print("{s}for (_buf) |*_se| {{\n", .{iii});
+                    try self.print("{s}for ({s}) |*{s}| {{\n", .{ iii, buf, se });
                     const iv = try std.fmt.allocPrint(self.alloc, "{s}    ", .{iii});
                     defer self.alloc.free(iv);
+                    if (self.aggregateNeedsCleanup(seq.element.*) or generic) {
+                        // The element's decoder may release its own partial
+                        // output on failure: start from a destructible value.
+                        const dflt = try self.defaultForTypeRef(seq.element.*);
+                        defer self.alloc.free(dflt);
+                        try self.ind();
+                        try self.print("{s}{s}.* = {s};\n", .{ iv, se, dflt });
+                    }
+                    if (generic) {
+                        try self.ind();
+                        try self.print("{s}errdefer zidl_rt.deinitOwned({s}, allocator);\n", .{ iv, se });
+                    }
                     // String elements in C-ABI buffers are [*:0]const u8; use zero-copy
                     // read + dupeZ to produce a null-terminated allocation.
                     const is_c_str_elem = switch (seq.element.*) {
-                        .string => |b| b == null,
+                        .string => |sb| sb == null,
                         else => false,
                     };
+                    const elem_lval = try std.fmt.allocPrint(self.alloc, "{s}.*", .{se});
+                    defer self.alloc.free(elem_lval);
                     if (is_c_str_elem) {
+                        const rs = try self.collName("_rs");
+                        defer self.alloc.free(rs);
                         try self.ind();
-                        try self.print("{s}const _rs = try reader.readStringZeroCopy();\n", .{iv});
+                        try self.print("{s}const {s} = try reader.readStringZeroCopy();\n", .{ iv, rs });
                         try self.ind();
-                        try self.print("{s}_se.* = (try allocator.dupeZ(u8, _rs)).ptr;\n", .{iv});
+                        try self.print("{s}{s} = (try allocator.dupeZ(u8, {s})).ptr;\n", .{ iv, elem_lval, rs });
                     } else {
-                        try self.emitReadForTypeRef(seq.element.*, "_se.*", iv);
+                        try self.emitReadForTypeRef(seq.element.*, elem_lval, iv);
                     }
+                    try self.ind();
+                    try self.print("{s}{s}._length += 1;\n", .{ iv, out_expr });
                     try self.ind();
                     try self.print("{s}}}\n", .{iii});
                     try self.ind();
@@ -6320,28 +6518,40 @@ const Generator = struct {
                 try self.print("{s}{{\n", .{extra});
                 const ii = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
                 defer self.alloc.free(ii);
+                const mn = try self.collName("_mn");
+                defer self.alloc.free(mn);
+                const mk = try self.collName("_mk");
+                defer self.alloc.free(mk);
+                const mv = try self.collName("_mv");
+                defer self.alloc.free(mv);
+                if (!(isPrimitiveElement(m.key.*) and isPrimitiveElement(m.value.*))) {
+                    try self.ind();
+                    try self.print("{s}try reader.skipDheaderIfXcdr2();\n", .{ii});
+                }
                 try self.ind();
-                try self.print("{s}const _mn = try reader.readU32();\n", .{ii});
+                try self.print("{s}const {s} = try reader.readU32();\n", .{ ii, mn });
                 try self.ind();
                 try self.print("{s}{s} = .{{}};\n", .{ ii, out_expr });
                 try self.ind();
-                try self.print("{s}try {s}.ensureTotalCapacity(allocator, _mn);\n", .{ ii, out_expr });
+                try self.print("{s}try {s}.ensureTotalCapacity(allocator, {s});\n", .{ ii, out_expr, mn });
                 try self.ind();
-                try self.print("{s}for (0.._mn) |_| {{\n", .{ii});
+                try self.print("{s}for (0..{s}) |_| {{\n", .{ ii, mn });
                 const iii = try std.fmt.allocPrint(self.alloc, "{s}    ", .{ii});
                 defer self.alloc.free(iii);
+                self.coll_depth += 1;
+                defer self.coll_depth -= 1;
                 const key_zig = try self.typeRefToZig(m.key.*);
                 defer self.alloc.free(key_zig);
                 try self.ind();
-                try self.print("{s}var _mk: {s} = undefined;\n", .{ iii, key_zig });
-                try self.emitReadForTypeRef(m.key.*, "_mk", iii);
+                try self.print("{s}var {s}: {s} = undefined;\n", .{ iii, mk, key_zig });
+                try self.emitReadForTypeRef(m.key.*, mk, iii);
                 const val_zig = try self.typeRefToZig(m.value.*);
                 defer self.alloc.free(val_zig);
                 try self.ind();
-                try self.print("{s}var _mv: {s} = undefined;\n", .{ iii, val_zig });
-                try self.emitReadForTypeRef(m.value.*, "_mv", iii);
+                try self.print("{s}var {s}: {s} = undefined;\n", .{ iii, mv, val_zig });
+                try self.emitReadForTypeRef(m.value.*, mv, iii);
                 try self.ind();
-                try self.print("{s}try {s}.putNoClobber(allocator, _mk, _mv);\n", .{ iii, out_expr });
+                try self.print("{s}try {s}.putNoClobber(allocator, {s}, {s});\n", .{ iii, out_expr, mk, mv });
                 try self.ind();
                 try self.print("{s}}}\n", .{ii});
                 try self.ind();
@@ -6436,14 +6646,14 @@ const Generator = struct {
                     try self.print("{s}{s}.appendAssumeCapacity(@enumFromInt(try reader.{s}()));\n", .{ extra, seq_expr, method });
                 },
                 .typedef => |t| {
-                    // For scalar typedefs, recurse on the underlying type so that
-                    // e.g. `typedef long MyInt` → sequence element uses readI32.
-                    // Array typedefs as sequence elements are rare; emit TODO.
+                    // Scalar and aggregate typedefs append like their target;
+                    // array typedefs (and aliases of strings / sequences) are
+                    // read through a temporary.
                     if (t.dimensions.len > 0) {
-                        try self.ind();
-                        try self.print("{s}// TODO: sequence element read array-typedef {s}\n", .{ extra, t.name });
-                    } else {
-                        try self.emitSequenceElementRead(t.type_ref, seq_expr, extra);
+                        try self.emitSequenceElementReadViaTemp(elem_tr, seq_expr, extra);
+                    } else switch (t.type_ref) {
+                        .base, .named => try self.emitSequenceElementRead(t.type_ref, seq_expr, extra),
+                        else => try self.emitSequenceElementReadViaTemp(elem_tr, seq_expr, extra),
                     }
                 },
                 .bitmask => |bm| {
@@ -6464,39 +6674,61 @@ const Generator = struct {
                 .union_ => {
                     const zig_type = try self.typeRefToZig(elem_tr);
                     defer self.alloc.free(zig_type);
+                    const elem = try self.collName("_elem");
+                    defer self.alloc.free(elem);
                     try self.ind();
-                    try self.print("{s}var _elem: {s} = .{{}};\n", .{ extra, zig_type });
+                    try self.print("{s}var {s}: {s} = .{{}};\n", .{ extra, elem, zig_type });
                     try self.ind();
-                    try self.print("{s}try {s}.deserializeInto(&_elem, reader, allocator);\n", .{ extra, zig_type });
+                    try self.print("{s}try {s}.deserializeInto(&{s}, reader, allocator);\n", .{ extra, zig_type, elem });
                     try self.ind();
-                    try self.print("{s}{s}.appendAssumeCapacity(_elem);\n", .{ extra, seq_expr });
+                    try self.print("{s}{s}.appendAssumeCapacity({s});\n", .{ extra, seq_expr, elem });
                 },
                 .bitset => {
                     const zig_type = try self.typeRefToZig(elem_tr);
                     defer self.alloc.free(zig_type);
+                    const elem = try self.collName("_elem");
+                    defer self.alloc.free(elem);
                     try self.ind();
-                    try self.print("{s}var _elem: {s} = .{{}};\n", .{ extra, zig_type });
+                    try self.print("{s}var {s}: {s} = .{{}};\n", .{ extra, elem, zig_type });
                     try self.ind();
-                    try self.print("{s}try {s}.deserializeInto(&_elem, reader, allocator);\n", .{ extra, zig_type });
+                    try self.print("{s}try {s}.deserializeInto(&{s}, reader, allocator);\n", .{ extra, zig_type, elem });
                     try self.ind();
-                    try self.print("{s}{s}.appendAssumeCapacity(_elem);\n", .{ extra, seq_expr });
+                    try self.print("{s}{s}.appendAssumeCapacity({s});\n", .{ extra, seq_expr, elem });
                 },
                 else => {
                     const zig_type = try self.typeRefToZig(elem_tr);
                     defer self.alloc.free(zig_type);
+                    const elem = try self.collName("_elem");
+                    defer self.alloc.free(elem);
                     try self.ind();
-                    try self.print("{s}var _elem: {s} = .{{}};\n", .{ extra, zig_type });
+                    try self.print("{s}var {s}: {s} = .{{}};\n", .{ extra, elem, zig_type });
                     try self.ind();
-                    try self.print("{s}try {s}.deserializeInto(&_elem, reader, allocator);\n", .{ extra, zig_type });
+                    try self.print("{s}try {s}.deserializeInto(&{s}, reader, allocator);\n", .{ extra, zig_type, elem });
                     try self.ind();
-                    try self.print("{s}{s}.appendAssumeCapacity(_elem);\n", .{ extra, seq_expr });
+                    try self.print("{s}{s}.appendAssumeCapacity({s});\n", .{ extra, seq_expr, elem });
                 },
             },
-            else => {
-                try self.ind();
-                try self.print("{s}// TODO: sequence element read\n", .{extra});
-            },
+            else => try self.emitSequenceElementReadViaTemp(elem_tr, seq_expr, extra),
         }
+    }
+
+    /// Read a bounded-sequence element of any kind (string, nested sequence,
+    /// array typedef, ...) into a temporary, then append it. A failure part-way
+    /// releases the temporary's partial contents.
+    fn emitSequenceElementReadViaTemp(self: *Generator, elem_tr: ir.TypeRef, seq_expr: []const u8, extra: []const u8) anyerror!void {
+        const ev = try self.collName("_ev");
+        defer self.alloc.free(ev);
+        const dflt = try self.defaultForTypeRef(elem_tr);
+        defer self.alloc.free(dflt);
+        try self.ind();
+        try self.print("{s}var {s}: zidl_rt.SeqElem(@TypeOf({s})) = {s};\n", .{ extra, ev, seq_expr, dflt });
+        if (self.typeOwnsHeap(elem_tr)) {
+            try self.ind();
+            try self.print("{s}errdefer zidl_rt.deinitOwned(&{s}, allocator);\n", .{ extra, ev });
+        }
+        try self.emitReadForTypeRef(elem_tr, ev, extra);
+        try self.ind();
+        try self.print("{s}{s}.appendAssumeCapacity({s});\n", .{ extra, seq_expr, ev });
     }
 
     /// Emit "read one element and `try seq.append(allocator, elem)`" for `@pl_repeated` fields.
@@ -6553,30 +6785,55 @@ const Generator = struct {
         try self.print("{s}}}\n", .{extra});
     }
 
-    /// Emit write loops for an IDL array member (multi-dimensional).
+    /// Emit write loops for an IDL array (member dimensions or array typedef).
+    /// XCDR flattens an array of array typedefs into one multi-dimensional
+    /// array, so a single DHEADER covers the whole array when its innermost
+    /// element type is non-primitive.
     fn emitWriteArray(self: *Generator, elem_tr: ir.TypeRef, access: []const u8, dims: []const u64, extra: []const u8, depth: usize) anyerror!void {
+        const cdh = try self.openCollectionDheader(depth == 0 and !isPrimitiveElement(arrayInnermost(elem_tr)), extra);
+        const body = if (cdh != null) try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra}) else try self.alloc.dupe(u8, extra);
+        defer self.alloc.free(body);
+        try self.emitWriteArrayDims(elem_tr, access, dims, body, depth);
+        try self.closeCollectionDheader(cdh, extra);
+    }
+
+    fn emitWriteArrayDims(self: *Generator, elem_tr: ir.TypeRef, access: []const u8, dims: []const u64, extra: []const u8, depth: usize) anyerror!void {
         if (dims.len == 0) {
+            if (arrayTypedefOf(elem_tr)) |t| return self.emitWriteArrayDims(t.type_ref, access, t.dimensions, extra, depth);
+            self.coll_depth += 1;
+            defer self.coll_depth -= 1;
             try self.emitWriteForTypeRef(elem_tr, access, extra);
             return;
         }
-        const var_name = try std.fmt.allocPrint(self.alloc, "_d{d}", .{depth});
+        const var_name = try self.arrayVar("_d", depth);
         defer self.alloc.free(var_name);
         try self.ind();
         try self.print("{s}for ({s}) |{s}| {{\n", .{ extra, access, var_name });
         const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
         defer self.alloc.free(inner);
-        try self.emitWriteArray(elem_tr, var_name, dims[1..], inner, depth + 1);
+        try self.emitWriteArrayDims(elem_tr, var_name, dims[1..], inner, depth + 1);
         try self.ind();
         try self.print("{s}}}\n", .{extra});
     }
 
-    /// Emit index-based read loops for an IDL array member (multi-dimensional).
+    /// Emit index-based read loops for an IDL array (see `emitWriteArray`).
     fn emitReadArray(self: *Generator, elem_tr: ir.TypeRef, base_access: []const u8, dims: []const u64, extra: []const u8, depth: usize) anyerror!void {
+        if (depth == 0 and !isPrimitiveElement(arrayInnermost(elem_tr))) {
+            try self.ind();
+            try self.print("{s}try reader.skipDheaderIfXcdr2();\n", .{extra});
+        }
+        try self.emitReadArrayDims(elem_tr, base_access, dims, extra, depth);
+    }
+
+    fn emitReadArrayDims(self: *Generator, elem_tr: ir.TypeRef, base_access: []const u8, dims: []const u64, extra: []const u8, depth: usize) anyerror!void {
         if (dims.len == 0) {
+            if (arrayTypedefOf(elem_tr)) |t| return self.emitReadArrayDims(t.type_ref, base_access, t.dimensions, extra, depth);
+            self.coll_depth += 1;
+            defer self.coll_depth -= 1;
             try self.emitReadForTypeRef(elem_tr, base_access, extra);
             return;
         }
-        const idx = try std.fmt.allocPrint(self.alloc, "_i{d}", .{depth});
+        const idx = try self.arrayVar("_i", depth);
         defer self.alloc.free(idx);
         try self.ind();
         try self.print("{s}for (0..{d}) |{s}| {{\n", .{ extra, dims[0], idx });
@@ -6584,7 +6841,7 @@ const Generator = struct {
         defer self.alloc.free(inner);
         const indexed = try std.fmt.allocPrint(self.alloc, "{s}[{s}]", .{ base_access, idx });
         defer self.alloc.free(indexed);
-        try self.emitReadArray(elem_tr, indexed, dims[1..], inner, depth + 1);
+        try self.emitReadArrayDims(elem_tr, indexed, dims[1..], inner, depth + 1);
         try self.ind();
         try self.print("{s}}}\n", .{extra});
     }
@@ -6690,7 +6947,18 @@ const Generator = struct {
     }
 
     fn emitSkipArray(self: *Generator, elem_tr: ir.TypeRef, dims: []const u64, extra: []const u8, depth: usize) anyerror!void {
+        if (depth == 0 and !isPrimitiveElement(arrayInnermost(elem_tr))) {
+            try self.ind();
+            try self.print("{s}try reader.skipDheaderIfXcdr2();\n", .{extra});
+        }
+        try self.emitSkipArrayDims(elem_tr, dims, extra, depth);
+    }
+
+    fn emitSkipArrayDims(self: *Generator, elem_tr: ir.TypeRef, dims: []const u64, extra: []const u8, depth: usize) anyerror!void {
         if (dims.len == 0) {
+            if (arrayTypedefOf(elem_tr)) |t| return self.emitSkipArrayDims(t.type_ref, t.dimensions, extra, depth);
+            self.coll_depth += 1;
+            defer self.coll_depth -= 1;
             try self.emitSkipForTypeRef(elem_tr, extra);
             return;
         }
@@ -6706,7 +6974,7 @@ const Generator = struct {
         try self.print("{s}for (0..{d}) |_| {{\n", .{ extra, dims[0] });
         const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
         defer self.alloc.free(inner);
-        try self.emitSkipArray(elem_tr, dims[1..], inner, depth + 1);
+        try self.emitSkipArrayDims(elem_tr, dims[1..], inner, depth + 1);
         try self.ind();
         try self.print("{s}}}\n", .{extra});
     }
@@ -6735,17 +7003,25 @@ const Generator = struct {
                 try self.print("{s}{{\n", .{extra});
                 const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
                 defer self.alloc.free(inner);
+                const n = try self.collName("_n");
+                defer self.alloc.free(n);
+                if (!isPrimitiveElement(seq.element.*)) {
+                    try self.ind();
+                    try self.print("{s}try reader.skipDheaderIfXcdr2();\n", .{inner});
+                }
                 try self.ind();
-                try self.print("{s}const _n = try reader.readU32();\n", .{inner});
+                try self.print("{s}const {s} = try reader.readU32();\n", .{ inner, n });
                 if (typeRefPrimWireSize(seq.element.*)) |sz| {
                     // Fixed-size primitive element → one bulk advance, no loop.
                     try self.ind();
-                    try self.print("{s}try reader.skipPrimitives(_n, {d});\n", .{ inner, sz });
+                    try self.print("{s}try reader.skipPrimitives({s}, {d});\n", .{ inner, n, sz });
                 } else {
                     try self.ind();
-                    try self.print("{s}for (0.._n) |_| {{\n", .{inner});
+                    try self.print("{s}for (0..{s}) |_| {{\n", .{ inner, n });
                     const inner2 = try std.fmt.allocPrint(self.alloc, "{s}    ", .{inner});
                     defer self.alloc.free(inner2);
+                    self.coll_depth += 1;
+                    defer self.coll_depth -= 1;
                     try self.emitSkipForTypeRef(seq.element.*, inner2);
                     try self.ind();
                     try self.print("{s}}}\n", .{inner});
@@ -6758,12 +7034,20 @@ const Generator = struct {
                 try self.print("{s}{{\n", .{extra});
                 const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
                 defer self.alloc.free(inner);
+                const mn = try self.collName("_mn");
+                defer self.alloc.free(mn);
+                if (!(isPrimitiveElement(m.key.*) and isPrimitiveElement(m.value.*))) {
+                    try self.ind();
+                    try self.print("{s}try reader.skipDheaderIfXcdr2();\n", .{inner});
+                }
                 try self.ind();
-                try self.print("{s}const _mn = try reader.readU32();\n", .{inner});
+                try self.print("{s}const {s} = try reader.readU32();\n", .{ inner, mn });
                 try self.ind();
-                try self.print("{s}for (0.._mn) |_| {{\n", .{inner});
+                try self.print("{s}for (0..{s}) |_| {{\n", .{ inner, mn });
                 const inner2 = try std.fmt.allocPrint(self.alloc, "{s}    ", .{inner});
                 defer self.alloc.free(inner2);
+                self.coll_depth += 1;
+                defer self.coll_depth -= 1;
                 try self.emitSkipForTypeRef(m.key.*, inner2);
                 try self.emitSkipForTypeRef(m.value.*, inner2);
                 try self.ind();
@@ -7348,6 +7632,51 @@ fn structIsCExternCompatible(s: *const ir.Struct) bool {
         if (!typeRefIsCExternCompatible(m.type_ref)) return false;
     }
     return true;
+}
+
+/// Follow dimension-less typedefs to the aliased type. Stops at an array
+/// typedef, which is a distinct (array) type.
+fn resolveAlias(tr: ir.TypeRef) ir.TypeRef {
+    var t = tr;
+    while (true) {
+        switch (t) {
+            .named => |td| switch (td) {
+                .typedef => |td2| if (td2.dimensions.len == 0) {
+                    t = td2.type_ref;
+                    continue;
+                },
+                else => {},
+            },
+            else => {},
+        }
+        return t;
+    }
+}
+
+/// The array typedef `tr` names (through dimension-less aliases), if any.
+fn arrayTypedefOf(tr: ir.TypeRef) ?*const ir.Typedef {
+    return switch (resolveAlias(tr)) {
+        .named => |td| switch (td) {
+            .typedef => |t| if (t.dimensions.len > 0) t else null,
+            else => null,
+        },
+        else => null,
+    };
+}
+
+/// Innermost element of an array: XCDR flattens array typedefs used as array
+/// elements into the enclosing array's dimensions.
+fn arrayInnermost(tr: ir.TypeRef) ir.TypeRef {
+    var t = tr;
+    while (arrayTypedefOf(t)) |td| t = td.type_ref;
+    return resolveAlias(t);
+}
+
+/// XCDR2 prefixes a sequence, array or map with a DHEADER unless its element
+/// type is primitive: integers, floating point, boolean, char/octet and wchar.
+/// Enums, bitmasks, strings, aggregates and collections all get one.
+fn isPrimitiveElement(tr: ir.TypeRef) bool {
+    return resolveAlias(tr) == .base;
 }
 
 const SequenceRef = @FieldType(ir.TypeRef, "sequence");
@@ -8659,7 +8988,11 @@ test "zig_backend: sequences release and deep-copy heap-owning elements" {
     const unbounded = s[std.mem.indexOf(u8, s, "pub const Unbounded = ").?..];
     try testing.expect(has(unbounded, "for (_buf[0..self.items._length]) |*_e| _e.deinit(alloc);"));
     try testing.expect(has(unbounded, "_buf[_n] = try _src.clone(alloc);"));
-    try testing.expect(has(unbounded, "for (_buf) |*_se| _se.* = .{};"));
+    // `_length` counts only fully decoded elements, and each element starts
+    // from a destructible default its own decoder can clean up.
+    try testing.expect(has(unbounded, "out.items._length = 0;"));
+    try testing.expect(has(unbounded, "_se.* = .{};"));
+    try testing.expect(has(unbounded, "out.items._length += 1;"));
 
     const typedef_seq = s[std.mem.indexOf(u8, s, "pub const NamedSeq = ").?..];
     try testing.expect(has(typedef_seq, "for (_buf[0..self._length]) |*_e| _e.deinit(alloc);"));

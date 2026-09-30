@@ -60,6 +60,14 @@ extern "C" {
 #define ZIDL_ENCAP_CDR2_LE    0x0007u
 /** CDR2 BE → header 0x00 0x06 0x00 0x00 */
 #define ZIDL_ENCAP_CDR2_BE    0x0006u
+/** D_CDR2 LE → header 0x00 0x09 0x00 0x00 (XCDR2, @appendable top-level type) */
+#define ZIDL_ENCAP_D_CDR2_LE  0x0009u
+/** D_CDR2 BE → header 0x00 0x08 0x00 0x00 */
+#define ZIDL_ENCAP_D_CDR2_BE  0x0008u
+/** PL_CDR2 LE → header 0x00 0x0b 0x00 0x00 (XCDR2, @mutable top-level type) */
+#define ZIDL_ENCAP_PL_CDR2_LE 0x000bu
+/** PL_CDR2 BE → header 0x00 0x0a 0x00 0x00 */
+#define ZIDL_ENCAP_PL_CDR2_BE 0x000au
 /** PL_CDR LE → header 0x00 0x03 0x00 0x00 (RTPS §10.2) */
 #define ZIDL_ENCAP_PL_CDR_LE  0x0003u
 /** PL_CDR BE → header 0x00 0x02 0x00 0x00 */
@@ -122,6 +130,18 @@ void zidl_cdr_writer_set_byte_order(ZidlCdrWriter *w, int byte_order);
 
 /* Encapsulation header ── must be the first call after init */
 int zidl_cdr_write_encap(ZidlCdrWriter *w);
+
+/** Top-level type extensibility, for zidl_cdr_write_encap_kind. */
+#define ZIDL_EXT_FINAL      0
+#define ZIDL_EXT_APPENDABLE 1
+#define ZIDL_EXT_MUTABLE    2
+/**
+ * Like zidl_cdr_write_encap, but for XCDR2 picks the representation id the
+ * top-level type's extensibility requires: CDR2 (final), D_CDR2 (appendable)
+ * or PL_CDR2 (mutable). Peers may reject a sample whose id
+ * doesn't match the topic type. XCDR1 and PL_CDR writers are unchanged.
+ */
+int zidl_cdr_write_encap_kind(ZidlCdrWriter *w, int extensibility);
 
 /* Primitives */
 int zidl_cdr_write_u8  (ZidlCdrWriter *w, uint8_t   v);
@@ -343,11 +363,14 @@ int zidl_cdr_skip_dheader_if_xcdr2(ZidlCdrReader *r);
 typedef struct ZidlEmHeader {
     uint32_t member_id;
     bool     must_understand;
-    /** Raw length code (0–6): 0→1B, 1→2B, 2→4B, 3→8B, 4–6→NEXTINT-encoded. */
+    /** Raw length code (0–7): 0→1B, 1→2B, 2→4B, 3→8B, 4–7→NEXTINT-encoded. */
     uint8_t  lc;
     /**
-     * Byte count of this member's payload.  Always set:
-     *   LC=0→1, LC=1→2, LC=2→4, LC=3→8, LC=4→NEXTINT, LC=5→NEXTINT×4, LC=6→NEXTINT×8.
+     * Byte count of this member's payload, counted from where
+     * zidl_cdr_read_emheader leaves the reader (the start of the value).
+     * Always set: LC=0→1, LC=1→2, LC=2→4, LC=3→8, LC=4→NEXTINT (consumed),
+     * LC=5→4+NEXTINT, LC=6→4+4×NEXTINT, LC=7→4+8×NEXTINT. For LC 5–7 the
+     * NEXTINT is the value's own first word and is not consumed.
      */
     uint32_t payload_bytes;
 } ZidlEmHeader;

@@ -9,6 +9,64 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- **All backends: XCDR2 now interoperates with other XTypes implementations for
+  collections, mutable members and type hashes.** Checked by the new
+  `test/integration/xcdr_known_answer/` fixture against reference encodings from an
+  independent implementation: every backend encodes the samples to the exact reference
+  bytes (XCDR1 and XCDR2) and decodes the reference bytes, and the Zig backend
+  reproduces the reference minimal TypeObject hashes. **Wire-format change:** XCDR2
+  output for the collections below, and every TypeObject hash, differ from earlier zidl
+  releases.
+  - **Collection DHEADER.** A sequence, array or map whose element type is not
+    primitive (enums, bitmasks, strings, aggregates, collections) is now prefixed by a
+    DHEADER in XCDR2, as XTypes requires. Previously no collection had one, so zidl's
+    XCDR2 encoding of e.g. `sequence<string>` or `sequence<SomeStruct>` was unreadable
+    by other vendors. An array of array typedefs is one flattened array with at most one
+    DHEADER.
+  - **DHEADER alignment (Zig and C runtimes).** A DHEADER reserved after unaligned data
+    recorded its offset before the alignment padding, so it was patched into the padding
+    with the padding counted in its length. This also affected nested `@appendable`
+    structs following an odd-sized member.
+  - **EMHEADER length codes 5–7 (Zig and C runtimes, Java).** For these the NEXTINT is
+    the first word of the member value (its DHEADER, string length or sequence length),
+    so it must be peeked, not consumed; the sizes are 4 + NEXTINT × 1/4/8. The readers
+    consumed it and used the wrong sizes (and rejected LC 7), so they could not read
+    other implementations' `@mutable` samples with string or collection members.
+  - **Encapsulation identifiers.** Readers accept D_CDR2 (`0x0008`/`0x0009`) and
+    PL_CDR2 (`0x000a`/`0x000b`); the C, C++ and Java readers previously accepted only
+    CDR2. The generated zzdds writers pick CDR2 / D_CDR2 / PL_CDR2 by the top-level
+    type's extensibility (C: new `zidl_cdr_write_encap_kind`; Zig: new
+    `writeEncapHeaderMutable`); C, C++ and Java always wrote CDR2, which other
+    implementations reject for appendable and mutable topics.
+  - **TypeObjects (Zig).** Member, literal, union-member, bit-flag and bit-field
+    sequences get their collection DHEADER; the equivalence hash no longer includes the
+    4-byte encapsulation header; `octet` is `TK_BYTE`; enum and bitmask flags carry the
+    type's extensibility (new `EnumAnnotations.extensibility` in the IR) and the default
+    literal is flagged; the union discriminator is must-understand and cases are
+    numbered from 1 (matching the mutable wire encoding); typedefs get `MinimalAliasType`
+    TypeObjects instead of a `TK_NONE` placeholder; and a plain sequence of a fully
+    descriptive element is itself fully descriptive. The result is byte-identical to
+    the reference.
+- **All backends: nested sequences and array-typedef elements work.**
+  `sequence<sequence<T>>` (anonymous, bounded, or through a typedef) and sequences or
+  arrays of array typedefs previously failed to compile (Zig, C, Java) or compiled and
+  corrupted memory (C, C++: nested loops shadowed their counters). Collection code now
+  names its locals by nesting depth, and:
+  - **Zig:** bounded sequences of strings, sequences and array typedefs decode (they were
+    `// TODO` stubs, and the bounded array-typedef case silently returned an empty
+    sequence); unbounded decode counts `_length` up as elements complete; nested
+    elements are released and deep-copied through new `zidl_rt.deinitOwned` /
+    `cloneOwned` / `SeqElem` helpers, and member arrays of heap-owning elements get
+    `deinit`/`clone` (previously none, or uncompilable).
+  - **C:** nested sequence element types are named (`int32_t_seq_seq`); array-typedef
+    elements are declared before the sequence type. **Behaviour change:**
+    `sequence<string<N>>` is now `stringN_seq` with inline `char[N + 1]` elements; it
+    was `string_seq` (`char *` elements) while the decoder wrote through those pointers
+    as if they were inline arrays.
+  - **C++:** `sequence<boolean>` compiles (`std::vector<bool>` elements are proxies).
+  - **Java:** nested and array-typedef sequence elements decode; `sequence<Triple>` is
+    `List<int[]>`; arrays of array typedefs and of sequences compile; enums and
+    bitmasks use their `@bit_bound` width (Java wrote every bitmask as 4 bytes).
 - **Zig backend: bounded sequences of struct/union/bitset elements no longer generate
   uncompilable decoders.** A bounded sequence stores its elements inline, so
   `typeRefNeedsAllocator` treated it as allocation-free. However, the element read for

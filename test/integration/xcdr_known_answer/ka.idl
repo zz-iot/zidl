@@ -1,0 +1,74 @@
+// Known-answer fixture for XCDR collection encoding and minimal TypeObject
+// hashes. vectors.txt holds reference encodings of these types from an
+// independent XTypes implementation; the zidl backends are checked against
+// them. Every type is annotated explicitly so extensibility never depends on
+// a generator's default.
+module KA {
+  enum Color { RED, GREEN, BLUE };
+  @bit_bound(8) bitmask Flags { F0, F1, F2 };
+  typedef long Triple[3];
+  typedef sequence<long> LongSeq;
+  typedef sequence<string> StrSeq;
+  @final struct Named { string label; long id; };
+  @appendable struct NamedA { string label; };
+  @final union U switch (long) { case 1: long i; case 2: string s; };
+
+  // Primitive elements: no collection DHEADER in either encoding.
+  @final struct Prims {
+    sequence<long> s_long;
+    sequence<octet> s_octet;
+    sequence<boolean> s_bool;
+    sequence<long long> s_ll;
+    sequence<double> s_dbl;
+    sequence<short> s_short;
+    long a_long[2][2];
+  };
+
+  // Non-primitive elements: XCDR2 prefixes each collection with a DHEADER.
+  @final struct NonPrims {
+    sequence<string> s_str;
+    sequence<string<5>, 3> s_bstr;
+    sequence<Color> s_enum;
+    sequence<Flags> s_bm;
+    sequence<Named> s_struct;
+    sequence<NamedA> s_astruct;
+    sequence<U> s_union;
+    StrSeq t_seq;
+  };
+
+  @final struct Nested {
+    sequence<sequence<long> > s_seq;
+    sequence<LongSeq, 2> s_tseq;
+    sequence<sequence<string> > s_seq_str;
+    sequence<sequence<Named> > s_seq_struct;
+    sequence<Triple> s_arr;
+    sequence<Triple, 2> s_barr;
+  };
+
+  @final struct Arrays {
+    string a_str[2];
+    Color a_enum[2];
+    Named a_struct[2];
+    string a_str2[2][2];
+    Triple a_tarr[2];
+    LongSeq a_seq[2];
+  };
+
+  @appendable struct App { NonPrims np; sequence<Named> extra; };
+
+  // Mutable members exercise the EMHEADER length codes the reference writes:
+  // LC 5 (string / DHEADER'd collection), 6 (4-byte elements),
+  // 7 (8-byte elements), 4 (2-byte elements, arrays of primitives, structs).
+  @mutable struct Mut {
+    @id(1) sequence<string> s_str;
+    @id(2) sequence<long> s_long;
+    @id(3) sequence<octet> s_octet;
+    @id(4) sequence<long long> s_ll;
+    @id(5) sequence<short> s_short;
+    @id(6) sequence<Named> s_struct;
+    @id(7) string name;
+    @id(8) long a_long[2];
+    @id(9) Named a_struct[2];
+    @id(10) Nested nest;
+  };
+};

@@ -1213,6 +1213,14 @@ const Builder = struct {
             const name = simpleName(a.name.parts);
             if (std.ascii.eqlIgnoreCase(name, "bit_bound")) {
                 result.bit_bound = extractU16Param(&a.params);
+            } else if (std.ascii.eqlIgnoreCase(name, "final")) {
+                result.extensibility = .final;
+            } else if (std.ascii.eqlIgnoreCase(name, "appendable")) {
+                result.extensibility = .appendable;
+            } else if (std.ascii.eqlIgnoreCase(name, "mutable")) {
+                result.extensibility = .mutable;
+            } else if (std.ascii.eqlIgnoreCase(name, "extensibility")) {
+                if (parseExtensibilityParam(&a.params)) |ext| result.extensibility = ext;
             } else {
                 try raw.append(self.alloc, .{
                     .name = try self.alloc.dupe(u8, name),

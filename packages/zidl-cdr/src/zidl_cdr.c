@@ -131,6 +131,17 @@ static int writer_pad(ZidlCdrWriter *w, size_t boundary) {
 
 /* ── Encapsulation header ─────────────────────────────────────────────────── */
 
+static int write_encap_id(ZidlCdrWriter *w, uint16_t id);
+
+int zidl_cdr_write_encap_kind(ZidlCdrWriter *w, int extensibility) {
+    if (w->xcdr_version != ZIDL_XCDR2 || extensibility == ZIDL_EXT_FINAL) return zidl_cdr_write_encap(w);
+    int be = w->byte_order == ZIDL_CDR_BE;
+    uint16_t id = extensibility == ZIDL_EXT_MUTABLE
+        ? (uint16_t)(be ? ZIDL_ENCAP_PL_CDR2_BE : ZIDL_ENCAP_PL_CDR2_LE)
+        : (uint16_t)(be ? ZIDL_ENCAP_D_CDR2_BE : ZIDL_ENCAP_D_CDR2_LE);
+    return write_encap_id(w, id);
+}
+
 int zidl_cdr_write_encap(ZidlCdrWriter *w) {
     uint16_t id;
     if (w->xcdr_version == ZIDL_XCDR1) {
@@ -140,6 +151,10 @@ int zidl_cdr_write_encap(ZidlCdrWriter *w) {
     } else {
         id = (uint16_t)(w->byte_order == ZIDL_CDR_BE ? ZIDL_ENCAP_CDR2_BE : ZIDL_ENCAP_CDR2_LE);
     }
+    return write_encap_id(w, id);
+}
+
+static int write_encap_id(ZidlCdrWriter *w, uint16_t id) {
     uint8_t hdr[4] = {
         (uint8_t)(id >> 8),    /* high byte first (big-endian repr ID per RTPS spec) */
         (uint8_t)(id & 0xFFu),
@@ -307,6 +322,10 @@ int zidl_cdr_write_dheader(ZidlCdrWriter *w, uint32_t payload_size) {
 }
 
 int zidl_cdr_reserve_dheader(ZidlCdrWriter *w, size_t *out_offset) {
+    /* Align first: the offset must name the 4-byte placeholder itself, not
+     * any padding written before it. */
+    int rc = writer_pad(w, align_cap(w->xcdr_version, 4));
+    if (rc) return rc;
     *out_offset = w->len;
     return zidl_cdr_write_u32(w, 0);
 }
@@ -341,6 +360,12 @@ int zidl_cdr_reader_init(ZidlCdrReader *r, const uint8_t *data, size_t data_len)
         case ZIDL_ENCAP_CDR1_BE:   r->byte_order = ZIDL_CDR_BE; r->xcdr_version = ZIDL_XCDR1; break;
         case ZIDL_ENCAP_CDR2_LE:   r->byte_order = ZIDL_CDR_LE; r->xcdr_version = ZIDL_XCDR2; break;
         case ZIDL_ENCAP_CDR2_BE:   r->byte_order = ZIDL_CDR_BE; r->xcdr_version = ZIDL_XCDR2; break;
+        /* XCDR2 appendable / mutable representations: same framing rules as
+         * CDR2 here (the DHEADER / EMHEADERs follow from the type). */
+        case ZIDL_ENCAP_D_CDR2_LE:
+        case ZIDL_ENCAP_PL_CDR2_LE: r->byte_order = ZIDL_CDR_LE; r->xcdr_version = ZIDL_XCDR2; break;
+        case ZIDL_ENCAP_D_CDR2_BE:
+        case ZIDL_ENCAP_PL_CDR2_BE: r->byte_order = ZIDL_CDR_BE; r->xcdr_version = ZIDL_XCDR2; break;
         case ZIDL_ENCAP_PL_CDR_LE: r->byte_order = ZIDL_CDR_LE; r->xcdr_version = ZIDL_XCDR1;
                                     r->is_pl_cdr = 1; break;
         case ZIDL_ENCAP_PL_CDR_BE: r->byte_order = ZIDL_CDR_BE; r->xcdr_version = ZIDL_XCDR1;
@@ -718,16 +743,26 @@ int zidl_cdr_read_emheader(ZidlCdrReader *r, ZidlEmHeader *out) {
         case 1: out->payload_bytes = 2u; break;
         case 2: out->payload_bytes = 4u; break;
         case 3: out->payload_bytes = 8u; break;
-        case 4: case 5: case 6: {
+        case 4:
+            /* A separate NEXTINT holding the member's byte length. */
+            rc = zidl_cdr_read_u32(r, &out->payload_bytes);
+            if (rc) return rc;
+            break;
+        default: {
+            /* LC 5-7: the NEXTINT is the first word of the member value (its
+             * DHEADER, string length or sequence length), so peek it and leave
+             * the reader at the start of the value (XTypes 1.3 7.4.3.4.8). */
+            size_t start = r->pos;
             uint32_t nextint;
             rc = zidl_cdr_read_u32(r, &nextint);
             if (rc) return rc;
-            if      (out->lc == 4) out->payload_bytes = nextint;
-            else if (out->lc == 5) out->payload_bytes = nextint * 4u;
-            else                   out->payload_bytes = nextint * 8u;
+            r->pos = start;
+            unsigned shift = out->lc == 5 ? 0u : out->lc == 6 ? 2u : 3u;
+            uint64_t bytes = ((uint64_t)nextint << shift) + 4u;
+            if (bytes > UINT32_MAX) return ZIDL_CDR_INVALID;
+            out->payload_bytes = (uint32_t)bytes;
             break;
         }
-        default: return ZIDL_CDR_INVALID; /* LC=7 reserved */
     }
     return ZIDL_CDR_OK;
 }

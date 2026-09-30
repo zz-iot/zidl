@@ -80,8 +80,9 @@ test "MutableStrUnion: a payload published earlier in the EMHEADER loop survives
 
     // Corrupt the DHEADER (the 4 bytes right after the 4-byte encap header)
     // to claim 4 more bytes of payload than actually follow, then append 4
-    // bytes that always decode as an invalid EMHEADER (`lc == 7`). This
-    // forces a THIRD loop iteration to fail *after* the real discriminant
+    // bytes that decode as an EMHEADER with `lc == 7`, whose NEXTINT (the
+    // start of the member value) is missing, so reading it runs off the end of
+    // the input. This forces a THIRD loop iteration to fail *after* the real discriminant
     // and case-value EMHEADERs (iterations 1-2) already ran and published to
     // out._d/out._u.
     var declared: u32 = std.mem.readInt(u32, buf.items[4..8], .little);
@@ -92,7 +93,7 @@ test "MutableStrUnion: a payload published earlier in the EMHEADER loop survives
     var reader = try zidl_rt.CdrReader.init(buf.items);
     var out: fixture.MutableStrUnion = .{};
     try testing.expectError(
-        error.InvalidEmheader,
+        error.EndOfStream,
         fixture.MutableStrUnion.deserializeInto(&out, &reader, testing.allocator),
     );
 

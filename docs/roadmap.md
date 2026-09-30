@@ -25,45 +25,24 @@ Features*.
 
 ### All backends
 
-- **Nested sequences are broken in every backend; C and C++ corrupt memory without any
-  error.** `sequence<sequence<T>>` (anonymous, bounded, typedef'd inner such as
-  `sequence<LongSeq>`, string or struct elements) reuses the outer loop's locals in the
-  inner read/write/skip loops:
-  - **Zig** does not compile (shadowed `_n`/`_buf`/`_se`/`_sb`).
-  - **C** does not compile for anonymous inner sequences (`void **` assigned to
-    `X_seq *`). The typedef'd-inner form compiles, and the shadowed `_si` then makes
-    decode write through a NULL buffer.
-  - **C++** compiles every form. Serialize writes `rows[i][i]` (out of bounds) and
-    decode writes into the wrong, still-empty inner vector. Every form crashes or
-    overflows under ASan.
-  - **Java** does not compile (`_e` redeclared); decode is also the Java non-primitive
-    element stub below.
-
-  Until fixed, generation should reject nested sequences rather than emit code that
-  compiles and corrupts memory. The fix needs a cross-backend compile-and-run fixture like
-  `test/integration/sequence_elements/`.
-- **Sequences whose element is an array typedef** (`typedef long Triple[3];
-  sequence<Triple>`):
-  - **C++** round-trips correctly.
-  - **Zig** unbounded is correct, but a bounded sequence's decode is a `// TODO` in
-    `emitSequenceElementRead`. It returns an empty sequence after consuming only the
-    count, and reports success.
-  - **C** headers do not compile (the element type is not declared before the hoisted
-    `X_seq` struct).
-  - **Java** does not compile.
-
-  Generation must never succeed with a decoder that silently consumes no elements.
-- **XCDR2 DHEADER on collections of non-primitive elements — needs interop confirmation.**
-  zidl encodes `sequence<string>`, `sequence<SomeStruct>` and similar collections in XCDR2
-  as the length followed by the elements. It writes a DHEADER only for `@appendable` and
-  `@mutable` aggregates (see `xcdr_encoding.md`). OpenDDS's generator
-  (`dds/idl/marshal_generator.cpp`, `generate_dheader_code`) also emits a DHEADER before
-  every sequence, array and map whose element type is not primitive when encoding XCDR2.
-  If that reading of XTypes is right, zidl's XCDR2 output for such types does not
-  interoperate with OpenDDS and likely other vendors. dds-rtps's Shape type has no
-  sequences, so the interop suite does not exercise this. Confirm with a real cross-vendor
-  exchange (including which element kinds count as primitive, e.g. enums) before changing
-  the wire format in every backend.
+- **Key hash of keys containing arrays of enums or bitmasks.** The key-hash writers
+  (Zig `KeyHashWriter`, C's XCDR1 big-endian key writer) omit every DHEADER, which is
+  right for aggregates but not for the XCDR2 collection DHEADER of an array-of-enum or
+  array-of-bitmask key member (arrays of primitives have none). The hash writer streams
+  into MD5 and cannot back-patch a length, so it needs the array's byte size computed
+  up front.
+- **XCDR1 `@mutable` data is not PL_CDR.** Peers expect a ParameterList (PL_CDR)
+  encoding for XCDR1 samples of mutable types; zidl writes plain CDR1 framing with a
+  CDR1 identifier. XCDR2 mutable types are correct (PL_CDR2, EMHEADERs).
+- **Decoders do not bound-check untrusted lengths.** The C and C++ decoders accept a
+  `sequence<T, N>` count above `N`, and the C++ decoder calls `resize()` with an
+  unchecked wire count, so a hostile length can throw `std::bad_alloc` out of an
+  `extern "C"` function (terminating the process). Reject counts above the bound and
+  counts that cannot fit in the remaining input before allocating.
+- **TypeObjects are minimal-only and struct-only as emitted constants.** zidl emits a
+  struct's minimal TypeObject and its hash (checked against reference hashes by
+  `test/integration/xcdr_known_answer/`); unions, enums and aliases are encoded only
+  as dependencies, and complete TypeObjects / TypeInformation are not generated.
 
 - **Managed references and construction-only Config fields** —
   [contract, open items and acceptance criteria](design/managed-references.md).
@@ -169,9 +148,8 @@ Features*.
 
 - **`bitset` CDR** — no standard Java CDR mapping; emits `// TODO: bitset`. (The bitset
   *type* is generated as a real class.)
-- **Non-primitive sequence-element CDR deserialization** — falls through to
-  `// TODO: seq elem deserialize`; a `.seq_struct` param whose element is an enum stays in
-  the `UnsupportedOperationException` stub bucket. `java.zig:2647`.
+- **`.seq_struct` interface parameter whose element is an enum** stays in the
+  `UnsupportedOperationException` stub bucket.
 - **`--generate-interfaces` residual stub-bucket cases** — an op generates an
   `UnsupportedOperationException` throw (not a native call) for: a `value_struct` returned
   *by value*, a `.callback` return other than `get_listener()`, an anonymous inline
