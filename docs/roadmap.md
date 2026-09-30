@@ -25,6 +25,59 @@ Features*.
 
 ### All backends
 
+- **Nested sequences are broken in every backend; C and C++ corrupt memory without any
+  error.** `sequence<sequence<T>>` (anonymous, bounded, typedef'd inner such as
+  `sequence<LongSeq>`, string or struct elements) reuses the outer loop's locals in the
+  inner read/write/skip loops:
+  - **Zig** does not compile (shadowed `_n`/`_buf`/`_se`/`_sb`).
+  - **C** does not compile for anonymous inner sequences (`void **` assigned to
+    `X_seq *`). The typedef'd-inner form compiles, and the shadowed `_si` then makes
+    decode write through a NULL buffer.
+  - **C++** compiles every form. Serialize writes `rows[i][i]` (out of bounds) and
+    decode writes into the wrong, still-empty inner vector. Every form crashes or
+    overflows under ASan.
+  - **Java** does not compile (`_e` redeclared); decode is also the Java non-primitive
+    element stub below.
+
+  Until fixed, generation should reject nested sequences rather than emit code that
+  compiles and corrupts memory. The fix needs a cross-backend compile-and-run fixture like
+  `test/integration/sequence_elements/`.
+- **Sequences whose element is an array typedef** (`typedef long Triple[3];
+  sequence<Triple>`):
+  - **C++** round-trips correctly.
+  - **Zig** unbounded is correct, but a bounded sequence's decode is a `// TODO` in
+    `emitSequenceElementRead`. It returns an empty sequence after consuming only the
+    count, and reports success.
+  - **C** headers do not compile (the element type is not declared before the hoisted
+    `X_seq` struct).
+  - **Java** does not compile.
+
+  Generation must never succeed with a decoder that silently consumes no elements.
+- **XCDR2 DHEADER on collections of non-primitive elements — needs interop confirmation.**
+  zidl encodes `sequence<string>`, `sequence<SomeStruct>` and similar collections in XCDR2
+  as the length followed by the elements. It writes a DHEADER only for `@appendable` and
+  `@mutable` aggregates (see `xcdr_encoding.md`). OpenDDS's generator
+  (`dds/idl/marshal_generator.cpp`, `generate_dheader_code`) also emits a DHEADER before
+  every sequence, array and map whose element type is not primitive when encoding XCDR2.
+  If that reading of XTypes is right, zidl's XCDR2 output for such types does not
+  interoperate with OpenDDS and likely other vendors. dds-rtps's Shape type has no
+  sequences, so the interop suite does not exercise this. Confirm with a real cross-vendor
+  exchange (including which element kinds count as primitive, e.g. enums) before changing
+  the wire format in every backend.
+
+- **Managed references and construction-only Config fields** —
+  [contract, open items and acceptance criteria](design/managed-references.md).
+  Opt-in managed-reference lifetime for non-DDS reference interfaces (owning slot helpers,
+  provider retain/release/identity/query_view, staged out/inout publication) and
+  construction-only Config members excluded from TOML/wire. Includes the four generator
+  corrections listed there (nil interface defaults, inout direction, aggregate view
+  conversion, sequence-conversion failure). A narrow C/Zig experiment behind
+  `@experimental_managed_reference`/`@experimental_managed_config` lives on the
+  `concurrency-reference-support` branch, not in `main`; it is not a supported ABI.
+  Needed by zzdds only for its advanced concurrency extension objects (runtime owners/refs,
+  listener groups, resource scopes), not for its first shipped subset. Consumer semantics
+  stay outside zidl; plugin extraction remains the separate later project below.
+
 - **Union discriminant of a complex type** (`wstring` / `fixed_pt` / named-non-enum /
   typedef-of-complex) emits `/* TODO: unsupported discriminant */` in every backend.
   `c.zig:3316`, `cpp.zig:2947`, `zig.zig:969`; Boolean union switch also unhandled in Java
@@ -131,8 +184,16 @@ Features*.
 
 ### Zig backend
 
-- **Sequence element that resolves to an array typedef** emits a `// TODO` in the
-  deserialize path. `zig.zig:5877`.
+- **Untrusted-input decoding for broker-style protocols:** generated mutable decoding
+  currently accepts absent required members and duplicate singleton members. The zzdds
+  broker draft keeps mutable encoding only for bootstrap bodies; its established bodies
+  are final and require exact-extent decoding (reject truncation and trailing bytes)
+  through bounded sub-readers. Provide generic required/duplicate-member validation or an
+  explicit validated-decoder facility, and expose consumed length for final bodies,
+  before consumers treat generated decoding as untrusted-message admission. Bounded
+  sequences use inline storage sized to the schema maximum; provide a bounded
+  allocator-backed or borrowed mapping for large wire ceilings so embedded consumers need
+  not reserve the maximum in every native value.
 - **`wstring` constants** emit only a comment — `[]const u16` literals are unsupported.
 - **`--zig-generate-toml-config`** (`applyToml`) — fixed-size arrays (incl. array typedefs),
   unions, bitmasks, bounded strings, and sequences of non-string turn the whole generated
