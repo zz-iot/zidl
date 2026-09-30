@@ -25,13 +25,17 @@ Features*.
 
 ### All backends
 
-- **Generic construction-reference bindings (zzdds concurrency prerequisite)** —
-  [Requirements and validation gates](design/construction-reference-bindings.md).
-  Fix interface out/inout replacement and aggregate C-ABI conversion; specify safe
-  reference defaults/ownership and fallible cleanup; support explicitly construction-only
-  configuration fields without serializing live handles. Validate all four bindings
-  with a non-DDS reference core. Consumer runtime/group semantics stay outside zidl.
-  Plugin extraction remains the separate later project below.
+- **Managed references and construction-only Config fields** —
+  [contract, open items and acceptance criteria](design/managed-references.md).
+  Opt-in managed-reference lifetime for non-DDS reference interfaces (owning slot helpers,
+  provider retain/release/identity/query_view, staged out/inout publication) and
+  construction-only Config members excluded from TOML/wire. Includes the four generator
+  corrections listed there (nil interface defaults, inout direction, aggregate view
+  conversion, sequence-conversion failure). A narrow C/Zig experiment exists behind
+  `@experimental_managed_reference`/`@experimental_managed_config`; it is not a supported ABI.
+  Needed by zzdds only for its advanced concurrency extension objects (runtime owners/refs,
+  listener groups, resource scopes), not for its first shipped subset. Consumer semantics
+  stay outside zidl; plugin extraction remains the separate later project below.
 
 - **Union discriminant of a complex type** (`wstring` / `fixed_pt` / named-non-enum /
   typedef-of-complex) emits `/* TODO: unsupported discriminant */` in every backend.
@@ -139,12 +143,16 @@ Features*.
 
 ### Zig backend
 
-- **Broker codec admission/representation follow-ups (2026-09-17):** mutable
-  decoding currently accepts absent required fields and duplicate singleton members.
-  Add generic validation or an explicit validated-decoder facility before consumers
-  treat decoding as untrusted-message admission. Bounded sequences use inline storage;
-  provide/review a bounded allocated or borrowed mapping for large wire ceilings rather
-  than forcing embedded clients to reserve the maximum in every native value.
+- **Untrusted-input decoding for broker-style protocols:** generated mutable decoding
+  currently accepts absent required members and duplicate singleton members. The zzdds
+  broker draft keeps mutable encoding only for bootstrap bodies; its established bodies
+  are final and require exact-extent decoding (reject truncation and trailing bytes)
+  through bounded sub-readers. Provide generic required/duplicate-member validation or an
+  explicit validated-decoder facility, and expose consumed length for final bodies,
+  before consumers treat generated decoding as untrusted-message admission. Bounded
+  sequences use inline storage sized to the schema maximum; provide a bounded
+  allocator-backed or borrowed mapping for large wire ceilings so embedded consumers need
+  not reserve the maximum in every native value.
 - **Nested/unsupported sequence element decoding:** `emitSequenceElementRead` can
   emit TODO-only bodies for nested sequences and array typedef elements. Diagnose
   unsupported shapes or implement correct reads/cleanup; successful generation must

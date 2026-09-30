@@ -1666,7 +1666,7 @@ const Generator = struct {
             if (!self.opts.generate_interfaces or !self.opts.no_typesupport) return error.UnsupportedManagedReferenceExperiment;
             const cname = try self.cApiQualName(iface.qualified_name, pfx);
             defer self.alloc.free(cname);
-            const name = try std.fmt.allocPrint(self.alloc, "{s}{s}", .{pfx, iface.name});
+            const name = try std.fmt.allocPrint(self.alloc, "{s}{s}", .{ pfx, iface.name });
             defer self.alloc.free(name);
             const generated = try managed.zig(self.alloc, iface, name, cname);
             defer self.alloc.free(generated);
