@@ -1,0 +1,2 @@
+// Generate the actual typed reader entry points under review.
+@appendable struct Topic { @key long id; };

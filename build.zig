@@ -187,6 +187,55 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_wrapper_contract.step);
     }
 
+    // Compile and run the full C++ condition hierarchy and raw-op adapters.
+    // Keep this in the default tests: signature text checks alone cannot catch
+    // incompatible native_handle return types or incorrect shared_ptr upcasts.
+    {
+        const gen_c = b.addRunArtifact(exe);
+        gen_c.addArgs(&.{ "-b", "c", "--generate-interfaces", "-o" });
+        const c_dir = gen_c.addOutputDirectoryArg("cpp-conditions-c");
+        gen_c.addFileArg(b.path("test/integration/cpp_conditions/dcps.idl"));
+        const gen_cpp = b.addRunArtifact(exe);
+        gen_cpp.addArgs(&.{ "-b", "cpp", "--generate-interfaces", "--cpp-generate-impl", "-o" });
+        const cpp_dir = gen_cpp.addOutputDirectoryArg("cpp-conditions-cpp");
+        gen_cpp.addFileArg(b.path("test/integration/cpp_conditions/dcps.idl"));
+        const gen_topic = b.addRunArtifact(exe);
+        gen_topic.addArgs(&.{ "-b", "cpp", "--generate-zzdds-wrappers", "-o" });
+        const topic_dir = gen_topic.addOutputDirectoryArg("cpp-conditions-topic");
+        gen_topic.addFileArg(b.path("test/integration/cpp_conditions/topic.idl"));
+        const conditions_mod = b.createModule(.{
+            .root_source_file = null,
+            .target = target,
+            .optimize = .Debug,
+            .sanitize_thread = sanitize_thread,
+            .link_libc = true,
+            .link_libcpp = true,
+        });
+        conditions_mod.addCSourceFile(.{
+            .file = b.path("test/integration/cpp_conditions/test.cpp"),
+            .flags = &.{ "-std=c++17", "-Wall", "-Werror" },
+        });
+        conditions_mod.addCSourceFile(.{
+            .file = cpp_dir.path(b, "dcps_impl.cpp"),
+            .flags = &.{ "-std=c++17", "-Wall", "-Werror" },
+        });
+        conditions_mod.addCSourceFile(.{
+            .file = topic_dir.path(b, "topic_cdr.cpp"),
+            .flags = &.{ "-std=c++17", "-Wall", "-Werror" },
+        });
+        conditions_mod.addCSourceFile(.{
+            .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"),
+            .flags = &.{"-std=c99"},
+        });
+        conditions_mod.addIncludePath(topic_dir);
+        conditions_mod.addIncludePath(cpp_dir);
+        conditions_mod.addIncludePath(c_dir);
+        conditions_mod.addIncludePath(b.path("test/integration/cpp_conditions"));
+        conditions_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+        const conditions_test = b.addExecutable(.{ .name = "zidl-cpp-conditions", .root_module = conditions_mod });
+        test_step.dependOn(&b.addRunArtifact(conditions_test).step);
+    }
+
     // ── PL_CDR retention / strict-mode compile-and-run check ──────────────────
     // src/backend/zig.zig's PL_CDR tests only substring-match. This generates
     // test/integration/zig_pl_cdr/fixture.idl with --zig-pl-cdr, compiles the
