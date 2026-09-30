@@ -1,0 +1,90 @@
+// Fixture for sequences whose elements are structs/unions (or aliases of
+// them): generated for the Zig, C and C++ backends, then compiled and run by
+// test.zig / test.c / test.cpp.
+//
+// Zig:
+// 1. A bounded sequence stores its elements inline, so it never allocates, but
+//    struct/union/bitset element decoders still take the allocator. Before the
+//    fix, a struct whose only allocator-forwarding member was such a sequence
+//    emitted `_ = allocator;` and then used `allocator` (a compile error).
+// 2. Heap-owning elements (here `Named`'s string) were never released or deep
+//    copied: bounded holders got no deinit/clone at all, and unbounded
+//    sequence deinit/clone freed or memcpy'd only the element buffer.
+// C:
+// 3. The hoisted `X_seq` struct named union and alias element types before
+//    they were declared, so the header did not compile.
+// 4. `typedef sequence<T> X;` declared `X_free` in the header but no
+//    definition was generated.
+// 5. A decode that failed part-way left never-read elements uninitialized,
+//    and the caller's `_free` then freed garbage pointers.
+// C++:
+// 6. Union CDR prototypes were declared with C++ linkage and then again in
+//    the `extern "C"` block (conflicting declarations).
+// 7. `@optional` members did not compile: the presence flag was `int8_t`
+//    (read through `bool *`) and the absent branch emitted an extra `{`.
+
+struct Point { long x; long y; };
+typedef Point PointAlias;
+typedef sequence<PointAlias, 4> AliasedPoints;
+
+struct Named { string label; long id; };
+
+union Choice switch (long) {
+    case 0: long i;
+    case 1: string s;
+};
+
+enum Color { RED, GREEN, BLUE };
+
+// The originally reported shape: POD struct elements reached through a typedef.
+struct AliasHolder { AliasedPoints rows; };
+
+// Direct struct elements that own heap memory: decode must allocate and deinit must free.
+struct NamedHolder { sequence<Named, 3> items; long tail; };
+
+// Union elements.
+struct ChoiceHolder { sequence<Choice, 3> choices; };
+
+// Enum elements never forward the allocator; this must still compile with a discard.
+struct ColorHolder { sequence<Color, 4> colors; };
+
+// Other extensibility kinds use their own decoders.
+@appendable struct AppendableHolder { sequence<Point, 2> points; };
+@mutable struct MutableHolder { @id(1) sequence<Point, 2> points; @id(2) long tail; };
+
+// A union case whose only allocator use is the bounded sequence.
+union SeqCase switch (long) {
+    case 0: long none;
+    case 1: sequence<Point, 2> points;
+};
+
+// Heap-owning elements through every sequence form.
+typedef sequence<Named> NamedSeq;
+typedef sequence<Named, 3> NamedBoundedSeq;
+struct UnboundedHolder { sequence<Named> items; };
+struct TypedefUnboundedHolder { NamedSeq items; };
+struct TypedefBoundedHolder { NamedBoundedSeq items; };
+
+// A holder whose only heap-owning content is a nested bounded-sequence holder.
+struct Outer { NamedHolder inner; long x; };
+
+// Alias elements: each must be declared before the hoisted C `X_seq` struct.
+typedef string Label;
+typedef PointAlias PointAlias2;
+typedef Choice ChoiceAlias;
+typedef Color ColorAlias;
+typedef sequence<string> LabelList;
+struct AliasElementHolder {
+    sequence<Label> labels;
+    sequence<PointAlias2> points;
+    sequence<ChoiceAlias> choices;
+    sequence<ColorAlias> colors;
+    LabelList more;
+};
+
+// Optional bounded member and a union case holding heap-owning elements.
+struct OptionalHolder { @optional sequence<Named, 2> maybe; };
+union PeopleCase switch (long) {
+    case 0: long none;
+    case 1: sequence<Named, 2> people;
+};

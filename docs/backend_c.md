@@ -13,7 +13,10 @@ derived from the IDL source file.
 | `<name>.h` | Type declarations, CDR function prototypes, include guards |
 | `<name>_cdr.c` | CDR serialize/deserialize implementations |
 
-`--split-files` produces one `.h`/`.c` pair per top-level named type.
+`--split-files` produces one `<Type>.h` per top-level named type, plus `<stem>_all.h`
+that includes them all. Each header `#include`s the headers of the types it uses. Structs,
+exceptions and unions also get `<Type>_cdr.c`. So does an unbounded `typedef sequence<T>`,
+for its `_free`, unless `--c-no-free` is set.
 
 ---
 
@@ -118,6 +121,13 @@ int Foo_serialize(ZidlCdrWriter *w, const Foo *v);
    must free them when done. */
 int Foo_deserialize(ZidlCdrReader *r, Foo *v);
 ```
+
+Pass a zeroed or `Foo_default`-initialized `Foo`. On failure, `Foo_free`
+(when generated) releases whatever the decode had already allocated. That
+includes sequence elements that were never read (their buffer is zeroed
+before decoding) and a partially read `@optional` member (it is marked
+present before it is read). An unbounded `typedef sequence<T> X;` also gets
+an `X_free`.
 
 ---
 

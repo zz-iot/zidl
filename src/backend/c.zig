@@ -194,6 +194,11 @@ const Generator = struct {
     /// safely included together.  Always true: prevents conflicts when multiple
     /// generated headers (e.g. dcps.h and shape.h) define the same sequence type.
     guarded_seqs: bool = true,
+    /// Split-file mode: C name of the one type this header defines. Every other
+    /// named type is declared by a dependency header this one `#include`s, so
+    /// only this type may be forward-declared or hoisted here (a sequence of
+    /// itself); re-declaring anything else is a duplicate typedef under C99.
+    split_self_c_name: ?[]const u8 = null,
 
     // ── Low-level output helpers ──────────────────────────────────────────────
 
@@ -408,12 +413,13 @@ const Generator = struct {
         // For named struct/exception element types, emit a forward typedef so
         // `ElemType *_buffer` compiles before the full struct definition appears.
         try self.emitForwardDeclIfStruct(elem);
-        // Likewise for a typedef-to-sequence element (e.g. `octet_seq` used
-        // as `sequence<octet_seq>`'s element): its own `typedef` line's
-        // normal emission point (`emitTypedef`, via the per-item walk) runs
-        // after this whole pre-scan pass -- too late for the guarded outer
-        // sequence struct below, which references it by name.
-        try self.emitForwardDeclIfSeqTypedef(elem);
+        // Likewise for a typedef element (e.g. `octet_seq` used as
+        // `sequence<octet_seq>`'s element, or `typedef Point PointAlias` used
+        // as `sequence<PointAlias>`'s): its own `typedef` line's normal
+        // emission point (`emitTypedef`, via the per-item walk) runs after
+        // this whole pre-scan pass -- too late for the guarded outer sequence
+        // struct below, which references it by name.
+        try self.emitForwardDeclIfAlias(elem);
 
         const seq_name = try std.fmt.allocPrint(self.alloc, "{s}_seq", .{key});
         defer self.alloc.free(seq_name);
@@ -722,15 +728,28 @@ const Generator = struct {
         const disc_c = try self.typeRefToC(u.discriminant);
         defer self.alloc.free(disc_c);
 
+        // Forward-declared when used as a sequence element (see
+        // `emitForwardDeclIfStruct`); complete the struct without repeating
+        // the typedef, exactly like `emitStruct`.
+        const was_forward_declared = self.forward_decl_emitted.get(c_name) != null;
+
         try self.emitVerbatimForPlacement(u.annotations.raw, "before-declaration");
-        try self.print("typedef struct {s}_s {{\n", .{c_name});
+        if (was_forward_declared) {
+            try self.print("struct {s}_s {{\n", .{c_name});
+        } else {
+            try self.print("typedef struct {s}_s {{\n", .{c_name});
+        }
         try self.print("    {s}{s}_d;\n", .{ disc_c, ptrSep(disc_c) });
         try self.write("    union {\n");
         for (u.cases) |cas| {
             try self.emitMemberDecl(cas.type_ref, cas.name, cas.dimensions, "        ");
         }
         try self.write("    } _u;\n");
-        try self.print("}} {s};\n\n", .{c_name});
+        if (was_forward_declared) {
+            try self.write("};\n\n");
+        } else {
+            try self.print("}} {s};\n\n", .{c_name});
+        }
 
         if (!self.opts.no_typesupport) {
             try self.emitUnionCdrProtos(c_name);
@@ -833,8 +852,8 @@ const Generator = struct {
         const c_type = try self.typeRefToC(t.type_ref);
         defer self.alloc.free(c_type);
 
-        // A typedef-to-sequence used as another sequence's element already
-        // had this exact line emitted early by `emitForwardDeclIfSeqTypedef`
+        // A typedef used as a sequence's element already had this exact line
+        // emitted early by `emitForwardDeclIfAlias`
         // (see there) -- skip re-emitting it here; re-emitting an identical
         // typedef is illegal under this project's `-std=c99 -Werror`. The
         // `_free` declaration below is independent and must still run.
@@ -856,11 +875,7 @@ const Generator = struct {
 
         // Unbounded sequence typedefs need a _free declaration so C++ bindings
         // can release middleware-allocated buffers after copying them out.
-        const is_unbounded_seq = t.dimensions.len == 0 and switch (t.type_ref) {
-            .sequence => |seq| seq.bound == null,
-            else => false,
-        };
-        if (is_unbounded_seq and !self.opts.c_no_free) {
+        if (isUnboundedSeqTypedef(t) and !self.opts.c_no_free) {
             const em = self.opts.export_macro;
             const sp: []const u8 = if (em.len > 0) " " else "";
             try self.print("{s}{s}void {s}_free({s} *v);\n\n", .{ em, sp, c_name, c_name });
@@ -1050,14 +1065,24 @@ const Generator = struct {
         }
     }
 
+    /// True when `c_name` is declared by an included dependency header (split
+    /// mode) rather than by this header -- see `split_self_c_name`.
+    fn declaredByDependencyHeader(self: *const Generator, c_name: []const u8) bool {
+        const own = self.split_self_c_name orelse return false;
+        return !std.mem.eql(u8, own, c_name);
+    }
+
     fn emitForwardDeclIfStruct(self: *Generator, tr: ir.TypeRef) !void {
         switch (tr) {
             .named => |td| switch (td) {
-                .struct_, .exception => {
+                // Unions are emitted as `typedef struct X_s {...} X;` too, so the
+                // same incomplete-struct forward typedef works for them.
+                .struct_, .exception, .union_ => {
                     const qn = ir.typeDeclQualifiedName(td);
                     const c_name = try self.prefixedCName(qn);
                     defer self.alloc.free(c_name);
                     if (self.forward_decl_emitted.get(c_name) != null) return;
+                    if (self.declaredByDependencyHeader(c_name)) return;
                     const k = try self.alloc.dupe(u8, c_name);
                     errdefer self.alloc.free(k);
                     try self.forward_decl_emitted.put(self.alloc, k, {});
@@ -1069,14 +1094,17 @@ const Generator = struct {
         }
     }
 
-    /// A `.named .typedef` element whose own type is a sequence (e.g.
-    /// `typedef sequence<octet> octet_seq;`, used as `sequence<octet_seq>`'s
-    /// element) needs its plain `typedef {rhs} {c_name};` line emitted early,
-    /// same reasoning as `emitForwardDeclIfStruct` above: the guarded outer
-    /// sequence struct `ensureSeqTypedef` is about to emit references this
-    /// name, but the element's own typedef normally isn't written out until
-    /// `emitTypedef` reaches it in the later per-item walk. Registers into
-    /// the same `forward_decl_emitted` set `emitForwardDeclIfStruct` uses (no
+    /// A `.named .typedef` element (e.g. `typedef sequence<octet> octet_seq;`
+    /// used as `sequence<octet_seq>`'s element, or `typedef Point PointAlias;`
+    /// used as `sequence<PointAlias>`'s) needs its plain `typedef {rhs}
+    /// {c_name};` line emitted early, same reasoning as
+    /// `emitForwardDeclIfStruct` above: the guarded outer sequence struct
+    /// `ensureSeqTypedef` is about to emit references this name, but the
+    /// element's own typedef normally isn't written out until `emitTypedef`
+    /// reaches it in the later per-item walk. The aliased type is made
+    /// nameable first (forward struct/union typedef, its own sequence struct,
+    /// or -- for alias chains -- the next alias down). Registers into the
+    /// same `forward_decl_emitted` set `emitForwardDeclIfStruct` uses (no
     /// namespace collision -- struct and typedef qualified names can never
     /// coincide in valid IDL) so `emitTypedef` can skip re-emitting the same
     /// line as a duplicate, which `-std=c99 -Werror` (this project's C
@@ -1084,7 +1112,8 @@ const Generator = struct {
     /// typedef is identical -- unlike the struct case, a plain typedef has no
     /// "forward-declare incomplete, complete it later" split to exploit, so
     /// the later emission must be suppressed outright rather than reshaped.
-    fn emitForwardDeclIfSeqTypedef(self: *Generator, tr: ir.TypeRef) !void {
+    /// Scalar aliases were already emitted by pass 0 and are skipped here.
+    fn emitForwardDeclIfAlias(self: *Generator, tr: ir.TypeRef) anyerror!void {
         const td = switch (tr) {
             .named => |td| td,
             else => return,
@@ -1094,13 +1123,20 @@ const Generator = struct {
             else => return,
         };
         if (t.dimensions.len != 0) return; // array typedef: not a bare alias, not this case
-        switch (t.type_ref) {
-            .sequence => {},
-            else => return,
-        }
         const c_name = try self.prefixedCName(t.qualified_name);
         defer self.alloc.free(c_name);
         if (self.forward_decl_emitted.get(c_name) != null) return;
+        if (self.scalar_typedef_emitted.get(c_name) != null) return;
+        if (self.declaredByDependencyHeader(c_name)) return;
+
+        switch (t.type_ref) {
+            .sequence => |seq| try self.ensureSeqTypedef(seq.element.*),
+            else => {
+                try self.emitForwardDeclIfStruct(t.type_ref);
+                try self.emitForwardDeclIfAlias(t.type_ref);
+            },
+        }
+
         const k = try self.alloc.dupe(u8, c_name);
         errdefer self.alloc.free(k);
         try self.forward_decl_emitted.put(self.alloc, k, {});
@@ -1492,6 +1528,15 @@ fn itemsHaveZzddsTopicStructC(items: []const ir.ModuleItem) bool {
 /// caps _maximum, it doesn't change _buffer from a heap pointer to an inline
 /// array, unlike bounded strings). Also checks base structs, since a derived
 /// struct's _free must free its base's heap-owned fields too.
+/// `typedef sequence<T> Name;` (no array dimensions): the header declares a
+/// `Name_free` for it and `_cdr.c` defines one.
+fn isUnboundedSeqTypedef(t: *const ir.Typedef) bool {
+    return t.dimensions.len == 0 and switch (t.type_ref) {
+        .sequence => |seq| seq.bound == null,
+        else => false,
+    };
+}
+
 fn structHasSequenceFields(s: *const ir.Struct) bool {
     if (s.base) |base| {
         switch (base) {
@@ -1927,8 +1972,21 @@ const CdrGenerator = struct {
                 try self.emitUnionFns(u);
                 if (unionHasSequenceFields(u) and !self.opts.c_no_free) try self.emitUnionFree(u);
             },
+            .typedef => |t| if (isUnboundedSeqTypedef(t) and !self.opts.c_no_free) try self.emitSeqTypedefFree(t),
             else => {},
         }
+    }
+
+    /// Emit `void <CName>_free(<CName> *v)` for an unbounded sequence typedef --
+    /// the definition matching the declaration `Generator.emitTypedef` writes
+    /// into the header. Frees heap-owning elements, then the buffer, honouring
+    /// `_release` like any other sequence field.
+    fn emitSeqTypedefFree(self: *CdrGenerator, t: *const ir.Typedef) !void {
+        const c_name = try self.prefixedCName(t.qualified_name);
+        defer self.alloc.free(c_name);
+        try self.print("void {s}_free({s} *v) {{\n", .{ c_name, c_name });
+        try self.emitFreeTypeRefGeneral(t.type_ref, "(*v)", 0);
+        try self.write("}\n\n");
     }
 
     // ── Struct / Exception ────────────────────────────────────────────────────
@@ -2093,7 +2151,9 @@ const CdrGenerator = struct {
                 self.indent_depth += 1;
                 if (m.annotations.is_optional) {
                     // @mutable + @optional: receiving the EMHEADER means the field is present.
+                    // Zero it first so a partial read stays freeable.
                     const bit_idx = optBitIdxForMember(s.*, idx);
+                    try self.printI("memset(&_v->{s}, 0, sizeof(_v->{s}));\n", .{ m.name, m.name });
                     try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit_idx});
                 }
                 {
@@ -2147,12 +2207,16 @@ const CdrGenerator = struct {
                     self.indent_depth += 1;
                     const lval_opt = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
                     defer self.alloc.free(lval_opt);
+                    // Mark present (over zeroed storage) before reading, so a
+                    // decode that fails part-way leaves `_free` able to
+                    // release whatever the member already allocated.
+                    try self.printI("memset(&{s}, 0, sizeof({s}));\n", .{ lval_opt, lval_opt });
+                    try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit_idx});
                     if (m.dimensions.len > 0) {
                         try self.emitReadArray(m.type_ref, m.name, lval_opt, m.dimensions, 0);
                     } else {
                         try self.emitReadForTypeRef(m.type_ref, m.name, lval_opt);
                     }
-                    try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit_idx});
                     self.indent_depth -= 1;
                     try self.writeI("}\n");
                     self.indent_depth -= 1;
@@ -2601,8 +2665,11 @@ const CdrGenerator = struct {
                     try self.writeI("if (_rc) return _rc;\n");
                     try self.printI("if (_ip_{s}) {{\n", .{m.name});
                     self.indent_depth += 1;
-                    try self.emitReadMember(m);
+                    // Same ordering as the full deserialize: present over
+                    // zeroed storage first, so a partial read stays freeable.
+                    try self.printI("memset(&_v->{s}, 0, sizeof(_v->{s}));\n", .{ m.name, m.name });
                     try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit_idx});
+                    try self.emitReadMember(m);
                     self.indent_depth -= 1;
                     try self.writeI("}\n");
                     self.indent_depth -= 1;
@@ -3508,7 +3575,10 @@ const CdrGenerator = struct {
                 if (std.mem.startsWith(u8, fn_name, "//")) {
                     try self.printI("/* unsupported discriminant type read */\n", .{});
                 } else {
-                    try self.printI("{{ {s} _d; _rc = {s}(_r, &_d); if (_rc) return _rc; {s} = ({s})_d; }}\n", .{ c_type, fn_name, lval, c_type });
+                    // The temporary must not be named `_d`: `_skip` reads into a
+                    // local `_d`, which an inner `_d` would shadow, leaving the
+                    // `switch (_d)` that follows on an uninitialized value.
+                    try self.printI("{{ {s} _d_raw; _rc = {s}(_r, &_d_raw); if (_rc) return _rc; {s} = ({s})_d_raw; }}\n", .{ c_type, fn_name, lval, c_type });
                 }
             },
             .named => |td| switch (td) {
@@ -3827,6 +3897,7 @@ const CdrGenerator = struct {
 
     fn emitReadPresentMember(self: *CdrGenerator, m: ir.StructMember, bit_idx: u32) anyerror!void {
         if (m.annotations.is_optional) {
+            try self.printI("memset(&_v->{s}, 0, sizeof(_v->{s}));\n", .{ m.name, m.name });
             try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit_idx});
         }
         const lval = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
@@ -3912,15 +3983,35 @@ const CdrGenerator = struct {
                 try self.emitRcCheck();
                 const elem_c = try self.elemCType(seq.element.*);
                 defer self.alloc.free(elem_c);
+                // A wire length whose byte size wraps `size_t` (32-bit
+                // targets) would allocate a short buffer the element loop
+                // then overruns.
+                try self.printI("if ((size_t)_sl > SIZE_MAX / sizeof({s})) {{\n", .{elem_c});
+                self.indent_depth += 1;
+                try self.emitReturnRc("ZIDL_CDR_OVERFLOW");
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
                 try self.printI("{s}._length = _sl;\n", .{lval});
                 try self.printI("{s}._maximum = _sl;\n", .{lval});
                 try self.printI("{s}._release = true;\n", .{lval});
                 try self.printI("{s}._buffer = ({s} *)zidl_cdr_alloc(_sl * sizeof({s}));\n", .{ lval, elem_c, elem_c });
                 try self.printI("if (!{s}._buffer && _sl > 0) {{\n", .{lval});
                 self.indent_depth += 1;
+                // Leave an empty sequence behind so the caller's `_free` does
+                // not walk `_length` slots of a NULL buffer.
+                try self.printI("{s}._length = 0;\n", .{lval});
+                try self.printI("{s}._maximum = 0;\n", .{lval});
                 try self.emitReturnRc("ZIDL_CDR_OVERFLOW");
                 self.indent_depth -= 1;
                 try self.writeI("}\n");
+                // `_length` already covers every slot, so if an element fails
+                // part-way the caller's `_free` walks all of them -- including
+                // ones never read. Zero heap-owning elements first so those
+                // slots hold NULL strings / non-releasing sequences, which the
+                // free path treats as empty.
+                if (typeRefHasSequence(seq.element.*)) {
+                    try self.printI("if ({s}._buffer) memset({s}._buffer, 0, _sl * sizeof({s}));\n", .{ lval, lval, elem_c });
+                }
                 try self.writeI("{ uint32_t _si; for (_si = 0; _si < _sl; _si++) {\n");
                 self.indent_depth += 1;
                 const elem_lval = try std.fmt.allocPrint(self.alloc, "{s}._buffer[_si]", .{lval});
@@ -4661,6 +4752,9 @@ fn generateTypeHeader(
         .enum_emitted = .empty,
         .guarded_seqs = true,
     };
+    const self_c_name = try gen.prefixedCName(qname);
+    defer alloc.free(self_c_name);
+    gen.split_self_c_name = self_c_name;
     defer {
         var it = gen.seq_emitted.keyIterator();
         while (it.next()) |k| alloc.free(k.*);
@@ -4686,7 +4780,8 @@ fn generateTypeHeader(
     try gen.write("#include <stdbool.h>\n");
     if (!opts.no_typesupport) {
         switch (td) {
-            .struct_ => try gen.write("#include \"zidl_cdr.h\"\n"),
+            // Unions declare CDR prototypes too (`emitUnionCdrProtos`).
+            .struct_, .union_ => try gen.write("#include \"zidl_cdr.h\"\n"),
             else => {},
         }
     }
@@ -4826,18 +4921,22 @@ pub fn generateSplitFiles(
         defer alloc.free(h_filename);
         try writeOutputFile(alloc, io, opts, h_filename, h_content.items);
 
-        // CDR source (structs and exceptions only).
+        // CDR source: structs, exceptions and unions get serialize/deserialize
+        // (+ `_free`); an unbounded sequence typedef gets its `_free`, which its
+        // header declares, unless `--c-no-free`.
         if (!opts.no_typesupport) {
-            switch (td) {
-                .struct_, .exception => {
-                    var c_content = std.ArrayList(u8).empty;
-                    defer c_content.deinit(alloc);
-                    try generateTypeCdrSource(alloc, td, opts, type_stem, &c_content);
-                    const c_filename = try std.fmt.allocPrint(alloc, "{s}_cdr.c", .{type_stem});
-                    defer alloc.free(c_filename);
-                    try writeOutputFile(alloc, io, opts, c_filename, c_content.items);
-                },
-                else => {},
+            const wants_cdr = switch (td) {
+                .struct_, .exception, .union_ => true,
+                .typedef => |t| isUnboundedSeqTypedef(t) and !opts.c_no_free,
+                else => false,
+            };
+            if (wants_cdr) {
+                var c_content = std.ArrayList(u8).empty;
+                defer c_content.deinit(alloc);
+                try generateTypeCdrSource(alloc, td, opts, type_stem, &c_content);
+                const c_filename = try std.fmt.allocPrint(alloc, "{s}_cdr.c", .{type_stem});
+                defer alloc.free(c_filename);
+                try writeOutputFile(alloc, io, opts, c_filename, c_content.items);
             }
         }
     }
@@ -6865,4 +6964,124 @@ test "c_backend: @default prototype absent when no_typesupport" {
     var h = try testGenFullOpts(idl, "cfg", .{ .no_typesupport = true });
     defer h.deinit(testing.allocator);
     try testing.expect(!has(h.items, "apply_defaults"));
+}
+
+test "c_backend: union and alias sequence elements are declared before the hoisted _seq struct" {
+    var out = try testGen(
+        \\struct Point { long x; };
+        \\typedef Point PointAlias;
+        \\typedef PointAlias PointAlias2;
+        \\union Choice switch (long) { case 0: long i; case 1: string s; };
+        \\typedef string Label;
+        \\struct H { sequence<Choice> c; sequence<PointAlias2> p; sequence<Label> l; };
+    , "t");
+    defer out.deinit(testing.allocator);
+    const h = out.items;
+    const before = struct {
+        fn f(s: []const u8, a: []const u8, b: []const u8) bool {
+            const ia = std.mem.indexOf(u8, s, a) orelse return false;
+            const ib = std.mem.indexOf(u8, s, b) orelse return false;
+            return ia < ib;
+        }
+    }.f;
+    try testing.expect(before(h, "typedef struct Choice_s Choice;", "Choice *_buffer;"));
+    try testing.expect(before(h, "typedef struct Point_s Point;", "typedef Point PointAlias;"));
+    try testing.expect(before(h, "typedef Point PointAlias;", "typedef PointAlias PointAlias2;"));
+    try testing.expect(before(h, "typedef PointAlias PointAlias2;", "PointAlias2 *_buffer;"));
+    try testing.expect(before(h, "typedef char *Label;", "Label *_buffer;"));
+    // The forward-declared union is completed without repeating the typedef,
+    // and each early alias is not emitted a second time.
+    try testing.expect(has(h, "struct Choice_s {"));
+    try testing.expect(!has(h, "typedef struct Choice_s {"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, h, "typedef PointAlias PointAlias2;"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, h, "typedef char *Label;"));
+}
+
+test "c_backend cdr: unbounded sequence typedef _free is defined unless --c-no-free" {
+    const idl =
+        \\struct Named { string label; };
+        \\typedef sequence<Named> NamedSeq;
+    ;
+    var s = try testGenCdr(idl, "t");
+    defer s.deinit(testing.allocator);
+    try testing.expect(has(s.items, "void NamedSeq_free(NamedSeq *v) {"));
+    try testing.expect(has(s.items, "Named_free(&(*v)._buffer[_fsi0]);"));
+
+    var nf = try testGenCdrOpts(idl, "t", .{ .c_no_free = true });
+    defer nf.deinit(testing.allocator);
+    try testing.expect(!has(nf.items, "NamedSeq_free"));
+}
+
+test "c_backend cdr: sequence decode guards size, empties on OOM, zeroes heap-owning elements" {
+    var s = try testGenCdr(
+        \\struct Named { string label; };
+        \\struct H { sequence<Named> named; sequence<long> nums; };
+    , "t");
+    defer s.deinit(testing.allocator);
+    const c = s.items;
+    try testing.expect(has(c, "if ((size_t)_sl > SIZE_MAX / sizeof(Named)) {"));
+    try testing.expect(has(c, "if ((size_t)_sl > SIZE_MAX / sizeof(int32_t)) {"));
+    try testing.expect(has(c, "_v->named._length = 0;"));
+    try testing.expect(has(c, "if (_v->named._buffer) memset(_v->named._buffer, 0, _sl * sizeof(Named));"));
+    // POD elements need no zeroing.
+    try testing.expect(!has(c, "memset(_v->nums._buffer"));
+}
+
+test "c_backend cdr: union _skip reads the discriminant without shadowing _d" {
+    var s = try testGenCdr(
+        \\union Choice switch (long) { case 0: long i; case 1: string s; };
+    , "t");
+    defer s.deinit(testing.allocator);
+    try testing.expect(has(s.items, "int32_t _d_raw; _rc = zidl_cdr_read_i32(_r, &_d_raw);"));
+    try testing.expect(!has(s.items, "{ int32_t _d; _rc"));
+}
+
+test "c_backend cdr: @optional member is marked present over zeroed storage before it is read" {
+    var s = try testGenCdr(
+        \\struct Named { string label; };
+        \\struct O { @optional sequence<Named> maybe; };
+    , "t");
+    defer s.deinit(testing.allocator);
+    const c = s.items;
+    const zero = std.mem.indexOf(u8, c, "memset(&_v->maybe, 0, sizeof(_v->maybe));") orelse return error.TestUnexpectedResult;
+    const mark = std.mem.indexOfPos(u8, c, zero, "_v->_present |= (1ULL << 0u);") orelse return error.TestUnexpectedResult;
+    const read = std.mem.indexOfPos(u8, c, mark, "_rc = zidl_cdr_read_u32(_r, &_sl);") orelse return error.TestUnexpectedResult;
+    try testing.expect(zero < mark and mark < read);
+}
+
+test "c_backend split: sequence elements come from dependency headers, not re-declared" {
+    const idl =
+        \\struct Named { string label; };
+        \\union Choice switch (long) { case 0: long i; case 1: string s; };
+        \\typedef string Label;
+        \\struct H { sequence<Named> n; sequence<Choice> c; sequence<Label> l; };
+    ;
+    var out = try testGenTypeHeader(idl, "t", 3);
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "#include \"Named.h\""));
+    try testing.expect(has(s, "#include \"Choice.h\""));
+    try testing.expect(has(s, "#include \"Label.h\""));
+    // Re-declaring any of these duplicates a typedef, which C99 rejects.
+    try testing.expect(!has(s, "typedef struct Named_s Named;"));
+    try testing.expect(!has(s, "typedef struct Choice_s Choice;"));
+    try testing.expect(!has(s, "typedef char *Label;"));
+}
+
+test "c_backend split: a self-referencing sequence still forward-declares its own type" {
+    var out = try testGenTypeHeader(
+        \\struct Node { long v; sequence<Node> kids; };
+    , "t", 0);
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "typedef struct Node_s Node;"));
+    try testing.expect(has(out.items, "struct Node_s {"));
+}
+
+test "c_backend split: union header includes zidl_cdr.h for its CDR prototypes" {
+    var out = try testGenTypeHeader(
+        \\union Choice switch (long) { case 0: long i; case 1: string s; };
+    , "t", 0);
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "#include \"zidl_cdr.h\""));
+    try testing.expect(has(out.items, "int Choice_serialize(ZidlCdrWriter *_w, const Choice *_v);"));
 }

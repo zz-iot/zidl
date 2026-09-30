@@ -608,6 +608,7 @@ const Generator = struct {
         defer self.alloc.free(cpp_qname);
         const em = self.opts.export_macro;
         const sp: []const u8 = if (em.len > 0) " " else "";
+        try self.print("#define {s}_has_key 0\n", .{c_name});
         try self.print("{s}{s}int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
@@ -803,19 +804,10 @@ const Generator = struct {
         }
         try self.write("    } _u;\n");
         try self.print("}}; // class {s}\n\n", .{u.name});
-
-        if (!self.opts.no_typesupport) {
-            const c_name = try self.prefixedCName(u.qualified_name);
-            defer self.alloc.free(c_name);
-            const cpp_qname = try std.fmt.allocPrint(self.alloc, "::{s}", .{u.qualified_name});
-            defer self.alloc.free(cpp_qname);
-            const em = self.opts.export_macro;
-            const sp: []const u8 = if (em.len > 0) " " else "";
-            try self.print("#define {s}_has_key 0\n", .{c_name});
-            try self.print("{s}{s}int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
-            try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
-            try self.write("\n");
-        }
+        // CDR prototypes are declared once, with C linkage, by
+        // `emitUnionCdrProtos` in the header's `extern "C"` block. Declaring
+        // them here too gave them C++ linkage first, which the later
+        // `extern "C"` redeclaration conflicts with.
         try self.emitVerbatimForPlacement(u.annotations.raw, "after-declaration");
     }
 
@@ -1841,7 +1833,7 @@ const CdrGenerator = struct {
                     // XCDR2: read bool presence flag; emplace inner value if present.
                     const pvar = try std.fmt.allocPrint(self.alloc, "_ip_{s}", .{m.name});
                     defer self.alloc.free(pvar);
-                    try self.printI("{{ int8_t {s};\n", .{pvar});
+                    try self.printI("{{ bool {s};\n", .{pvar});
                     self.indent_depth += 1;
                     try self.printI("_rc = zidl_cdr_read_bool(_r, &{s});\n", .{pvar});
                     try self.writeI("if (_rc) return _rc;\n");
@@ -1856,7 +1848,7 @@ const CdrGenerator = struct {
                         try self.emitReadForTypeRef(m.type_ref, m.name, deref);
                     }
                     self.indent_depth -= 1;
-                    try self.writeI("} else {{\n");
+                    try self.writeI("} else {\n");
                     self.indent_depth += 1;
                     try self.printI("_v->{s} = std::nullopt;\n", .{m.name});
                     self.indent_depth -= 1;
@@ -3723,7 +3715,7 @@ const CdrGenerator = struct {
         if (m.annotations.is_optional) {
             const pvar = try std.fmt.allocPrint(self.alloc, "_ip_{s}", .{m.name});
             defer self.alloc.free(pvar);
-            try self.printI("{{ int8_t {s};\n", .{pvar});
+            try self.printI("{{ bool {s};\n", .{pvar});
             self.indent_depth += 1;
             try self.printI("_rc = zidl_cdr_read_bool(_r, &{s});\n", .{pvar});
             try self.writeI("if (_rc) return _rc;\n");
@@ -8226,6 +8218,14 @@ test "cpp_backend: cdr @optional scalar deserialize reads bool then emplaces" {
     const s = out.items;
     // Presence flag read.
     try testing.expect(has(s, "zidl_cdr_read_bool(_r, &_ip_maybe_x)"));
+    // The flag must be `bool`: zidl_cdr_read_bool takes `bool *`, and C++ has
+    // no implicit `int8_t *` -> `bool *` conversion (C only warns).
+    try testing.expect(has(s, "bool _ip_maybe_x;"));
+    try testing.expect(!has(s, "int8_t _ip_"));
+    // `writeI` is not a format call: a `{{` there is emitted literally and
+    // unbalances the function body.
+    try testing.expect(has(s, "} else {\n"));
+    try testing.expect(!has(s, "} else {{"));
     // Emplace + read inner value on present.
     try testing.expect(has(s, "_v->maybe_x.emplace()"));
     try testing.expect(has(s, "zidl_cdr_read_i32(_r, &(*_v->maybe_x))"));
@@ -10142,4 +10142,17 @@ test "cpp_backend: raw-loan ops pass identity-preserving params straight through
     // passthrough -- same regression test as the interface-level one above,
     // at the impl layer.
     try testing.expect(has(src, "Foo_DataWriter_loan_raw(ptr_, size, &_c_cdr_payload)"));
+}
+
+test "cpp_backend: union CDR prototypes are declared once, with C linkage" {
+    var out = try testGen(
+        \\union Choice switch (long) { case 0: long i; case 1: string s; };
+    , "t");
+    defer out.deinit(testing.allocator);
+    const h = out.items;
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, h, "int Choice_serialize(ZidlCdrWriter *_w, const ::Choice *_v);"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, h, "#define Choice_has_key 0"));
+    const extern_c = std.mem.indexOf(u8, h, "extern \"C\" {") orelse return error.TestUnexpectedResult;
+    const proto = std.mem.indexOf(u8, h, "int Choice_serialize(") orelse return error.TestUnexpectedResult;
+    try testing.expect(extern_c < proto);
 }

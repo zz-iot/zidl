@@ -559,8 +559,20 @@ e.g. `DDS::Duration_t` → `DDS.<pfx>Duration_t`.
   with the provided `alloc`; caller is responsible for cleanup.
 - Generated `deinit(self: *@This(), alloc: std.mem.Allocator) void` frees all
   heap-owned sequence buffers (guarded by `_release == true`) recursively. Only
-  emitted when the type has at least one sequence field; no-op types do not get it.
+  emitted when the type owns heap memory somewhere; no-op types do not get it.
+- An owned unbounded sequence (`_release == true`) owns its elements' contents as
+  well as its buffer: `deinit` releases each string element and calls `deinit` on
+  each struct/union element that owns heap memory. A sequence whose elements borrow
+  their strings or nested buffers must therefore keep `_release == false`.
+- A bounded sequence (`zidl_rt.BoundedArray`) stores elements inline, so it has no
+  buffer to free. Its owner's `deinit` calls `deinit` on each heap-owning element in
+  place and then empties the array.
 - Generated `clone(self: @This(), alloc: std.mem.Allocator) !@This()` deep-copies
-  all sequence fields — the symmetric counterpart to `deinit`. Useful when a QoS
-  or data struct is stored beyond the lifetime of the caller's stack buffer (e.g.
-  vtable `init` methods that store the QoS by value).
+  all sequence fields, including heap-owning elements of bounded and unbounded
+  sequences — the symmetric counterpart to `deinit`. A failure part-way releases
+  the copies already made. Useful when a QoS or data struct is stored beyond the
+  lifetime of the caller's stack buffer (e.g. vtable `init` methods that store the
+  QoS by value).
+- Decoding an unbounded sequence of heap-owning elements starts every element at its
+  default value before reading, so a decode that fails part-way leaves an owner whose
+  `deinit` is safe to call.

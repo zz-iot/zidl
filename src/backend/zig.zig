@@ -274,6 +274,8 @@ const Generator = struct {
     /// operation signature needs to consult this set, any locally-declared
     /// struct it could reference has already been through `emitStruct`.
     toml_applied_structs: std.AutoHashMapUnmanaged(*const ir.Struct, void) = .{},
+    /// Recursion guard for `aggregateNeedsCleanup` (see there).
+    cleanup_depth: u8 = 0,
 
     fn deinit(self: *Generator) void {
         self.toml_applied_structs.deinit(self.alloc);
@@ -1450,6 +1452,11 @@ const Generator = struct {
             try self.write("        if (!self._release) return;\n");
             try self.ind();
             try self.write("        if (self._buffer) |_buf| {\n");
+            // An owned buffer also owns its heap-owning elements' contents.
+            if (self.aggregateNeedsCleanup(seq.element.*)) {
+                try self.ind();
+                try self.write("            for (_buf[0..self._length]) |*_e| _e.deinit(alloc);\n");
+            }
             // String elements were allocated with dupeZ → free len+1 bytes per element.
             if (seq.element.* == .string) {
                 try self.ind();
@@ -1500,6 +1507,32 @@ const Generator = struct {
                 try self.write("            for (_sb[0..self._length]) |_src| {\n");
                 try self.ind();
                 try self.write("                _buf[_n] = (try alloc.dupeZ(u8, std.mem.span(_src))).ptr;\n");
+                try self.ind();
+                try self.write("                _n += 1;\n");
+                try self.ind();
+                try self.write("            }\n");
+                try self.ind();
+                try self.write("        }\n");
+            } else if (self.aggregateNeedsCleanup(seq.element.*)) {
+                // Deep-copy heap-owning elements; release partial clones on failure.
+                try self.ind();
+                try self.print("        const _buf = try alloc.alloc({s}, self._length);\n", .{buf_elem});
+                try self.ind();
+                try self.write("        var _n: u32 = 0;\n");
+                try self.ind();
+                try self.write("        errdefer {\n");
+                try self.ind();
+                try self.write("            for (_buf[0.._n]) |*_e| _e.deinit(alloc);\n");
+                try self.ind();
+                try self.write("            alloc.free(_buf);\n");
+                try self.ind();
+                try self.write("        }\n");
+                try self.ind();
+                try self.write("        if (self._buffer) |_sb| {\n");
+                try self.ind();
+                try self.write("            for (_sb[0..self._length]) |_src| {\n");
+                try self.ind();
+                try self.write("                _buf[_n] = try _src.clone(alloc);\n");
                 try self.ind();
                 try self.write("                _n += 1;\n");
                 try self.ind();
@@ -5044,6 +5077,8 @@ const Generator = struct {
     /// memory.
     fn memberNeedsCleanup(self: *Generator, m: ir.StructMember) bool {
         if (typeRefNeedsSeqDeinit(m.type_ref)) return true;
+        if (self.boundedSeqNeedsElementCleanup(m.type_ref)) return true;
+        if (self.aggregateNeedsCleanup(m.type_ref)) return true;
         if (!typeRefHasUnboundedString(m.type_ref)) return false;
         if (typeRefIsDirectPlainString(m.type_ref) and
             !self.opts.zig_generate_toml_config and
@@ -5078,6 +5113,8 @@ const Generator = struct {
     /// Union-case analog of `memberNeedsCleanup`.
     fn caseNeedsCleanup(self: *Generator, cas: ir.UnionCase) bool {
         if (typeRefNeedsSeqDeinit(cas.type_ref)) return true;
+        if (self.boundedSeqNeedsElementCleanup(cas.type_ref)) return true;
+        if (self.aggregateNeedsCleanup(cas.type_ref)) return true;
         if (!typeRefHasUnboundedString(cas.type_ref)) return false;
         if (typeRefIsDirectPlainString(cas.type_ref) and
             !self.opts.zig_generate_toml_config and
@@ -5086,6 +5123,39 @@ const Generator = struct {
             return false;
         }
         return true;
+    }
+
+    /// True if a value of `tr` is a struct or union with generated
+    /// `deinit()`/`clone()`, directly or through typedefs without array
+    /// dimensions. Sequence elements and nested members of such a type
+    /// delegate cleanup and deep copy to those functions. Plain string
+    /// elements are not aggregates; the unbounded-sequence paths handle them.
+    ///
+    /// A type can refer to itself only through an unbounded sequence, which
+    /// `memberNeedsCleanup`/`caseNeedsCleanup` classify before reaching here,
+    /// so recursion normally terminates. The depth guard only protects the
+    /// generator from malformed recursive IR.
+    fn aggregateNeedsCleanup(self: *Generator, tr: ir.TypeRef) bool {
+        if (self.cleanup_depth >= 64) return false;
+        self.cleanup_depth += 1;
+        defer self.cleanup_depth -= 1;
+        return switch (tr) {
+            .named => |td| switch (td) {
+                .struct_ => |s| self.structNeedsCleanup(s),
+                .union_ => |u| self.unionNeedsCleanup(u),
+                .typedef => |t| t.dimensions.len == 0 and self.aggregateNeedsCleanup(t.type_ref),
+                else => false,
+            },
+            else => false,
+        };
+    }
+
+    /// True if `tr` is a bounded sequence (directly or through typedefs)
+    /// whose elements need cleanup. Bounded storage is inline, so only its
+    /// elements can own heap memory.
+    fn boundedSeqNeedsElementCleanup(self: *Generator, tr: ir.TypeRef) bool {
+        const seq = resolvedSequence(tr) orelse return false;
+        return seq.bound != null and self.aggregateNeedsCleanup(seq.element.*);
     }
 
     /// Union analog of `structNeedsCleanup`: true if the union needs its own
@@ -5171,6 +5241,18 @@ const Generator = struct {
     /// Emit the cleanup snippet for a single struct field whose type is or
     /// contains an unbounded sequence, or an unbounded string.
     fn emitFieldSeqDeinit(self: *Generator, field_name: []const u8, tr: ir.TypeRef, indent: []const u8) !void {
+        // A bounded sequence (direct or typedef'd) is an inline BoundedArray
+        // with no methods of its own: release each element in place, then
+        // empty it so a second deinit() is a no-op.
+        if (resolvedSequence(tr)) |seq| if (seq.bound != null) {
+            if (self.aggregateNeedsCleanup(seq.element.*)) {
+                try self.ind();
+                try self.print("{s}for (self.{s}.sliceMut()) |*_e| _e.deinit(alloc);\n", .{ indent, field_name });
+                try self.ind();
+                try self.print("{s}self.{s}.clearRetainingCapacity();\n", .{ indent, field_name });
+            }
+            return;
+        };
         switch (tr) {
             .string => |bound| if (bound == null) {
                 try self.emitPlainStringFreeStmt(field_name, indent);
@@ -5181,6 +5263,11 @@ const Generator = struct {
                 try self.print("{s}if (self.{s}._release) {{\n", .{ indent, field_name });
                 try self.ind();
                 try self.print("{s}    if (self.{s}._buffer) |_buf| {{\n", .{ indent, field_name });
+                if (self.aggregateNeedsCleanup(seq.element.*)) {
+                    // An owned buffer also owns its elements' contents.
+                    try self.ind();
+                    try self.print("{s}        for (_buf[0..self.{s}._length]) |*_e| _e.deinit(alloc);\n", .{ indent, field_name });
+                }
                 if (seq.element.* == .string) {
                     try self.ind();
                     try self.print("{s}        for (_buf[0..self.{s}._length]) |_s| {{\n", .{ indent, field_name });
@@ -5316,6 +5403,24 @@ const Generator = struct {
 
     /// Emit the copy snippet for a single struct field (the `result.field = ...` part).
     fn emitFieldSeqCloneStmt(self: *Generator, field_name: []const u8, tr: ir.TypeRef, indent: []const u8) !void {
+        // Bounded sequence (direct or typedef'd): `var result = self;` copied
+        // the inline elements shallowly. Rebuild the array from deep element
+        // clones; a failure part-way releases the clones made so far.
+        if (resolvedSequence(tr)) |seq| if (seq.bound != null) {
+            if (self.aggregateNeedsCleanup(seq.element.*)) {
+                try self.ind();
+                try self.print("{s}result.{s} = .{{}};\n", .{ indent, field_name });
+                try self.ind();
+                try self.print("{s}{{\n", .{indent});
+                try self.ind();
+                try self.print("{s}    errdefer for (result.{s}.sliceMut()) |*_e| _e.deinit(alloc);\n", .{ indent, field_name });
+                try self.ind();
+                try self.print("{s}    for (self.{s}.slice()) |_src| result.{s}.appendAssumeCapacity(try _src.clone(alloc));\n", .{ indent, field_name, field_name });
+                try self.ind();
+                try self.print("{s}}}\n", .{indent});
+            }
+            return;
+        };
         switch (tr) {
             // `var result = self;` above already shallow-copied the pointer —
             // this replaces it with an independent copy so freeing one of
@@ -5370,6 +5475,35 @@ const Generator = struct {
                     try self.print("{s}    }}\n", .{indent});
                     try self.ind();
                     try self.print("{s}    result.{s} = .{{ ._buffer = _buf.ptr, ._length = self.{s}._length, ._maximum = self.{s}._length, ._release = true }};\n", .{ indent, field_name, field_name, field_name });
+                } else if (self.aggregateNeedsCleanup(seq.element.*)) {
+                    // Heap-owning elements: clone each one, releasing the
+                    // clones made so far if a later one fails.
+                    try self.ind();
+                    try self.print("{s}    const _buf = try alloc.alloc({s}, self.{s}._length);\n", .{ indent, buf_elem, field_name });
+                    try self.ind();
+                    try self.print("{s}    var _n: u32 = 0;\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}    errdefer {{\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}        for (_buf[0.._n]) |*_e| _e.deinit(alloc);\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}        alloc.free(_buf);\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}    }}\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}    if (self.{s}._buffer) |_sb| {{\n", .{ indent, field_name });
+                    try self.ind();
+                    try self.print("{s}        for (_sb[0..self.{s}._length]) |_src| {{\n", .{ indent, field_name });
+                    try self.ind();
+                    try self.print("{s}            _buf[_n] = try _src.clone(alloc);\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}            _n += 1;\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}        }}\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}    }}\n", .{indent});
+                    try self.ind();
+                    try self.print("{s}    result.{s} = .{{ ._buffer = _buf.ptr, ._length = self.{s}._length, ._maximum = self.{s}._length, ._release = true }};\n", .{ indent, field_name, field_name, field_name });
                 } else {
                     try self.ind();
                     try self.print("{s}    const _buf = try alloc.alloc({s}, self.{s}._length);\n", .{ indent, buf_elem, field_name });
@@ -5409,6 +5543,16 @@ const Generator = struct {
         // Simple single-statement forms stay `errdefer <stmt>;`; the sequence
         // form needs a block. `emitFieldSeqCloneErrdeferBody` writes the body
         // targeting `result.<field_name>` — here always at function scope.
+        if (resolvedSequence(tr)) |seq| if (seq.bound != null) {
+            if (self.aggregateNeedsCleanup(seq.element.*)) {
+                try self.ind();
+                try self.print("{s}errdefer {{\n", .{indent});
+                try self.emitFieldSeqCloneErrdeferBody(field_name, tr, indent);
+                try self.ind();
+                try self.print("{s}}}\n", .{indent});
+            }
+            return;
+        };
         switch (tr) {
             .string => |bound| if (bound == null) {
                 try self.ind();
@@ -5442,7 +5586,16 @@ const Generator = struct {
         // The single-statement forms are emitted inline after `errdefer ` when
         // `indent` is empty (function-scope caller), and on their own indented
         // line when it isn't (the `@optional` wrapper caller). The multi-line
-        // `.sequence` form always indents.
+        // `.sequence` form always indents, as does the bounded form below.
+        if (resolvedSequence(tr)) |seq| if (seq.bound != null) {
+            if (self.aggregateNeedsCleanup(seq.element.*)) {
+                try self.ind();
+                try self.print("{s}    for (result.{s}.sliceMut()) |*_e| _e.deinit(alloc);\n", .{ indent, field_name });
+                try self.ind();
+                try self.print("{s}    result.{s}.clearRetainingCapacity();\n", .{ indent, field_name });
+            }
+            return;
+        };
         if (indent.len != 0 and tr != .sequence) try self.ind();
         switch (tr) {
             .string => |bound| if (bound == null) {
@@ -5453,6 +5606,10 @@ const Generator = struct {
                 try self.print("{s}    if (result.{s}._release) {{\n", .{ indent, field_name });
                 try self.ind();
                 try self.print("{s}        if (result.{s}._buffer) |_b| {{\n", .{ indent, field_name });
+                if (self.aggregateNeedsCleanup(seq.element.*)) {
+                    try self.ind();
+                    try self.print("{s}            for (_b[0..result.{s}._length]) |*_e| _e.deinit(alloc);\n", .{ indent, field_name });
+                }
                 if (seq.element.* == .string) {
                     try self.ind();
                     try self.print("{s}            for (_b[0..result.{s}._length]) |_s| {{\n", .{ indent, field_name });
@@ -6121,6 +6278,13 @@ const Generator = struct {
                     defer self.alloc.free(iii);
                     try self.ind();
                     try self.print("{s}const _buf = try allocator.alloc({s}, _n);\n", .{ iii, buf_elem });
+                    if (self.aggregateNeedsCleanup(seq.element.*)) {
+                        // `_length` is already _n, so a failure part-way through
+                        // lets the owner's deinit() visit every element: start
+                        // them all at a safely destructible default.
+                        try self.ind();
+                        try self.print("{s}for (_buf) |*_se| _se.* = .{{}};\n", .{iii});
+                    }
                     try self.ind();
                     try self.print("{s}{s}._buffer = _buf.ptr;\n", .{ iii, out_expr });
                     try self.ind();
@@ -6366,6 +6530,12 @@ const Generator = struct {
         try self.print("{s}if ({s}._buffer) |_ob| @memcpy(_pbuf[0.._plen], _ob[0.._plen]);\n", .{ ii, seq_expr });
 
         // Emit the element read into _pbuf[_plen] — must succeed before we touch seq_expr.
+        // A heap-owning element's decoder may clean up its own output on failure,
+        // so give it a safely destructible starting value.
+        if (self.aggregateNeedsCleanup(elem_tr)) {
+            try self.ind();
+            try self.print("{s}_pbuf[_plen] = .{{}};\n", .{ii});
+        }
         try self.emitReadForTypeRef(elem_tr, "_pbuf[_plen]", ii);
 
         // Read succeeded: now safe to release the old buffer and update the sequence.
@@ -7107,7 +7277,9 @@ fn typeRefNeedsAllocator(tr: ir.TypeRef) bool {
     return switch (tr) {
         .string => |bound| bound == null,
         .wstring => true, // readWstring always allocates, even for bounded wstring
-        .sequence => |seq| seq.bound == null,
+        // Bounded storage does not allocate, but its element decoder may
+        // forward allocator. Match emitSequenceElementRead's supported shapes.
+        .sequence => |seq| seq.bound == null or sequenceElementUsesAllocator(seq.element.*),
         .named => |td| switch (td) {
             // Conservatively: may have nested strings/seqs. A union case can
             // just as easily own a string/sequence as a struct field can --
@@ -7118,6 +7290,17 @@ fn typeRefNeedsAllocator(tr: ir.TypeRef) bool {
             .struct_, .union_, .exception => true,
             .typedef => |t| typeRefNeedsAllocator(t.type_ref),
             else => false,
+        },
+        else => false,
+    };
+}
+
+fn sequenceElementUsesAllocator(tr: ir.TypeRef) bool {
+    return switch (tr) {
+        .named => |td| switch (td) {
+            .enum_, .bitmask => false,
+            .typedef => |t| t.dimensions.len == 0 and sequenceElementUsesAllocator(t.type_ref),
+            else => true,
         },
         else => false,
     };
@@ -7165,6 +7348,21 @@ fn structIsCExternCompatible(s: *const ir.Struct) bool {
         if (!typeRefIsCExternCompatible(m.type_ref)) return false;
     }
     return true;
+}
+
+const SequenceRef = @FieldType(ir.TypeRef, "sequence");
+
+/// The sequence `tr` denotes, directly or through typedefs without array
+/// dimensions, or null if it is not a sequence.
+fn resolvedSequence(tr: ir.TypeRef) ?SequenceRef {
+    return switch (tr) {
+        .sequence => |seq| seq,
+        .named => |td| switch (td) {
+            .typedef => |t| if (t.dimensions.len == 0) resolvedSequence(t.type_ref) else null,
+            else => null,
+        },
+        else => null,
+    };
 }
 
 /// Returns true if the type ref is an unbounded sequence (anonymous or via typedef),
@@ -8424,6 +8622,48 @@ test "zig_backend: typedef needsAllocator recurses correctly" {
     defer out.deinit(testing.allocator);
     // allocator IS needed for the string read → must NOT emit "_ = allocator;"
     try testing.expect(!has(out.items, "_ = allocator;"));
+}
+
+test "zig_backend: bounded sequence elements forward allocator through typedefs" {
+    var out = try testGen(
+        \\struct Element { long value; };
+        \\typedef Element ElementAlias;
+        \\typedef sequence<ElementAlias, 4> Elements;
+        \\struct Holder { Elements rows; };
+    , "bounded_allocator");
+    defer out.deinit(testing.allocator);
+    const start = std.mem.indexOf(u8, out.items, "pub const Holder = struct").?;
+    const holder = out.items[start..];
+    try testing.expect(has(holder, "Element.deserializeInto"));
+    try testing.expect(!has(holder, "_ = allocator;"));
+}
+
+test "zig_backend: sequences release and deep-copy heap-owning elements" {
+    var out = try testGen(
+        \\struct Named { string label; };
+        \\typedef sequence<Named> NamedSeq;
+        \\struct Bounded { sequence<Named, 3> items; };
+        \\struct Unbounded { sequence<Named> items; };
+    , "seq_elem_cleanup");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+
+    // Bounded holders now get deinit/clone that visit each inline element.
+    const bounded = s[std.mem.indexOf(u8, s, "pub const Bounded = struct").?..];
+    try testing.expect(has(bounded, "for (self.items.sliceMut()) |*_e| _e.deinit(alloc);"));
+    try testing.expect(has(bounded, "result.items.appendAssumeCapacity(try _src.clone(alloc));"));
+    try testing.expect(has(bounded, "errdefer out.deinit(allocator);"));
+
+    // Unbounded buffers release and clone their elements, and decode starts
+    // every element at a destructible default before reading into it.
+    const unbounded = s[std.mem.indexOf(u8, s, "pub const Unbounded = ").?..];
+    try testing.expect(has(unbounded, "for (_buf[0..self.items._length]) |*_e| _e.deinit(alloc);"));
+    try testing.expect(has(unbounded, "_buf[_n] = try _src.clone(alloc);"));
+    try testing.expect(has(unbounded, "for (_buf) |*_se| _se.* = .{};"));
+
+    const typedef_seq = s[std.mem.indexOf(u8, s, "pub const NamedSeq = ").?..];
+    try testing.expect(has(typedef_seq, "for (_buf[0..self._length]) |*_e| _e.deinit(alloc);"));
+    try testing.expect(has(typedef_seq, "_buf[_n] = try _src.clone(alloc);"));
 }
 
 test "zig_backend: serialize @key member in serializeKey" {
