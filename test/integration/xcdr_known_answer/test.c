@@ -3,8 +3,9 @@
  * argv[1]).
  *
  * For each top-level type, in each reference encoding:
- *   - zidl encodes the sample to exactly the reference bytes (except Mut: the
- *     reference uses EMHEADER length codes 5-7 where zidl writes 4);
+ *   - zidl encodes the sample to exactly the reference bytes, including the
+ *     representation id the type's extensibility selects (for Mut only the
+ *     id: the reference uses EMHEADER length codes 5-7 where zidl writes 4);
  *   - the reference bytes decode to a value that re-encodes to zidl's encoding
  *     of the same sample (the encoder being checked against the reference,
  *     that pins the decode);
@@ -86,18 +87,14 @@ static void load_vectors(const char *path) {
     vectors[n] = 0;
 }
 
-/* Fill `out` (with room for the 4-byte encapsulation header in front) from
- * "data <name> <enc> <hex>"; returns the total length including the header. */
-static size_t vector(const char *name, int xcdr, uint8_t *out, size_t cap) {
+/* Decode the hex after "<kind> <name> xcdr<n> " into `out`; returns its length. */
+static size_t vector_hex(const char *kind, const char *name, int xcdr, uint8_t *out, size_t cap) {
     char key[64];
-    snprintf(key, sizeof key, "data %s xcdr%d ", name, xcdr);
+    snprintf(key, sizeof key, "%s %s xcdr%d ", kind, name, xcdr);
     const char *line = strstr(vectors, key);
     CHECK(line != NULL);
     const char *hex = line + strlen(key);
-    out[0] = 0x00;
-    out[1] = xcdr == 1 ? 0x01 : 0x07;
-    out[2] = out[3] = 0x00;
-    size_t n = 4;
+    size_t n = 0;
     while (hex[0] && hex[0] != '\n') {
         unsigned b;
         CHECK(sscanf(hex, "%2x", &b) == 1);
@@ -106,6 +103,14 @@ static size_t vector(const char *name, int xcdr, uint8_t *out, size_t cap) {
         hex += 2;
     }
     return n;
+}
+
+/* The reference sample: the representation id the reference writes for this
+ * type and encoding, then the payload. Returns the total length. */
+static size_t vector(const char *name, int xcdr, uint8_t *out, size_t cap) {
+    CHECK(vector_hex("encap", name, xcdr, out, cap) == 2);
+    out[2] = out[3] = 0x00;
+    return 4 + vector_hex("data", name, xcdr, out + 4, cap - 4);
 }
 
 /* ── Samples (borrowed storage, _release == false) ──────────────────────── */
@@ -138,6 +143,7 @@ static KA_Prims prims(void) {
 
 static char *np_str[] = {"a", "bc"};
 static char np_bstr[][6] = {"xy", "z"};
+static char np_ubstr[][6] = {"uv", "", "w"};
 static KA_Color np_enum[] = {KA_Color_GREEN, KA_Color_BLUE};
 static KA_Flags np_bm[] = {KA_Flags_F0 | KA_Flags_F2, KA_Flags_F1};
 static KA_Named np_struct[] = {{"n1", 1}, {"n2", 2}};
@@ -154,6 +160,7 @@ static KA_NonPrims non_prims(void) {
     memset(&v, 0, sizeof v);
     v.s_str = SEQ(string_seq, np_str);
     v.s_bstr = SEQ(string5_seq, np_bstr);
+    v.s_ubstr = SEQ(string5_seq, np_ubstr);
     v.s_enum = SEQ(KA_Color_seq, np_enum);
     v.s_bm = SEQ(KA_Flags_seq, np_bm);
     v.s_struct = SEQ(KA_Named_seq, np_struct);
@@ -257,12 +264,14 @@ typedef struct {
     size_t len; /* including the encapsulation header */
 } Bytes;
 
-#define ENCODE(T, value, xcdr, out)                                                   \
+/* `ext` is the type's ZIDL_EXT_* extensibility (as annotated in ka.idl): it
+ * selects the XCDR2 representation id. */
+#define ENCODE(T, value, xcdr, ext, out)                                              \
     do {                                                                              \
         ZidlCdrWriter w_;                                                             \
         zidl_cdr_writer_init_fixed(&w_, (out).buf, sizeof (out).buf,                  \
                                    (xcdr) == 1 ? ZIDL_XCDR1 : ZIDL_XCDR2);            \
-        CHECK(zidl_cdr_write_encap(&w_) == 0);                                        \
+        CHECK(zidl_cdr_write_encap_kind(&w_, (ext)) == 0);                            \
         CHECK(T##_serialize(&w_, &(value)) == 0);                                     \
         (out).len = w_.pos + 4;                                                       \
     } while (0)
@@ -279,21 +288,23 @@ typedef struct {
         }                                                                             \
     } while (0)
 
-#define CHECK_TYPE(T, name, sample_expr, xcdr, compare_bytes)                         \
+#define CHECK_TYPE(T, name, ext, sample_expr, xcdr, compare_bytes)                    \
     do {                                                                              \
         T sample_ = (sample_expr);                                                    \
         static Bytes reference_, ours_, again_;                                         \
         reference_.len = vector(name, xcdr, reference_.buf, sizeof reference_.buf);         \
-        ENCODE(T, sample_, xcdr, ours_);                                              \
+        ENCODE(T, sample_, xcdr, ext, ours_);                                         \
+        /* Representation id always; the payload too, except for Mut. */             \
+        CHECK(memcmp(ours_.buf, reference_.buf, 4) == 0);                             \
         if (compare_bytes) {                                                          \
-            CHECK(ours_.len == reference_.len);                                         \
-            CHECK(memcmp(ours_.buf + 4, reference_.buf + 4, ours_.len - 4) == 0);       \
+            CHECK(ours_.len == reference_.len);                                       \
+            CHECK(memcmp(ours_.buf, reference_.buf, ours_.len) == 0);                 \
         }                                                                             \
         T got_;                                                                       \
         int rc_;                                                                      \
         DECODE(T, reference_.buf, reference_.len, got_, rc_);                             \
         CHECK(rc_ == 0);                                                              \
-        ENCODE(T, got_, xcdr, again_);                                                \
+        ENCODE(T, got_, xcdr, ext, again_);                                           \
         CHECK(again_.len == ours_.len && memcmp(again_.buf, ours_.buf, ours_.len) == 0); \
         T##_free(&got_);                                                              \
         CHECK(live_count == 0);                                                       \
@@ -320,13 +331,13 @@ int main(int argc, char **argv) {
     load_vectors(argv[1]);
     zidl_cdr_set_allocator(&tracking);
     for (int xcdr = 1; xcdr <= 2; xcdr++) {
-        CHECK_TYPE(KA_Prims, "Prims", prims(), xcdr, 1);
-        CHECK_TYPE(KA_NonPrims, "NonPrims", non_prims(), xcdr, 1);
-        CHECK_TYPE(KA_Nested, "Nested", nested(), xcdr, 1);
-        CHECK_TYPE(KA_Arrays, "Arrays", arrays(), xcdr, 1);
-        CHECK_TYPE(KA_App, "App", app(), xcdr, 1);
+        CHECK_TYPE(KA_Prims, "Prims", ZIDL_EXT_FINAL, prims(), xcdr, 1);
+        CHECK_TYPE(KA_NonPrims, "NonPrims", ZIDL_EXT_FINAL, non_prims(), xcdr, 1);
+        CHECK_TYPE(KA_Nested, "Nested", ZIDL_EXT_FINAL, nested(), xcdr, 1);
+        CHECK_TYPE(KA_Arrays, "Arrays", ZIDL_EXT_FINAL, arrays(), xcdr, 1);
+        CHECK_TYPE(KA_App, "App", ZIDL_EXT_APPENDABLE, app(), xcdr, 1);
     }
-    CHECK_TYPE(KA_Mut, "Mut", mut(), 2, 0);
+    CHECK_TYPE(KA_Mut, "Mut", ZIDL_EXT_MUTABLE, mut(), 2, 0);
     zidl_cdr_set_allocator(NULL);
     printf("xcdr_known_answer C: all checks passed\n");
     return 0;

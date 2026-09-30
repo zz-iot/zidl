@@ -10244,3 +10244,20 @@ test "cpp_backend: union CDR prototypes are declared once, with C linkage" {
     const proto = std.mem.indexOf(u8, h, "int Choice_serialize(") orelse return error.TestUnexpectedResult;
     try testing.expect(extern_c < proto);
 }
+
+test "cpp_backend cdr: collection DHEADERs, depth-named loops and vector<bool>" {
+    var out = try testGenCdr(
+        \\typedef long Triple[3];
+        \\struct S { sequence<string> s; sequence<sequence<string> > n; sequence<boolean> b; string a[2]; Triple ta[2]; };
+    , "t");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "_rc = zidl_cdr_reserve_dheader_maybe(_w, &_cdh);"));
+    try testing.expect(has(s, "zidl_cdr_patch_dheader_maybe(_w, _cdh);"));
+    try testing.expect(has(s, "_rc = zidl_cdr_skip_dheader_if_xcdr2(_r);"));
+    try testing.expect(has(s, "uint32_t _si1;"));
+    // std::vector<bool> elements are proxies: read through a temporary.
+    try testing.expect(has(s, "{ bool _bv; _rc = zidl_cdr_read_bool(_r, &_bv);"));
+    // Triple[2] flattens to int32 x 6: no DHEADER, depth-qualified loop vars.
+    try testing.expect(has(s, "_ai1"));
+}

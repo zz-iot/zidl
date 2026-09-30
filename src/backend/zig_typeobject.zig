@@ -1826,3 +1826,10 @@ test "encodeMinimalStruct: deterministic output for same input" {
     defer alloc.free(bytes2);
     try testing.expectEqualSlices(u8, bytes1, bytes2);
 }
+
+test "typeobject: a plain sequence of a fully descriptive element is itself fully descriptive" {
+    const seq_long: ir.TypeRef = .{ .base = .long };
+    var inner = ir.TypeRef{ .sequence = .{ .element = @constCast(&seq_long), .bound = null } };
+    const outer = ir.TypeRef{ .sequence = .{ .element = &inner, .bound = null } };
+    try std.testing.expect(typeRefIsFullyDescriptive(outer));
+}

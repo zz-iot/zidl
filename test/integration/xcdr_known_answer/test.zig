@@ -2,7 +2,8 @@
 //! ka.idl from an independent XTypes implementation (vectors.txt).
 //!
 //! For each top-level type: the sample encodes to the reference XCDR1 and
-//! XCDR2 bytes; the reference bytes decode back to the sample; decoded values
+//! XCDR2 bytes, including the representation id the type's extensibility
+//! selects; the reference bytes decode back to the sample; decoded values
 //! clone and release without leaks; every truncated input and every
 //! allocation failure is handled cleanly; and the generated minimal
 //! TypeObject hash equals the reference hash.
@@ -72,6 +73,7 @@ fn nonPrims() KA.NonPrims {
     return .{
         .s_str = borrow(F(KA.NonPrims, "s_str"), &.{ "a", "bc" }),
         .s_bstr = bounded(F(KA.NonPrims, "s_bstr"), &.{ bstr(5, "xy"), bstr(5, "z") }),
+        .s_ubstr = borrow(F(KA.NonPrims, "s_ubstr"), &.{ bstr(5, "uv"), bstr(5, ""), bstr(5, "w") }),
         .s_enum = borrow(F(KA.NonPrims, "s_enum"), &.{ .GREEN, .BLUE }),
         .s_bm = borrow(F(KA.NonPrims, "s_bm"), &.{ KA.Flags_F0 | KA.Flags_F2, KA.Flags_F1 }),
         .s_struct = borrow(F(KA.NonPrims, "s_struct"), &.{ .{ .label = "n1", .id = 1 }, .{ .label = "n2", .id = 2 } }),
@@ -169,18 +171,32 @@ fn eql(a: anytype, b: @TypeOf(a)) bool {
 
 // ── Checks ────────────────────────────────────────────────────────────────────
 
-fn encode(comptime T: type, comptime v: zidl_rt.XcdrVersion, value: T) ![]u8 {
+/// Top-level extensibility, as annotated in ka.idl: it selects the XCDR2
+/// representation id (CDR2 / D_CDR2 / PL_CDR2).
+const Ext = enum { final, appendable, mutable };
+
+fn encode(comptime T: type, comptime v: zidl_rt.XcdrVersion, comptime ext: Ext, value: T) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(testing.allocator);
     var w = zidl_rt.CdrWriter(v).init(&buf, testing.allocator);
-    try w.writeEncapHeader();
+    switch (ext) {
+        .final => try w.writeEncapHeader(),
+        .appendable => try w.writeEncapHeaderDelimited(),
+        .mutable => try w.writeEncapHeaderMutable(),
+    }
     try T.serialize(&w, value);
     return buf.toOwnedSlice(testing.allocator);
 }
 
-fn withHeader(comptime v: zidl_rt.XcdrVersion, payload: []const u8) ![]u8 {
+/// The reference sample: the representation id the reference writes for
+/// this type and encoding, then the payload.
+fn referenceSample(name: []const u8, tag: []const u8) ![]u8 {
+    const id = try vector("encap", name, tag);
+    defer testing.allocator.free(id);
+    const payload = try vector("data", name, tag);
+    defer testing.allocator.free(payload);
     const out = try testing.allocator.alloc(u8, payload.len + 4);
-    out[0..4].* = if (v == .xcdr1) .{ 0x00, 0x01, 0x00, 0x00 } else .{ 0x00, 0x07, 0x00, 0x00 };
+    out[0..4].* = .{ id[0], id[1], 0x00, 0x00 };
     @memcpy(out[4..], payload);
     return out;
 }
@@ -203,18 +219,21 @@ fn decodeAndRelease(alloc: std.mem.Allocator, comptime T: type, bytes: []const u
     c.deinit(alloc);
 }
 
-fn check(comptime T: type, comptime name: []const u8, sample: T, comptime compare_bytes: bool, comptime encodings: []const zidl_rt.XcdrVersion) !void {
+fn check(comptime T: type, comptime name: []const u8, comptime ext: Ext, sample: T, comptime compare_bytes: bool, comptime encodings: []const zidl_rt.XcdrVersion) !void {
     inline for (encodings) |v| {
         const tag = if (v == .xcdr1) "xcdr1" else "xcdr2";
-        const expected = try vector("data", name, tag);
-        defer testing.allocator.free(expected);
-        const reference = try withHeader(v, expected);
+        const reference = try referenceSample(name, tag);
         defer testing.allocator.free(reference);
 
-        // zidl encodes the sample to the reference bytes.
-        const ours = try encode(T, v, sample);
+        // zidl encodes the sample to the reference bytes, representation id
+        // included (for Mut only the id: its payload legitimately differs).
+        const ours = try encode(T, v, ext, sample);
         defer testing.allocator.free(ours);
-        if (compare_bytes) try testing.expectEqualSlices(u8, expected, ours[4..]);
+        if (compare_bytes) {
+            try testing.expectEqualSlices(u8, reference, ours);
+        } else {
+            try testing.expectEqualSlices(u8, reference[0..4], ours[0..4]);
+        }
 
         // The reference bytes (and zidl's own) decode back to the sample.
         inline for (.{ reference, ours }) |bytes| {
@@ -248,27 +267,27 @@ fn check(comptime T: type, comptime name: []const u8, sample: T, comptime compar
 const both = &[_]zidl_rt.XcdrVersion{ .xcdr1, .xcdr2 };
 
 test "Prims (primitive elements: no collection DHEADER)" {
-    try check(KA.Prims, "Prims", comptime prims(), true, both);
+    try check(KA.Prims, "Prims", .final, comptime prims(), true, both);
 }
 
 test "NonPrims (string/enum/bitmask/struct/union elements: DHEADER in XCDR2)" {
-    try check(KA.NonPrims, "NonPrims", comptime nonPrims(), true, both);
+    try check(KA.NonPrims, "NonPrims", .final, comptime nonPrims(), true, both);
 }
 
 test "Nested (sequences of sequences and of array typedefs)" {
-    try check(KA.Nested, "Nested", comptime nested(), true, both);
+    try check(KA.Nested, "Nested", .final, comptime nested(), true, both);
 }
 
 test "Arrays (multi-dimensional, flattened array typedefs, arrays of sequences)" {
-    try check(KA.Arrays, "Arrays", comptime arrays(), true, both);
+    try check(KA.Arrays, "Arrays", .final, comptime arrays(), true, both);
 }
 
 test "App (appendable holder)" {
-    try check(KA.App, "App", comptime app(), true, both);
+    try check(KA.App, "App", .appendable, comptime app(), true, both);
 }
 
 test "Mut (mutable members: EMHEADER length codes 5-7 in the reference)" {
-    try check(KA.Mut, "Mut", comptime mut(), false, &.{.xcdr2});
+    try check(KA.Mut, "Mut", .mutable, comptime mut(), false, &.{.xcdr2});
 }
 
 test "minimal TypeObject hashes of element structs" {

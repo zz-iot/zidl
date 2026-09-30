@@ -1468,7 +1468,7 @@ const Generator = struct {
                 try self.write("            for (_buf[0..self._length]) |*_e| _e.deinit(alloc);\n");
             }
             // String elements were allocated with dupeZ → free len+1 bytes per element.
-            if (seq.element.* == .string) {
+            if (isUnboundedString(seq.element.*)) {
                 try self.ind();
                 try self.write("            for (_buf[0..self._length]) |_s| {\n");
                 try self.ind();
@@ -1517,7 +1517,7 @@ const Generator = struct {
                 try self.write("            }\n");
                 try self.ind();
                 try self.write("        }\n");
-            } else if (seq.element.* == .string) {
+            } else if (isUnboundedString(seq.element.*)) {
                 try self.ind();
                 try self.print("        const _buf = try alloc.alloc({s}, self._length);\n", .{buf_elem});
                 try self.ind();
@@ -1652,9 +1652,11 @@ const Generator = struct {
     /// Buffer element type for a C sequence struct's `_buffer` field.
     /// String elements become `[*:0]const u8` (C string pointer) instead of `[]const u8`.
     fn seqBufElemZig(self: *Generator, elem_tr: ir.TypeRef) ![]u8 {
+        // Unbounded strings are C strings in a C-PSM buffer; bounded ones keep
+        // their inline `BoundedArray` representation.
         return switch (elem_tr) {
-            .string => self.alloc.dupe(u8, "[*:0]const u8"),
-            .wstring => self.alloc.dupe(u8, "[*:0]const u16"),
+            .string => |b| if (b == null) self.alloc.dupe(u8, "[*:0]const u8") else self.typeRefToZig(elem_tr),
+            .wstring => |b| if (b == null) self.alloc.dupe(u8, "[*:0]const u16") else self.typeRefToZig(elem_tr),
             else => self.typeRefToZig(elem_tr),
         };
     }
@@ -5312,7 +5314,7 @@ const Generator = struct {
                     try self.ind();
                     try self.print("{s}        for (_buf[0..self.{s}._length]) |*_e| _e.deinit(alloc);\n", .{ indent, field_name });
                 }
-                if (seq.element.* == .string) {
+                if (isUnboundedString(seq.element.*)) {
                     try self.ind();
                     try self.print("{s}        for (_buf[0..self.{s}._length]) |_s| {{\n", .{ indent, field_name });
                     try self.ind();
@@ -5491,7 +5493,7 @@ const Generator = struct {
                 try self.print("{s}result.{s} = .{{}};\n", .{ indent, field_name });
                 try self.ind();
                 try self.print("{s}if (self.{s}._length > 0) {{\n", .{ indent, field_name });
-                if (seq.element.* == .string) {
+                if (isUnboundedString(seq.element.*)) {
                     try self.ind();
                     try self.print("{s}    const _buf = try alloc.alloc({s}, self.{s}._length);\n", .{ indent, buf_elem, field_name });
                     try self.ind();
@@ -5669,7 +5671,7 @@ const Generator = struct {
                     try self.ind();
                     try self.print("{s}            for (_b[0..result.{s}._length]) |*_e| _e.deinit(alloc);\n", .{ indent, field_name });
                 }
-                if (seq.element.* == .string) {
+                if (isUnboundedString(seq.element.*)) {
                     try self.ind();
                     try self.print("{s}            for (_b[0..result.{s}._length]) |_s| {{\n", .{ indent, field_name });
                     try self.ind();
@@ -5853,7 +5855,7 @@ const Generator = struct {
                 .struct_, .enum_ => true,
                 else => false,
             },
-            .sequence => |seq| seq.bound == null and seq.element.* == .string,
+            .sequence => |seq| seq.bound == null and isUnboundedString(seq.element.*),
             else => false,
         };
     }
@@ -5984,7 +5986,7 @@ const Generator = struct {
                 else => try self.emitApplyTomlUnsupported(struct_name, field_name, indent),
             },
             .sequence => |seq| {
-                if (seq.bound == null and seq.element.* == .string) {
+                if (seq.bound == null and isUnboundedString(seq.element.*)) {
                     try self.emitStringSeqApplyToml(field_name, indent);
                 } else {
                     try self.emitApplyTomlUnsupported(struct_name, field_name, indent);
@@ -7632,6 +7634,15 @@ fn structIsCExternCompatible(s: *const ir.Struct) bool {
         if (!typeRefIsCExternCompatible(m.type_ref)) return false;
     }
     return true;
+}
+
+/// An unbounded `string` (a C string in C-PSM sequence buffers); bounded
+/// strings are inline `BoundedArray`s.
+fn isUnboundedString(tr: ir.TypeRef) bool {
+    return switch (tr) {
+        .string => |b| b == null,
+        else => false,
+    };
 }
 
 /// Follow dimension-less typedefs to the aliased type. Stops at an array
@@ -11394,4 +11405,52 @@ test "toml config: one unsupported field makes the whole body a single compileEr
     // The supported field's statement must NOT appear — nothing follows the
     // compileError in the generated body, since that would be unreachable code.
     try testing.expect(!has(s, "self.x = std.math.cast"));
+}
+
+test "zig_backend: nested collections, array typedefs and bounded-sequence elements" {
+    // In-process twin of test/integration/xcdr_known_answer (which runs the
+    // installed generator): pins the shapes the nested/DHEADER codegen emits.
+    var out = try testGen(
+        \\typedef sequence<long> LongSeq;
+        \\typedef sequence<sequence<string> > StrSeqSeq;
+        \\typedef long Triple[3];
+        \\struct Named { string label; };
+        \\union Choice switch (long) { case 1: long i; case 2: string s; };
+        \\union Holder switch (long) { case 1: sequence<sequence<long> > rows; };
+        \\struct S {
+        \\    sequence<sequence<long> > n;
+        \\    sequence<string<5>, 3> bs;
+        \\    sequence<string<5> > ubs;
+        \\    sequence<LongSeq, 2> bts;
+        \\    sequence<Triple, 2> bta;
+        \\    sequence<sequence<long>, 2> bsq;
+        \\    sequence<Named, 2> bn;
+        \\    sequence<Choice, 2> bu;
+        \\    string sa[2];
+        \\    Triple ta[2];
+        \\    @optional sequence<sequence<long> > on;
+        \\    StrSeqSeq t;
+        \\};
+    , "nest");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Unbounded nested: element type derived from the field; partial elements released.
+    try testing.expect(has(s, "zidl_rt.SeqElem(@TypeOf(out.n))"));
+    try testing.expect(has(s, "errdefer zidl_rt.deinitOwned(_se, allocator);"));
+    // Inner loops are depth-qualified.
+    try testing.expect(has(s, "const _n1 = try reader.readU32();"));
+    // Bounded elements of any kind decode through a temporary.
+    try testing.expect(has(s, "var _ev1: zidl_rt.SeqElem(@TypeOf(out.bta)) ="));
+    // Unbounded sequences of bounded strings keep inline elements.
+    try testing.expect(has(s, "?[*]zidl_rt.BoundedArray(u8, 5)"));
+    // Collection DHEADERs: strings in arrays / sequences of structs, never for Triple arrays.
+    try testing.expect(has(s, "const _cdh = try writer.reserveDheaderMaybe();"));
+    try testing.expect(has(s, "try reader.skipDheaderIfXcdr2();"));
+    // Generic ownership for nested / array members, including optional and union cases.
+    try testing.expect(has(s, "zidl_rt.deinitOwned(&self.n, alloc);"));
+    try testing.expect(has(s, "zidl_rt.deinitOwned(&self._u.rows, alloc);"));
+    try testing.expect(has(s, "zidl_rt.deinitOwned(&result.on.?, alloc);"));
+    // Typedef'd sequence of nested elements releases / clones them generically.
+    try testing.expect(has(s, "for (_buf[0..self._length]) |*_e| zidl_rt.deinitOwned(_e, alloc);"));
+    try testing.expect(has(s, "_buf[_n] = try zidl_rt.cloneOwned(_src, alloc);"));
 }

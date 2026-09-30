@@ -52,6 +52,12 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   arrays of array typedefs previously failed to compile (Zig, C, Java) or compiled and
   corrupted memory (C, C++: nested loops shadowed their counters). Collection code now
   names its locals by nesting depth, and:
+  - **Parser:** a nested template whose inner bound is followed by the closing `>` no
+    longer fails to parse (`sequence<string<5>>`, `sequence<sequence<long, 5> >`): inside
+    a template bound, `> >` closes the template rather than forming a shift, as in C++11
+    (parenthesize a shift there, e.g. `string<(8 >> 1)>`).
+  - **Zig:** unbounded sequences of bounded strings compile (their buffer elements are
+    inline `BoundedArray`s, not C strings).
   - **Zig:** bounded sequences of strings, sequences and array typedefs decode (they were
     `// TODO` stubs, and the bounded array-typedef case silently returned an empty
     sequence); unbounded decode counts `_length` up as elements complete; nested

@@ -100,6 +100,7 @@ public class KaTest {
         Ka.KA.NonPrims v = new Ka.KA.NonPrims();
         v.set_s_str(list("a", "bc"));
         v.set_s_bstr(list("xy", "z"));
+        v.set_s_ubstr(list("uv", "", "w"));
         v.set_s_enum(list(Ka.KA.Color.GREEN, Ka.KA.Color.BLUE));
         v.set_s_bm(list(Ka.KA.Flags.F0 | Ka.KA.Flags.F2, Ka.KA.Flags.F1));
         v.set_s_struct(list(new Ka.KA.Named("n1", 1), new Ka.KA.Named("n2", 2)));

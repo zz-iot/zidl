@@ -7208,3 +7208,22 @@ test "c_backend cdr: zzdds writer encapsulation follows top-level extensibility"
         try testing.expect(!has(s.items, "zidl_cdr_write_encap(&_w);"));
     }
 }
+
+test "c_backend: sequences of bounded strings are inline; nested sequences named by element" {
+    const idl =
+        \\typedef long Triple[3];
+        \\struct S { sequence<string<5> > s; sequence<wstring<3> > w; sequence<sequence<string> > n; Triple ta[2]; };
+    ;
+    var h = try testGen(idl, "t");
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "char (*_buffer)[6];"));
+    try testing.expect(has(h.items, "uint16_t (*_buffer)[4];"));
+    try testing.expect(has(h.items, "} string5_seq;"));
+    try testing.expect(has(h.items, "} wstring3_seq;"));
+    try testing.expect(has(h.items, "string_seq_seq n;"));
+    var c = try testGenCdr(idl, "t");
+    defer c.deinit(testing.allocator);
+    try testing.expect(has(c.items, "_v->s._buffer = (char (*)[6])zidl_cdr_alloc(_sl * sizeof(char[6]));"));
+    try testing.expect(has(c.items, "(uint16_t (*)[4])zidl_cdr_alloc(_sl * sizeof(uint16_t[4]))"));
+    try testing.expect(has(c.items, "(string_seq *)zidl_cdr_alloc(_sl * sizeof(string_seq))"));
+}

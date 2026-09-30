@@ -1138,4 +1138,12 @@ test "encap: XCDR2 appendable/mutable ids are written by kind and accepted by th
         try std.testing.expectEqual(@as(c_int, 0), c.zidl_cdr_reader_init(&r, &buf, 4));
         try std.testing.expectEqual(@as(c_int, c.ZIDL_XCDR2), r.xcdr_version);
     }
+    // Big-endian D_CDR2 / PL_CDR2 are XCDR2 big-endian.
+    for ([_]u8{ 0x08, 0x0a }) |id| {
+        const hdr = [_]u8{ 0x00, id, 0x00, 0x00 };
+        var r: c.ZidlCdrReader = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), c.zidl_cdr_reader_init(&r, &hdr, hdr.len));
+        try std.testing.expectEqual(@as(c_int, c.ZIDL_XCDR2), r.xcdr_version);
+        try std.testing.expectEqual(@as(c_int, c.ZIDL_CDR_BE), r.byte_order);
+    }
 }

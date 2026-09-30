@@ -28,6 +28,7 @@ module KA {
   @final struct NonPrims {
     sequence<string> s_str;
     sequence<string<5>, 3> s_bstr;
+    sequence<string<5> > s_ubstr;
     sequence<Color> s_enum;
     sequence<Flags> s_bm;
     sequence<Named> s_struct;

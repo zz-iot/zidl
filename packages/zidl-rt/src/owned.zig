@@ -206,3 +206,17 @@ test "owned: clone rolls back on every allocation failure" {
     const src: Outer = .{ ._maximum = 2, ._length = 2, ._buffer = &inner, ._release = false };
     try testing.checkAllAllocationFailures(testing.allocator, Check.run, .{src});
 }
+
+test "owned: bounded clone rolls back on every allocation failure" {
+    const Check = struct {
+        fn run(alloc: std.mem.Allocator, src: BoundedArray([]const u8, 3)) !void {
+            var copy = try cloneOwned(src, alloc);
+            deinitOwned(&copy, alloc);
+        }
+    };
+    var src: BoundedArray([]const u8, 3) = .{};
+    src.appendAssumeCapacity("a");
+    src.appendAssumeCapacity("bc");
+    src.appendAssumeCapacity("def");
+    try testing.checkAllAllocationFailures(testing.allocator, Check.run, .{src});
+}

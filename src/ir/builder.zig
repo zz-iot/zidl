@@ -2035,3 +2035,19 @@ test "builder: @default named form with unknown key leaves default_value null" {
     const m = ir_spec.items[0].type_decl.struct_.members[0];
     try testing.expect(m.annotations.default_value == null);
 }
+
+test "builder: enum and bitmask extensibility annotations" {
+    var ir_spec = try testBuild(
+        \\enum Plain { A };
+        \\@final enum F { A };
+        \\@appendable enum App { A };
+        \\@mutable bitmask Mut { B0 };
+        \\@extensibility(APPENDABLE) enum Ext { A };
+    );
+    defer ir_spec.deinit();
+    try testing.expectEqual(ir.Extensibility.final, ir_spec.items[0].type_decl.enum_.annotations.extensibility);
+    try testing.expectEqual(ir.Extensibility.final, ir_spec.items[1].type_decl.enum_.annotations.extensibility);
+    try testing.expectEqual(ir.Extensibility.appendable, ir_spec.items[2].type_decl.enum_.annotations.extensibility);
+    try testing.expectEqual(ir.Extensibility.mutable, ir_spec.items[3].type_decl.bitmask.annotations.extensibility);
+    try testing.expectEqual(ir.Extensibility.appendable, ir_spec.items[4].type_decl.enum_.annotations.extensibility);
+}

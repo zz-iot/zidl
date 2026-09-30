@@ -3,11 +3,13 @@
 // argv[1]).
 //
 // For each top-level type, in each reference encoding: zidl encodes the
-// sample to exactly the reference bytes (except Mut, where the reference uses
+// sample to exactly the reference bytes, including the representation id the
+// type's extensibility selects (for Mut only the id: the reference uses
 // EMHEADER length codes 5-7 and zidl writes 4); the reference bytes decode to
 // a value that re-encodes to zidl's encoding of the same sample; and every
 // truncated input fails.
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -30,23 +32,37 @@ namespace {
 
 std::string vectors;
 
-std::vector<uint8_t> vector(const std::string &name, int xcdr) {
-    const std::string key = "data " + name + " xcdr" + std::to_string(xcdr) + " ";
+std::vector<uint8_t> vector_hex(const std::string &kind, const std::string &name, int xcdr) {
+    const std::string key = kind + " " + name + " xcdr" + std::to_string(xcdr) + " ";
     const auto at = vectors.find(key);
     CHECK(at != std::string::npos);
-    std::vector<uint8_t> out{0x00, static_cast<uint8_t>(xcdr == 1 ? 0x01 : 0x07), 0x00, 0x00};
+    std::vector<uint8_t> out;
     for (size_t i = at + key.size(); i + 1 < vectors.size() && vectors[i] != '\n'; i += 2) {
         out.push_back(static_cast<uint8_t>(std::stoul(vectors.substr(i, 2), nullptr, 16)));
     }
     return out;
 }
 
+// The reference sample: the representation id the reference writes for this
+// type and encoding, then the payload.
+std::vector<uint8_t> vector(const std::string &name, int xcdr) {
+    auto out = vector_hex("encap", name, xcdr);
+    CHECK(out.size() == 2);
+    out.push_back(0x00);
+    out.push_back(0x00);
+    const auto payload = vector_hex("data", name, xcdr);
+    out.insert(out.end(), payload.begin(), payload.end());
+    return out;
+}
+
+// `ext` is the type's ZIDL_EXT_* extensibility (as annotated in ka.idl): it
+// selects the XCDR2 representation id.
 template <typename T, typename Ser>
-std::vector<uint8_t> encode(const T &value, int xcdr, Ser ser) {
+std::vector<uint8_t> encode(const T &value, int xcdr, int ext, Ser ser) {
     std::vector<uint8_t> buf(2048);
     ZidlCdrWriter w;
     zidl_cdr_writer_init_fixed(&w, buf.data(), buf.size(), xcdr == 1 ? ZIDL_XCDR1 : ZIDL_XCDR2);
-    CHECK(zidl_cdr_write_encap(&w) == 0);
+    CHECK(zidl_cdr_write_encap_kind(&w, ext) == 0);
     CHECK(ser(&w, &value) == 0);
     buf.resize(w.pos + 4);
     return buf;
@@ -62,16 +78,18 @@ int decode(const uint8_t *bytes, size_t len, T &out, De de) {
 }
 
 template <typename T, typename Ser, typename De>
-void check(const char *name, const T &sample, int xcdr, bool compare_bytes, Ser ser, De de) {
+void check(const char *name, int ext, const T &sample, int xcdr, bool compare_bytes, Ser ser, De de) {
     const auto reference = vector(name, xcdr);
-    const auto ours = encode(sample, xcdr, ser);
+    const auto ours = encode(sample, xcdr, ext, ser);
+    // Representation id always; the payload too, except for Mut.
+    CHECK(std::equal(ours.begin(), ours.begin() + 4, reference.begin()));
     if (compare_bytes) CHECK(ours == reference);
     {
         T got;
         CHECK(decode(reference.data(), reference.size(), got, de) == 0);
-        CHECK(encode(got, xcdr, ser) == ours);
+        CHECK(encode(got, xcdr, ext, ser) == ours);
         T copy = got;
-        CHECK(encode(copy, xcdr, ser) == ours);
+        CHECK(encode(copy, xcdr, ext, ser) == ours);
     }
     for (size_t cut = 0; cut < reference.size(); cut++) {
         T got;
@@ -107,6 +125,7 @@ KA::NonPrims non_prims() {
     KA::NonPrims v;
     v.s_str = {"a", "bc"};
     v.s_bstr = {"xy", "z"};
+    v.s_ubstr = {"uv", "", "w"};
     v.s_enum = {KA::Color::GREEN, KA::Color::BLUE};
     v.s_bm = {static_cast<KA::Flags>(KA::Flags_F0 | KA::Flags_F2), KA::Flags_F1};
     v.s_struct = {{"n1", 1}, {"n2", 2}};
@@ -180,13 +199,13 @@ int main(int argc, char **argv) {
     ss << in.rdbuf();
     vectors = ss.str();
     for (int xcdr = 1; xcdr <= 2; xcdr++) {
-        check("Prims", prims(), xcdr, true, KA_Prims_serialize, KA_Prims_deserialize);
-        check("NonPrims", non_prims(), xcdr, true, KA_NonPrims_serialize, KA_NonPrims_deserialize);
-        check("Nested", nested(), xcdr, true, KA_Nested_serialize, KA_Nested_deserialize);
-        check("Arrays", arrays(), xcdr, true, KA_Arrays_serialize, KA_Arrays_deserialize);
-        check("App", app(), xcdr, true, KA_App_serialize, KA_App_deserialize);
+        check("Prims", ZIDL_EXT_FINAL, prims(), xcdr, true, KA_Prims_serialize, KA_Prims_deserialize);
+        check("NonPrims", ZIDL_EXT_FINAL, non_prims(), xcdr, true, KA_NonPrims_serialize, KA_NonPrims_deserialize);
+        check("Nested", ZIDL_EXT_FINAL, nested(), xcdr, true, KA_Nested_serialize, KA_Nested_deserialize);
+        check("Arrays", ZIDL_EXT_FINAL, arrays(), xcdr, true, KA_Arrays_serialize, KA_Arrays_deserialize);
+        check("App", ZIDL_EXT_APPENDABLE, app(), xcdr, true, KA_App_serialize, KA_App_deserialize);
     }
-    check("Mut", mut(), 2, false, KA_Mut_serialize, KA_Mut_deserialize);
+    check("Mut", ZIDL_EXT_MUTABLE, mut(), 2, false, KA_Mut_serialize, KA_Mut_deserialize);
     std::printf("xcdr_known_answer C++: all checks passed\n");
     return 0;
 }

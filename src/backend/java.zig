@@ -10825,3 +10825,29 @@ test "java: raw-loan read ops carry native loan identity through the impl and JN
         \\    Foo_OctetSeqSeq _c_cdr_payloads; memset(&_c_cdr_payloads, 0, sizeof(_c_cdr_payloads)); Foo_OctetSeqSeq_from_java(env, cdr_payloads, &_c_cdr_payloads);
     ) != null);
 }
+
+test "java: nested and array-typedef sequence elements, enum elements, array typedef arrays" {
+    const alloc = testing.allocator;
+    const idl =
+        \\enum Color { RED, GREEN };
+        \\typedef long Triple[3];
+        \\struct S { sequence<Color> c; sequence<Triple> t; sequence<sequence<long> > n; Triple ta[2]; };
+    ;
+    // Elements that are collections decode through a temporary.
+    try testGen(alloc, idl, "test", "java.util.List<Integer> _ev1 = new java.util.ArrayList<>();");
+    try testGen(alloc, idl, "test", "int[] _ev1 = new int[3];");
+    try testGen(alloc, idl, "test", "_out.c.add(Color.valueOf((int) _buf.getInt()));");
+    // An array of an array typedef is one multi-dimensional array.
+    try testGen(alloc, idl, "test", "new int[2][3]");
+}
+
+test "java: @mutable key reads peek the NEXTINT for EMHEADER length codes 5-7" {
+    const alloc = testing.allocator;
+    const idl =
+        \\@bit_bound(8) enum Small { A, B };
+        \\@mutable struct K { @key string id; Small e; };
+    ;
+    try testGen(alloc, idl, "test", "else if (_emLc == 4) _emPayload = _buf.getInt(); else { int _emNext = _buf.getInt(_buf.position());");
+    // The 1-byte enum member gets EMHEADER LC 0.
+    try testGen(alloc, idl, "test", "_buf.putInt(0x00000001);");
+}
