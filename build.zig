@@ -199,6 +199,10 @@ pub fn build(b: *std.Build) void {
         gen_cpp.addArgs(&.{ "-b", "cpp", "--generate-interfaces", "--cpp-generate-impl", "-o" });
         const cpp_dir = gen_cpp.addOutputDirectoryArg("cpp-conditions-cpp");
         gen_cpp.addFileArg(b.path("test/integration/cpp_conditions/dcps.idl"));
+        const gen_topic = b.addRunArtifact(exe);
+        gen_topic.addArgs(&.{ "-b", "cpp", "--generate-zzdds-wrappers", "-o" });
+        const topic_dir = gen_topic.addOutputDirectoryArg("cpp-conditions-topic");
+        gen_topic.addFileArg(b.path("test/integration/cpp_conditions/topic.idl"));
         const conditions_mod = b.createModule(.{
             .root_source_file = null,
             .target = target,
@@ -215,6 +219,15 @@ pub fn build(b: *std.Build) void {
             .file = cpp_dir.path(b, "dcps_impl.cpp"),
             .flags = &.{ "-std=c++17", "-Wall", "-Werror" },
         });
+        conditions_mod.addCSourceFile(.{
+            .file = topic_dir.path(b, "topic_cdr.cpp"),
+            .flags = &.{ "-std=c++17", "-Wall", "-Werror" },
+        });
+        conditions_mod.addCSourceFile(.{
+            .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"),
+            .flags = &.{"-std=c99"},
+        });
+        conditions_mod.addIncludePath(topic_dir);
         conditions_mod.addIncludePath(cpp_dir);
         conditions_mod.addIncludePath(c_dir);
         conditions_mod.addIncludePath(b.path("test/integration/cpp_conditions"));
