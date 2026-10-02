@@ -635,6 +635,19 @@ pub fn collectBaseImplementors(
     }
 }
 
+/// `collectBaseImplementors` for a flat interface list -- an `ir.Spec`'s
+/// `imported_interfaces`, so a base declared in an imported file also lists
+/// its imported implementors (not only the generating file's own).
+pub fn collectBaseImplementorsFromList(
+    alloc: std.mem.Allocator,
+    ifaces: []const *const ir.Interface,
+    result: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged(*const ir.Interface)),
+) anyerror!void {
+    for (ifaces) |iface| {
+        if (!isCallbackInterface(iface)) try recordBaseChainImplementor(alloc, iface, iface, result);
+    }
+}
+
 /// Walk `iface`'s base chain transitively, recording `leaf` (the original
 /// concrete interface `collectBaseImplementors` started from) against every
 /// ancestor reached. Mirrors `collectBaseChain`'s traversal; dedups so a

@@ -81,7 +81,14 @@ jobject zidl_java_box_AdvancedGreeter(JNIEnv *env, void *handle);
 
 static jobject Greeter_box_as_most_derived(JNIEnv *env, void *handle);
 
-static void *zidl_java_unbox_as_Greeter(JNIEnv *env, jobject obj);
+#ifndef ZIDL_JAVA_MAYBE_UNUSED
+#if defined(__GNUC__) || defined(__clang__)
+#define ZIDL_JAVA_MAYBE_UNUSED __attribute__((unused))
+#else
+#define ZIDL_JAVA_MAYBE_UNUSED
+#endif
+#endif
+static ZIDL_JAVA_MAYBE_UNUSED void *zidl_java_unbox_as_Greeter(JNIEnv *env, jobject obj);
 
 static void *zidl_java_unbox_as_Greeter(JNIEnv *env, jobject obj) {
     if (obj == NULL) return NULL;

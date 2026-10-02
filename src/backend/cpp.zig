@@ -4166,6 +4166,9 @@ const ConcreteImplGenerator = struct {
 
         try interface.collectEntityBaseNames(self.alloc, spec.items, &self.entity_base_ifaces);
         try interface.collectBaseImplementors(self.alloc, spec.items, &self.base_implementors);
+        // After the local ones, so local (more-derived) candidates are tried
+        // first by the entity-parameter adapters.
+        try interface.collectBaseImplementorsFromList(self.alloc, spec.imported_interfaces, &self.base_implementors);
         try interface.collectSharedCAbiBoxFamilies(self.alloc, spec.items, &self.families);
 
         // Pre-scan: discover which entity interfaces are ever wrapped via
@@ -10260,4 +10263,68 @@ test "cpp_backend cdr: collection DHEADERs, depth-named loops and vector<bool>" 
     try testing.expect(has(s, "{ bool _bv; _rc = zidl_cdr_read_bool(_r, &_bv);"));
     // Triple[2] flattens to int32 x 6: no DHEADER, depth-qualified loop vars.
     try testing.expect(has(s, "_ai1"));
+}
+
+test "cpp_backend: cross-file base parameter adapter also accepts the imported file's own subtypes" {
+    // zzdds.idl's create_datareader_ex declares a DDS::TopicDescription
+    // parameter; a ContentFilteredTopic (an imported subtype the generating
+    // file never names) must be accepted via its own conversion, not rejected.
+    const alloc = testing.allocator;
+    var base_arena = std.heap.ArenaAllocator.init(alloc);
+    defer base_arena.deinit();
+    var base_p = parser_mod.Parser.init(
+        \\module DDS {
+        \\    interface TopicDescription { string get_name(); };
+        \\    interface Topic : TopicDescription {};
+        \\    interface ContentFilteredTopic : TopicDescription {};
+        \\    interface Subscriber { long create_datareader(in TopicDescription a_topic); };
+        \\};
+    , base_arena.allocator());
+    const base_spec = try base_p.parseSpecification();
+    var base_az = try semantic_mod.Analyzer.init(alloc);
+    defer base_az.deinit();
+    try base_az.analyze(&base_spec);
+
+    var ext_arena = std.heap.ArenaAllocator.init(alloc);
+    defer ext_arena.deinit();
+    var ext_p = parser_mod.Parser.init(
+        \\import "dcps.idl";
+        \\module ext {
+        \\    interface Topic : DDS::Topic {};
+        \\    interface Subscriber : DDS::Subscriber {
+        \\        long create_datareader_ex(in DDS::TopicDescription a_topic);
+        \\    };
+        \\};
+    , ext_arena.allocator());
+    const ext_spec = try ext_p.parseSpecification();
+    var ext_az = try semantic_mod.Analyzer.init(alloc);
+    defer ext_az.deinit();
+    try ext_az.preloadScope(base_az.global_scope);
+    try ext_az.analyze(&ext_spec);
+
+    var ir_spec = try ir.buildWithImportedUnits(
+        alloc,
+        &ext_spec,
+        ext_az.global_scope,
+        &.{"DDS"},
+        &.{.{ .ast_spec = &base_spec, .scope = base_az.global_scope }},
+        &.{"dcps"},
+        false,
+    );
+    defer ir_spec.deinit();
+
+    var hdr = std.ArrayList(u8).empty;
+    defer hdr.deinit(alloc);
+    var src = std.ArrayList(u8).empty;
+    defer src.deinit(alloc);
+    try generateConcreteImpl(alloc, &ir_spec, .{ .input_stem = "ext", .cpp_generate_impl = true }, &hdr, &src);
+    const s = src.items;
+
+    const start = std.mem.indexOf(u8, s, "ext_Subscriber_create_datareader_ex(ptr_").?;
+    const call = s[start..std.mem.indexOfPos(u8, s, start, "(a_topic)").?];
+    // This file's own subtype first, then the imported ones, each converted.
+    const local = std.mem.indexOf(u8, call, "dynamic_cast<::ext::TopicImpl*>").?;
+    const cft = std.mem.indexOf(u8, call, "dynamic_cast<::DDS::ContentFilteredTopicImpl*>(_p.get())) return DDS_ContentFilteredTopic_as_DDS_TopicDescription(").?;
+    try testing.expect(local < cft);
+    try testing.expect(std.mem.indexOf(u8, call, "dynamic_cast<::DDS::TopicImpl*>(_p.get())) return DDS_Topic_as_DDS_TopicDescription(") != null);
 }

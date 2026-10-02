@@ -452,6 +452,16 @@ pub const Spec = struct {
     /// already matches the IDL module path regardless of which file declared
     /// a type.
     import_stems: []const []const u8 = &.{},
+    /// Every interface declared by an imported file (callback and entity
+    /// alike), with real `.bases`. Not part of `items` and never generated:
+    /// backends use it to find an imported base interface's imported
+    /// subtypes, e.g. so a parameter declared as an imported
+    /// `DDS::TopicDescription` also accepts `DDS::ContentFilteredTopic` even
+    /// though the generating file never names it. Entity interfaces other
+    /// than the Java backend's have their members reset to the Pass-1
+    /// skeleton (see `buildWithImportedUnits`); only `.bases` and names are
+    /// reliable for every backend.
+    imported_interfaces: []const *const Interface = &.{},
 
     pub fn deinit(self: *Spec) void {
         self.arena.deinit();

@@ -142,7 +142,20 @@ Features*.
   query/read/null arguments, shared ownership through the `Condition` family cache,
   and rejection of guard/status conditions as read conditions. Downstream callers
   must regenerate their topic bindings and replace raw-handle arguments with C++
-  condition objects; zzdds migration remains separate.
+  condition objects (zzdds migrated in zzdds#95).
+- **Typed C++ API still needs raw C handles for type registration and typed reader/writer
+  construction.** `{T}TypeSupport::register_type(DDS_DomainParticipant, …)` (`cpp.zig:505`,
+  body `cpp.zig:2317`), `{T}DataWriter(DDS_DataWriter, …)` (`cpp.zig:510`) and
+  `{T}DataReader(DDS_DataReader)` (`cpp.zig:558`) take C-ABI handles, so application code
+  must call `native_handle()` on the C++ `DomainParticipant`/`DataReader`/`DataWriter`
+  objects (zzdds's C++ examples do: `register_type(dp->native_handle())`,
+  `WaitsetSampleDataReader reader(dr->native_handle())`). Accept
+  `std::shared_ptr<::DDS::DomainParticipant>` / `DataReader` / `DataWriter` instead, as the
+  `*_w_condition` operations now accept C++ conditions. Decide whether a typed wrapper
+  holds the `shared_ptr` (keeping the entity alive) or borrows it, and keep the raw-handle
+  forms only where C-ABI-level consumers need them. Once ordinary C++ code no longer needs
+  `native_handle()`, it can leave the application-facing surface (for example an explicit
+  interop accessor instead of a public virtual on every interface).
 
 ### Java backend
 
