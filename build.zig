@@ -773,6 +773,51 @@ pub fn build(b: *std.Build) void {
         integ_step.dependOn(&b.addRunArtifact(pmr_containers_exe).step);
     }
 
+    // Cross-file widening: an operation in plugin.idl declares an imported
+    // core::TopicDescription parameter; the generated C++ and Java bindings
+    // must convert imported subtypes (core::Topic, core::ContentFilteredTopic)
+    // to that view. native.c tags every view and rejects an unconverted
+    // handle. The C++ half runs here; the Java half below (needs a JDK).
+    const xfw_dir = "test/integration/cross_file_widening";
+    const gen_xfw_c = b.addRunArtifact(exe);
+    gen_xfw_c.addArgs(&.{ "-b", "c", "--generate-interfaces", "-o" });
+    const xfw_c_dir = gen_xfw_c.addOutputDirectoryArg("xfw-c");
+    gen_xfw_c.addFileArg(b.path(xfw_dir ++ "/core.idl"));
+    const gen_xfw_c_ext = b.addRunArtifact(exe);
+    gen_xfw_c_ext.addArgs(&.{ "-b", "c", "--generate-interfaces", "-o" });
+    const xfw_c_ext_dir = gen_xfw_c_ext.addOutputDirectoryArg("xfw-c-ext");
+    gen_xfw_c_ext.addFileArg(b.path(xfw_dir ++ "/plugin.idl"));
+    {
+        const gen_cpp_base = b.addRunArtifact(exe);
+        gen_cpp_base.addArgs(&.{ "-b", "cpp", "--generate-interfaces", "--cpp-generate-impl", "-o" });
+        const cpp_base_dir = gen_cpp_base.addOutputDirectoryArg("xfw-cpp-base");
+        gen_cpp_base.addFileArg(b.path(xfw_dir ++ "/core.idl"));
+        const gen_cpp_ext = b.addRunArtifact(exe);
+        gen_cpp_ext.addArgs(&.{ "-b", "cpp", "--generate-interfaces", "--cpp-generate-impl", "-o" });
+        const cpp_ext_dir = gen_cpp_ext.addOutputDirectoryArg("xfw-cpp-ext");
+        gen_cpp_ext.addFileArg(b.path(xfw_dir ++ "/plugin.idl"));
+        const xfw_cpp_mod = b.createModule(.{
+            .root_source_file = null,
+            .target = target,
+            .optimize = .Debug,
+            .link_libc = true,
+            .link_libcpp = true,
+        });
+        const cpp_flags = &.{ "-std=c++17", "-Wall", "-Werror" };
+        xfw_cpp_mod.addCSourceFile(.{ .file = b.path(xfw_dir ++ "/test.cpp"), .flags = cpp_flags });
+        xfw_cpp_mod.addCSourceFile(.{ .file = cpp_base_dir.path(b, "core_impl.cpp"), .flags = cpp_flags });
+        xfw_cpp_mod.addCSourceFile(.{ .file = cpp_ext_dir.path(b, "plugin_impl.cpp"), .flags = cpp_flags });
+        xfw_cpp_mod.addCSourceFile(.{ .file = b.path(xfw_dir ++ "/native.c"), .flags = &.{ "-std=c99", "-Wall", "-Werror" } });
+        xfw_cpp_mod.addIncludePath(b.path(xfw_dir));
+        xfw_cpp_mod.addIncludePath(cpp_base_dir);
+        xfw_cpp_mod.addIncludePath(cpp_ext_dir);
+        xfw_cpp_mod.addIncludePath(xfw_c_dir);
+        xfw_cpp_mod.addIncludePath(xfw_c_ext_dir);
+        xfw_cpp_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+        const xfw_cpp = b.addExecutable(.{ .name = "zidl-cross-file-widening-cpp", .root_module = xfw_cpp_mod });
+        integ_step.dependOn(&b.addRunArtifact(xfw_cpp).step);
+    }
+
     // Java integration test — requires javac/java on PATH
     {
         const maybe_javac = b.findProgram(&.{"javac"}, &.{}) catch null;
@@ -856,6 +901,55 @@ pub fn build(b: *std.Build) void {
                 run_entity_java.step.dependOn(&compile_entity_java.step);
                 run_entity_java.step.dependOn(&entity_jni_lib.step);
                 integ_step.dependOn(&run_entity_java.step);
+
+                // Java half of the cross-file widening test (see above).
+                const gen_xfw_java_base = b.addRunArtifact(exe);
+                gen_xfw_java_base.addArgs(&.{ "-b", "java", "--generate-interfaces", "--java-package", "xfw.core", "--java-jni-library", "xfw_jni", "-o" });
+                const xfw_java_base_dir = gen_xfw_java_base.addOutputDirectoryArg("xfw-java-base");
+                gen_xfw_java_base.addFileArg(b.path(xfw_dir ++ "/core.idl"));
+                const gen_xfw_java_ext = b.addRunArtifact(exe);
+                gen_xfw_java_ext.addArgs(&.{
+                    "-b",                    "java",
+                    "--generate-interfaces", "--java-package",
+                    "xfw.plugin",            "--java-import-package",
+                    "core=xfw.core",         "--java-jni-library",
+                    "xfw_jni",               "-o",
+                });
+                const xfw_java_ext_dir = gen_xfw_java_ext.addOutputDirectoryArg("xfw-java-ext");
+                gen_xfw_java_ext.addFileArg(b.path(xfw_dir ++ "/plugin.idl"));
+
+                const xfw_jni_mod = b.createModule(.{
+                    .root_source_file = null,
+                    .target = target,
+                    .optimize = .Debug,
+                    .link_libc = true,
+                });
+                xfw_jni_mod.addCSourceFile(.{ .file = xfw_java_base_dir.path(b, "core_jni.c"), .flags = &.{"-std=c99"} });
+                xfw_jni_mod.addCSourceFile(.{ .file = xfw_java_ext_dir.path(b, "plugin_jni.c"), .flags = &.{"-std=c99"} });
+                xfw_jni_mod.addCSourceFile(.{ .file = b.path(xfw_dir ++ "/native.c"), .flags = &.{"-std=c99"} });
+                xfw_jni_mod.addCSourceFile(.{ .file = b.path(xfw_dir ++ "/jni_bootstrap.c"), .flags = &.{"-std=c99"} });
+                xfw_jni_mod.addIncludePath(b.path(xfw_dir));
+                xfw_jni_mod.addIncludePath(xfw_c_dir);
+                xfw_jni_mod.addIncludePath(xfw_c_ext_dir);
+                xfw_jni_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+                xfw_jni_mod.addIncludePath(.{ .cwd_relative = jni_inc.base });
+                xfw_jni_mod.addIncludePath(.{ .cwd_relative = jni_inc.platform });
+                const xfw_jni_lib = b.addLibrary(.{ .name = "xfw_jni", .linkage = .dynamic, .root_module = xfw_jni_mod });
+
+                const compile_xfw_java = b.addSystemCommand(&.{ javac, "-d", "build-tmp/integ-java-xfw" });
+                compile_xfw_java.addArg(xfw_dir ++ "/CrossFileTest.java");
+                for (&[_][]const u8{ "Core.java", "TopicDescriptionImpl.java", "TopicImpl.java", "ContentFilteredTopicImpl.java", "FactoryImpl.java" }) |f| {
+                    compile_xfw_java.addFileArg(xfw_java_base_dir.path(b, f));
+                }
+                for (&[_][]const u8{ "Plugin.java", "ReaderImpl.java" }) |f| {
+                    compile_xfw_java.addFileArg(xfw_java_ext_dir.path(b, f));
+                }
+                const run_xfw_java = b.addSystemCommand(&.{ java, "-cp", "build-tmp/integ-java-xfw" });
+                run_xfw_java.addPrefixedDirectoryArg("-Djava.library.path=", xfw_jni_lib.getEmittedBinDirectory());
+                run_xfw_java.addArg("CrossFileTest");
+                run_xfw_java.step.dependOn(&compile_xfw_java.step);
+                run_xfw_java.step.dependOn(&xfw_jni_lib.step);
+                integ_step.dependOn(&run_xfw_java.step);
             } else {
                 std.log.warn("jni.h not found under the detected JAVA_HOME — skipping Java entity JNI bridge integration test", .{});
             }

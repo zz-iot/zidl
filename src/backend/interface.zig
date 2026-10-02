@@ -544,6 +544,21 @@ pub fn collectEntityBaseNames(
     }
 }
 
+/// `collectEntityBaseNames` for a flat interface list -- an `ir.Spec`'s
+/// `imported_interfaces`. An imported interface that is a base only within
+/// its own file (e.g. `DDS::TopicDescription`, based by `DDS::Topic`) must
+/// still count as a base in an importing file's pass, or that pass treats it
+/// as a leaf that owns a `native_handle()` its own header never declared.
+pub fn collectEntityBaseNamesFromList(
+    alloc: std.mem.Allocator,
+    ifaces: []const *const ir.Interface,
+    result: *std.StringHashMapUnmanaged(void),
+) anyerror!void {
+    for (ifaces) |iface| {
+        if (!isCallbackInterface(iface)) try collectBaseChain(alloc, iface, result);
+    }
+}
+
 /// Walk `iface`'s base chain transitively (base-of-base, ...), adding every
 /// ancestor's qualified name to `result`. Direct-bases-only would miss an
 /// ancestor declared in an *imported* file: e.g. `zzdds::DomainParticipant`

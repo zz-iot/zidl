@@ -20,6 +20,13 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   (`Spec.imported_interfaces`), and both backends consider them as candidates after the
   file's own. Java JNI sources also declare the widening dispatchers with
   `ZIDL_JAVA_MAYBE_UNUSED`, since an imported base may now get one this file never calls.
+  Also fixed in the same path: the C++ backend decided which interfaces own a
+  `native_handle()` from the generating file alone, so an imported base that is a base
+  only in its own file (such as `DDS::TopicDescription`) looked like a leaf, and the
+  generated adapter called a `native_handle()` the base never declares (a compile
+  error). Covered by a compiled cross-file fixture,
+  `test/integration/cross_file_widening/`, run by `zig build integration-test` for C++
+  and Java.
 
 - **All backends: XCDR2 now interoperates with other XTypes implementations for
   collections, mutable members and type hashes.** Checked by the new

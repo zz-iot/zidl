@@ -314,6 +314,7 @@ const Generator = struct {
         // interfaces that actually need the C handle types.
         if (self.opts.generate_interfaces) {
             try interface.collectEntityBaseNames(self.alloc, spec.items, &self.entity_base_ifaces);
+            try interface.collectEntityBaseNamesFromList(self.alloc, spec.imported_interfaces, &self.entity_base_ifaces);
             // Include the C header when any interface needs C ABI types:
             // native_handle() returns C entity handles; c_listener() returns C listener structs.
             if (hasNativeHandleInterfaces(spec.items, &self.entity_base_ifaces) or
@@ -4165,6 +4166,7 @@ const ConcreteImplGenerator = struct {
         if (spec.imports.len != 0) try self.hdrWrite("\n");
 
         try interface.collectEntityBaseNames(self.alloc, spec.items, &self.entity_base_ifaces);
+        try interface.collectEntityBaseNamesFromList(self.alloc, spec.imported_interfaces, &self.entity_base_ifaces);
         try interface.collectBaseImplementors(self.alloc, spec.items, &self.base_implementors);
         // After the local ones, so local (more-derived) candidates are tried
         // first by the entity-parameter adapters.
