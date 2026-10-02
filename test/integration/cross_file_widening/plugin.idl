@@ -1,0 +1,11 @@
+// Importing module: `id_of` declares an imported base interface parameter,
+// and this file never names the imported subtypes. A caller passing a
+// core::Topic or core::ContentFilteredTopic must still have its handle
+// converted to the TopicDescription view (see native.c).
+import "core.idl";
+
+module plugin {
+    interface Reader {
+        long id_of(in core::TopicDescription t);
+    };
+};

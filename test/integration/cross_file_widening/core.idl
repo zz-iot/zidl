@@ -1,0 +1,13 @@
+// Imported module for the cross-file widening fixture: a base interface with two
+// independent subtypes, and a factory that creates them.
+module core {
+    interface TopicDescription {
+        long get_id();
+    };
+    interface Topic : TopicDescription {};
+    interface ContentFilteredTopic : TopicDescription {};
+    interface Factory {
+        Topic create_topic(in long id);
+        ContentFilteredTopic create_cft(in long id);
+    };
+};

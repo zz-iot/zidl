@@ -144,6 +144,9 @@ fn buildImpl(
         if (!fill_entity_bases) b.resetNonCallbackInterfaces(iu.scope, "");
     }
 
+    var imported_ifaces: std.ArrayListUnmanaged(*const ir.Interface) = .empty;
+    for (imported_units) |iu| try b.collectImportedInterfaces(iu.scope, "", &imported_ifaces);
+
     // Pass 2 — fill the main file's own skeletons from its AST in source order.
     var top_items: std.ArrayListUnmanaged(ir.ModuleItem) = .empty;
     try b.buildDefinitions(ast_spec.definitions, &top_items, "", global_scope);
@@ -167,6 +170,7 @@ fn buildImpl(
         .warnings = try b.warnings.toOwnedSlice(alloc),
         .imports = try import_names.toOwnedSlice(alloc),
         .import_stems = try import_stems_owned.toOwnedSlice(alloc),
+        .imported_interfaces = try imported_ifaces.toOwnedSlice(alloc),
     };
 }
 
@@ -344,6 +348,37 @@ const Builder = struct {
     /// unaffected: nothing here changes which interfaces get callback
     /// treatment, only what a *non*-callback interface's own `.raw` reads
     /// back as.
+    /// Appends every interface declared in the imported `scope` (recursing
+    /// into modules and nested interface scopes), deduplicated by node.
+    fn collectImportedInterfaces(
+        self: *Builder,
+        scope: *const Scope,
+        qpath: []const u8,
+        out: *std.ArrayListUnmanaged(*const ir.Interface),
+    ) anyerror!void {
+        var it = scope.symbols.iterator();
+        while (it.next()) |entry| {
+            const sym = entry.value_ptr.*;
+            switch (sym.tag) {
+                .module => {
+                    const qname = try qualifyName(self.alloc, qpath, sym.name);
+                    if (sym.scope) |child| try self.collectImportedInterfaces(child, qname, out);
+                },
+                .interface_def => {
+                    const qname = try qualifyName(self.alloc, qpath, sym.name);
+                    if (self.lookupByQname(qname)) |td| {
+                        const iface: *const ir.Interface = td.interface;
+                        for (out.items) |existing| {
+                            if (existing == iface) break;
+                        } else try out.append(self.alloc, iface);
+                    } else |_| {}
+                    if (sym.scope) |iface_scope| try self.collectImportedInterfaces(iface_scope, qname, out);
+                },
+                else => {},
+            }
+        }
+    }
+
     fn resetNonCallbackInterfaces(self: *Builder, scope: *const Scope, qpath: []const u8) void {
         var it = scope.symbols.iterator();
         while (it.next()) |entry| {

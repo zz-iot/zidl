@@ -4513,25 +4513,43 @@ fn emitBoxAsMostDerived(
 
 /// Free-function core of `JniBridgeGenerator.entityUnboxFnName` — shared with
 /// `SeqParamMarshalGenerator.emitSeqEntity`, which needs the exact same
-/// "does this target have derived siblings in `all_entity_ifaces`" decision
-/// for a sequence *element* type, not just a bare single-entity param. Takes
-/// the already-resolved `target` interface directly (not a `TypeRef`) so
-/// both callers can supply one however they already have it in hand.
+/// decision for a sequence *element* type, not just a bare single-entity
+/// param. Takes the already-resolved `target` interface directly (not a
+/// `TypeRef`) so both callers can supply one however they already have it in
+/// hand. Returns the `zidl_java_unbox_as_<target_c>` dispatcher exactly when
+/// `JniBridgeGenerator.emitSource` emits one for `target` (it is in
+/// `widening_targets` and has a derived candidate); otherwise the plain
+/// `zidl_java_unbox`.
 fn entityUnboxFnNameFor(
     alloc: std.mem.Allocator,
     opts: interface.Options,
-    all_entity_ifaces: []const *const ir.Interface,
+    widening_targets: []const *const ir.Interface,
+    widening_candidates: []const *const ir.Interface,
     target: *const ir.Interface,
 ) ![]u8 {
-    for (all_entity_ifaces) |candidate| {
-        if (candidate == target) continue;
-        if (interfaceHasBaseTransitively(candidate, target)) {
-            const target_c = try interface.prefixedCNameFromQualified(alloc, target.qualified_name, opts.type_prefix);
-            defer alloc.free(target_c);
-            return std.fmt.allocPrint(alloc, "zidl_java_unbox_as_{s}", .{target_c});
-        }
+    if (needsUnboxDispatcher(widening_targets, widening_candidates, target)) {
+        const target_c = try interface.prefixedCNameFromQualified(alloc, target.qualified_name, opts.type_prefix);
+        defer alloc.free(target_c);
+        return std.fmt.allocPrint(alloc, "zidl_java_unbox_as_{s}", .{target_c});
     }
     return alloc.dupe(u8, "zidl_java_unbox");
+}
+
+/// Whether `target` gets a `zidl_java_unbox_as_<target_c>` dispatcher: it is
+/// one of `widening_targets` and some candidate derives from it.
+fn needsUnboxDispatcher(
+    widening_targets: []const *const ir.Interface,
+    widening_candidates: []const *const ir.Interface,
+    target: *const ir.Interface,
+) bool {
+    for (widening_targets) |t| {
+        if (std.mem.eql(u8, t.qualified_name, target.qualified_name)) break;
+    } else return false;
+    for (widening_candidates) |candidate| {
+        if (std.mem.eql(u8, candidate.qualified_name, target.qualified_name)) continue;
+        if (interfaceHasBaseTransitively(candidate, target)) return true;
+    }
+    return false;
 }
 
 /// Generate a `<IfaceName>Impl.java` file for one IDL interface.
@@ -4571,6 +4589,8 @@ pub fn generateJniSource(
     var gen = JniBridgeGenerator{ .alloc = alloc, .opts = opts, .out = out };
     defer interface.deinitBaseImplementors(alloc, &gen.families);
     defer gen.local_entity_names.deinit(alloc);
+    defer alloc.free(gen.widening_candidates);
+    defer alloc.free(gen.widening_targets);
     try gen.emitSource(spec);
 }
 
@@ -5142,6 +5162,16 @@ const JniBridgeGenerator = struct {
     /// *other* interface whose (transitive) bases include X — see
     /// `emitUnboxAsDispatcher`.
     all_entity_ifaces: []const *const ir.Interface = &.{},
+    /// Entity interfaces a Java argument declared as some base interface may
+    /// really be: this file's own, then (after them, so more-derived local
+    /// classes are tried first) every imported file's. Set in `emitSource`.
+    widening_candidates: []const *const ir.Interface = &.{},
+    /// Interfaces that get a `zidl_java_unbox_as_<C>` dispatcher (when some
+    /// candidate derives from them): this file's entities, their bases, and
+    /// every imported entity interface. Set in `emitSource`; shared by the
+    /// dispatcher emission and `entityUnboxFnNameFor`, so a referenced
+    /// dispatcher is always defined.
+    widening_targets: []const *const ir.Interface = &.{},
     /// See `CrossFileResolver`. Set once at the top of `emitSource`.
     /// Default-empty: every type reference resolves as local to the current
     /// file, today's behavior.
@@ -5463,29 +5493,54 @@ const JniBridgeGenerator = struct {
         // need a different dispatcher body (checking against *its own*
         // derived types) — a non-`static`, identically-named symbol would
         // collide with that file's own definition at link time.
+        //
+        // Candidates also include the imported files' entity interfaces: a
+        // parameter declared as an imported base (`DDS::TopicDescription`)
+        // must accept that base's imported subtypes (`DDS::Topic`,
+        // `DDS::ContentFilteredTopic`) as well as this file's, even when this
+        // file never names them. Imported targets with such subtypes get a
+        // dispatcher too; one this file's ops don't use is harmless (marked
+        // unused for compilers that warn).
+        var widening_candidates = std.ArrayListUnmanaged(*const ir.Interface).empty;
+        try widening_candidates.appendSlice(self.alloc, entity_ifaces.items);
+        for (spec.imported_interfaces) |imported| {
+            if (interface.isCallbackInterface(imported)) continue;
+            if (self.local_entity_names.contains(imported.qualified_name)) continue;
+            try widening_candidates.append(self.alloc, imported);
+        }
         var widening_targets = std.ArrayListUnmanaged(*const ir.Interface).empty;
-        defer widening_targets.deinit(self.alloc);
         try widening_targets.appendSlice(self.alloc, entity_ifaces.items);
         for (entity_ifaces.items) |candidate| try self.collectBasesTransitively(candidate, &widening_targets);
+        for (spec.imported_interfaces) |imported| {
+            if (interface.isCallbackInterface(imported)) continue;
+            for (widening_targets.items) |existing| {
+                if (std.mem.eql(u8, existing.qualified_name, imported.qualified_name)) break;
+            } else try widening_targets.append(self.alloc, imported);
+        }
+        self.widening_candidates = try widening_candidates.toOwnedSlice(self.alloc);
+        self.widening_targets = try widening_targets.toOwnedSlice(self.alloc);
 
-        for (widening_targets.items) |target| {
-            var derived = std.ArrayListUnmanaged(*const ir.Interface).empty;
-            defer derived.deinit(self.alloc);
-            for (entity_ifaces.items) |candidate| {
-                if (candidate == target) continue;
-                if (interfaceHasBaseTransitively(candidate, target)) try derived.append(self.alloc, candidate);
-            }
-            if (derived.items.len == 0) continue;
+        try self.write(
+            "#ifndef ZIDL_JAVA_MAYBE_UNUSED\n" ++
+                "#if defined(__GNUC__) || defined(__clang__)\n" ++
+                "#define ZIDL_JAVA_MAYBE_UNUSED __attribute__((unused))\n" ++
+                "#else\n" ++
+                "#define ZIDL_JAVA_MAYBE_UNUSED\n" ++
+                "#endif\n" ++
+                "#endif\n",
+        );
+        for (self.widening_targets) |target| {
+            if (!needsUnboxDispatcher(self.widening_targets, self.widening_candidates, target)) continue;
             const target_c = try interface.prefixedCNameFromQualified(self.alloc, target.qualified_name, self.opts.type_prefix);
             defer self.alloc.free(target_c);
-            try self.print("static void *zidl_java_unbox_as_{s}(JNIEnv *env, jobject obj);\n", .{target_c});
+            try self.print("static ZIDL_JAVA_MAYBE_UNUSED void *zidl_java_unbox_as_{s}(JNIEnv *env, jobject obj);\n", .{target_c});
         }
         try self.write("\n");
-        for (widening_targets.items) |target| {
+        for (self.widening_targets) |target| {
             var derived = std.ArrayListUnmanaged(*const ir.Interface).empty;
             defer derived.deinit(self.alloc);
-            for (entity_ifaces.items) |candidate| {
-                if (candidate == target) continue;
+            for (self.widening_candidates) |candidate| {
+                if (std.mem.eql(u8, candidate.qualified_name, target.qualified_name)) continue;
                 if (interfaceHasBaseTransitively(candidate, target)) try derived.append(self.alloc, candidate);
             }
             if (derived.items.len == 0) continue;
@@ -5507,7 +5562,7 @@ const JniBridgeGenerator = struct {
         // its own "before the per-interface bridges" placement, which call
         // into both for `value_struct`-categorized params (see
         // `opIsJniSupported`/`paramIsSupportedValueStruct`).
-        var seq_gen = SeqParamMarshalGenerator{ .alloc = self.alloc, .opts = self.opts, .out = self.out, .cross_file = self.cross_file, .all_entity_ifaces = self.all_entity_ifaces, .stem_class = stem_class };
+        var seq_gen = SeqParamMarshalGenerator{ .alloc = self.alloc, .opts = self.opts, .out = self.out, .cross_file = self.cross_file, .all_entity_ifaces = self.all_entity_ifaces, .widening_targets = self.widening_targets, .widening_candidates = self.widening_candidates, .stem_class = stem_class };
         try seq_gen.emitSource(spec);
 
         try self.emitItems(spec.items);
@@ -5594,7 +5649,7 @@ const JniBridgeGenerator = struct {
     /// dispatcher if some do (see `emitUnboxAsDispatcher`). Always returns
     /// an owned, allocator-freed string for uniform call-site handling.
     fn entityUnboxFnName(self: *JniBridgeGenerator, tr: ir.TypeRef) ![]u8 {
-        return entityUnboxFnNameFor(self.alloc, self.opts, self.all_entity_ifaces, resolveToNamedDecl(tr).interface);
+        return entityUnboxFnNameFor(self.alloc, self.opts, self.widening_targets, self.widening_candidates, resolveToNamedDecl(tr).interface);
     }
 
     /// Emits `zidl_java_unbox_as_<target_c>`: unboxes `obj`'s raw handle,
@@ -7755,6 +7810,9 @@ const SeqParamMarshalGenerator = struct {
     /// bare (non-sequence) entity param; always populated from
     /// `JniBridgeGenerator.all_entity_ifaces`.
     all_entity_ifaces: []const *const ir.Interface = &.{},
+    /// See `JniBridgeGenerator.widening_targets`/`widening_candidates`.
+    widening_targets: []const *const ir.Interface = &.{},
+    widening_candidates: []const *const ir.Interface = &.{},
     /// Needed by `binClass` (`emitSeqPlainStruct`'s `_fill_java` direction,
     /// to `FindClass` a fresh element instance) — same purpose as
     /// `StructMarshalGenerator.stem_class`, unused before that case existed.
@@ -7965,7 +8023,7 @@ const SeqParamMarshalGenerator = struct {
     /// NULL when not an instance — the mirror image of the widening
     /// dispatcher's always-succeeds `<Derived>_as_<Base>` upcasts) instead.
     fn emitSeqEntity(self: *SeqParamMarshalGenerator, c_name: []const u8, element_iface: *const ir.Interface) !void {
-        const unbox_fn = try entityUnboxFnNameFor(self.alloc, self.opts, self.all_entity_ifaces, element_iface);
+        const unbox_fn = try entityUnboxFnNameFor(self.alloc, self.opts, self.widening_targets, self.widening_candidates, element_iface);
         defer self.alloc.free(unbox_fn);
 
         try self.print(
@@ -10850,4 +10908,60 @@ test "java: @mutable key reads peek the NEXTINT for EMHEADER length codes 5-7" {
     try testGen(alloc, idl, "test", "else if (_emLc == 4) _emPayload = _buf.getInt(); else { int _emNext = _buf.getInt(_buf.position());");
     // The 1-byte enum member gets EMHEADER LC 0.
     try testGen(alloc, idl, "test", "_buf.putInt(0x00000001);");
+}
+
+test "java: cross-file base parameter widening also accepts the imported file's own subtypes" {
+    // zzdds.idl's create_datareader_ex declares a DDS::TopicDescription
+    // parameter. A Java caller passes a plain DDS::Topic or
+    // ContentFilteredTopic (imported types this file never names); each needs
+    // its own `<X>_as_DDS_TopicDescription` conversion, or the native side
+    // receives the wrong handle view.
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpecWithImport(
+        alloc,
+        \\module DDS {
+        \\    interface TopicDescription { string get_name(); };
+        \\    interface Topic : TopicDescription {};
+        \\    interface ContentFilteredTopic : TopicDescription {};
+        \\    interface Subscriber { long create_datareader(in TopicDescription a_topic); };
+        \\};
+    ,
+        "DDS",
+        "dcps",
+        \\import "dcps.idl";
+        \\module ext {
+        \\    interface Topic : DDS::Topic {};
+        \\    interface Subscriber : DDS::Subscriber {
+        \\        long create_datareader_ex(in DDS::TopicDescription a_topic);
+        \\    };
+        \\};
+        ,
+    );
+    defer ir_spec.deinit();
+    try testing.expectEqual(@as(usize, 4), ir_spec.imported_interfaces.len);
+
+    var jni_out = std.ArrayList(u8).empty;
+    defer jni_out.deinit(alloc);
+    const opts = interface.Options{
+        .input_stem = "ext",
+        .java_package = "io.x.ext",
+        .java_import_packages = &.{"DDS=io.x.dcps"},
+    };
+    try generateJniSource(alloc, &ir_spec, opts, &jni_out);
+    const jni = jni_out.items;
+
+    const start = std.mem.indexOf(u8, jni, "static void *zidl_java_unbox_as_DDS_TopicDescription(JNIEnv *env, jobject obj) {").?;
+    const end = std.mem.indexOfPos(u8, jni, start, "    return raw;\n}").?;
+    const dispatcher = jni[start..end];
+    // This file's own subtype first (more derived), then the imported ones.
+    const local = std.mem.indexOf(u8, dispatcher, "\"io/x/ext/TopicImpl\"").?;
+    const imported_topic = std.mem.indexOf(u8, dispatcher, "\"io/x/dcps/TopicImpl\"").?;
+    try testing.expect(local < imported_topic);
+    try testing.expect(std.mem.indexOf(u8, dispatcher, "\"io/x/dcps/ContentFilteredTopicImpl\"") != null);
+    try testing.expect(std.mem.indexOf(u8, dispatcher, "_v0 = (void *)ext_Topic_as_DDS_Topic(_v0);") != null);
+    try testing.expect(std.mem.indexOf(u8, dispatcher, "(void *)DDS_ContentFilteredTopic_as_DDS_TopicDescription(") != null);
+    // The extension op uses the dispatcher, and every referenced dispatcher
+    // is defined.
+    try testing.expect(std.mem.indexOf(u8, jni, "void *_n_a_topic = zidl_java_unbox_as_DDS_TopicDescription(env, a_topic);") != null);
+    try testing.expect(std.mem.indexOf(u8, jni, "static ZIDL_JAVA_MAYBE_UNUSED void *zidl_java_unbox_as_DDS_TopicDescription(JNIEnv *env, jobject obj);") != null);
 }
