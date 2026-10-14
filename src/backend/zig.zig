@@ -1549,7 +1549,11 @@ const Generator = struct {
                 try self.ind();
                 try self.write("            for (_sb[0..self._length]) |_src| {\n");
                 try self.ind();
-                try self.write("                _buf[_n] = (try alloc.dupeSentinel(u8, std.mem.span(_src), 0)).ptr;\n");
+                if (self.opts.zig_version == .@"0.17.0") {
+                    try self.write("                _buf[_n] = (try alloc.dupeSentinel(u8, std.mem.span(_src), 0)).ptr;\n");
+                } else {
+                    try self.write("                _buf[_n] = (try alloc.dupeZ(u8, std.mem.span(_src))).ptr;\n");
+                }
                 try self.ind();
                 try self.write("                _n += 1;\n");
                 try self.ind();
@@ -5525,7 +5529,11 @@ const Generator = struct {
                     try self.ind();
                     try self.print("{s}        for (_sb[0..self.{s}._length]) |_src| {{\n", .{ indent, field_name });
                     try self.ind();
-                    try self.print("{s}            _buf[_n] = (try alloc.dupeSentinel(u8, std.mem.span(_src), 0)).ptr;\n", .{indent});
+                    if (self.opts.zig_version == .@"0.17.0") {
+                        try self.print("{s}            _buf[_n] = (try alloc.dupeSentinel(u8, std.mem.span(_src), 0)).ptr;\n", .{indent});
+                    } else {
+                        try self.print("{s}            _buf[_n] = (try alloc.dupeZ(u8, std.mem.span(_src))).ptr;\n", .{indent});
+                    }
                     try self.ind();
                     try self.print("{s}            _n += 1;\n", .{indent});
                     try self.ind();
@@ -6070,7 +6078,11 @@ const Generator = struct {
         try self.ind();
         try self.print("{s}    for (_arr) |_s| {{\n", .{indent});
         try self.ind();
-        try self.print("{s}        _buf[_n] = (try alloc.dupeSentinel(u8, _s, 0)).ptr;\n", .{indent});
+        if (self.opts.zig_version == .@"0.17.0") {
+            try self.print("{s}        _buf[_n] = (try alloc.dupeSentinel(u8, _s, 0)).ptr;\n", .{indent});
+        } else {
+            try self.print("{s}        _buf[_n] = (try alloc.dupeZ(u8, _s)).ptr;\n", .{indent});
+        }
         try self.ind();
         try self.print("{s}        _n += 1;\n", .{indent});
         try self.ind();
@@ -6513,7 +6525,11 @@ const Generator = struct {
                         try self.ind();
                         try self.print("{s}const {s} = try reader.readStringZeroCopy();\n", .{ iv, rs });
                         try self.ind();
-                        try self.print("{s}{s} = (try allocator.dupeSentinel(u8, {s}, 0)).ptr;\n", .{ iv, elem_lval, rs });
+                        if (self.opts.zig_version == .@"0.17.0") {
+                            try self.print("{s}{s} = (try allocator.dupeSentinel(u8, {s}, 0)).ptr;\n", .{ iv, elem_lval, rs });
+                        } else {
+                            try self.print("{s}{s} = (try allocator.dupeZ(u8, {s})).ptr;\n", .{ iv, elem_lval, rs });
+                        }
                     } else {
                         try self.emitReadForTypeRef(seq.element.*, elem_lval, iv);
                     }

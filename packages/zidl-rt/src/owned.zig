@@ -117,7 +117,10 @@ pub fn cloneOwned(value: anytype, alloc: std.mem.Allocator) !@TypeOf(value) {
                 return alloc.dupe(p.child, value);
             } else return value,
             .many => if (comptime isCharUnit(p.child) and p.sentinel() != null) {
-                return (try alloc.dupeSentinel(p.child, std.mem.span(value), 0)).ptr;
+                const source = std.mem.span(value);
+                const copy = try alloc.allocSentinel(p.child, source.len, 0);
+                @memcpy(copy, source);
+                return copy.ptr;
             } else return value,
             else => return value,
         },

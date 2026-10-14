@@ -94,7 +94,9 @@ jobs:
 
       - name: Generate default XRCE fixture for Zig 0.17.0
         if: matrix.os == 'ubuntu-latest'
-        run: zig build run -- -b zig --profile xrce -o test/xrce-microzig/generated test/xrce-microzig/types.idl
+        run: |
+          zig build run -- -b zig --profile xrce -o test/xrce-microzig/generated test/xrce-microzig/types.idl
+          zig build run -- -b zig -o test/xrce-microzig/generated test/xrce-microzig/allocations.idl
 
       - name: Test XRCE fixture on Zig 0.17.0
         if: matrix.os == 'ubuntu-latest'
@@ -103,7 +105,9 @@ jobs:
 
       - name: Generate legacy XRCE fixture
         if: matrix.os == 'ubuntu-latest'
-        run: zig build run -- -b zig --profile xrce --zig-version 0.15.1 -o test/xrce-microzig/generated test/xrce-microzig/types.idl
+        run: |
+          zig build run -- -b zig --profile xrce --zig-version 0.15.1 -o test/xrce-microzig/generated test/xrce-microzig/types.idl
+          zig build run -- -b zig --zig-version 0.15.1 -o test/xrce-microzig/generated test/xrce-microzig/allocations.idl
 
       - name: Install Zig 0.15.1
         if: matrix.os == 'ubuntu-latest'

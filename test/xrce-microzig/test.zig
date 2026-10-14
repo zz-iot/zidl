@@ -2,7 +2,7 @@ const std = @import("std");
 const zidl_rt = @import("zidl_rt");
 const types = @import("types");
 
-test "XRCE fixture round-trips bounded data on Zig 0.15.1" {
+test "XRCE fixture round-trips bounded data" {
     const allocator = std.testing.allocator;
 
     const board = try zidl_rt.BoundedArray(u8, 16).fromSlice("pico-wh");
@@ -37,4 +37,31 @@ test "XRCE fixture round-trips bounded data on Zig 0.15.1" {
 
     const key_hash = types.CounterStatus.computeKeyHash(&sample);
     try std.testing.expectEqual(@as(usize, 16), key_hash.len);
+}
+
+test "allocated string sequences decode and deep clone" {
+    const StringList = @import("allocations").StringList;
+    const allocator = std.testing.allocator;
+    var bytes = std.ArrayListUnmanaged(u8).empty;
+    defer bytes.deinit(allocator);
+    var writer = zidl_rt.CdrWriter(.xcdr1).init(&bytes, allocator);
+    try writer.writeEncapHeader();
+    try writer.writeU32(2);
+    try writer.writeString("alpha");
+    try writer.writeString("");
+    var reader = try zidl_rt.CdrReader.init(bytes.items);
+    var decoded: StringList = .{};
+    try StringList.deserializeInto(&decoded, &reader, allocator);
+    defer decoded.deinit(allocator);
+    var copy = try decoded.clone(allocator);
+    defer copy.deinit(allocator);
+    var owned = try zidl_rt.cloneOwned(decoded.names, allocator);
+    defer zidl_rt.deinitOwned(&owned, allocator);
+    for ([_][]const u8{ "alpha", "" }, 0..) |expected, i| {
+        try std.testing.expectEqualStrings(expected, std.mem.span(decoded.names._buffer.?[i]));
+        try std.testing.expectEqualStrings(expected, std.mem.span(copy.names._buffer.?[i]));
+        try std.testing.expectEqualStrings(expected, std.mem.span(owned._buffer.?[i]));
+        try std.testing.expect(decoded.names._buffer.?[i] != copy.names._buffer.?[i]);
+        try std.testing.expect(decoded.names._buffer.?[i] != owned._buffer.?[i]);
+    }
 }
