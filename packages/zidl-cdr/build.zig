@@ -4,6 +4,7 @@
 //   lib   — libzidl_cdr.a (static C99 CDR library)
 //   test  — Zig roundtrip tests cross-validating C library against zidl-rt
 const std = @import("std");
+const Translator = @import("translate_c").Translator;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -42,6 +43,12 @@ pub fn build(b: *std.Build) void {
     });
     const zidl_rt_mod = zidl_rt_dep.module("zidl-rt");
 
+    const c: Translator = .init(b.dependency("translate_c", .{}), .{
+        .c_source_file = b.path("include/zidl_cdr.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const test_mod = b.createModule(.{
         .root_source_file = b.path("test/roundtrip.zig"),
         .target = target,
@@ -50,6 +57,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "zidl_rt", .module = zidl_rt_mod },
+            .{ .name = "zidl_cdr", .module = c.mod },
         },
     });
     test_mod.addIncludePath(b.path("include"));

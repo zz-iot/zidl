@@ -148,7 +148,7 @@ fn findReturnOp(iface: *const ir.Interface, tr: ir.TypeRef, producing_op_name: [
             // matched this shape and is genuinely Category 2, not 1).
             if (p.mode != .inout) continue;
             if (!typeRefEqlByIdentity(p.type_ref, tr)) continue;
-            if (std.ascii.indexOfIgnoreCase(op.name, "return") != null) {
+            if (std.ascii.findIgnoreCase(op.name, "return") != null) {
                 return .{ .name = op.name, .looks_like_release = true };
             }
             if (fallback == null) fallback = op.name;

@@ -132,7 +132,16 @@ jobs:
       - name: Interop tests
         run: zig build interop-test
 
-      - name: Generate XRCE MicroZig fixture
+      - name: Generate default XRCE fixture for Zig 0.17.0
+        if: matrix.os == 'ubuntu-latest'
+        run: zig build run -- -b zig --profile xrce -o test/xrce-microzig/generated test/xrce-microzig/types.idl
+
+      - name: Test XRCE fixture on Zig 0.17.0
+        if: matrix.os == 'ubuntu-latest'
+        run: zig build test
+        working-directory: test/xrce-microzig
+
+      - name: Generate legacy XRCE fixture
         if: matrix.os == 'ubuntu-latest'
         run: zig build run -- -b zig --profile xrce --zig-version 0.15.1 -o test/xrce-microzig/generated test/xrce-microzig/types.idl
 
@@ -142,7 +151,7 @@ jobs:
         with:
           version: "0.15.1"
 
-      - name: Test XRCE MicroZig fixture
+      - name: Test legacy XRCE fixture
         if: matrix.os == 'ubuntu-latest'
         run: zig build test
         working-directory: test/xrce-microzig

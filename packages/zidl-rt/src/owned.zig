@@ -117,7 +117,7 @@ pub fn cloneOwned(value: anytype, alloc: std.mem.Allocator) !@TypeOf(value) {
                 return alloc.dupe(p.child, value);
             } else return value,
             .many => if (comptime isCharUnit(p.child) and p.sentinel() != null) {
-                return (try alloc.dupeZ(p.child, std.mem.span(value))).ptr;
+                return (try alloc.dupeSentinel(p.child, std.mem.span(value), 0)).ptr;
             } else return value,
             else => return value,
         },
@@ -173,7 +173,7 @@ test "owned: borrowed sequences are neither freed nor required to be heap" {
 test "owned: string elements and bounded sequences of them" {
     const alloc = testing.allocator;
     var strs = try alloc.alloc([*:0]const u8, 1);
-    strs[0] = (try alloc.dupeZ(u8, "hi")).ptr;
+    strs[0] = (try alloc.dupeSentinel(u8, "hi", 0)).ptr;
     var v: StrSeq = .{ ._maximum = 1, ._length = 1, ._buffer = strs.ptr, ._release = true };
 
     var b: BoundedArray([]const u8, 2) = .{};

@@ -56,13 +56,13 @@ const std = @import("std");
 /// Fixed-capacity XCDR2 little-endian byte buffer usable at comptime and runtime.
 ///
 /// `cap` is a compile-time upper bound; `len` tracks actual bytes written.
-/// Unused tail bytes are always zero (array initialised to `[_]u8{0} ** cap`).
+/// Unused tail bytes are always zero (array initialised to `@splat(0)`).
 ///
 /// Alignment padding is zero-filled in-place (no explicit loop needed because
 /// the data array is already zero-initialised).
 pub fn CdrBuf(comptime cap: usize) type {
     return struct {
-        data: [cap]u8 = [_]u8{0} ** cap,
+        data: [cap]u8 = @splat(0),
         len: usize = 0,
 
         const Self = @This();

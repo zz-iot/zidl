@@ -13,7 +13,7 @@ const JniIncludeDirs = struct { base: []const u8, platform: []const u8 };
 fn findJniIncludeDir(b: *std.Build, java_path: []const u8) ?JniIncludeDirs {
     const io = b.graph.io;
     const resolved = std.Io.Dir.realPathFileAbsoluteAlloc(io, java_path, b.allocator) catch
-        (b.allocator.dupeZ(u8, java_path) catch return null);
+        (b.allocator.dupeSentinel(u8, java_path, 0) catch return null);
     const bin_dir = std.fs.path.dirname(resolved) orelse return null;
     const java_home = std.fs.path.dirname(bin_dir) orelse return null;
     const base = std.fs.path.join(b.allocator, &.{ java_home, "include" }) catch return null;
@@ -81,7 +81,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
 
     // ── unit tests ────────────────────────────────────────────────────────────
     const mod_tests = b.addTest(.{ .name = "zidl-mod", .root_module = mod });
@@ -553,8 +553,8 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_cpp.step);
 
         // Java: only when a JDK is on PATH.
-        const maybe_javac = b.findProgram(&.{"javac"}, &.{}) catch null;
-        const maybe_java = b.findProgram(&.{"java"}, &.{}) catch null;
+        const maybe_javac = b.findProgram(.{ .names = &.{"javac"} });
+        const maybe_java = b.findProgram(.{ .names = &.{"java"} });
         if (maybe_javac != null and maybe_java != null) {
             const gen_java = b.addRunArtifact(exe);
             gen_java.addArgs(&.{ "-b", "java", "-o" });
@@ -820,8 +820,8 @@ pub fn build(b: *std.Build) void {
 
     // Java integration test — requires javac/java on PATH
     {
-        const maybe_javac = b.findProgram(&.{"javac"}, &.{}) catch null;
-        const maybe_java = b.findProgram(&.{"java"}, &.{}) catch null;
+        const maybe_javac = b.findProgram(.{ .names = &.{"javac"} });
+        const maybe_java = b.findProgram(.{ .names = &.{"java"} });
         if (maybe_javac != null and maybe_java != null) {
             const javac = maybe_javac.?;
             const java = maybe_java.?;
