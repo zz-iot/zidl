@@ -23,7 +23,7 @@ for all supported targets.
 
 ## Build
 
-Requires Zig 0.16.0.
+Requires Zig 0.17.0.
 
 ```sh
 zig build                         # build the zidl binary (output: zig-out/bin/zidl)
@@ -59,7 +59,7 @@ zig build -Doptimize=ReleaseFast  # optimised release build
 | `--zig-generate-c-api` | Emit Zig-backend C ABI exports for generated interface operations |
 | `--zig-pl-cdr` | Generate PL_CDR functions for `@mutable` types (Zig backend) |
 | `--zig-generate-toml-config` | Emit `applyToml(alloc, table: anytype) !void` per struct (Zig backend) |
-| `--zig-version <0.16.0\|0.15.1>` | Output compatibility target (Zig backend) |
+| `--zig-version <0.17.0\|0.16.0\|0.15.1>` | Output compatibility target (Zig backend) |
 | `--version` / `--help` | Standard |
 
 ## Documentation

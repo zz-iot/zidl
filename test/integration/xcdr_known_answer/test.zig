@@ -152,7 +152,7 @@ fn eql(a: anytype, b: @TypeOf(a)) bool {
                 for (a.slice(), b.slice()) |x, y| if (!eql(x, y)) return false;
                 return true;
             }
-            inline for (st.fields) |fld| if (!eql(@field(a, fld.name), @field(b, fld.name))) return false;
+            inline for (st.field_names) |name| if (!eql(@field(a, name), @field(b, name))) return false;
             return true;
         },
         .pointer => |p| switch (p.size) {

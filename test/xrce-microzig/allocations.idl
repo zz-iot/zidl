@@ -1,0 +1,4 @@
+@final
+struct StringList {
+    sequence<string> names;
+};

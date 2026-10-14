@@ -105,7 +105,7 @@ pub const Sample = struct {
         for (value.arr) |_d0| {
             try writer.writeI32(_d0);
         }
-        try writer.writeU32(@intFromEnum(value.clr));
+        try writer.writeU32(@backingInt(value.clr));
         try Point.serialize(writer, value.nested);
     }
 
@@ -145,7 +145,7 @@ pub const Sample = struct {
         for (0..3) |_i0| {
             out.arr[_i0] = try reader.readI32();
         }
-        out.clr = @enumFromInt(try reader.readU32());
+        out.clr = @fromBackingInt(@intCast(try reader.readU32()));
         try Point.deserializeInto(&out.nested, reader, allocator);
     }
 

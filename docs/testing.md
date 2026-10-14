@@ -140,12 +140,14 @@ Coverage includes: all primitive types, strings, sequences, DHEADER framing for 
 
 ## XRCE MicroZig Fixture
 
-The XRCE profile test fixture in `test/xrce-microzig/` is compiled against Zig 0.15.1 (MicroZig compatibility). It is regenerated and compiled in CI but is not part of `zig build test`:
+The XRCE profile fixture in `test/xrce-microzig/` is generated and tested on Zig 0.17.0 in CI. A temporary Zig 0.15.1 consumer check remains until the Pico migration passes hardware validation. A companion allocating fixture exercises `sequence<string>` decoding, generated cloning, and runtime `cloneOwned`, with leak checking. These fixtures are not part of `zig build test`:
 
 ```sh
-# Regenerate (requires Zig 0.16.0):
+# Regenerate (requires Zig 0.17.0):
 zig build run -- -b zig --profile xrce --zig-version 0.15.1 \
   -o test/xrce-microzig/generated test/xrce-microzig/types.idl
+zig build run -- -b zig --zig-version 0.15.1 \
+  -o test/xrce-microzig/generated test/xrce-microzig/allocations.idl
 
 # Compile (requires Zig 0.15.1):
 cd test/xrce-microzig && zig build test

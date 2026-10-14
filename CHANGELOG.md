@@ -7,6 +7,15 @@ Notable changes to zidl, newest first. For current capability and known limitati
 
 Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
+## Unreleased — Zig 0.17.0 migration
+
+- Build zidl and its native packages with Zig 0.17.0; generated Zig output now
+  defaults to 0.17.0. Keep legacy output selectors and the bounded 0.15.1 runtime
+  check temporarily while the Pico migration is validated.
+- Update generated sentinel allocations, mutable parameter tracking, reflection,
+  and build APIs for the new compiler.
+- Translate the CDR test header through a pinned official translate-c package.
+
 ## Unreleased
 
 - **C++ and Java: an operation in an importing file now accepts the imported file's own

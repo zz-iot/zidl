@@ -356,7 +356,7 @@ test "@optional sequence / array members round-trip on the @mutable (EMHEADER) p
     const src = OptSeqRec{
         .data = .{ ._maximum = 2, ._length = 2, ._buffer = @constCast(&[_]u8{ 9, 8 }), ._release = false },
         .names = .{ ._maximum = 2, ._length = 2, ._buffer = &names, ._release = false },
-        .guid = [_]u8{5} ** 16,
+        .guid = @splat(5),
         .tail = 3,
     };
 

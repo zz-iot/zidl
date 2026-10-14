@@ -1,6 +1,6 @@
 //! Cross-validation tests for zidl-cdr (C library) against zidl-rt (Zig).
 //!
-//! These tests call the C library via @cImport and verify that:
+//! These tests call the C library via a build-translated header module and verify that:
 //!   1. The C library serializes identical bytes to zidl-rt for the same values.
 //!   2. The C library correctly deserializes bytes produced by zidl-rt.
 //!
@@ -15,9 +15,7 @@ const std = @import("std");
 const zidl_rt = @import("zidl_rt");
 const testing = std.testing;
 
-const c = @cImport({
-    @cInclude("zidl_cdr.h");
-});
+const c = @import("zidl_cdr");
 
 // ── Cross-validation helpers ──────────────────────────────────────────────────
 

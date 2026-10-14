@@ -168,8 +168,8 @@ pub const TokenKind = enum {
 
     /// True if this kind represents any keyword.
     pub fn isKeyword(self: TokenKind) bool {
-        return @intFromEnum(self) >= @intFromEnum(TokenKind.kw_abstract) and
-            @intFromEnum(self) <= @intFromEnum(TokenKind.kw_uint64);
+        return @backingInt(self) >= @backingInt(TokenKind.kw_abstract) and
+            @backingInt(self) <= @backingInt(TokenKind.kw_uint64);
     }
 };
 

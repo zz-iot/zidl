@@ -18,6 +18,13 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const allocations_mod = b.createModule(.{
+        .root_source_file = b.path("generated/allocations.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zidl_rt", .module = zidl_rt_dep.module("zidl-rt") }},
+    });
+
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test.zig"),
@@ -26,6 +33,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "zidl_rt", .module = zidl_rt_dep.module("zidl-rt") },
                 .{ .name = "types", .module = types_mod },
+                .{ .name = "allocations", .module = allocations_mod },
             },
         }),
     });

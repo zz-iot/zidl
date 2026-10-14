@@ -40,7 +40,7 @@
 //!   --zig-idiomatic-enums          Generate lowercase snake_case enum tags (e.g. .durability_volatile) (Zig backend)
 //!   --zig-generate-toml-config     Emit applyToml(alloc, table: anytype) !void per struct (Zig backend)
 //!   --zig-pl-cdr                   Generate PL_CDR functions for @mutable types (Zig backend)
-//!   --zig-version <0.16.0|0.15.1>  Output compatibility target (Zig backend)
+//!   --zig-version <0.17.0|0.16.0|0.15.1>  Output compatibility target (Zig backend)
 //!
 //!   -h, --help                     Show this help
 //!   -v, --version                  Show version
@@ -70,7 +70,7 @@ const Opts = struct {
     type_prefix: []const u8 = "",
     export_macro: []const u8 = "",
     profile: zidl.backend.Profile = .full,
-    zig_version: zidl.backend.ZigVersion = .@"0.16.0",
+    zig_version: zidl.backend.ZigVersion = .@"0.17.0",
     java_package: []const u8 = "",
     default_extensibility: zidl.ir.Extensibility = .final,
     jni_library: []const u8 = "zidl_dds_jni",
@@ -241,7 +241,7 @@ pub fn main(init: std.process.Init) !void {
                 std.process.exit(1);
             }
             opts.zig_version = zidl.backend.ZigVersion.parse(args[i]) orelse {
-                try stderr.print("error: unknown Zig version '{s}'; supported: 0.16.0, 0.15.1\n", .{args[i]});
+                try stderr.print("error: unknown Zig version '{s}'; supported: 0.17.0, 0.16.0, 0.15.1\n", .{args[i]});
                 try stderr.flush();
                 std.process.exit(1);
             };
@@ -804,7 +804,7 @@ fn printUsage(w: *Io.Writer) !void {
         \\  --zig-generate-c-api           Emit pub export fn callconv(.c) wrappers for C free-function API (Zig backend)
         \\  --zig-generate-toml-config     Emit applyToml(alloc, table: anytype) !void per struct (Zig backend)
         \\  --zig-pl-cdr                   Generate PL_CDR functions for @mutable types (Zig backend)
-        \\  --zig-version <0.16.0|0.15.1>  Output compatibility target (Zig backend)
+        \\  --zig-version <0.17.0|0.16.0|0.15.1>  Output compatibility target (Zig backend)
         \\
         \\  -h, --help                     Show this help
         \\  -v, --version                  Show version

@@ -67,7 +67,7 @@ test "deserializeSelected: extracts a non-leading @key, skips large non-key memb
     defer buf.deinit(testing.allocator);
     var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
     try writer.writeEncapHeaderDelimited();
-    const big = [_]u8{0xAB} ** 4096;
+    const big: [4096]u8 = @splat(0xAB);
     try fixture.KeyedBlob.serialize(&writer, .{
         .prefix = "a-prefix-that-should-be-skipped",
         .id = 0x0BADF00D,
@@ -140,7 +140,7 @@ test "getFieldFromCdr: decodes only the referenced field, skips the rest" {
     defer buf.deinit(testing.allocator);
     var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
     try writer.writeEncapHeaderDelimited();
-    const big = [_]u8{0xCD} ** 4096;
+    const big: [4096]u8 = @splat(0xCD);
     try fixture.KeyedBlob.serialize(&writer, .{
         .prefix = "unused-prefix",
         .id = 12345,

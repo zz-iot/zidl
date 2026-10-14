@@ -165,7 +165,7 @@ pub fn CdrWriter(comptime xcdr_version: XcdrVersion) type {
             const rem = self.pos % boundary;
             if (rem == 0) return;
             const pad = boundary - rem;
-            const z: [8]u8 = .{0} ** 8;
+            const z: [8]u8 = @splat(0);
             try self.writeBytes(z[0..pad]);
         }
 
@@ -477,7 +477,7 @@ pub fn CdrWriter(comptime xcdr_version: XcdrVersion) type {
 /// API used by generated `serializeKey` methods, but it does not store the
 /// whole stream.  It keeps the first 16 bytes and streams every byte into MD5.
 pub const KeyHashWriter = struct {
-    first16: [16]u8 = .{0} ** 16,
+    first16: [16]u8 = @splat(0),
     len: usize = 0,
     pos: usize = 0,
     md5: std.crypto.hash.Md5 = std.crypto.hash.Md5.init(.{}),
@@ -502,7 +502,7 @@ pub const KeyHashWriter = struct {
         const rem = self.pos % boundary;
         if (rem == 0) return;
         const pad = boundary - rem;
-        const z: [4]u8 = .{0} ** 4;
+        const z: [4]u8 = @splat(0);
         try self.writeBytes(z[0..pad]);
     }
 
