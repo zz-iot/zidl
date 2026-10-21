@@ -10,6 +10,21 @@
 zig build test
 ```
 
+Sequence, known-answer, and typesupport-host success output is checked by the
+build runner instead of printed. Nonzero exits and failed checks still report their diagnostics. For more
+detail:
+
+```sh
+zig build test --summary all             # build/test results, including cached steps
+zig build test -Dverbose-tests=true      # successful C/C++/Java and library-host output
+zig build integration-test --summary all # also shows optional Java/JNI skip steps
+```
+
+The Java known-answer fixture compiles with unchecked warnings treated as errors.
+Generated constructors suppress only the unavoidable generic-array conversion.
+Missing optional JDK tools/headers are recorded as skip steps for the integration
+suite, rather than warnings during every build.
+
 Runs:
 - **Library unit tests** (678): parser, lexer, preprocessor, semantic analysis, IR builder, backend codegen, and backend interface utilities.
 - **CLI unit test** (1): smoke test of the CLI entry point.
@@ -31,6 +46,38 @@ cd packages/zidl-rt  && zig build test   # 61 CDR round-trip tests
 cd packages/zidl-cdr && zig build test   # 44 CDR cross-validation tests
 ```
 
+### Coverage collection
+
+CI builds coverage executables with `zig build emit-tests -Dcoverage=true`,
+including the same command in `packages/zidl-rt` and `packages/zidl-cdr`.
+This selects LLVM for those executables: kcov instrumentation of the default
+x86 backend's debug line addresses crashes during the lexer tests. Ordinary
+builds and tests keep the default compiler backend.
+
+The coverage job builds unmodified kcov v42 against stock elfutils. Ubuntu 24.04
+has no kcov package, so that small build is cached. LLVM-built Zig 0.17 coverage
+binaries work with its unpatched libdw 0.190. The default x86 backend still produces
+debug information that stock libdw cannot read correctly; the old ULEB128 patch addresses that parsing problem,
+but does not prevent the subsequent instrumentation crash. Selecting LLVM for
+coverage removes the need to build or patch elfutils in CI. See
+[the coverage job](../.github/workflows/ci.yml) for collection commands. Collector
+failures and upload errors fail the job rather than publishing partial results.
+
+Zig 0.17 also exposes compiler instrumentation through `Module.fuzz` (inline
+counters and program-counter tables) and `sanitize_coverage_trace_pc_guard` for
+third-party fuzzers. These are not a built-in LCOV/Cobertura reporting pipeline.
+The default fuzz test runner requires Zig's server protocol, and Zig's fuzzer
+coverage format is not the sanitizer `.sancov` format consumed by kcov's `--clang`
+engine. Using that route would require a separate runtime/export adapter or a
+coverage tool built around those counters; simply enabling it is not a replacement
+for this job.
+
+`emit-tests` also installs the static typesupport test in `zig-out/tests/`,
+and the C/Zig loader hosts and three shared providers in
+`zig-out/coverage-typesupport/`. CI collects the CLI's opt-in generation path
+and both hosts with these providers, covering the ABI helper and callbacks
+alongside the generator unit tests.
+
 ### Integration tests
 
 ```sh
@@ -41,7 +88,7 @@ Compiles and runs the generated C, C++, and Java code against the committed gold
 
 - **C**: links `test/golden/c/types_cdr.c` + `packages/zidl-cdr/src/zidl_cdr.c`, compiles with `-std=c99 -Wall -Werror` using Zig's bundled clang. No external toolchain needed.
 - **C++**: links `test/golden/cpp/types_cdr.cpp` + `zidl_cdr.c`, compiles with `-std=c++17` using Zig's bundled clang++. No external toolchain needed.
-- **Java**: compiles `test/golden/java/Types.java` + `test/integration/java/Test.java` with `javac`, then runs with `java`. Skipped with a warning if `javac`/`java` is not on `PATH`.
+- **Java**: compiles `test/golden/java/Types.java` + `test/integration/java/Test.java` with `javac`, then runs with `java`. Recorded as a skip step if `javac`/`java` is not on `PATH`.
 
 ### CDR interop tests
 
@@ -152,3 +199,13 @@ zig build run -- -b zig --zig-version 0.15.1 \
 # Compile (requires Zig 0.15.1):
 cd test/xrce-microzig && zig build test
 ```
+
+### Experimental typesupport library hosts (Linux)
+
+`zig build test-typesupport-library` generates and independently builds three
+wire typesupport libraries, loads them through C and Zig hosts, and checks static
+descriptor consumption. It covers equivalent/conflicting exports, shared metadata,
+ABI errors, dependency integrity, malformed/bounded samples and full/key-only keys.
+The step is included in `zig build test` on Linux. Other platforms are not yet
+qualified for these hosts. See
+[`packages/zidl-typesupport/README.md`](../packages/zidl-typesupport/README.md).

@@ -432,7 +432,7 @@ const Builder = struct {
         scope: *const Scope,
     ) anyerror!void {
         switch (def.kind) {
-            .module => |*m| try self.handleModule(m, out_items, module_qpath, scope),
+            .module => |*m| try self.handleModule(m, def.annotations, out_items, module_qpath, scope),
             .const_dcl => |*c| {
                 const ic = try self.buildConst(c, def.annotations, module_qpath, scope);
                 try out_items.append(self.alloc, .{ .const_ = ic });
@@ -532,6 +532,7 @@ const Builder = struct {
     fn handleModule(
         self: *Builder,
         m: *const ast.ModuleDcl,
+        annotations: []const ast.AnnotationAppl,
         out_items: *std.ArrayListUnmanaged(ir.ModuleItem),
         parent_qpath: []const u8,
         parent_scope: *const Scope,
@@ -543,6 +544,11 @@ const Builder = struct {
         const lkey = lowerInto(lbuf[0..qname.len], qname);
 
         const entry_ptr = self.module_entries.getPtr(lkey) orelse return error.UnregisteredModule;
+
+        // Preserve annotations from every opening. Consumers must be able to
+        // reject unsupported inherited module semantics rather than lose them.
+        const raw = try self.extractRaw(annotations);
+        if (raw.len != 0) entry_ptr.module.raw = try std.mem.concat(self.alloc, ir.RawAnnotation, &.{ entry_ptr.module.raw, raw });
 
         // Add to parent items only on the first opening.
         if (!entry_ptr.in_parent) {

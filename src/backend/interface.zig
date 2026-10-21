@@ -68,6 +68,8 @@ pub const Options = struct {
     /// Suppress XTYPES TypeObject / TypeIdentifier output.
     /// All backends; currently only the Zig backend emits TypeObjects.
     no_typeobject_support: bool = false,
+    /// Experimental middleware-neutral wire library alongside normal Zig output.
+    zig_typesupport_library: bool = false,
     /// Default extensibility when no `@extensibility` annotation is present.
     default_extensibility: ir.Extensibility = .final,
     /// C, C++ backends: prefix for include-guard macros (e.g. `"DDSC_"` → `"DDSC_FOO_H"`).

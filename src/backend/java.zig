@@ -437,6 +437,19 @@ const Generator = struct {
 
         // Default constructor
         try self.write("\n");
+        for (s.members) |m| {
+            if (m.annotations.is_optional) continue;
+            const java_type = try self.memberJavaType(m);
+            defer self.alloc.free(java_type);
+            if (std.mem.endsWith(u8, java_type, "[]") and std.mem.indexOfScalar(u8, java_type, '<') != null) {
+                // Java requires a raw backing array for parameterized elements.
+                // Confine this unavoidable conversion's suppression to the
+                // constructor rather than suppressing warnings for the class.
+                try self.ind();
+                try self.write("@SuppressWarnings(\"unchecked\")\n");
+                break;
+            }
+        }
         try self.ind();
         try self.print("public {s}{s}() {{\n", .{ pfx, s.name });
         for (s.members) |m| {

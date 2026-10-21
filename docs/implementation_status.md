@@ -200,8 +200,8 @@ XTypes stream format. Key implementation notes:
 - `writeEncapHeader()`: writes 4-byte encap header, resets `pos` to 0 so all
   subsequent alignment is relative to CDR payload start (not buffer start).
 - `nameHash(name)`: MD5 of UTF-8 name bytes, returns `[4]u8`.
-- `computeEquivalenceHash(bytes)`: MD5 of the full type object bytes (including
-  encap header), returns `[14]u8`.
+- `computeEquivalenceHash(bytes)`: first 14 bytes of MD5 of the serialized
+  TypeObject payload, excluding the encapsulation header; returns `[14]u8`.
 - `computeTypeIdentifier(bytes)`: SHA-256 of type object bytes, returns `[32]u8`.
 - `encodeMinimalStruct`, `encodeMinimalEnum`, `encodeMinimalUnion`,
   `encodeMinimalBitmask`, and `encodeMinimalBitset` produce spec-compliant
@@ -313,3 +313,16 @@ integration tests run as part of `zig build test`.
 | C-ABI entity identity across views | Phase 1 (`Condition` family, via `@shared_c_abi_box`) shipped in v0.3.5; `Entity`/`TopicDescription`/`DomainParticipantFactory` families and embedded-substruct impls open — see [`design/binding-c-abi-identity.md`](design/binding-c-abi-identity.md) |
 | Java `--generate-interfaces` residual stubs | A few parameter/return shapes (by-value `value_struct` return, anonymous inline `sequence<T>` param, `sequence<enum>` param, non-`get_listener` `.callback` return) throw `UnsupportedOperationException`; none occur in dcps.idl/zzdds.idl. QoS/status struct params + listener JNI upcalls are implemented |
 | Factory-less entity bootstrap (`WaitSet`/`GuardCondition`) | Hand-written per binding; `@factory_less_bootstrap` annotation decided, not implemented |
+
+### Experimental wire typesupport libraries
+
+`zidl -b zig --experimental-typesupport-library` emits a C-callable descriptor
+wrapper alongside normal generated Zig types. The middleware-neutral
+[`zidl-typesupport` package](../packages/zidl-typesupport/README.md) supplies the
+experimental ABI, registration-independent metadata checks and a standalone build
+recipe. Linux integration hosts load multiple independent libraries and exercise
+equivalent/conflicting exports and wire callbacks; static consumption is also tested.
+
+This is a restricted final/bounded prototype, not general TypeObject coverage,
+assignability, a stable ABI, a zzdds loader or hot reload. Unsupported shapes fail
+explicitly. See the package README for the supported matrix and ownership contract.

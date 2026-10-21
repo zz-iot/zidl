@@ -9,6 +9,7 @@ const Translator = @import("translate_c").Translator;
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const coverage = b.option(bool, "coverage", "Use LLVM for kcov-compatible test debug information") orelse false;
     const sanitize_thread = b.option(bool, "sanitize-thread", "Enable ThreadSanitizer") orelse false;
 
     // ── Library ────────────────────────────────────────────────────────────────
@@ -70,6 +71,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run zidl-cdr tests");
     test_step.dependOn(&run_tests.step);
 
+    if (coverage) test_exe.use_llvm = true;
     const emit_tests_step = b.step("emit-tests", "Build test binaries for kcov coverage analysis");
     emit_tests_step.dependOn(&b.addInstallArtifact(test_exe, .{
         .dest_dir = .{ .override = .{ .custom = "tests" } },

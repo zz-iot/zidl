@@ -1,0 +1,4 @@
+module Shared {
+  struct Reading { @key unsigned long id; float temperature; };
+};
+module ProjectB { struct EquivalentReading { @key unsigned long id; float temperature; }; struct Counter { unsigned long long count; boolean enabled; }; };

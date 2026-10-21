@@ -65,6 +65,7 @@ const Opts = struct {
     preprocess_only: bool = false,
     no_typesupport: bool = false,
     no_typeobject_support: bool = false,
+    zig_typesupport_library: bool = false,
     generate_interfaces: bool = false,
     header_guard_prefix: []const u8 = "",
     type_prefix: []const u8 = "",
@@ -130,6 +131,8 @@ pub fn main(init: std.process.Init) !void {
             opts.preprocess_only = true;
         } else if (std.mem.eql(u8, arg, "--no-typesupport")) {
             opts.no_typesupport = true;
+        } else if (std.mem.eql(u8, arg, "--experimental-typesupport-library")) {
+            opts.zig_typesupport_library = true;
         } else if (std.mem.eql(u8, arg, "--no-typeobject-support")) {
             opts.no_typeobject_support = true;
         } else if (std.mem.eql(u8, arg, "--generate-interfaces")) {
@@ -655,6 +658,9 @@ fn processFile(
         try zidl.backend.validateXrce(&ir_spec, stderr);
     }
 
+    if (opts.zig_typesupport_library and (!std.mem.eql(u8, opts.backend, "zig") or opts.profile != .full or opts.split_files or opts.no_typesupport or opts.no_typeobject_support or opts.pl_cdr or opts.zig_version != .@"0.17.0" or opts.type_prefix.len != 0 or opts.zig_idiomatic_enums or opts.default_extensibility != .final))
+        return error.TypesupportLibraryIncompatibleOptions;
+
     // ── Phase 5: Code generation ─────────────────────────────────────────────
     if (opts.output_dir.len > 0 and !std.mem.eql(u8, opts.output_dir, ".")) {
         const _io = std.Io.Threaded.global_single_threaded.io();
@@ -666,6 +672,7 @@ fn processFile(
         .output_dir = opts.output_dir,
         .input_stem = stem,
         .no_typesupport = opts.no_typesupport,
+        .zig_typesupport_library = opts.zig_typesupport_library,
         .no_typeobject_support = opts.no_typeobject_support or opts.profile == .xrce,
         .generate_interfaces = opts.generate_interfaces,
         .header_guard_prefix = opts.header_guard_prefix,
@@ -767,6 +774,7 @@ fn printUsage(w: *Io.Writer) !void {
         \\                                 (default: final, per IDL4 §8.3.1) (all backends)
         \\  --generate-zzdds-wrappers      Emit typed zzdds topic wrappers (Zig, C, C++)
         \\  --generate-interfaces          Emit binding layer for IDL interface declarations (all backends)
+        \\  --experimental-typesupport-library Emit experimental Zig wire library descriptors
         \\  --no-typeobject-support        Suppress TypeObject/TypeIdentifier (all backends, currently Zig only)
         \\  --no-typesupport               Suppress CDR serialize/deserialize (all backends)
         \\  --profile <full|xrce>          Target profile: full (default) or xrce (all backends)

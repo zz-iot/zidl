@@ -1,0 +1,8 @@
+.{
+    .name = .zidl_typesupport,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.17.0",
+    .fingerprint = 0x8d9260f41a6830d7,
+    .dependencies = .{ .zidl_rt = .{ .path = "../zidl-rt" } },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "include", "README.md" },
+}

@@ -43,6 +43,9 @@ Features*.
   struct's minimal TypeObject and its hash (checked against reference hashes by
   `test/integration/xcdr_known_answer/`); unions, enums and aliases are encoded only
   as dependencies, and complete TypeObjects / TypeInformation are not generated.
+  The opt-in [wire typesupport library prototype](../packages/zidl-typesupport/README.md)
+  exports a separate minimal-object table for its supported final/bounded subset;
+  broader coverage, complete metadata and reusable DDS integration remain open.
 
 - **Managed references and construction-only Config fields** —
   [contract, open items and acceptance criteria](design/managed-references.md).

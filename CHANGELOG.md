@@ -18,6 +18,22 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Keep normal `zig build test` success output quiet, with `-Dverbose-tests=true`
+  for detailed output. Report missing optional Java/JNI tools as skip steps instead
+  of configure-time warnings. Suppress Java's unavoidable generic-array conversion
+  only on the affected generated constructor, and enforce unchecked-clean compilation
+  of the Java known-answer fixture.
+
+- Add an experimental Zig wire typesupport library generator and middleware-neutral
+  C descriptor ABI, with minimal XTypes identities/dependencies, allocation-free
+  sample validation and full/key-only key hashing for a restricted final/bounded
+  subset. Include a standalone library build recipe and Linux C/Zig hosts loading
+  equivalent and conflicting exports from independent projects. This is not a
+  frozen ABI or an implementation of zzdds registration/hot reload.
+  Preserve module annotations across reopenings so unsupported module semantics
+  cannot silently disappear before library validation. Reject incompatible library
+  options through both the CLI and direct backend API before producing output.
+
 - **C++ and Java: an operation in an importing file now accepts the imported file's own
   subtypes for a parameter declared as an imported base interface.** For example, an
   extension IDL operation taking `DDS::TopicDescription` now accepts a `DDS::Topic`,
