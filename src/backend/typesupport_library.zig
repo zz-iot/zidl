@@ -55,7 +55,10 @@ const Generator = struct {
                 }
             },
             .enum_ => |e| {
-                for (e.enumerators) |value| if (value.value < 0 or value.value > std.math.maxInt(u32)) return error.TypesupportLibraryEnumValueUnsupported;
+                for (e.enumerators) |value| {
+                    if (value.raw.len != 0) return error.TypesupportLibraryEnumeratorAnnotationUnsupported;
+                    if (value.value < 0 or value.value > std.math.maxInt(u32)) return error.TypesupportLibraryEnumValueUnsupported;
+                }
                 if (e.annotations.bit_bound != null or e.annotations.extensibility != .final or e.annotations.raw.len != 0)
                     return error.TypesupportLibraryEnumAnnotationUnsupported;
             },
@@ -110,7 +113,9 @@ const Generator = struct {
     }
     fn walkRef(self: *@This(), ref: ir.TypeRef, dims: []const u64) anyerror!void {
         if (dims.len > 0) {
-            try self.print("{{ var i: usize = 0; while (i < {d}) : (i += 1) {{\n", .{dims[0]});
+            // Remaining rank identifies each nested loop; sibling arrays have
+            // separate blocks, and named dependencies have separate walkers.
+            try self.print("{{ var i_{d}: usize = 0; while (i_{d} < {d}) : (i_{d} += 1) {{\n", .{ dims.len, dims.len, dims[0], dims.len });
             try self.walkRef(ref, dims[1..]);
             try self.print("}} }}\n", .{});
             return;
@@ -283,6 +288,9 @@ test "wire library rejects unsupported IDL instead of emitting fallback identiti
     try expectError(error.TypesupportLibraryModuleAnnotationUnsupported, testGenerate("@autoid(HASH) module M { struct S { long x; }; };"));
     try expectError(error.TypesupportLibraryModuleAnnotationUnsupported, testGenerate("module M { struct S { long x; }; }; @autoid(HASH) module M { struct T { long y; }; };"));
     try expectError(error.TypesupportLibraryTypeKindUnsupported, testGenerate("union U switch(long) { case 0: long x; };"));
+    try expectError(error.TypesupportLibraryEnumeratorAnnotationUnsupported, testGenerate("enum E { @value(42) A, B }; struct S { E state; };"));
+    try expectError(error.TypesupportLibraryEnumeratorAnnotationUnsupported, testGenerate("enum E { A, @value(42) B }; struct S { E state; };"));
+    try expectError(error.TypesupportLibraryEnumeratorAnnotationUnsupported, testGenerate("enum E { @default_literal A, B }; struct S { E state; };"));
     try testGenerate("module Test { enum E { A, B }; typedef long L; @nested struct N { long n; }; struct S { @key long id; N n; E e; L x; string<10> s; sequence<octet,8> bytes; }; };");
 }
 

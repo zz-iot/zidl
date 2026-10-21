@@ -56,8 +56,8 @@ The generator rejects unsupported shapes instead of exporting fallback TK_NONE
 identities. These include unbounded data, optional members, inheritance, mutable/
 appendable structs, unions, maps, fixed point, wide characters/strings, bitsets/
 bitmasks, non-primitive sequences/arrays, aggregate/string/array keys, import files,
-recursion, and unsupported annotations. Metadata support in the ordinary generator
-is broader; this restriction applies only to the experimental library mode.
+recursion, and unsupported annotations (including annotations on enum literals).
+Metadata support in the ordinary generator is broader; this restriction applies only to the experimental library mode.
 Split files, type prefixes, idiomatic enum renaming, older Zig output, XRCE profile,
 PL-CDR, non-final default extensibility and suppression of typesupport/TypeObjects
 are incompatible with this mode, including calls through the backend API.
@@ -100,7 +100,8 @@ zig build test
 
 The first step builds three independent libraries and checks equivalent/conflicting
 exports through both a C host and a Zig host. It includes nested metadata/dependencies,
-full/key-only key hashing, both byte orders and XCDR versions, malformed/truncated data,
+full/key-only key hashing, both byte orders and XCDR versions, multidimensional
+arrays and array typedef dependencies, malformed/truncated data,
 bounds/enum/boolean/string validation, trailing bytes, ABI rejection, corrupted
 metadata, duplicate exports, missing dependencies and static descriptor consumption.
 The normal suite also runs unsupported-generation regressions and the existing

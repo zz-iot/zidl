@@ -9,5 +9,10 @@ module ProjectA {
   struct Both { Shared::Position a; Shared::OtherPosition b; };
   struct NonLeading { float before; @key unsigned long id; @key unsigned short channel; };
   struct Vector { long values[2]; };
+  // Cover nested walkers directly and through an array typedef dependency.
+  struct Matrix { long values[2][3]; @key unsigned long id; };
+  struct Cube { long values[2][2][2]; };
+  typedef long MatrixValues[2][3];
+  struct ArrayAlias { MatrixValues values; };
   struct Packet { Shared::Position position; Shared::State state; Shared::SensorId source; string<12> label; sequence<octet, 8> payload; };
 };

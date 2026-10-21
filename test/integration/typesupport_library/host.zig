@@ -10,6 +10,26 @@ fn find(lib: *const ts.Library, name: []const u8) !*const ts.Type {
     }
     return error.MissingType;
 }
+// Real generated providers must compile and consume every array dimension, even
+// before a non-leading key. Cover both final encodings and malformed extents.
+fn checkArray(lib: *const ts.Library, name: []const u8, elements: usize, keyed: bool) !void {
+    const descriptor = try find(lib, name);
+    var wire: [41]u8 = @splat(0);
+    const size = 4 + 4 * elements + @as(usize, if (keyed) 4 else 0);
+    for (0..elements) |i| wire[4 + 4 * i] = @intCast(i + 1);
+    if (keyed) wire[size - 4] = 42;
+    var expected: [16]u8 = @splat(0);
+    if (keyed) expected[3] = 42;
+    for ([_]u8{ 1, 7 }) |representation| {
+        wire[1] = representation;
+        try expect(descriptor.validate.?(wire[0..].ptr, size) == ts.ok);
+        for (0..size) |n| try expect(descriptor.validate.?(wire[0..].ptr, n) != ts.ok);
+        try expect(descriptor.validate.?(wire[0..].ptr, size + 1) == ts.invalid_data);
+        var hash: [16]u8 = undefined;
+        try expect(descriptor.key_hash.?(wire[0..].ptr, size, &hash) == ts.ok);
+        try expect(std.mem.eql(u8, &expected, &hash));
+    }
+}
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(std.heap.page_allocator);
     defer std.heap.page_allocator.free(args);
@@ -27,6 +47,9 @@ pub fn main(init: std.process.Init) !void {
         libraries[i] = descriptor;
         try ts.checkLibrary(libraries[i]);
     }
+    try checkArray(libraries[0], "ProjectA::Matrix", 6, true);
+    try checkArray(libraries[0], "ProjectA::Cube", 8, false);
+    try checkArray(libraries[0], "ProjectA::ArrayAlias", 6, false);
     const a = try find(libraries[0], "Shared::Reading");
     const b = try find(libraries[1], "Shared::Reading");
     const different = try find(libraries[2], "Shared::Reading");
