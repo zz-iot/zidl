@@ -3,10 +3,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const zidl = b.option([]const u8, "zidl", "Path to prebuilt zidl") orelse "../../../zig-out/bin/zidl";
-    b.step("test", "Run wire library integration tests").dependOn(addTests(b, b.path("."), .{ .cwd_relative = zidl }, target, optimize, b.option(bool, "verbose-tests", "Show successful integration test output") orelse false));
+    b.step("test", "Run wire library integration tests").dependOn(addTests(b, b.path("."), .{ .cwd_relative = zidl }, target, optimize, b.option(bool, "verbose-tests", "Show successful integration test output") orelse false, b.option(bool, "coverage", "Use LLVM for kcov-compatible debug information") orelse false).tests);
 }
 
-pub fn addTests(b: *std.Build, base: std.Build.LazyPath, zidl: std.Build.LazyPath, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, verbose_tests: bool) *std.Build.Step {
+pub fn addTests(b: *std.Build, base: std.Build.LazyPath, zidl: std.Build.LazyPath, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, verbose_tests: bool, coverage: bool) struct { tests: *std.Build.Step, emit: *std.Build.Step } {
     const rt = b.createModule(.{ .root_source_file = base.path(b, "../../../packages/zidl-rt/src/root.zig"), .target = target, .optimize = optimize });
     const header = b.addTranslateC(.{ .root_source_file = base.path(b, "../../../packages/zidl-typesupport/include/zidl_typesupport.h"), .target = target, .optimize = optimize, .link_libc = false });
     const ts = b.createModule(.{ .root_source_file = base.path(b, "../../../packages/zidl-typesupport/src/root.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "zidl_rt", .module = rt }, .{ .name = "zidl_typesupport_c", .module = header.createModule() } } });
@@ -46,7 +46,19 @@ pub fn addTests(b: *std.Build, base: std.Build.LazyPath, zidl: std.Build.LazyPat
     static_gen.addFileArg(base.path(b, "b.idl"));
     const static_types = b.createModule(.{ .root_source_file = static_out.path(b, "b.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "zidl_rt", .module = rt }} });
     const static_provider = b.createModule(.{ .root_source_file = static_out.path(b, "b_typesupport.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "types", .module = static_types }, .{ .name = "zidl_rt", .module = rt }, .{ .name = "zidl_typesupport", .module = ts } } });
-    const static_test = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = base.path(b, "static.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "provider", .module = static_provider }, .{ .name = "zidl_typesupport", .module = ts } } }) });
+    const static_test = b.addTest(.{ .name = "zidl-typesupport-static", .root_module = b.createModule(.{ .root_source_file = base.path(b, "static.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "provider", .module = static_provider }, .{ .name = "zidl_typesupport", .module = ts } } }) });
     tests.dependOn(&b.addRunArtifact(static_test).step);
-    return tests;
+    // Keep loadable providers beside the hosts, separate from argument-free tests.
+    const emit = b.step("emit-typesupport-tests", "Build typesupport coverage fixtures and hosts");
+    if (coverage) {
+        for (libs) |lib| lib.use_llvm = true;
+        host.use_llvm = true;
+        c_host.use_llvm = true;
+        static_test.use_llvm = true;
+    }
+    emit.dependOn(&b.addInstallArtifact(static_test, .{ .dest_dir = .{ .override = .{ .custom = "tests" } } }).step);
+    for (libs ++ [_]*std.Build.Step.Compile{ host, c_host }) |artifact| {
+        emit.dependOn(&b.addInstallArtifact(artifact, .{ .dest_dir = .{ .override = .{ .custom = "coverage-typesupport" } } }).step);
+    }
+    return .{ .tests = tests, .emit = emit };
 }

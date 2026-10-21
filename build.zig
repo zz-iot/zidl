@@ -41,6 +41,7 @@ fn versionFromZon(comptime zon: []const u8) []const u8 {
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const coverage = b.option(bool, "coverage", "Use LLVM for kcov-compatible test debug information") orelse false;
     const sanitize_thread = b.option(bool, "sanitize-thread", "Enable ThreadSanitizer") orelse false;
     const verbose_tests = b.option(bool, "verbose-tests", "Show successful integration test output") orelse false;
 
@@ -95,6 +96,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
+    var typesupport_emit: ?*std.Build.Step = null;
     // This prototype's real dynamic-load hosts are Linux-only. Do not make
     // other platforms' existing test suites depend on an unported loader host.
     if (target.result.os.tag == .linux and b.graph.host.result.os.tag == .linux) {
@@ -105,8 +107,10 @@ pub fn build(b: *std.Build) void {
             target,
             optimize,
             verbose_tests,
+            coverage,
         );
-        test_step.dependOn(typesupport_library_tests);
+        test_step.dependOn(typesupport_library_tests.tests);
+        typesupport_emit = typesupport_library_tests.emit;
     }
 
     // ── Zig integration tests ─────────────────────────────────────────────────
@@ -1024,6 +1028,16 @@ pub fn build(b: *std.Build) void {
 
     // ── emit-tests: build all test binaries to zig-out/tests/ for kcov ───────
     const emit_tests_step = b.step("emit-tests", "Build test binaries for kcov coverage analysis");
+    if (typesupport_emit) |emit| emit_tests_step.dependOn(emit);
+    emit_tests_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
+    // kcov instrumentation crashes with the default x86 backend's debug
+    // information (reproduced in lexer tests). LLVM works with stock libdw;
+    // ordinary builds retain their default backend.
+    if (coverage) {
+        for ([_]*std.Build.Step.Compile{ exe, mod_tests, exe_tests, zig_integration_tests, interop_tests }) |tests| {
+            tests.use_llvm = true;
+        }
+    }
     emit_tests_step.dependOn(&b.addInstallArtifact(mod_tests, .{ .dest_dir = .{ .override = .{ .custom = "tests" } } }).step);
     emit_tests_step.dependOn(&b.addInstallArtifact(exe_tests, .{ .dest_dir = .{ .override = .{ .custom = "tests" } } }).step);
     emit_tests_step.dependOn(&b.addInstallArtifact(zig_integration_tests, .{ .dest_dir = .{ .override = .{ .custom = "tests" } } }).step);

@@ -46,6 +46,38 @@ cd packages/zidl-rt  && zig build test   # 61 CDR round-trip tests
 cd packages/zidl-cdr && zig build test   # 44 CDR cross-validation tests
 ```
 
+### Coverage collection
+
+CI builds coverage executables with `zig build emit-tests -Dcoverage=true`,
+including the same command in `packages/zidl-rt` and `packages/zidl-cdr`.
+This selects LLVM for those executables: kcov instrumentation of the default
+x86 backend's debug line addresses crashes during the lexer tests. Ordinary
+builds and tests keep the default compiler backend.
+
+The coverage job builds unmodified kcov v42 against stock elfutils. Ubuntu 24.04
+has no kcov package, so that small build is cached. LLVM-built Zig 0.17 coverage
+binaries work with its unpatched libdw 0.190. The default x86 backend still produces
+debug information that stock libdw cannot read correctly; the old ULEB128 patch addresses that parsing problem,
+but does not prevent the subsequent instrumentation crash. Selecting LLVM for
+coverage removes the need to build or patch elfutils in CI. See
+[the coverage job](../.github/workflows/ci.yml) for collection commands. Collector
+failures and upload errors fail the job rather than publishing partial results.
+
+Zig 0.17 also exposes compiler instrumentation through `Module.fuzz` (inline
+counters and program-counter tables) and `sanitize_coverage_trace_pc_guard` for
+third-party fuzzers. These are not a built-in LCOV/Cobertura reporting pipeline.
+The default fuzz test runner requires Zig's server protocol, and Zig's fuzzer
+coverage format is not the sanitizer `.sancov` format consumed by kcov's `--clang`
+engine. Using that route would require a separate runtime/export adapter or a
+coverage tool built around those counters; simply enabling it is not a replacement
+for this job.
+
+`emit-tests` also installs the static typesupport test in `zig-out/tests/`,
+and the C/Zig loader hosts and three shared providers in
+`zig-out/coverage-typesupport/`. CI collects the CLI's opt-in generation path
+and both hosts with these providers, covering the ABI helper and callbacks
+alongside the generator unit tests.
+
 ### Integration tests
 
 ```sh

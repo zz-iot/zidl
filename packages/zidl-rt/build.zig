@@ -4,6 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     _ = optimize;
+    const coverage = b.option(bool, "coverage", "Use LLVM for kcov-compatible test debug information") orelse false;
     const sanitize_thread = b.option(bool, "sanitize-thread", "Enable ThreadSanitizer") orelse false;
 
     const mod = b.addModule("zidl-rt", .{
@@ -19,6 +20,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run zidl-rt tests");
     test_step.dependOn(&run_tests.step);
 
+    if (coverage) mod_tests.use_llvm = true;
     const emit_tests_step = b.step("emit-tests", "Build test binaries for kcov coverage analysis");
     emit_tests_step.dependOn(&b.addInstallArtifact(mod_tests, .{
         .dest_dir = .{ .override = .{ .custom = "tests" } },
