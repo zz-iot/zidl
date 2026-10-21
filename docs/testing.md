@@ -10,6 +10,21 @@
 zig build test
 ```
 
+Sequence, known-answer, and typesupport-host success output is checked by the
+build runner instead of printed. Nonzero exits and failed checks still report their diagnostics. For more
+detail:
+
+```sh
+zig build test --summary all             # build/test results, including cached steps
+zig build test -Dverbose-tests=true      # successful C/C++/Java and library-host output
+zig build integration-test --summary all # also shows optional Java/JNI skip steps
+```
+
+The Java known-answer fixture compiles with unchecked warnings treated as errors.
+Generated constructors suppress only the unavoidable generic-array conversion.
+Missing optional JDK tools/headers are recorded as skip steps for the integration
+suite, rather than warnings during every build.
+
 Runs:
 - **Library unit tests** (678): parser, lexer, preprocessor, semantic analysis, IR builder, backend codegen, and backend interface utilities.
 - **CLI unit test** (1): smoke test of the CLI entry point.
@@ -41,7 +56,7 @@ Compiles and runs the generated C, C++, and Java code against the committed gold
 
 - **C**: links `test/golden/c/types_cdr.c` + `packages/zidl-cdr/src/zidl_cdr.c`, compiles with `-std=c99 -Wall -Werror` using Zig's bundled clang. No external toolchain needed.
 - **C++**: links `test/golden/cpp/types_cdr.cpp` + `zidl_cdr.c`, compiles with `-std=c++17` using Zig's bundled clang++. No external toolchain needed.
-- **Java**: compiles `test/golden/java/Types.java` + `test/integration/java/Test.java` with `javac`, then runs with `java`. Skipped with a warning if `javac`/`java` is not on `PATH`.
+- **Java**: compiles `test/golden/java/Types.java` + `test/integration/java/Test.java` with `javac`, then runs with `java`. Recorded as a skip step if `javac`/`java` is not on `PATH`.
 
 ### CDR interop tests
 
@@ -152,3 +167,13 @@ zig build run -- -b zig --zig-version 0.15.1 \
 # Compile (requires Zig 0.15.1):
 cd test/xrce-microzig && zig build test
 ```
+
+### Experimental typesupport library hosts (Linux)
+
+`zig build test-typesupport-library` generates and independently builds three
+wire typesupport libraries, loads them through C and Zig hosts, and checks static
+descriptor consumption. It covers equivalent/conflicting exports, shared metadata,
+ABI errors, dependency integrity, malformed/bounded samples and full/key-only keys.
+The step is included in `zig build test` on Linux. Other platforms are not yet
+qualified for these hosts. See
+[`packages/zidl-typesupport/README.md`](../packages/zidl-typesupport/README.md).

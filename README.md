@@ -42,6 +42,7 @@ zig build -Doptimize=ReleaseFast  # optimised release build
 | `-E` | Preprocess only; emit expanded IDL |
 | `--default-extensibility <final\|appendable\|mutable>` | Default extensibility (spec default: `final`) |
 | `--no-typesupport` | Suppress CDR serialization output |
+| `--experimental-typesupport-library` | Emit experimental Zig wire-library descriptors ([contract and build recipe](packages/zidl-typesupport/README.md)) |
 | `--no-typeobject-support` | Suppress TypeObject/TypeIdentifier output (all backends) |
 | `--generate-interfaces` | Emit binding layer for IDL `interface` declarations |
 | `--generate-zzdds-wrappers` | Emit typed zzdds topic wrappers for keyed, non-mutable topic structs (Zig, C, C++) |

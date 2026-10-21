@@ -66,12 +66,18 @@ pub const ZigBackend = struct {
         opts: interface.Options,
     ) anyerror!void {
         const self: *ZigBackend = @ptrCast(@alignCast(ctx));
+        try @import("typesupport_library.zig").validateOptions(opts);
         const io = std.Io.Threaded.global_single_threaded.io();
 
         if (opts.split_files) {
             try generateSplitFiles(self.alloc, io, spec, opts);
             return;
         }
+
+        var library_content = std.ArrayList(u8).empty;
+        defer library_content.deinit(self.alloc);
+        if (opts.zig_typesupport_library)
+            try @import("typesupport_library.zig").generate(self.alloc, spec, &library_content);
 
         var content = std.ArrayList(u8).empty;
         defer content.deinit(self.alloc);
@@ -80,6 +86,11 @@ pub const ZigBackend = struct {
         const filename = try std.fmt.allocPrint(self.alloc, "{s}.zig", .{opts.input_stem});
         defer self.alloc.free(filename);
         try writeOutputFile(self.alloc, io, opts, filename, content.items);
+        if (opts.zig_typesupport_library) {
+            const library_filename = try std.fmt.allocPrint(self.alloc, "{s}_typesupport.zig", .{opts.input_stem});
+            defer self.alloc.free(library_filename);
+            try writeOutputFile(self.alloc, io, opts, library_filename, library_content.items);
+        }
     }
 
     fn vtableDeinit(ctx: *anyopaque) void {

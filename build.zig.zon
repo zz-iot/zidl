@@ -39,6 +39,8 @@
         "packages/zidl-rt",
         "packages/zidl-cdr",
         "packages/zidl-xtypes",
+        "packages/zidl-typesupport",
+        "test/integration/typesupport_library",
         "LICENSE",
     },
 }

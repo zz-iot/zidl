@@ -42,6 +42,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const sanitize_thread = b.option(bool, "sanitize-thread", "Enable ThreadSanitizer") orelse false;
+    const verbose_tests = b.option(bool, "verbose-tests", "Show successful integration test output") orelse false;
 
     const zidl_xtypes_mod = b.addModule("zidl_xtypes", .{
         .root_source_file = b.path("packages/zidl-xtypes/src/root.zig"),
@@ -94,12 +95,43 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
+    // This prototype's real dynamic-load hosts are Linux-only. Do not make
+    // other platforms' existing test suites depend on an unported loader host.
+    if (target.result.os.tag == .linux and b.graph.host.result.os.tag == .linux) {
+        const typesupport_library_tests = @import("test/integration/typesupport_library/build.zig").addTests(
+            b,
+            b.path("test/integration/typesupport_library"),
+            exe.getEmittedBin(),
+            target,
+            optimize,
+            verbose_tests,
+        );
+        test_step.dependOn(typesupport_library_tests);
+    }
+
     // ── Zig integration tests ─────────────────────────────────────────────────
     // These use the committed golden types.zig and run CDR round-trip + vtable tests.
     const zidl_rt_mod = b.addModule("zidl_rt", .{
         .root_source_file = b.path("packages/zidl-rt/src/root.zig"),
         .target = target,
         .sanitize_thread = sanitize_thread,
+    });
+
+    // Share the same runtime module with generated wire-library consumers.
+    const ts_header = b.addTranslateC(.{
+        .root_source_file = b.path("packages/zidl-typesupport/include/zidl_typesupport.h"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = false,
+    });
+    _ = b.addModule("zidl_typesupport", .{
+        .root_source_file = b.path("packages/zidl-typesupport/src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zidl_rt", .module = zidl_rt_mod },
+            .{ .name = "zidl_typesupport_c", .module = ts_header.createModule() },
+        },
     });
 
     const golden_zig_mod = b.createModule(.{
@@ -373,7 +405,9 @@ pub fn build(b: *std.Build) void {
         c_mod.addIncludePath(c_dir);
         c_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
         const c_test = b.addExecutable(.{ .name = "zidl-sequence-elements-c", .root_module = c_mod });
-        test_step.dependOn(&b.addRunArtifact(c_test).step);
+        const run_c_test = b.addRunArtifact(c_test);
+        if (!verbose_tests) run_c_test.expectStdOutMatch("sequence_elements C: all checks passed");
+        test_step.dependOn(&run_c_test.step);
 
         // The same C test against `--split-files` output (one header and
         // `_cdr.c` per type): split headers must not re-declare types their
@@ -421,7 +455,9 @@ pub fn build(b: *std.Build) void {
         c_split_mod.addIncludePath(c_split_dir);
         c_split_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
         const c_split_test = b.addExecutable(.{ .name = "zidl-sequence-elements-c-split", .root_module = c_split_mod });
-        test_step.dependOn(&b.addRunArtifact(c_split_test).step);
+        const run_c_split_test = b.addRunArtifact(c_split_test);
+        if (!verbose_tests) run_c_split_test.expectStdOutMatch("sequence_elements C: all checks passed");
+        test_step.dependOn(&run_c_split_test.step);
 
         const gen_cpp = b.addRunArtifact(exe);
         gen_cpp.addArgs(&.{ "-b", "cpp", "-o" });
@@ -450,7 +486,9 @@ pub fn build(b: *std.Build) void {
         cpp_mod.addIncludePath(cpp_dir);
         cpp_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
         const cpp_test = b.addExecutable(.{ .name = "zidl-sequence-elements-cpp", .root_module = cpp_mod });
-        test_step.dependOn(&b.addRunArtifact(cpp_test).step);
+        const run_cpp_test = b.addRunArtifact(cpp_test);
+        if (!verbose_tests) run_cpp_test.expectStdOutMatch("sequence_elements C++: all checks passed");
+        test_step.dependOn(&run_cpp_test.step);
     }
 
     // ── XCDR known-answer checks ──────────────────────────────────────────────
@@ -519,6 +557,7 @@ pub fn build(b: *std.Build) void {
         const c_test = b.addExecutable(.{ .name = "zidl-xcdr-known-answer-c", .root_module = c_mod });
         const run_c = b.addRunArtifact(c_test);
         run_c.addFileArg(vectors);
+        if (!verbose_tests) run_c.expectStdOutMatch("xcdr_known_answer C: all checks passed");
         test_step.dependOn(&run_c.step);
 
         const gen_cpp = b.addRunArtifact(exe);
@@ -550,6 +589,7 @@ pub fn build(b: *std.Build) void {
         const cpp_test = b.addExecutable(.{ .name = "zidl-xcdr-known-answer-cpp", .root_module = cpp_mod });
         const run_cpp = b.addRunArtifact(cpp_test);
         run_cpp.addFileArg(vectors);
+        if (!verbose_tests) run_cpp.expectStdOutMatch("xcdr_known_answer C++: all checks passed");
         test_step.dependOn(&run_cpp.step);
 
         // Java: only when a JDK is on PATH.
@@ -560,7 +600,7 @@ pub fn build(b: *std.Build) void {
             gen_java.addArgs(&.{ "-b", "java", "-o" });
             const java_dir = gen_java.addOutputDirectoryArg("xcdr-known-answer-java");
             gen_java.addFileArg(ka_idl);
-            const compile_java = b.addSystemCommand(&.{ maybe_javac.?, "-d" });
+            const compile_java = b.addSystemCommand(&.{ maybe_javac.?, "-Xlint:unchecked", "-Werror", "-d" });
             const java_classes = compile_java.addOutputDirectoryArg("xcdr-known-answer-java-classes");
             compile_java.addFileArg(java_dir.path(b, "Ka.java"));
             compile_java.addFileArg(b.path("test/integration/xcdr_known_answer/KaTest.java"));
@@ -568,6 +608,7 @@ pub fn build(b: *std.Build) void {
             run_java.addDirectoryArg(java_classes);
             run_java.addArg("KaTest");
             run_java.addFileArg(vectors);
+            if (!verbose_tests) run_java.expectStdOutMatch("xcdr_known_answer Java: all checks passed");
             test_step.dependOn(&run_java.step);
         }
     }
@@ -951,10 +992,14 @@ pub fn build(b: *std.Build) void {
                 run_xfw_java.step.dependOn(&xfw_jni_lib.step);
                 integ_step.dependOn(&run_xfw_java.step);
             } else {
-                std.log.warn("jni.h not found under the detected JAVA_HOME — skipping Java entity JNI bridge integration test", .{});
+                // A missing optional JDK header is a skip, not a configure-time
+                // warning during every install/test or consuming build.
+                const skipped = b.step("skip-java-jni", "Skip optional Java JNI tests: jni.h not found");
+                integ_step.dependOn(skipped);
             }
         } else {
-            std.log.warn("javac/java not found — skipping Java integration test", .{});
+            const skipped = b.step("skip-java-integration", "Skip optional Java integration tests: javac/java not found");
+            integ_step.dependOn(skipped);
         }
     }
 

@@ -113,7 +113,8 @@ NameHash(member_name) = MD5(UTF-8 bytes of member_name)[0..4]
 EquivalenceHash(type_object) = MD5(type_object_CDR_bytes)[0..14]
 ```
 
-- Input: full XCDR2 LE bytes of the MinimalTypeObject (including the 4-byte encap header).
+- Input: serialized XCDR2 LE TypeObject payload, excluding the 4-byte encapsulation header.
+  Pass `encoded[encap_header_len..]` to `computeEquivalenceHash`.
 - Output: 14 bytes, used in `TypeIdentifier` when discriminant = `EK_MINIMAL`.
 - This is what other DDS implementations (Cyclone DDS, FastDDS) compare to match types.
 - Defined in DDS-XTypes §7.3.4.5.

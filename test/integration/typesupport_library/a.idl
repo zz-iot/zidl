@@ -1,0 +1,13 @@
+module Shared {
+  @nested struct OtherPosition { long x; long y; };
+  @nested struct Position { long x; long y; };
+  enum State { IDLE, ACTIVE };
+  typedef unsigned long SensorId;
+  struct Reading { @key unsigned long id; float temperature; };
+};
+module ProjectA {
+  struct Both { Shared::Position a; Shared::OtherPosition b; };
+  struct NonLeading { float before; @key unsigned long id; @key unsigned short channel; };
+  struct Vector { long values[2]; };
+  struct Packet { Shared::Position position; Shared::State state; Shared::SensorId source; string<12> label; sequence<octet, 8> payload; };
+};
