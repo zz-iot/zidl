@@ -1,6 +1,6 @@
 .{
     .name = .zidl_xtypes,
-    .version = "0.3.22-zig.0.17.0-dev",
+    .version = "0.3.23-zig.0.17.0",
     .minimum_zig_version = "0.17.0",
     .fingerprint = 0x71cd99a20407b171,
     .paths = .{
