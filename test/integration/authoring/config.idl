@@ -1,0 +1,35 @@
+enum RunMode { FAST, SLOW };
+struct Item {
+    @default("child-default") string name;
+    @optional boolean enabled;
+    sequence<long> values;
+};
+struct Config {
+    @default("default") string label;
+    @optional boolean enabled;
+    @optional unsigned short count;
+    @optional float ratio;
+    string<4> code;
+    sequence<string> tags;
+    sequence<Item, 2> items;
+    sequence<sequence<long>> matrix;
+    long fixed_values[2];
+    RunMode mode;
+    @optional Item child;
+};
+
+struct Empty {};
+
+#ifdef AUTHORING_FEATURE
+struct FeatureSettings { boolean enabled; @default(5) unsigned short limit; };
+#endif
+struct BuildConfig {
+    @default(17) unsigned short port_base;
+#ifdef AUTHORING_FEATURE
+    @optional boolean xtypes;
+    FeatureSettings feature;
+#endif
+};
+
+struct NamedEnum { RunMode name; };
+struct InvalidNames { sequence<NamedEnum> items; };

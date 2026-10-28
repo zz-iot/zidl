@@ -120,6 +120,38 @@ jobs:
         run: zig build test
         working-directory: test/xrce-microzig
 
+  authoring-compatibility:
+    name: Authoring consumer / Zig ${{ matrix.zig }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        zig: ["0.15.1", "0.16.0"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install generator compiler
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.17.0"
+      - name: Generate version-matched authoring fixtures
+        shell: bash
+        run: |
+          zig build
+          zig-out/bin/zidl -b zig --single-file --zig-generate-authoring --no-typesupport --no-typeobject-support --zig-version "${{ matrix.zig }}" -o "${{ runner.temp }}/authoring-base" test/integration/authoring/config.idl
+          zig-out/bin/zidl -b zig --single-file --zig-generate-authoring --no-typesupport --no-typeobject-support --zig-version "${{ matrix.zig }}" -D AUTHORING_FEATURE -o "${{ runner.temp }}/authoring-feature" test/integration/authoring/config.idl
+      - name: Install consumer compiler
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ matrix.zig }}
+      - name: Test generated decoder on the consumer compiler
+        shell: bash
+        run: |
+          zig test --dep zidl_rt --dep authoring_types --dep authoring_feature \
+            -Mroot=test/integration/authoring/test.zig \
+            -Mzidl_rt=packages/zidl-rt/src/root.zig \
+            --dep zidl_rt "-Mauthoring_types=${{ runner.temp }}/authoring-base/config.zig" \
+            --dep zidl_rt "-Mauthoring_feature=${{ runner.temp }}/authoring-feature/config.zig"
+
   # ── Valgrind ──────────────────────────────────────────────────────────────
 
   valgrind:

@@ -252,6 +252,16 @@ pub const Options = struct {
     ///     Foo;` field where `SomeStruct` owns a string still correctly triggers lifecycle
     ///     generation for the struct containing it, exactly as a direct `SomeStruct` field would.
     zig_generate_toml_config: bool = false,
+    /// Zig backend opt-in: emit strict `decodeToml`, `toml_fields` and `tomlSpec`
+    /// metadata backed by zidl_rt.authoring. Independent of legacy applyToml;
+    /// no extra data fields or CDR methods are required. Results own an arena
+    /// plus presence/source paths and reject unknown fields. Supports bounded
+    /// strings, optional scalars, records, arrays and nested sequences. Named
+    /// collections require an explicit named-field convention. Release the
+    /// returned owner rather than generated field-level deinit. IDL inheritance,
+    /// unions, wide strings and opaque types are rejected by this strict subset.
+    /// Generated names are reserved only with this flag. Pair compiler/runtime.
+    zig_generate_authoring: bool = false,
     /// C++ backend: generate concrete Impl classes and listener bridges.
     /// Outputs ${stem}_impl.hpp and ${stem}_impl.cpp alongside the abstract interface header.
     cpp_generate_impl: bool = false,
