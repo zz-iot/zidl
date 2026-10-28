@@ -18,6 +18,15 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Extend generated authoring with conditional `_setting` handling, owned skip
+  reports, explicit compatibility choices and independent reads from existing values
+  (`decodeTomlFrom`). Keep legacy `applyToml` unchanged.
+- Add opt-in `--zig-generate-authoring` metadata and strict arena-owned decoding
+  through `zidl_rt.authoring`: presence/provenance, bounded record collections,
+  named-key injection, canonical enums and failure-safe cleanup. Keep legacy
+  `applyToml` output and dependency behavior unchanged. Generated decoder fixtures
+  run in the regular test suite and emitted coverage artifacts.
+
 - Keep normal `zig build test` success output quiet, with `-Dverbose-tests=true`
   for detailed output. Report missing optional Java/JNI tools as skip steps instead
   of configure-time warnings. Suppress Java's unavoidable generic-array conversion

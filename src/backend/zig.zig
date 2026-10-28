@@ -182,7 +182,7 @@ pub fn generateSplitFiles(
             .{opts.input_stem},
         );
         try gen.write("const std = @import(\"std\");\n");
-        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(m.items)) {
+        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_authoring or opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(m.items)) {
             try gen.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
         if (opts.generate_zzdds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(m.items)) {
@@ -238,7 +238,7 @@ pub fn generateSplitFiles(
     if (non_module.items.len > 0) {
         if (module_names.items.len > 0) try gen.write("\n");
         try gen.write("const std = @import(\"std\");\n");
-        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(non_module.items)) {
+        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_authoring or opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(non_module.items)) {
             try gen.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
         if (opts.generate_zzdds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(non_module.items)) {
@@ -252,7 +252,7 @@ pub fn generateSplitFiles(
     } else {
         // No modules and no items: emit standard header anyway.
         try gen.write("const std = @import(\"std\");\n");
-        if (!opts.no_typesupport or opts.pl_cdr) {
+        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_authoring) {
             try gen.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
         try gen.write("\n");
@@ -324,7 +324,7 @@ const Generator = struct {
             try self.print("// Zig output target: {s}\n\n", .{self.opts.zig_version.label()});
         }
         try self.write("const std = @import(\"std\");\n");
-        if (!self.opts.no_typesupport or self.opts.pl_cdr or self.opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(spec.items)) {
+        if (!self.opts.no_typesupport or self.opts.pl_cdr or self.opts.zig_generate_authoring or self.opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(spec.items)) {
             try self.write("const zidl_rt = @import(\"zidl_rt\");\n");
         }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveTopicTypes(spec.items)) {
@@ -462,6 +462,13 @@ const Generator = struct {
     // ── Struct ────────────────────────────────────────────────────────────────
 
     fn emitStruct(self: *Generator, s: *const ir.Struct) !void {
+        if (self.opts.zig_generate_authoring) {
+            for (s.members) |m| {
+                inline for (.{ "toml_fields", "tomlSpec", "decodeToml", "decodeTomlFrom" }) |reserved| {
+                    if (std.mem.eql(u8, m.name, reserved)) return error.TomlGeneratedNameCollision;
+                }
+            }
+        }
         const pfx = self.opts.type_prefix;
         try self.ind();
         const kw: []const u8 = if (structIsCExternCompatible(s)) "extern struct" else "struct";
@@ -537,6 +544,9 @@ const Generator = struct {
         if (self.opts.zig_generate_toml_config) {
             try self.write("\n");
             try self.emitStructApplyTomlFn(s);
+        }
+        if (self.opts.zig_generate_authoring) {
+            try self.emitStructStrictToml(s);
         }
         try self.ind();
         try self.print("}}; // {s}{s}\n\n", .{ pfx, s.name });
@@ -5829,6 +5839,70 @@ const Generator = struct {
         try self.write("    }\n");
     }
 
+    /// Strict authoring metadata is separate from legacy mutating applyToml.
+    fn emitStructStrictToml(self: *Generator, s: *const ir.Struct) !void {
+        try self.ind();
+        try self.write("    pub const toml_fields: []const []const u8 = &.{");
+        for (s.members) |m| try self.print("\"{s}\",", .{m.name});
+        try self.write("};\n");
+        try self.ind();
+        try self.write("    pub fn tomlSpec(comptime field: []const u8) zidl_rt.authoring.Spec {\n");
+        if (s.members.len == 0) {
+            try self.ind();
+            try self.write("        _ = field;\n");
+        }
+
+        for (s.members) |m| {
+            try self.ind();
+            try self.print("        if (comptime std.mem.eql(u8, field, \"{s}\")) return ", .{m.name});
+            try self.emitStrictTomlSpec(m.type_ref, m.dimensions);
+            try self.write(";\n");
+        }
+        try self.ind();
+        try self.write("        @compileError(\"unknown generated authoring field\");\n    }\n");
+        try self.ind();
+        try self.write("    pub fn decodeToml(alloc: std.mem.Allocator, table: anytype, options: zidl_rt.authoring.Options, diagnostic: *zidl_rt.authoring.Diagnostic) !zidl_rt.authoring.Decoded(@This()) {\n        return zidl_rt.authoring.decode(@This(), alloc, table, options, diagnostic);\n    }\n");
+        try self.ind();
+        try self.write("    pub fn decodeTomlFrom(alloc: std.mem.Allocator, base: @This(), table: anytype, options: zidl_rt.authoring.Options, diagnostic: *zidl_rt.authoring.Diagnostic) !zidl_rt.authoring.Decoded(@This()) {\n        return zidl_rt.authoring.decodeFrom(@This(), alloc, base, table, options, diagnostic);\n    }\n");
+    }
+    fn emitStrictTomlSpec(self: *Generator, tr_in: ir.TypeRef, dimensions: []const u64) anyerror!void {
+        if (dimensions.len != 0) {
+            try self.print(".{{ .kind = .array, .bound = {d}, .element = &", .{dimensions[0]});
+            try self.emitStrictTomlSpec(tr_in, dimensions[1..]);
+            return self.write(" }");
+        }
+        const tr = resolveTomlTypeRef(tr_in);
+        switch (tr) {
+            .string => |bound| {
+                try self.write(".{ .kind = .string");
+                if (bound) |n| try self.print(", .bound = {d}", .{n});
+                try self.write(" }");
+            },
+            .sequence => |seq| {
+                try self.write(".{ .kind = .sequence");
+                if (seq.bound) |n| try self.print(", .bound = {d}", .{n});
+                try self.write(", .element = &");
+                try self.emitStrictTomlSpec(seq.element.*, &.{});
+                try self.write(" }");
+            },
+            .base => |b| try self.write(switch (b) {
+                .any, .object, .value_base => ".{ .kind = .unsupported }",
+                else => ".{ .kind = .scalar }",
+            }),
+            .named => |decl| switch (decl) {
+                .struct_ => try self.write(".{ .kind = .record }"),
+                .enum_ => |e| {
+                    try self.write(".{ .kind = .enumeration, .enumerators = &.{");
+                    for (e.enumerators) |v| try self.print(".{{ .name = \"{s}\", .value = {d} }},", .{ v.name, v.value });
+                    try self.write("} }");
+                },
+                .typedef => |t| try self.emitStrictTomlSpec(t.type_ref, t.dimensions),
+                else => try self.write(".{ .kind = .unsupported }"),
+            },
+            else => try self.write(".{ .kind = .unsupported }"),
+        }
+    }
+
     /// True if this member's generated statement references `alloc` (a string
     /// dupe, a recursive `applyToml(alloc, ...)` call, or building a sequence).
     /// Must stay in sync with `emitTypeRefApplyToml` the same way
@@ -8008,6 +8082,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
     zig_generate_c_api_cdr_allocator: bool = false,
     zig_idiomatic_enums: bool = false,
     zig_generate_toml_config: bool = false,
+    zig_generate_authoring: bool = false,
     /// Module names to inject as if they came from `import "file.idl";` directives.
     imports: []const []const u8 = &.{},
 }) !std.ArrayList(u8) {
@@ -8042,6 +8117,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
         .zig_generate_c_api_cdr_allocator = extra_opts.zig_generate_c_api_cdr_allocator,
         .zig_idiomatic_enums = extra_opts.zig_idiomatic_enums,
         .zig_generate_toml_config = extra_opts.zig_generate_toml_config,
+        .zig_generate_authoring = extra_opts.zig_generate_authoring,
     };
     try generateFile(alloc, &ir_spec, opts, &out);
     return out;
@@ -11510,4 +11586,32 @@ test "zig_backend: legacy enum conversion spellings" {
         try testing.expect(has(out.items, "@enumFromInt(try reader.readU32())"));
         try testing.expect(!has(out.items, "@backingInt("));
     }
+}
+
+test "toml config rejects generated authoring declaration collisions" {
+    try testing.expectError(error.TomlGeneratedNameCollision, testGenOpts(
+        "struct Cfg { long toml_fields; };",
+        "t",
+        .{ .zig_generate_authoring = true, .no_typesupport = true, .no_typeobject_support = true },
+    ));
+}
+
+test "strict authoring is opt-in without changing legacy TOML dependency behavior" {
+    var legacy = try testGenOpts("struct Cfg { long count; };", "t", .{
+        .zig_generate_toml_config = true,
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+    });
+    defer legacy.deinit(testing.allocator);
+    try testing.expect(!has(legacy.items, "toml_fields"));
+    try testing.expect(!has(legacy.items, "const zidl_rt"));
+    var strict = try testGenOpts("struct Cfg { long count; };", "t", .{
+        .zig_generate_authoring = true,
+        .no_typesupport = true,
+        .no_typeobject_support = true,
+    });
+    defer strict.deinit(testing.allocator);
+    try testing.expect(has(strict.items, "const zidl_rt"));
+    try testing.expect(has(strict.items, "pub fn decodeToml"));
+    try testing.expect(!has(strict.items, "_toml_applied"));
 }

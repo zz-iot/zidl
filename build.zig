@@ -96,6 +96,41 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
+    const authoring_step = b.step("test-authoring", "Test generated strict presence-aware authoring records");
+    const authoring_gen = b.addRunArtifact(exe);
+    authoring_gen.addArgs(&.{ "-b", "zig", "--single-file", "--zig-generate-authoring", "--no-typesupport", "--no-typeobject-support", "-o" });
+    const authoring_dir = authoring_gen.addOutputDirectoryArg("authoring-config");
+    authoring_gen.addFileArg(b.path("test/integration/authoring/config.idl"));
+    const authoring_rt = b.createModule(.{ .root_source_file = b.path("packages/zidl-rt/src/root.zig"), .target = target, .optimize = optimize, .sanitize_thread = sanitize_thread });
+    const authoring_schema = b.createModule(.{
+        .root_source_file = authoring_dir.path(b, "config.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = sanitize_thread,
+        .imports = &.{.{ .name = "zidl_rt", .module = authoring_rt }},
+    });
+    const authoring_feature_gen = b.addRunArtifact(exe);
+    authoring_feature_gen.addArgs(&.{ "-b", "zig", "--single-file", "--zig-generate-authoring", "--no-typesupport", "--no-typeobject-support", "-D", "AUTHORING_FEATURE", "-o" });
+    const authoring_feature_dir = authoring_feature_gen.addOutputDirectoryArg("authoring-config-feature");
+    authoring_feature_gen.addFileArg(b.path("test/integration/authoring/config.idl"));
+    const authoring_feature = b.createModule(.{
+        .root_source_file = authoring_feature_dir.path(b, "config.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = sanitize_thread,
+        .imports = &.{.{ .name = "zidl_rt", .module = authoring_rt }},
+    });
+    const authoring_test = b.addTest(.{ .name = "authoring-test", .use_llvm = if (coverage or sanitize_thread) true else null, .root_module = b.createModule(.{
+        .root_source_file = b.path("test/integration/authoring/test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = sanitize_thread,
+        .imports = &.{ .{ .name = "zidl_rt", .module = authoring_rt }, .{ .name = "authoring_types", .module = authoring_schema }, .{ .name = "authoring_feature", .module = authoring_feature } },
+    }) });
+    const authoring_run = b.addRunArtifact(authoring_test);
+    authoring_step.dependOn(&authoring_run.step);
+    test_step.dependOn(&authoring_run.step);
+
     var typesupport_emit: ?*std.Build.Step = null;
     // This prototype's real dynamic-load hosts are Linux-only. Do not make
     // other platforms' existing test suites depend on an unported loader host.
@@ -1034,12 +1069,13 @@ pub fn build(b: *std.Build) void {
     // information (reproduced in lexer tests). LLVM works with stock libdw;
     // ordinary builds retain their default backend.
     if (coverage) {
-        for ([_]*std.Build.Step.Compile{ exe, mod_tests, exe_tests, zig_integration_tests, interop_tests }) |tests| {
+        for ([_]*std.Build.Step.Compile{ exe, mod_tests, exe_tests, zig_integration_tests, interop_tests, authoring_test }) |tests| {
             tests.use_llvm = true;
         }
     }
     emit_tests_step.dependOn(&b.addInstallArtifact(mod_tests, .{ .dest_dir = .{ .override = .{ .custom = "tests" } } }).step);
     emit_tests_step.dependOn(&b.addInstallArtifact(exe_tests, .{ .dest_dir = .{ .override = .{ .custom = "tests" } } }).step);
     emit_tests_step.dependOn(&b.addInstallArtifact(zig_integration_tests, .{ .dest_dir = .{ .override = .{ .custom = "tests" } } }).step);
+    emit_tests_step.dependOn(&b.addInstallArtifact(authoring_test, .{ .dest_dir = .{ .override = .{ .custom = "tests" } } }).step);
     emit_tests_step.dependOn(&b.addInstallArtifact(interop_tests, .{ .dest_dir = .{ .override = .{ .custom = "tests" } } }).step);
 }

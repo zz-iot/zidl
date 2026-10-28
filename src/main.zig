@@ -39,6 +39,7 @@
 //!   --zig-generate-c-api           Emit pub export fn callconv(.c) wrappers for C free-function API (Zig backend)
 //!   --zig-idiomatic-enums          Generate lowercase snake_case enum tags (e.g. .durability_volatile) (Zig backend)
 //!   --zig-generate-toml-config     Emit applyToml(alloc, table: anytype) !void per struct (Zig backend)
+//!   --zig-generate-authoring       Emit strict presence-aware decoding (Zig backend)
 //!   --zig-pl-cdr                   Generate PL_CDR functions for @mutable types (Zig backend)
 //!   --zig-version <0.17.0|0.16.0|0.15.1>  Output compatibility target (Zig backend)
 //!
@@ -86,6 +87,7 @@ const Opts = struct {
     zig_generate_c_api_cdr_allocator: bool = false,
     zig_idiomatic_enums: bool = false,
     zig_generate_toml_config: bool = false,
+    zig_generate_authoring: bool = false,
     cpp_generate_impl: bool = false,
     cpp_pmr_containers: bool = false,
     cpp_impl_overrides: std.ArrayListUnmanaged([]const u8) = .empty,
@@ -298,6 +300,8 @@ pub fn main(init: std.process.Init) !void {
             opts.audit_lifecycle = true;
         } else if (std.mem.eql(u8, arg, "--zig-idiomatic-enums")) {
             opts.zig_idiomatic_enums = true;
+        } else if (std.mem.eql(u8, arg, "--zig-generate-authoring")) {
+            opts.zig_generate_authoring = true;
         } else if (std.mem.eql(u8, arg, "--zig-generate-toml-config")) {
             opts.zig_generate_toml_config = true;
         } else if (std.mem.eql(u8, arg, "--c-pragma-once")) {
@@ -691,6 +695,7 @@ fn processFile(
         .zig_generate_c_api_cdr_allocator = opts.zig_generate_c_api_cdr_allocator,
         .zig_idiomatic_enums = opts.zig_idiomatic_enums,
         .zig_generate_toml_config = opts.zig_generate_toml_config,
+        .zig_generate_authoring = opts.zig_generate_authoring,
         .generate_zzdds_wrappers = opts.generate_zzdds_wrappers,
         .java_import_packages = opts.java_import_packages.items,
         .zig_version = opts.zig_version,
@@ -811,6 +816,7 @@ fn printUsage(w: *Io.Writer) !void {
         \\
         \\  --zig-generate-c-api           Emit pub export fn callconv(.c) wrappers for C free-function API (Zig backend)
         \\  --zig-generate-toml-config     Emit applyToml(alloc, table: anytype) !void per struct (Zig backend)
+        \\  --zig-generate-authoring       Emit strict presence-aware decodeToml using zidl_rt.authoring
         \\  --zig-pl-cdr                   Generate PL_CDR functions for @mutable types (Zig backend)
         \\  --zig-version <0.17.0|0.16.0|0.15.1>  Output compatibility target (Zig backend)
         \\
