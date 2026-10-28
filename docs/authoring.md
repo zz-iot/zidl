@@ -83,7 +83,9 @@ none of these checks establishes a complete TOML implementation or DDS conforman
 
 `zig build test-authoring` compiles/runs generated fixtures for presence, bounds,
 named records, nested sequences, diagnostics, allocation failures and empty records.
-The target also joins ordinary tests and emitted coverage artifacts. The consumer
+The target also joins ordinary tests and emitted coverage artifacts. CI also runs
+the generated decoder fixtures with the supported Zig 0.15.1 and 0.16.0 consumer
+compilers, using version-matched generated output. The consumer
 integration in zzdds uses its existing generic TOML parser, not a second decoder.
 
 ## Conditional settings and compatibility choices

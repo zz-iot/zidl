@@ -3,6 +3,25 @@
 //! Values and presence/provenance are owned by a single arena, released on failure.
 const std = @import("std");
 const owned = @import("owned.zig");
+fn dupeCString(a: std.mem.Allocator, text: []const u8) ![:0]u8 {
+    return if (@hasDecl(std.mem.Allocator, "dupeSentinel")) a.dupeSentinel(u8, text, 0) else a.dupeZ(u8, text);
+}
+// Select a declared tag by its numeric metadata, preserving native-name mangling
+// without using enum conversion builtins that older compilers cannot parse.
+fn enumValue(comptime T: type, comptime value: u64) T {
+    const info = @typeInfo(T).@"enum";
+    if (comptime @hasField(@TypeOf(info), "field_names")) {
+        inline for (info.field_names, info.field_values) |name, number| {
+            if (comptime number == value) return @field(T, name);
+        }
+    } else {
+        inline for (info.fields) |field| {
+            if (comptime field.value == value) return @field(T, field.name);
+        }
+    }
+    @compileError("authoring enum metadata does not match the generated enum");
+}
+
 pub const Spec = struct {
     kind: enum { scalar, string, sequence, array, enumeration, record, unsupported },
     bound: ?usize = null,
@@ -207,7 +226,7 @@ const Context = struct {
                     const text = if (p.size == .slice) value else std.mem.span(value);
                     if (text.len > ctx.options.max_string_bytes) return ctx.fail(error.LimitExceeded, node);
                     if (p.size == .slice) return try ctx.a.dupe(u8, text);
-                    return (try ctx.a.dupeSentinel(u8, text, 0)).ptr;
+                    return (try dupeCString(ctx.a, text)).ptr;
                 },
                 else => return value,
             },
@@ -266,7 +285,7 @@ const Context = struct {
                 switch (@typeInfo(T)) {
                     .pointer => |p| {
                         if (p.size == .slice) return try ctx.a.dupe(u8, text);
-                        if (p.size == .many and p.sentinel() != null) return (try ctx.a.dupeSentinel(u8, text, 0)).ptr;
+                        if (p.size == .many and p.sentinel() != null) return (try dupeCString(ctx.a, text)).ptr;
                         return ctx.fail(error.UnsupportedType, node);
                     },
                     .@"struct" => {
@@ -299,7 +318,7 @@ const Context = struct {
             },
             .enumeration => {
                 if (node.value != .string) return ctx.fail(error.TypeMismatch, node);
-                inline for (spec.enumerators) |e| if (if (ctx.options.enum_matching == .ascii_case_insensitive) std.ascii.eqlIgnoreCase(e.name, node.value.string) else std.mem.eql(u8, e.name, node.value.string)) return @fromBackingInt(@intCast(e.value));
+                inline for (spec.enumerators) |e| if (if (ctx.options.enum_matching == .ascii_case_insensitive) std.ascii.eqlIgnoreCase(e.name, node.value.string) else std.mem.eql(u8, e.name, node.value.string)) return enumValue(T, e.value);
                 return ctx.fail(error.InvalidEnum, node);
             },
             .record => {
@@ -363,7 +382,7 @@ const Context = struct {
                     if (named) {
                         var found = false;
                         inline for (E.toml_fields) |field| if (std.mem.eql(u8, field, ctx.options.named_field.?)) {
-                            found = true;
+                            found = E.tomlSpec(field).kind == .string;
                         };
                         if (!found) return ctx.fail(error.UnsupportedType, node);
                     }

@@ -71,7 +71,7 @@ test "named records, nested scalar sequences, bounded strings and fixed arrays" 
     try testing.expectEqual(@as(i32, 9), result.value.matrix._buffer.?[0]._buffer.?[0]);
     try testing.expectEqual(@as(i32, 2), result.value.fixed_values[1]);
     try testing.expectEqualStrings("x", std.mem.span(result.value.tags._buffer.?[0]));
-    try testing.expectEqual(@as(u32, 1), @backingInt(result.value.mode));
+    try testing.expectEqual(types.RunMode.SLOW, result.value.mode);
     try testing.expect(result.isPresent(&.{ "items", "a.b", "name" }));
 }
 
@@ -310,4 +310,23 @@ test "omitted lists are copied and newly introduced optional records use default
     try testing.expectEqualStrings("child-default", result.value.child.?.name);
     try testing.expectEqual(@as(?bool, false), result.value.child.?.enabled);
     try testing.expect(!result.isPresent(&.{"tags"}));
+}
+
+test "named collections reject non-string name members even when empty" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var diag: rt.authoring.Diagnostic = .{};
+    const item = try Table.make(a, &.{});
+    const named = try Table.make(a, &.{.{ .key = "FAST", .value = .{ .table = item } }});
+    for ([_]Table{ named, .{} }) |table| {
+        const root = try Table.make(a, &.{.{ .key = "items", .value = .{ .table = table } }});
+        try testing.expectError(error.UnsupportedType, types.InvalidNames.decodeToml(testing.allocator, root, .{ .named_field = "name" }, &diag));
+        try testing.expectEqualStrings("items", diag.fieldPath());
+    }
+    // The schema remains valid for ordinary arrays, where no name is injected.
+    const root = try Table.make(a, &.{.{ .key = "items", .value = .{ .array = &.{.{ .value = .{ .table = item } }} } }});
+    var result = try types.InvalidNames.decodeToml(testing.allocator, root, .{}, &diag);
+    defer result.deinit();
+    try testing.expectEqual(@as(u32, 1), result.value.items._length);
 }

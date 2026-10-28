@@ -30,3 +30,6 @@ struct BuildConfig {
     FeatureSettings feature;
 #endif
 };
+
+struct NamedEnum { RunMode name; };
+struct InvalidNames { sequence<NamedEnum> items; };
