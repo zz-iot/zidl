@@ -18,6 +18,14 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Listener identity: callback structs (C and Zig) end with `listener_identity`, after
+  `release_listener_data`. A middleware treats registrations with the same non-null identity,
+  or else the same `listener_data`, as one listener. New `@shared_base` interface annotation:
+  the C++ backend inherits it virtually, rejects it on an interface that declares operations
+  or attributes, and `c_listener` passes the object's `@shared_base` subobject (else its
+  complete object) as the identity. The Java bridge keeps one reference-counted native
+  context per listener object, found through a registry at registration, so every
+  registration of an object passes the same `listener_data`.
 - C++: a listener registration owns a reference to its listener. `c_listener` takes a
   `shared_ptr` and sets `release_listener_data`, so a listener replaced or cleared while one
   of its callbacks runs, or passed only to a `create_*` call, stays alive until the core

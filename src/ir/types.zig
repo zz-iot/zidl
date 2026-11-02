@@ -328,6 +328,19 @@ pub fn isCallbackInterface(iface: *const Interface) bool {
     return std.mem.endsWith(u8, iface.name, "Listener");
 }
 
+/// True for `@shared_base`-annotated interfaces: an object implementing any
+/// number of interfaces that derive from this one holds one copy of it, so
+/// the interface names one identity for the object however many of its
+/// descendants the object implements. Backends map it as they see fit (C++:
+/// virtual inheritance, which needs the interface to declare no operations);
+/// others may ignore it.
+pub fn isSharedBaseInterface(iface: *const Interface) bool {
+    for (iface.raw) |ann| {
+        if (std.mem.eql(u8, ann.name, "shared_base")) return true;
+    }
+    return false;
+}
+
 /// True for `@shared_c_abi_box`-annotated interfaces — concrete implementations
 /// of these share one C-ABI box (one `CachedCAbiHandle`-style cache) across
 /// every interface view they present, instead of one box per view. Backends

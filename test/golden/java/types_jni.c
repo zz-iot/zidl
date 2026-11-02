@@ -12,8 +12,16 @@
 /* Listener JNI upcall support: a global ref to the registered Java
  * listener object, reachable from any native thread the callback
  * fires on (not just JVM-created ones) via a process-wide JavaVM*
- * cached in JNI_OnLoad. */
-typedef struct { jobject ref; } zidl_java_listener_ctx;
+ * cached in JNI_OnLoad. One context per Java listener object,
+ * however many registrations it has (see
+ * zidl_java_listener_ctx_acquire), so the context pointer each
+ * registration passes as `listener_data` names the object. */
+typedef struct zidl_java_listener_ctx {
+    jobject ref;
+    jint hash;
+    unsigned refs;
+    struct zidl_java_listener_ctx *next;
+} zidl_java_listener_ctx;
 
 /* Unboxes a generated entity `*Impl` object's native handle via its
  * `private final long ptr_` field. NULL-safe. */
@@ -32,17 +40,79 @@ char *zidl_java_strdup(const char *s) {
     return p;
 }
 
-/* Releases a listener context previously installed as a C listener
- * struct's `listener_data` — frees the global ref to the Java listener
- * object plus the ctx allocation itself. NULL-safe: harmless for an
+/* Registry of listener contexts, one per Java listener object:
+ * bucketed by System.identityHashCode, matched with IsSameObject.
+ * Consulted only when a listener is registered or released, never
+ * per callback. */
+#define ZIDL_JAVA_LISTENER_BUCKETS 64
+static pthread_mutex_t zidl_java_listener_mtx = PTHREAD_MUTEX_INITIALIZER;
+static zidl_java_listener_ctx *zidl_java_listener_buckets[ZIDL_JAVA_LISTENER_BUCKETS];
+static jclass zidl_java_system_cls = NULL;
+static jmethodID zidl_java_identity_hash = NULL;
+
+/* The context for `obj`, with one more reference: an existing one when
+ * `obj` is already registered anywhere, so each of its registrations
+ * passes the same `listener_data`. NULL without memory. */
+zidl_java_listener_ctx *zidl_java_listener_ctx_acquire(JNIEnv *env, jobject obj) {
+    pthread_mutex_lock(&zidl_java_listener_mtx);
+    jclass cls = zidl_java_system_cls;
+    jmethodID mid = zidl_java_identity_hash;
+    pthread_mutex_unlock(&zidl_java_listener_mtx);
+    if (mid == NULL) {
+        /* Looked up without the lock held: FindClass may run Java code. */
+        jclass local = (*env)->FindClass(env, "java/lang/System");
+        mid = (*env)->GetStaticMethodID(env, local, "identityHashCode", "(Ljava/lang/Object;)I");
+        pthread_mutex_lock(&zidl_java_listener_mtx);
+        if (zidl_java_system_cls == NULL) {
+            zidl_java_system_cls = (jclass)(*env)->NewGlobalRef(env, local);
+            zidl_java_identity_hash = mid;
+        }
+        cls = zidl_java_system_cls;
+        pthread_mutex_unlock(&zidl_java_listener_mtx);
+        (*env)->DeleteLocalRef(env, local);
+    }
+    jint hash = (*env)->CallStaticIntMethod(env, cls, mid, obj);
+    zidl_java_listener_ctx **bucket = &zidl_java_listener_buckets[(unsigned)hash % ZIDL_JAVA_LISTENER_BUCKETS];
+    pthread_mutex_lock(&zidl_java_listener_mtx);
+    for (zidl_java_listener_ctx *n = *bucket; n != NULL; n = n->next) {
+        if (n->hash == hash && (*env)->IsSameObject(env, n->ref, obj)) {
+            n->refs++;
+            pthread_mutex_unlock(&zidl_java_listener_mtx);
+            return n;
+        }
+    }
+    zidl_java_listener_ctx *ctx = malloc(sizeof(zidl_java_listener_ctx));
+    if (ctx != NULL) {
+        ctx->ref = (*env)->NewGlobalRef(env, obj);
+        ctx->hash = hash;
+        ctx->refs = 1;
+        ctx->next = *bucket;
+        *bucket = ctx;
+    }
+    pthread_mutex_unlock(&zidl_java_listener_mtx);
+    return ctx;
+}
+
+/* Drops one reference to a listener context installed as a C
+ * listener struct's `listener_data`; the last frees the global ref to
+ * the Java listener object and the context. NULL-safe: harmless for an
  * entity/slot that never had a listener installed. Called by
  * `zidl_java_release_listener_data` below (the hook zzdds's own core
- * calls generically) and directly by `emitJniBridgeOp`'s
- * `created_listener_params` handling for a `create_*` call whose
- * listener never actually got installed anywhere. */
+ * calls generically, once per registration) and directly by
+ * `emitJniBridgeOp`'s `created_listener_params` handling for a
+ * `create_*` call whose listener never actually got installed. */
 void zidl_java_release_listener_ctx(JNIEnv *env, void *listener_data) {
     if (listener_data == NULL) return;
     zidl_java_listener_ctx *ctx = (zidl_java_listener_ctx *)listener_data;
+    pthread_mutex_lock(&zidl_java_listener_mtx);
+    if (--ctx->refs != 0) {
+        pthread_mutex_unlock(&zidl_java_listener_mtx);
+        return;
+    }
+    zidl_java_listener_ctx **pp = &zidl_java_listener_buckets[(unsigned)ctx->hash % ZIDL_JAVA_LISTENER_BUCKETS];
+    while (*pp != ctx) pp = &(*pp)->next;
+    *pp = ctx->next;
+    pthread_mutex_unlock(&zidl_java_listener_mtx);
     (*env)->DeleteGlobalRef(env, ctx->ref);
     free(ctx);
 }

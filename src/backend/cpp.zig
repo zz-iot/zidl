@@ -922,12 +922,20 @@ const Generator = struct {
             try self.emitConst(c);
         }
 
+        // @shared_base maps to virtual inheritance, so an object deriving from
+        // several of its descendants holds one copy of it. That copy may not
+        // declare operations: the generated `FooBase` classes' default
+        // overrides of one would have no unique final overrider.
+        if (ir.isSharedBaseInterface(iface) and (iface.operations.len > 0 or iface.attributes.len > 0)) {
+            return error.SharedBaseDeclaresMembers;
+        }
         try self.print("class {s}", .{iface.name});
         if (iface.bases.len > 0) {
             try self.write(" : ");
             for (iface.bases, 0..) |base, i| {
                 if (i > 0) try self.write(", ");
-                try self.print("public ::{s}", .{ir.typeDeclQualifiedName(base)});
+                const virt = base == .interface and ir.isSharedBaseInterface(base.interface);
+                try self.print("public {s}::{s}", .{ if (virt) "virtual " else "", ir.typeDeclQualifiedName(base) });
             }
         }
         try self.write(" {\npublic:\n");
@@ -5652,11 +5660,20 @@ const ConcreteImplGenerator = struct {
 
         // c_listener() implementation
         try self.srcPrint("{s} {s}Base::c_listener(std::shared_ptr<{s}Base> owner) {{\n", .{ c_name, iface.name, iface.name });
+        // listener_identity: the one object behind every registration of
+        // this listener, whichever listener interfaces it implements. Its
+        // @shared_base subobject when it has one (one copy per object, at
+        // one address from construction on); otherwise the complete object.
+        if (sharedBaseOf(iface)) |shared| {
+            try self.srcPrint("    void* _identity = static_cast<::{s}*>(owner.get());\n", .{shared.qualified_name});
+        } else {
+            try self.srcWrite("    void* _identity = dynamic_cast<void*>(owner.get());\n");
+        }
         try self.srcPrint("    return {{new std::shared_ptr<{s}Base>(std::move(owner))", .{iface.name});
         for (ops.items) |op| {
             try self.srcPrint(", s_{s}", .{op.name});
         }
-        try self.srcWrite(", release_c_listener};\n}\n\n");
+        try self.srcWrite(", release_c_listener, _identity};\n}\n\n");
         try self.srcPrint("void {s}Base::release_c_listener(void* d) {{\n", .{iface.name});
         try self.srcPrint("    delete static_cast<std::shared_ptr<{s}Base>*>(d);\n}}\n\n", .{iface.name});
 
@@ -6155,6 +6172,17 @@ fn typeRefIsCScalar(tr: ir.TypeRef) bool {
 
 fn isCallbackIface(iface: *const ir.Interface) bool {
     return interface.isCallbackInterface(iface);
+}
+
+/// The `@shared_base` interface `iface` is or derives from, nearest first in
+/// declaration order (DCPS: `DDS::Listener` for every listener).
+fn sharedBaseOf(iface: *const ir.Interface) ?*const ir.Interface {
+    if (ir.isSharedBaseInterface(iface)) return iface;
+    for (iface.bases) |base| {
+        if (base != .interface) continue;
+        if (sharedBaseOf(base.interface)) |found| return found;
+    }
+    return null;
 }
 
 /// If `ops` contains a zero-param `get_listener` operation returning a `@callback`
@@ -9727,6 +9755,53 @@ test "cpp_backend: listener registrations own the listener; a call that installs
     try testing.expect(!has(src, "TODO"));
 }
 
+test "cpp_backend: @shared_base is a virtual base and the listener identity" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    interface Topic {};
+        \\    interface Reader {};
+        \\    @shared_base @callback interface Listener {};
+        \\    @callback interface TopicListener : Listener { void on_topic(in Topic t); };
+        \\    @callback interface ReaderListener : Listener { void on_reader(in Reader r); };
+        \\    @callback interface AllListener : TopicListener, ReaderListener {};
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "void* _identity = static_cast<::DDS::Listener*>(owner.get());"));
+    try testing.expect(!has(src, "dynamic_cast<void*>(owner.get())"));
+
+    const alloc = testing.allocator;
+    var out = try testGenOpts(
+        \\module DDS {
+        \\    interface Topic {};
+        \\    @shared_base @callback interface Listener {};
+        \\    @callback interface TopicListener : Listener { void on_topic(in Topic t); };
+        \\    @callback interface Other { void on_other(); };
+        \\    @callback interface Both : TopicListener, Other {};
+        \\};
+    ,
+        "dcps",
+        .{ .generate_interfaces = true },
+    );
+    defer out.deinit(alloc);
+    const s = out.items;
+    // Only inheritance from the @shared_base interface is virtual.
+    try testing.expect(has(s, "class TopicListener : public virtual ::DDS::Listener {"));
+    try testing.expect(has(s, "class Both : public ::DDS::TopicListener, public ::DDS::Other {"));
+}
+
+test "cpp_backend: @shared_base on an interface with operations is rejected" {
+    try testing.expectError(error.SharedBaseDeclaresMembers, testGenOpts(
+        \\module DDS {
+        \\    @shared_base @callback interface Listener { void on_any(); };
+        \\};
+    ,
+        "dcps",
+        .{ .generate_interfaces = true },
+    ));
+}
+
 test "cpp_backend: get_listener/set_listener stash — void set_listener return stashes unconditionally" {
     var res = try testGenConcreteImpl(
         \\module DDS {
@@ -9782,7 +9857,9 @@ test "cpp_backend: B1+B3 — listener base is in dcps_impl.cpp; decl moved to dc
     try testing.expect(has(src, "DDS_DataWriterListener DataWriterListenerBase::c_listener(std::shared_ptr<DataWriterListenerBase> owner)"));
     try testing.expect(has(src, "DataWriterListenerBase::s_on_data"));
     // Each registration owns a reference to the listener, released by the core.
-    try testing.expect(has(src, "return {new std::shared_ptr<DataWriterListenerBase>(std::move(owner)), s_on_data, release_c_listener};"));
+    try testing.expect(has(src, "return {new std::shared_ptr<DataWriterListenerBase>(std::move(owner)), s_on_data, release_c_listener, _identity};"));
+    // No @shared_base: the identity is the complete object.
+    try testing.expect(has(src, "void* _identity = dynamic_cast<void*>(owner.get());"));
     try testing.expect(has(src, "delete static_cast<std::shared_ptr<DataWriterListenerBase>*>(d);"));
     try testing.expect(has(src, "(*static_cast<std::shared_ptr<DataWriterListenerBase>*>(d))->on_data("));
     // Trampoline wraps the raw handle via the identity-preserving cache, not a
