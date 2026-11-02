@@ -4432,10 +4432,22 @@ const ConcreteImplGenerator = struct {
                 // default-constructs against std::pmr::get_default_resource()
                 // with no explicit allocator argument needed, matching every
                 // other pmr container in this codebase.
+                // An entry keeps the object it caches by a weak_ptr to the
+                // family interface, plus its creating class's tag and its own
+                // address as that class. A member's hit rebuilds its
+                // shared_ptr from `obj` (aliasing the locked `ref`), so it
+                // never downcasts from the interface: that downcast cannot be
+                // static when a @shared_base (virtual base) lies between the
+                // two, and dynamic would need RTTI.
                 try self.hdrPrint(
-                    "    static std::mutex& _familyMutex();\n" ++
-                        "    static std::pmr::unordered_map<{s}, std::pair<std::weak_ptr<{s}>, const void*>>& _familyCache();\n",
-                    .{ c_name, iface.name },
+                    "    struct _FamilyEntry {{\n" ++
+                        "        std::weak_ptr<{s}> ref;\n" ++
+                        "        const void* tag;\n" ++
+                        "        void* obj;\n" ++
+                        "    }};\n" ++
+                        "    static std::mutex& _familyMutex();\n" ++
+                        "    static std::pmr::unordered_map<{s}, _FamilyEntry>& _familyCache();\n",
+                    .{ iface.name, c_name },
                 );
             } else {
                 // Non-root family member: signature unchanged (still this
@@ -4598,11 +4610,11 @@ const ConcreteImplGenerator = struct {
                         "    static std::mutex m;\n" ++
                         "    return m;\n" ++
                         "}}\n" ++
-                        "std::pmr::unordered_map<{s}, std::pair<std::weak_ptr<{s}>, const void*>>& {s}Impl::_familyCache() {{\n" ++
-                        "    static std::pmr::unordered_map<{s}, std::pair<std::weak_ptr<{s}>, const void*>> c;\n" ++
+                        "std::pmr::unordered_map<{s}, {s}Impl::_FamilyEntry>& {s}Impl::_familyCache() {{\n" ++
+                        "    static std::pmr::unordered_map<{s}, _FamilyEntry> c;\n" ++
                         "    return c;\n" ++
                         "}}\n",
-                    .{ iface.name, c_name, iface.name, iface.name, c_name, iface.name },
+                    .{ iface.name, c_name, iface.name, iface.name, c_name },
                 );
                 // Cache hit may genuinely be a sibling object (constructed by
                 // its own _getOrCreate below) viewed through the shared
@@ -4618,11 +4630,11 @@ const ConcreteImplGenerator = struct {
                         "    auto& _cache = _familyCache();\n" ++
                         "    auto _it = _cache.find(h);\n" ++
                         "    if (_it != _cache.end()) {{\n" ++
-                        "        if (auto _sp = _it->second.first.lock()) return _sp;\n" ++
+                        "        if (auto _sp = _it->second.ref.lock()) return _sp;\n" ++
                         "    }}\n" ++
                         "    auto _sp = std::allocate_shared<{s}Impl>(\n" ++
                         "        std::pmr::polymorphic_allocator<{s}Impl>(std::pmr::get_default_resource()), h);\n" ++
-                        "    _cache[h] = {{_sp, _familyTag()}};\n" ++
+                        "    _cache[h] = {{_sp, _familyTag(), _sp.get()}};\n" ++
                         "    return _sp;\n" ++
                         "}}\n\n",
                     .{ iface.name, iface.name, c_name, iface.name, iface.name },
@@ -4630,9 +4642,9 @@ const ConcreteImplGenerator = struct {
             } else {
                 // Non-root family member: consults/populates the ROOT's
                 // shared cache instead of one of its own. A hit counts only
-                // when its tag is this class's, so the static_pointer_cast
-                // back down to this class is safe; an entry another member
-                // created (the root's generic wrapper, say) is replaced.
+                // when its tag is this class's, so its `obj` is this class's
+                // object; an entry another member created (the root's
+                // generic wrapper, say) is replaced.
                 const root_c_name = try cNameOf(self.alloc, fam.root.qualified_name);
                 defer self.alloc.free(root_c_name);
                 const root_impl = try std.fmt.allocPrint(self.alloc, "::{s}Impl", .{fam.root.qualified_name});
@@ -4646,15 +4658,15 @@ const ConcreteImplGenerator = struct {
                         "    std::lock_guard<std::mutex> _lock({s}::_familyMutex());\n" ++
                         "    auto& _cache = {s}::_familyCache();\n" ++
                         "    auto _it = _cache.find(_fh);\n" ++
-                        "    if (_it != _cache.end() && _it->second.second == _familyTag()) {{\n" ++
-                        "        if (auto _base = _it->second.first.lock()) return std::static_pointer_cast<{s}Impl>(_base);\n" ++
+                        "    if (_it != _cache.end() && _it->second.tag == _familyTag()) {{\n" ++
+                        "        if (auto _base = _it->second.ref.lock()) return std::shared_ptr<{s}Impl>(_base, static_cast<{s}Impl*>(_it->second.obj));\n" ++
                         "    }}\n" ++
                         "    auto _sp = std::allocate_shared<{s}Impl>(\n" ++
                         "        std::pmr::polymorphic_allocator<{s}Impl>(std::pmr::get_default_resource()), h);\n" ++
-                        "    _cache[_fh] = {{_sp, _familyTag()}};\n" ++
+                        "    _cache[_fh] = {{_sp, _familyTag(), _sp.get()}};\n" ++
                         "    return _sp;\n" ++
                         "}}\n\n",
-                    .{ iface.name, iface.name, c_name, root_c_name, key_expr, root_impl, root_impl, iface.name, iface.name, iface.name },
+                    .{ iface.name, iface.name, c_name, root_c_name, key_expr, root_impl, root_impl, iface.name, iface.name, iface.name, iface.name },
                 );
             }
         }
@@ -4862,9 +4874,13 @@ const ConcreteImplGenerator = struct {
                             try self.srcPrint("    listener_ = {s};\n", .{op.params[0].name});
                         }
                     }
-                    // A call that fails installs no listener, so the core
-                    // never releases the registration built for it.
-                    if (op.return_type != null) for (op.params) |p| {
+                    // A set_listener that fails installs no listener, so the
+                    // core never releases the registration built for it. Only
+                    // set_listener has a known zero-means-success contract
+                    // (the stash above relies on it too): another op's nonzero
+                    // return may well mean success, and releasing then would
+                    // free a listener the core still holds.
+                    if (is_listener_setter and op.return_type != null) for (op.params) |p| {
                         if (paramAdaptKind(p) != .listener_in) continue;
                         const bridge_name = try self.listenerBridgeName(p.type_ref);
                         defer self.alloc.free(bridge_name);
@@ -9597,16 +9613,17 @@ test "cpp_backend: family root's _familyCache is std::pmr::unordered_map, not pl
     defer res.deinit();
     const hdr = res.hdr.items;
     const src = res.src.items;
-    try testing.expect(has(hdr, "static std::pmr::unordered_map<DDS_Bar, std::pair<std::weak_ptr<Bar>, const void*>>& _familyCache();"));
-    try testing.expect(has(src, "std::pmr::unordered_map<DDS_Bar, std::pair<std::weak_ptr<Bar>, const void*>>& BarImpl::_familyCache() {"));
-    try testing.expect(has(src, "static std::pmr::unordered_map<DDS_Bar, std::pair<std::weak_ptr<Bar>, const void*>> c;"));
+    try testing.expect(has(hdr, "std::weak_ptr<Bar> ref;"));
+    try testing.expect(has(hdr, "static std::pmr::unordered_map<DDS_Bar, _FamilyEntry>& _familyCache();"));
+    try testing.expect(has(src, "std::pmr::unordered_map<DDS_Bar, BarImpl::_FamilyEntry>& BarImpl::_familyCache() {"));
+    try testing.expect(has(src, "static std::pmr::unordered_map<DDS_Bar, _FamilyEntry> c;"));
     try testing.expect(!has(hdr, "static std::unordered_map<DDS_Bar,"));
     // Each member tags its entries, and recognises its own by tag, not RTTI.
     try testing.expect(has(hdr, "static const void* _familyTag() noexcept;"));
     try testing.expect(has(src, "const void* BazImpl::_familyTag() noexcept {"));
-    try testing.expect(has(src, "_cache[h] = {_sp, _familyTag()};"));
-    try testing.expect(has(src, "if (_it != _cache.end() && _it->second.second == _familyTag()) {"));
-    try testing.expect(has(src, "return std::static_pointer_cast<BazImpl>(_base);"));
+    try testing.expect(has(src, "_cache[h] = {_sp, _familyTag(), _sp.get()};"));
+    try testing.expect(has(src, "if (_it != _cache.end() && _it->second.tag == _familyTag()) {"));
+    try testing.expect(has(src, "return std::shared_ptr<BazImpl>(_base, static_cast<BazImpl*>(_it->second.obj));"));
     try testing.expect(!has(src, "dynamic_pointer_cast"));
     try testing.expect(!has(src, "static std::unordered_map<DDS_Bar, std::weak_ptr<Bar>> c;"));
 }
@@ -9731,6 +9748,23 @@ test "cpp_backend: listener registrations own the listener; a call that installs
     // create_*: a failed create returns a nil entity, whose listener is not ours.
     try testing.expect(has(src, "if (_lp_a_listener && DDS_Foo_get_listener(_h).listener_data != _l_a_listener.listener_data) ::DDS::FooListenerBase::release_c_listener(_l_a_listener.listener_data);"));
     try testing.expect(!has(src, "TODO"));
+}
+
+test "cpp_backend: only set_listener releases its listener on a nonzero return" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    @callback interface FooListener { void on_foo(); };
+        \\    interface Foo {
+        \\        boolean register_listener(in FooListener a_listener);
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    // `true` may well mean the listener was installed: releasing it then
+    // would free a listener the core still holds.
+    try testing.expect(has(src, "_lp_a_listener = &_l_a_listener;"));
+    try testing.expect(!has(src, "release_c_listener(_l_a_listener.listener_data)"));
 }
 
 test "cpp_backend: @shared_base is a virtual base and the listener identity" {

@@ -8,7 +8,9 @@ module DDS {
     @shared_c_abi_box interface Condition {};
     @shared_c_abi_box interface GuardCondition : Condition {};
     @shared_c_abi_box interface StatusCondition : Condition {};
-    @shared_c_abi_box interface ReadCondition : Condition {};
+    // @shared_base: QueryCondition derives from it virtually, so family cache
+    // lookups cannot downcast from Condition to QueryConditionImpl.
+    @shared_base @shared_c_abi_box interface ReadCondition : Condition {};
     @shared_c_abi_box interface QueryCondition : ReadCondition {};
     interface DataReader {
         DataReader get_reader();

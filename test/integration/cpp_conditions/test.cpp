@@ -173,6 +173,9 @@ int main() {
     assert(late && late != generic);
     assert(DDS::ReadConditionImpl::_getOrCreate(&late_handle) == late);
     assert(DDS::ConditionImpl::_getOrCreate(&late_root) == late);
+    // The same through ReadCondition, a virtual base of QueryCondition.
+    assert(DDS::QueryConditionImpl::_getOrCreate(&query_handle) == query);
+    assert(DDS::ConditionImpl::_getOrCreate(&roots[1]) == query);
 
     // A user implementation has no native ABI handle: it reaches the C ABI as
     // a nil entity, exactly like an empty pointer, and the call reports the
