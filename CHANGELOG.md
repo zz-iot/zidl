@@ -18,6 +18,37 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Listener identity: callback structs (C and Zig) end with `listener_identity`, after
+  `release_listener_data`. A middleware treats registrations with the same non-null identity,
+  or else the same `listener_data`, as one listener. New `@shared_base` interface annotation:
+  the C++ backend inherits it virtually, rejects it on an interface that declares operations
+  or attributes, and `c_listener` passes the object's `@shared_base` subobject (else its
+  complete object) as the identity. The Java bridge keeps one reference-counted native
+  context per listener object, found through a registry at registration, so every
+  registration of an object passes the same `listener_data`.
+- C++: a listener registration owns a reference to its listener. `c_listener` takes a
+  `shared_ptr` and sets `release_listener_data`, so a listener replaced or cleared while one
+  of its callbacks runs, or passed only to a `create_*` call, stays alive until the core
+  releases it. A `set_listener` or `create_*` that installs no listener releases its
+  registration at once.
+- C++: the generated bindings compile and work without RTTI or exceptions, and use RTTI
+  where the compiler provides it.
+  - Every entity interface declares a virtual `_zidl_handle_<C type>()` accessor that each
+    generated Impl overrides for its own interface and each one it inherits. Entity
+    parameters convert through it instead of a `dynamic_cast` cascade. A pointer the binding
+    did not create (a test double, say) now reaches the C ABI as a nil entity instead of
+    throwing `std::invalid_argument`.
+  - Listener registration takes the listener interface itself and dispatches through its
+    virtual functions, with no cast to the generated `FooListenerBase`. A listener that
+    implements the interface directly, which was silently not installed, now registers.
+  - Shared family caches tag each entry with the class that created it, replacing
+    `dynamic_pointer_cast`.
+  - Without `@shared_base`, the listener identity is the complete object where RTTI is
+    available (`ZIDL_HAS_RTTI`, detected or user-defined), else the listener interface's
+    own subobject.
+  - `zidl_allocator_pmr.hpp` aborts on allocation failure when exceptions are disabled
+    (`ZIDL_HAS_EXCEPTIONS`).
+
 - Extend generated authoring with conditional `_setting` handling, owned skip
   reports, explicit compatibility choices and independent reads from existing values
   (`decodeTomlFrom`). Keep legacy `applyToml` unchanged.

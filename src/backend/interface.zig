@@ -601,118 +601,10 @@ fn collectBaseChain(
     }
 }
 
-/// For every concrete (non-callback) interface anywhere in `items`, record it
-/// against every ancestor's qualified name in its base chain (transitively).
-///
-/// Needed because a base interface can have multiple *sibling* concrete
-/// implementations that don't inherit from each other: e.g. dcps.idl's
-/// `TopicDescription` is implemented independently by `Topic`,
-/// `ContentFilteredTopic`, and `MultiTopic` — `ContentFilteredTopicImpl` does
-/// NOT inherit from `TopicDescriptionImpl` in the generated C++, they're
-/// siblings both implementing `::DDS::TopicDescription`. A parameter typed as
-/// the base (e.g. `create_datareader`'s `a_topic: TopicDescription`) can
-/// legitimately receive any of them at runtime, so the C++ backend's entity-
-/// parameter `dynamic_cast` adaptation needs to try every one, not just the
-/// base's own mechanical `<Iface>Impl` name — see `emitAdaptedParams`'s
-/// `entity_in` case in cpp.zig, the sole consumer of this.
-///
-/// Deliberately does NOT exclude interfaces found in `entity_base_ifaces`
-/// (unlike an earlier version of this function, which took that set as a
-/// parameter and skipped anything in it). `entity_base_ifaces` answers a
-/// different question — "does this interface need its own *virtual*
-/// `native_handle()`, or does a more-derived interface own a more specific
-/// one instead" (see `ifaceOwnsNativeHandle`) — which is NOT the same as "is
-/// this interface ever the actual most-derived runtime type of an object."
-/// `ReadCondition` is the concrete counterexample that exposed the bug:
-/// excluded from `entity_base_ifaces` so `QueryCondition` can own its own,
-/// more specific `DDS_QueryCondition` handle instead of inheriting
-/// `ReadCondition`'s — but `ReadCondition` still gets its own real,
-/// independently-constructible `ReadConditionImpl` (with its own
-/// `_getOrCreate`), returned as-is by `DataReader::create_readcondition`
-/// whenever the app doesn't ask for a `QueryCondition`. Confirmed via a real
-/// crash, not just by inspection: `WaitSet::attach_condition`/
-/// `detach_condition`'s generated `Condition`-parameter adapter cascade
-/// (`dynamic_cast<ConditionImpl*>`, `GuardConditionImpl*`,
-/// `StatusConditionImpl*`, `QueryConditionImpl*`, in that order) never
-/// included `ReadConditionImpl` at all under the old exclusion, so attaching
-/// a plain `ReadCondition` (not further specialized to a `QueryCondition`)
-/// threw `std::invalid_argument("zidl: incompatible entity implementation
-/// for DDS::Condition")` at runtime — every non-callback interface gets its
-/// own concrete impl class regardless of `entity_base_ifaces` membership
-/// (confirmed: `ConditionImpl`/`EntityImpl`/`TopicDescriptionImpl` — the
-/// three interfaces this exclusion was originally written to describe as
-/// "genuinely abstract-only" — all have their own generated class too), so
-/// there is no case where excluding an `entity_base_ifaces` member here is
-/// actually correct.
-pub fn collectBaseImplementors(
-    alloc: std.mem.Allocator,
-    items: []const ir.ModuleItem,
-    result: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged(*const ir.Interface)),
-) anyerror!void {
-    for (items) |item| {
-        switch (item) {
-            .module => |m| try collectBaseImplementors(alloc, m.items, result),
-            .type_decl => |td| switch (td) {
-                .interface => |iface| {
-                    if (!isCallbackInterface(iface)) {
-                        try recordBaseChainImplementor(alloc, iface, iface, result);
-                    }
-                },
-                else => {},
-            },
-            else => {},
-        }
-    }
-}
-
-/// `collectBaseImplementors` for a flat interface list -- an `ir.Spec`'s
-/// `imported_interfaces`, so a base declared in an imported file also lists
-/// its imported implementors (not only the generating file's own).
-pub fn collectBaseImplementorsFromList(
-    alloc: std.mem.Allocator,
-    ifaces: []const *const ir.Interface,
-    result: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged(*const ir.Interface)),
-) anyerror!void {
-    for (ifaces) |iface| {
-        if (!isCallbackInterface(iface)) try recordBaseChainImplementor(alloc, iface, iface, result);
-    }
-}
-
-/// Walk `iface`'s base chain transitively, recording `leaf` (the original
-/// concrete interface `collectBaseImplementors` started from) against every
-/// ancestor reached. Mirrors `collectBaseChain`'s traversal; dedups so a
-/// diamond-shaped base chain (reaching the same ancestor via two paths)
-/// doesn't record `leaf` against it twice.
-fn recordBaseChainImplementor(
-    alloc: std.mem.Allocator,
-    leaf: *const ir.Interface,
-    iface: *const ir.Interface,
-    result: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged(*const ir.Interface)),
-) anyerror!void {
-    for (iface.bases) |base| {
-        switch (base) {
-            .interface => |b| if (!isCallbackInterface(b)) {
-                const gop = try result.getOrPut(alloc, b.qualified_name);
-                if (!gop.found_existing) gop.value_ptr.* = .empty;
-                var already = false;
-                for (gop.value_ptr.items) |existing| {
-                    if (existing == leaf) {
-                        already = true;
-                        break;
-                    }
-                }
-                if (!already) try gop.value_ptr.append(alloc, leaf);
-                try recordBaseChainImplementor(alloc, leaf, b, result);
-            },
-            else => {},
-        }
-    }
-}
-
 /// Frees every `ArrayListUnmanaged` value in a map populated by
-/// `collectBaseImplementors`, then the map itself. `StringHashMapUnmanaged`'s
+/// `collectSharedCAbiBoxFamilies`, then the map itself. `StringHashMapUnmanaged`'s
 /// own `deinit` only frees its bucket storage, not per-value allocations.
-pub fn deinitBaseImplementors(
+pub fn deinitFamilies(
     alloc: std.mem.Allocator,
     map: *std.StringHashMapUnmanaged(std.ArrayListUnmanaged(*const ir.Interface)),
 ) void {
@@ -750,9 +642,7 @@ pub fn sharedCAbiBoxFamilyRoot(iface: *const ir.Interface) *const ir.Interface {
 /// un-annotated interface always had, so a caller can treat "family size 1"
 /// as "nothing to change here" without a separate check.
 ///
-/// Unlike `collectBaseImplementors` (which records an implementor against
-/// *every* ancestor in its full base chain, primary or secondary), this only
-/// ever walks `bases[0]` — a secondary base (e.g. `Topic`'s `TopicDescription`)
+/// This only ever walks `bases[0]` — a secondary base (e.g. `Topic`'s `TopicDescription`)
 /// deliberately does NOT pull its implementors into the primary chain's
 /// family, matching the "known limitation" the box-identity design already
 /// calls out: secondary-base views keep their own independently-cached box,

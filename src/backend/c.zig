@@ -1197,6 +1197,13 @@ const Generator = struct {
         // delete_contained_entities()'s per-child teardown, since the latter
         // already funnels through each child's own destructor.
         try self.write("    void (*release_listener_data)(void *listener_data);\n");
+        // Also trailing, after release_listener_data for the same reason.
+        // The application object this registration stands for, when that is
+        // not listener_data: a middleware treats registrations with the same
+        // non-null identity (or, when it is null, the same non-null
+        // listener_data) as one listener. Set by bindings whose
+        // listener_data is per registration (C++: an owning reference).
+        try self.write("    void *listener_identity;\n");
         try self.print("}} {s};\n\n", .{c_name});
     }
 
@@ -5616,6 +5623,8 @@ test "c_backend: listener interface emits callback struct not free functions" {
     // Listener gets a callback struct, not an opaque typedef + free functions
     try testing.expect(has(s, "void *listener_data;"));
     try testing.expect(has(s, "void (*on_change)(Entity e, void *listener_data);"));
+    // Trailing fields, release hook then identity, after every callback.
+    try testing.expect(has(s, "    void (*release_listener_data)(void *listener_data);\n    void *listener_identity;\n} EntityListener;"));
     // Listener must NOT get an opaque typedef
     try testing.expect(!has(s, "typedef struct EntityListener_s *EntityListener;"));
     try testing.expect(!has(s, "EntityListener_enable"));

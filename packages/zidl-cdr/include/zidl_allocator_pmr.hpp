@@ -10,7 +10,7 @@
  * not return null) — a deliberate departure from ZidlAllocator's own C-level
  * contract (graceful nullptr return) and from zidl-cdr's/zidl-rt's Zig
  * adapter's graceful-failure behavior. Under a `-fno-exceptions` build this
- * degrades to std::terminate() on OOM rather than a checkable failure — an
+ * degrades to std::abort() on OOM rather than a checkable failure — an
  * accepted, well-precedented embedded C++ pattern (matching how libstdc++'s
  * own `operator new` behaves under -fno-exceptions), but a real behavior
  * difference from the rest of the allocator story, not a silent one.
@@ -56,6 +56,16 @@
 #include <cstdlib>
 #include <memory_resource>
 #include <new>
+
+/* Whether C++ exceptions are enabled. Defining ZIDL_HAS_EXCEPTIONS first
+ * overrides the detection. */
+#ifndef ZIDL_HAS_EXCEPTIONS
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)
+#define ZIDL_HAS_EXCEPTIONS 1
+#else
+#define ZIDL_HAS_EXCEPTIONS 0
+#endif
+#endif
 
 namespace zidl {
 
@@ -107,7 +117,13 @@ private:
     // instance.
     void* do_allocate(std::size_t bytes, std::size_t alignment) override {
         void* p = allocator_ ? allocator_->alloc(allocator_->ctx, bytes, alignment) : nullptr;
-        if (!p) throw std::bad_alloc();
+        if (!p) {
+#if ZIDL_HAS_EXCEPTIONS
+            throw std::bad_alloc();
+#else
+            std::abort();
+#endif
+        }
         return p;
     }
 

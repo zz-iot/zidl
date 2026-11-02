@@ -2676,6 +2676,8 @@ const Generator = struct {
         try self.ind();
         try self.write("    release_listener_data: ?*const fn (?*anyopaque) callconv(.c) void = null,\n");
         try self.ind();
+        try self.write("    listener_identity: ?*anyopaque = null,\n");
+        try self.ind();
         try self.print("}}; // {s}{s}\n\n", .{ pfx, iface_name });
     }
 
@@ -9460,6 +9462,8 @@ test "zig_backend: --zig-generate-c-api emits C_XxxListener and adapter for list
     try testing.expect(has(s, "pub const SourceListener = extern struct {"));
     try testing.expect(has(s, "on_change: ?*const fn (*anyopaque, *const Status, ?*anyopaque) callconv(.c) void"));
     try testing.expect(has(s, "pub const noop_SourceListener: SourceListener = .{};"));
+    // Trailing fields in the C struct's order: release hook, then identity.
+    try testing.expect(has(s, "release_listener_data: ?*const fn (?*anyopaque) callconv(.c) void = null,\n    listener_identity: ?*anyopaque = null,\n};"));
     // No fat-pointer SourceListener, no adapter
     try testing.expect(!has(s, "pub const CSourceListenerAdapter"));
     try testing.expect(!has(s, "pub fn asZigListener"));

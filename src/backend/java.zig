@@ -4600,7 +4600,7 @@ pub fn generateJniSource(
     out: *std.ArrayList(u8),
 ) !void {
     var gen = JniBridgeGenerator{ .alloc = alloc, .opts = opts, .out = out };
-    defer interface.deinitBaseImplementors(alloc, &gen.families);
+    defer interface.deinitFamilies(alloc, &gen.families);
     defer gen.local_entity_names.deinit(alloc);
     defer alloc.free(gen.widening_candidates);
     defer alloc.free(gen.widening_targets);
@@ -5277,8 +5277,16 @@ const JniBridgeGenerator = struct {
             "/* Listener JNI upcall support: a global ref to the registered Java\n" ++
                 " * listener object, reachable from any native thread the callback\n" ++
                 " * fires on (not just JVM-created ones) via a process-wide JavaVM*\n" ++
-                " * cached in JNI_OnLoad. */\n" ++
-                "typedef struct { jobject ref; } zidl_java_listener_ctx;\n\n",
+                " * cached in JNI_OnLoad. One context per Java listener object,\n" ++
+                " * however many registrations it has (see\n" ++
+                " * zidl_java_listener_ctx_acquire), so the context pointer each\n" ++
+                " * registration passes as `listener_data` names the object. */\n" ++
+                "typedef struct zidl_java_listener_ctx {\n" ++
+                "    jobject ref;\n" ++
+                "    jint hash;\n" ++
+                "    unsigned refs;\n" ++
+                "    struct zidl_java_listener_ctx *next;\n" ++
+                "} zidl_java_listener_ctx;\n\n",
         );
 
         // A shared JNI bridge runtime (entity unboxing, JavaVM*/JNIEnv*
@@ -5311,17 +5319,77 @@ const JniBridgeGenerator = struct {
                     "    if (p) memcpy(p, s, n);\n" ++
                     "    return p;\n" ++
                     "}\n\n" ++
-                    "/* Releases a listener context previously installed as a C listener\n" ++
-                    " * struct's `listener_data` — frees the global ref to the Java listener\n" ++
-                    " * object plus the ctx allocation itself. NULL-safe: harmless for an\n" ++
+                    "/* Registry of listener contexts, one per Java listener object:\n" ++
+                    " * bucketed by System.identityHashCode, matched with IsSameObject.\n" ++
+                    " * Consulted only when a listener is registered or released, never\n" ++
+                    " * per callback. */\n" ++
+                    "#define ZIDL_JAVA_LISTENER_BUCKETS 64\n" ++
+                    "static pthread_mutex_t zidl_java_listener_mtx = PTHREAD_MUTEX_INITIALIZER;\n" ++
+                    "static zidl_java_listener_ctx *zidl_java_listener_buckets[ZIDL_JAVA_LISTENER_BUCKETS];\n" ++
+                    "static jclass zidl_java_system_cls = NULL;\n" ++
+                    "static jmethodID zidl_java_identity_hash = NULL;\n\n" ++
+                    "/* The context for `obj`, with one more reference: an existing one when\n" ++
+                    " * `obj` is already registered anywhere, so each of its registrations\n" ++
+                    " * passes the same `listener_data`. NULL without memory. */\n" ++
+                    "zidl_java_listener_ctx *zidl_java_listener_ctx_acquire(JNIEnv *env, jobject obj) {\n" ++
+                    "    pthread_mutex_lock(&zidl_java_listener_mtx);\n" ++
+                    "    jclass cls = zidl_java_system_cls;\n" ++
+                    "    jmethodID mid = zidl_java_identity_hash;\n" ++
+                    "    pthread_mutex_unlock(&zidl_java_listener_mtx);\n" ++
+                    "    if (mid == NULL) {\n" ++
+                    "        /* Looked up without the lock held: FindClass may run Java code. */\n" ++
+                    "        jclass local = (*env)->FindClass(env, \"java/lang/System\");\n" ++
+                    "        mid = (*env)->GetStaticMethodID(env, local, \"identityHashCode\", \"(Ljava/lang/Object;)I\");\n" ++
+                    "        pthread_mutex_lock(&zidl_java_listener_mtx);\n" ++
+                    "        if (zidl_java_system_cls == NULL) {\n" ++
+                    "            zidl_java_system_cls = (jclass)(*env)->NewGlobalRef(env, local);\n" ++
+                    "            zidl_java_identity_hash = mid;\n" ++
+                    "        }\n" ++
+                    "        cls = zidl_java_system_cls;\n" ++
+                    "        pthread_mutex_unlock(&zidl_java_listener_mtx);\n" ++
+                    "        (*env)->DeleteLocalRef(env, local);\n" ++
+                    "    }\n" ++
+                    "    jint hash = (*env)->CallStaticIntMethod(env, cls, mid, obj);\n" ++
+                    "    zidl_java_listener_ctx **bucket = &zidl_java_listener_buckets[(unsigned)hash % ZIDL_JAVA_LISTENER_BUCKETS];\n" ++
+                    "    pthread_mutex_lock(&zidl_java_listener_mtx);\n" ++
+                    "    for (zidl_java_listener_ctx *n = *bucket; n != NULL; n = n->next) {\n" ++
+                    "        if (n->hash == hash && (*env)->IsSameObject(env, n->ref, obj)) {\n" ++
+                    "            n->refs++;\n" ++
+                    "            pthread_mutex_unlock(&zidl_java_listener_mtx);\n" ++
+                    "            return n;\n" ++
+                    "        }\n" ++
+                    "    }\n" ++
+                    "    zidl_java_listener_ctx *ctx = malloc(sizeof(zidl_java_listener_ctx));\n" ++
+                    "    if (ctx != NULL) {\n" ++
+                    "        ctx->ref = (*env)->NewGlobalRef(env, obj);\n" ++
+                    "        ctx->hash = hash;\n" ++
+                    "        ctx->refs = 1;\n" ++
+                    "        ctx->next = *bucket;\n" ++
+                    "        *bucket = ctx;\n" ++
+                    "    }\n" ++
+                    "    pthread_mutex_unlock(&zidl_java_listener_mtx);\n" ++
+                    "    return ctx;\n" ++
+                    "}\n\n" ++
+                    "/* Drops one reference to a listener context installed as a C\n" ++
+                    " * listener struct's `listener_data`; the last frees the global ref to\n" ++
+                    " * the Java listener object and the context. NULL-safe: harmless for an\n" ++
                     " * entity/slot that never had a listener installed. Called by\n" ++
                     " * `zidl_java_release_listener_data` below (the hook zzdds's own core\n" ++
-                    " * calls generically) and directly by `emitJniBridgeOp`'s\n" ++
-                    " * `created_listener_params` handling for a `create_*` call whose\n" ++
-                    " * listener never actually got installed anywhere. */\n" ++
+                    " * calls generically, once per registration) and directly by\n" ++
+                    " * `emitJniBridgeOp`'s `created_listener_params` handling for a\n" ++
+                    " * `create_*` call whose listener never actually got installed. */\n" ++
                     "void zidl_java_release_listener_ctx(JNIEnv *env, void *listener_data) {\n" ++
                     "    if (listener_data == NULL) return;\n" ++
                     "    zidl_java_listener_ctx *ctx = (zidl_java_listener_ctx *)listener_data;\n" ++
+                    "    pthread_mutex_lock(&zidl_java_listener_mtx);\n" ++
+                    "    if (--ctx->refs != 0) {\n" ++
+                    "        pthread_mutex_unlock(&zidl_java_listener_mtx);\n" ++
+                    "        return;\n" ++
+                    "    }\n" ++
+                    "    zidl_java_listener_ctx **pp = &zidl_java_listener_buckets[(unsigned)ctx->hash % ZIDL_JAVA_LISTENER_BUCKETS];\n" ++
+                    "    while (*pp != ctx) pp = &(*pp)->next;\n" ++
+                    "    *pp = ctx->next;\n" ++
+                    "    pthread_mutex_unlock(&zidl_java_listener_mtx);\n" ++
                     "    (*env)->DeleteGlobalRef(env, ctx->ref);\n" ++
                     "    free(ctx);\n" ++
                     "}\n" ++
@@ -5362,6 +5430,7 @@ const JniBridgeGenerator = struct {
                     " * definitions this mirrors, above. */\n" ++
                     "extern void *zidl_java_unbox(JNIEnv *env, jobject obj);\n" ++
                     "extern char *zidl_java_strdup(const char *s);\n" ++
+                    "extern zidl_java_listener_ctx *zidl_java_listener_ctx_acquire(JNIEnv *env, jobject obj);\n" ++
                     "extern void zidl_java_release_listener_ctx(JNIEnv *env, void *listener_data);\n" ++
                     "extern JNIEnv *zidl_java_get_env(void);\n" ++
                     "extern void zidl_java_release_listener_data(void *listener_data);\n\n",
@@ -6215,8 +6284,11 @@ const JniBridgeGenerator = struct {
     /// param `p`: builds a (possibly NULL, if the Java caller passed null to
     /// clear the listener) native listener struct on the stack, wiring every
     /// callback slot to its `zidl_java_cb_<ListenerCName>_<op>` trampoline,
-    /// `listener_data` to a heap `zidl_java_listener_ctx` holding a global
-    /// ref to the Java listener object, and `release_listener_data` to
+    /// `listener_data` to the Java listener object's one
+    /// `zidl_java_listener_ctx` (holding a global ref to it, shared by all
+    /// of its registrations and reference-counted per registration — so
+    /// `listener_data` is also the object's identity to the middleware),
+    /// and `release_listener_data` to
     /// `zidl_java_release_listener_data` — the generic hook zzdds's core
     /// calls exactly once, on its own, the moment this listener is replaced/
     /// cleared or its owning entity is destroyed (see that function's own
@@ -6240,9 +6312,7 @@ const JniBridgeGenerator = struct {
             "    {[pc]s} _c_{[name]s}; const {[pc]s} *_p_{[name]s} = NULL;\n" ++
                 "    if ({[name]s} != NULL) {{\n" ++
                 "        memset(&_c_{[name]s}, 0, sizeof(_c_{[name]s}));\n" ++
-                "        zidl_java_listener_ctx *_ctx_{[name]s} = malloc(sizeof(zidl_java_listener_ctx));\n" ++
-                "        _ctx_{[name]s}->ref = (*env)->NewGlobalRef(env, {[name]s});\n" ++
-                "        _c_{[name]s}.listener_data = _ctx_{[name]s};\n" ++
+                "        _c_{[name]s}.listener_data = zidl_java_listener_ctx_acquire(env, {[name]s});\n" ++
                 "        _c_{[name]s}.release_listener_data = zidl_java_release_listener_data;\n",
             .{ .pc = pc, .name = p.name },
         );
