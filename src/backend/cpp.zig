@@ -4879,8 +4879,9 @@ const ConcreteImplGenerator = struct {
                     // set_listener has a known zero-means-success contract
                     // (the stash above relies on it too): another op's nonzero
                     // return may well mean success, and releasing then would
-                    // free a listener the core still holds.
-                    if (is_listener_setter and op.return_type != null) for (op.params) |p| {
+                    // free a listener the core still holds. Unlike the stash,
+                    // this needs no get_listener on the interface.
+                    if (isListenerSetterOp(op) and op.return_type != null) for (op.params) |p| {
                         if (paramAdaptKind(p) != .listener_in) continue;
                         const bridge_name = try self.listenerBridgeName(p.type_ref);
                         defer self.alloc.free(bridge_name);
@@ -6197,6 +6198,21 @@ fn listenerTypeOf(ops: []const OwnedOperation) ?ir.TypeRef {
         }
     }
     return null;
+}
+
+/// True when `op` is a `set_listener` whose first parameter is an `in`
+/// callback interface, whether or not the interface has a `get_listener`.
+fn isListenerSetterOp(op: *const ir.Operation) bool {
+    if (!std.mem.eql(u8, op.name, "set_listener") or op.params.len == 0) return false;
+    const p0 = op.params[0];
+    if (p0.mode != .in_) return false;
+    return switch (p0.type_ref) {
+        .named => |td| switch (td) {
+            .interface => |iface| isCallbackIface(iface),
+            else => false,
+        },
+        else => false,
+    };
 }
 
 /// True when `op` is the `set_listener` half of a `listenerTypeOf` pair: a first
@@ -9748,6 +9764,21 @@ test "cpp_backend: listener registrations own the listener; a call that installs
     // create_*: a failed create returns a nil entity, whose listener is not ours.
     try testing.expect(has(src, "if (_lp_a_listener && DDS_Foo_get_listener(_h).listener_data != _l_a_listener.listener_data) ::DDS::FooListenerBase::release_c_listener(_l_a_listener.listener_data);"));
     try testing.expect(!has(src, "TODO"));
+}
+
+test "cpp_backend: a rejected set_listener releases its listener without a get_listener" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    @callback interface FooListener { void on_foo(); };
+        \\    interface Foo {
+        \\        long set_listener(in FooListener a_listener, in long mask);
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "if (_rc != 0 && _lp_a_listener) ::DDS::FooListenerBase::release_c_listener(_l_a_listener.listener_data);"));
+    try testing.expect(!has(src, "listener_ = a_listener;"));
 }
 
 test "cpp_backend: only set_listener releases its listener on a nonzero return" {
