@@ -4600,7 +4600,7 @@ pub fn generateJniSource(
     out: *std.ArrayList(u8),
 ) !void {
     var gen = JniBridgeGenerator{ .alloc = alloc, .opts = opts, .out = out };
-    defer interface.deinitBaseImplementors(alloc, &gen.families);
+    defer interface.deinitFamilies(alloc, &gen.families);
     defer gen.local_entity_names.deinit(alloc);
     defer alloc.free(gen.widening_candidates);
     defer alloc.free(gen.widening_targets);

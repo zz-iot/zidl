@@ -163,10 +163,21 @@ int main() {
     check_identity(guard, &roots[2]);
     check_identity(status, &roots[3]);
 
-    // A user implementation has no native ABI handle: reject it explicitly.
+    // A member's lookup counts only the entries it created: after the root
+    // wrapped a handle generically, the member constructs its own wrapper,
+    // which then replaces the generic one in the shared cache.
+    DDS_Condition_s late_root;
+    DDS_ReadCondition_s late_handle{&late_root};
+    auto generic = DDS::ConditionImpl::_getOrCreate(&late_root);
+    auto late = DDS::ReadConditionImpl::_getOrCreate(&late_handle);
+    assert(late && late != generic);
+    assert(DDS::ReadConditionImpl::_getOrCreate(&late_handle) == late);
+    assert(DDS::ConditionImpl::_getOrCreate(&late_root) == late);
+
+    // A user implementation has no native ABI handle: it reaches the C ABI as
+    // a nil entity, exactly like an empty pointer, and the call reports the
+    // C ABI's error.
     auto foreign = std::make_shared<DDS::ReadCondition>();
-    bool rejected = false;
-    try { exercise_typed(foreign, nullptr); }
-    catch (const std::invalid_argument&) { rejected = true; }
-    assert(rejected && calls == 28);
+    exercise_typed(foreign, nullptr);
+    assert(calls == 32 && loans == 12);
 }

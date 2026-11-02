@@ -274,37 +274,45 @@ pub fn build(b: *std.Build) void {
         gen_topic.addArgs(&.{ "-b", "cpp", "--generate-zzdds-wrappers", "-o" });
         const topic_dir = gen_topic.addOutputDirectoryArg("cpp-conditions-topic");
         gen_topic.addFileArg(b.path("test/integration/cpp_conditions/topic.idl"));
-        const conditions_mod = b.createModule(.{
-            .root_source_file = null,
-            .target = target,
-            .optimize = .Debug,
-            .sanitize_thread = sanitize_thread,
-            .link_libc = true,
-            .link_libcpp = true,
-        });
-        conditions_mod.addCSourceFile(.{
-            .file = b.path("test/integration/cpp_conditions/test.cpp"),
-            .flags = &.{ "-std=c++17", "-Wall", "-Werror" },
-        });
-        conditions_mod.addCSourceFile(.{
-            .file = cpp_dir.path(b, "dcps_impl.cpp"),
-            .flags = &.{ "-std=c++17", "-Wall", "-Werror" },
-        });
-        conditions_mod.addCSourceFile(.{
-            .file = topic_dir.path(b, "topic_cdr.cpp"),
-            .flags = &.{ "-std=c++17", "-Wall", "-Werror" },
-        });
-        conditions_mod.addCSourceFile(.{
-            .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"),
-            .flags = &.{"-std=c99"},
-        });
-        conditions_mod.addIncludePath(topic_dir);
-        conditions_mod.addIncludePath(cpp_dir);
-        conditions_mod.addIncludePath(c_dir);
-        conditions_mod.addIncludePath(b.path("test/integration/cpp_conditions"));
-        conditions_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
-        const conditions_test = b.addExecutable(.{ .name = "zidl-cpp-conditions", .root_module = conditions_mod });
-        test_step.dependOn(&b.addRunArtifact(conditions_test).step);
+        // Built twice: as usual, and without RTTI or exceptions, which the
+        // generated C++ must also compile and work under.
+        const variants = [_]struct { name: []const u8, flags: []const []const u8 }{
+            .{ .name = "zidl-cpp-conditions", .flags = &.{ "-std=c++17", "-Wall", "-Werror" } },
+            .{ .name = "zidl-cpp-conditions-no-rtti-no-exceptions", .flags = &.{ "-std=c++17", "-Wall", "-Werror", "-fno-rtti", "-fno-exceptions" } },
+        };
+        for (variants) |variant| {
+            const conditions_mod = b.createModule(.{
+                .root_source_file = null,
+                .target = target,
+                .optimize = .Debug,
+                .sanitize_thread = sanitize_thread,
+                .link_libc = true,
+                .link_libcpp = true,
+            });
+            conditions_mod.addCSourceFile(.{
+                .file = b.path("test/integration/cpp_conditions/test.cpp"),
+                .flags = variant.flags,
+            });
+            conditions_mod.addCSourceFile(.{
+                .file = cpp_dir.path(b, "dcps_impl.cpp"),
+                .flags = variant.flags,
+            });
+            conditions_mod.addCSourceFile(.{
+                .file = topic_dir.path(b, "topic_cdr.cpp"),
+                .flags = variant.flags,
+            });
+            conditions_mod.addCSourceFile(.{
+                .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"),
+                .flags = &.{"-std=c99"},
+            });
+            conditions_mod.addIncludePath(topic_dir);
+            conditions_mod.addIncludePath(cpp_dir);
+            conditions_mod.addIncludePath(c_dir);
+            conditions_mod.addIncludePath(b.path("test/integration/cpp_conditions"));
+            conditions_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+            const conditions_test = b.addExecutable(.{ .name = variant.name, .root_module = conditions_mod });
+            test_step.dependOn(&b.addRunArtifact(conditions_test).step);
+        }
     }
 
     // ── PL_CDR retention / strict-mode compile-and-run check ──────────────────
@@ -783,10 +791,11 @@ pub fn build(b: *std.Build) void {
         integ_step.dependOn(&b.addRunArtifact(alloc_pmr_exe).step);
     }
 
-    // Same test again, but compiled with -fno-rtti: zidl_allocator_pmr.hpp is
-    // meant for embedded/RT builds that routinely disable RTTI, and that
-    // claim needs an actual CI-checked compile, not just a one-off manual
-    // check — a prior dynamic_cast in do_is_equal broke this silently.
+    // Same test again, but compiled with -fno-rtti -fno-exceptions:
+    // zidl_allocator_pmr.hpp is meant for embedded/RT builds that routinely
+    // disable both, and that claim needs an actual CI-checked compile, not
+    // just a one-off manual check — a prior dynamic_cast in do_is_equal broke
+    // this silently.
     {
         const no_rtti_mod = b.createModule(.{
             .root_source_file = null,
@@ -797,7 +806,7 @@ pub fn build(b: *std.Build) void {
         });
         no_rtti_mod.addCSourceFiles(.{
             .files = &.{"test/integration/cpp/test_allocator_pmr.cpp"},
-            .flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-fno-rtti" },
+            .flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-fno-rtti", "-fno-exceptions" },
         });
         no_rtti_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
         const no_rtti_exe = b.addExecutable(.{ .name = "test_allocator_pmr_no_rtti", .root_module = no_rtti_mod });
