@@ -1007,8 +1007,13 @@ const Generator = struct {
             try self.write(") override {}\n");
         }
 
-        // c_listener() declaration — implemented in dcps_impl.cpp
-        try self.print("    {s} c_listener() noexcept;\n", .{c_name});
+        // c_listener() declaration — implemented in dcps_impl.cpp. Each
+        // registration owns a reference to the listener: its listener_data
+        // is a heap shared_ptr, which release_c_listener deletes once the
+        // core drops the registration (replaced, cleared or its entity
+        // deleted, after any dispatch through it returns).
+        try self.print("    static {s} c_listener(std::shared_ptr<{s}Base> owner);\n", .{ c_name, iface.name });
+        try self.write("    static void release_c_listener(void* d);\n");
         try self.write("private:\n");
 
         // Static trampoline declarations
@@ -4755,8 +4760,8 @@ const ConcreteImplGenerator = struct {
                 try self.srcPrint("    {s}* _lp_{s} = nullptr;\n", .{ lc, p.name });
                 try self.srcPrint("    {s} _l_{s}{{}};\n", .{ lc, p.name });
                 try self.srcPrint(
-                    "    if (auto* _b = dynamic_cast<{s}*>({s}.get())) {{ _l_{s} = _b->c_listener(); _lp_{s} = &_l_{s}; }}\n",
-                    .{ bridge_name, p.name, p.name, p.name, p.name },
+                    "    if (auto* _b = dynamic_cast<{[b]s}*>({[n]s}.get())) {{ _l_{[n]s} = {[b]s}::c_listener(std::shared_ptr<{[b]s}>({[n]s}, _b)); _lp_{[n]s} = &_l_{[n]s}; }}\n",
+                    .{ .b = bridge_name, .n = p.name },
                 );
             }
         }
@@ -4788,6 +4793,7 @@ const ConcreteImplGenerator = struct {
                 try self.srcPrint("    {s} _h = {s}_{s}({s}", .{ ret_c, owner_c_name, op.name, handle_expr });
                 try self.emitAdaptedParams(op.params);
                 try self.srcWrite(");\n");
+                try self.emitCreatedListenerRelease(op, ret_c);
                 try self.srcPrint("    return {s}::_getOrCreate(_h);\n", .{impl_name});
             },
             .str_ret => {
@@ -4800,7 +4806,7 @@ const ConcreteImplGenerator = struct {
             .direct => {
                 const needs_post = is_listener_setter or for (op.params) |p| {
                     const k = paramAdaptKind(p);
-                    if (k == .complex_struct_out or k == .seq_out) break true;
+                    if (k == .complex_struct_out or k == .seq_out or k == .listener_in) break true;
                 } else false;
                 if (needs_post) {
                     if (op.return_type != null) {
@@ -4824,6 +4830,17 @@ const ConcreteImplGenerator = struct {
                             try self.srcPrint("    listener_ = {s};\n", .{op.params[0].name});
                         }
                     }
+                    // A call that fails installs no listener, so the core
+                    // never releases the registration built for it.
+                    if (op.return_type != null) for (op.params) |p| {
+                        if (paramAdaptKind(p) != .listener_in) continue;
+                        const bridge_name = try self.listenerBridgeName(p.type_ref);
+                        defer self.alloc.free(bridge_name);
+                        try self.srcPrint(
+                            "    if (_rc != 0 && _lp_{[n]s}) {[b]s}::release_c_listener(_l_{[n]s}.listener_data);\n",
+                            .{ .n = p.name, .b = bridge_name },
+                        );
+                    };
                     if (op.return_type != null) try self.srcWrite("    return _rc;\n");
                 } else {
                     if (op.return_type != null) {
@@ -4841,6 +4858,39 @@ const ConcreteImplGenerator = struct {
             },
         }
         try self.srcWrite("}\n\n");
+    }
+
+    /// After a `create_*`-shaped call: releases each listener registration
+    /// the new entity did not install. A failed create returns a nil entity
+    /// rather than null and never releases the listener it was given, so
+    /// reading the entity's listener back is what tells (as zidl's Java
+    /// bridge does).
+    fn emitCreatedListenerRelease(self: *ConcreteImplGenerator, op: *const ir.Operation, ret_c: []const u8) !void {
+        const created = switch (op.return_type.?) {
+            .named => |td| switch (td) {
+                .interface => |i| i,
+                else => return,
+            },
+            else => return,
+        };
+        var ops = std.ArrayListUnmanaged(ir.Operation).empty;
+        defer ops.deinit(self.alloc);
+        var attrs = std.ArrayListUnmanaged(ir.Attribute).empty;
+        defer attrs.deinit(self.alloc);
+        try collectIfaceMembers(self.alloc, created, &ops, &attrs);
+        const has_get_listener = for (ops.items) |o| {
+            if (std.mem.eql(u8, o.name, "get_listener")) break true;
+        } else false;
+        if (!has_get_listener) return;
+        for (op.params) |p| {
+            if (paramAdaptKind(p) != .listener_in) continue;
+            const bridge_name = try self.listenerBridgeName(p.type_ref);
+            defer self.alloc.free(bridge_name);
+            try self.srcPrint(
+                "    if (_lp_{[n]s} && {[c]s}_get_listener(_h).listener_data != _l_{[n]s}.listener_data) {[b]s}::release_c_listener(_l_{[n]s}.listener_data);\n",
+                .{ .n = p.name, .c = ret_c, .b = bridge_name },
+            );
+        }
     }
 
     fn emitEntityAttr(
@@ -5601,11 +5651,14 @@ const ConcreteImplGenerator = struct {
         try self.srcPrint("// \u{2500}\u{2500} {s}Base \u{2500}\u{2500}\n\n", .{iface.name});
 
         // c_listener() implementation
-        try self.srcPrint("{s} {s}Base::c_listener() noexcept {{\n    return {{this", .{ c_name, iface.name });
+        try self.srcPrint("{s} {s}Base::c_listener(std::shared_ptr<{s}Base> owner) {{\n", .{ c_name, iface.name, iface.name });
+        try self.srcPrint("    return {{new std::shared_ptr<{s}Base>(std::move(owner))", .{iface.name});
         for (ops.items) |op| {
             try self.srcPrint(", s_{s}", .{op.name});
         }
-        try self.srcWrite("};\n}\n\n");
+        try self.srcWrite(", release_c_listener};\n}\n\n");
+        try self.srcPrint("void {s}Base::release_c_listener(void* d) {{\n", .{iface.name});
+        try self.srcPrint("    delete static_cast<std::shared_ptr<{s}Base>*>(d);\n}}\n\n", .{iface.name});
 
         // Trampoline static implementations
         for (ops.items) |op| {
@@ -5618,7 +5671,7 @@ const ConcreteImplGenerator = struct {
             }
             if (op.params.len > 0) try self.srcWrite(", ");
             try self.srcWrite("void* d) {\n");
-            try self.srcPrint("    static_cast<{s}Base*>(d)->{s}(", .{ iface.name, op.name });
+            try self.srcPrint("    (*static_cast<std::shared_ptr<{s}Base>*>(d))->{s}(", .{ iface.name, op.name });
             for (op.params, 0..) |p, i| {
                 if (i > 0) try self.srcWrite(", ");
                 switch (p.type_ref) {
@@ -9650,6 +9703,30 @@ test "cpp_backend: get_listener/set_listener stash pattern" {
     try testing.expect(!has(src, "TODO"));
 }
 
+test "cpp_backend: listener registrations own the listener; a call that installs none releases it" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    @callback interface FooListener { void on_foo(); };
+        \\    interface Foo {
+        \\        long set_listener(in FooListener a_listener, in long mask);
+        \\        FooListener get_listener();
+        \\    };
+        \\    interface Factory {
+        \\        Foo create_foo(in FooListener a_listener, in long mask);
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    // The registration holds the shared_ptr, aliased to the listener base.
+    try testing.expect(has(src, "_l_a_listener = ::DDS::FooListenerBase::c_listener(std::shared_ptr<::DDS::FooListenerBase>(a_listener, _b));"));
+    // set_listener: a failed call installs nothing, so nothing else releases it.
+    try testing.expect(has(src, "if (_rc != 0 && _lp_a_listener) ::DDS::FooListenerBase::release_c_listener(_l_a_listener.listener_data);"));
+    // create_*: a failed create returns a nil entity, whose listener is not ours.
+    try testing.expect(has(src, "if (_lp_a_listener && DDS_Foo_get_listener(_h).listener_data != _l_a_listener.listener_data) ::DDS::FooListenerBase::release_c_listener(_l_a_listener.listener_data);"));
+    try testing.expect(!has(src, "TODO"));
+}
+
 test "cpp_backend: get_listener/set_listener stash — void set_listener return stashes unconditionally" {
     var res = try testGenConcreteImpl(
         \\module DDS {
@@ -9702,8 +9779,12 @@ test "cpp_backend: B1+B3 — listener base is in dcps_impl.cpp; decl moved to dc
     try testing.expect(!has(hdr, "class DataWriterListenerBridge"));
     try testing.expect(!has(hdr, "class DataWriterListenerBase"));
     // Method bodies still in dcps_impl.cpp, renamed to Base
-    try testing.expect(has(src, "DDS_DataWriterListener DataWriterListenerBase::c_listener()"));
+    try testing.expect(has(src, "DDS_DataWriterListener DataWriterListenerBase::c_listener(std::shared_ptr<DataWriterListenerBase> owner)"));
     try testing.expect(has(src, "DataWriterListenerBase::s_on_data"));
+    // Each registration owns a reference to the listener, released by the core.
+    try testing.expect(has(src, "return {new std::shared_ptr<DataWriterListenerBase>(std::move(owner)), s_on_data, release_c_listener};"));
+    try testing.expect(has(src, "delete static_cast<std::shared_ptr<DataWriterListenerBase>*>(d);"));
+    try testing.expect(has(src, "(*static_cast<std::shared_ptr<DataWriterListenerBase>*>(d))->on_data("));
     // Trampoline wraps the raw handle via the identity-preserving cache, not a
     // bare make_shared (see _getOrCreate).
     try testing.expect(has(src, "DataWriterImpl::_getOrCreate(w)"));
@@ -9754,7 +9835,8 @@ test "cpp_backend: B1+B3 — listener base decl appears in dcps.hpp" {
     defer out.deinit(alloc);
     const s = out.items;
     try testing.expect(has(s, "class DataWriterListenerBase : public ::DDS::DataWriterListener"));
-    try testing.expect(has(s, "c_listener() noexcept;"));
+    try testing.expect(has(s, "static DDS_DataWriterListener c_listener(std::shared_ptr<DataWriterListenerBase> owner);"));
+    try testing.expect(has(s, "static void release_c_listener(void* d);"));
     try testing.expect(has(s, "s_on_data"));
 }
 

@@ -18,6 +18,12 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- C++: a listener registration owns a reference to its listener. `c_listener` takes a
+  `shared_ptr` and sets `release_listener_data`, so a listener replaced or cleared while one
+  of its callbacks runs, or passed only to a `create_*` call, stays alive until the core
+  releases it. A `set_listener` or `create_*` that installs no listener releases its
+  registration at once.
+
 - Extend generated authoring with conditional `_setting` handling, owned skip
   reports, explicit compatibility choices and independent reads from existing values
   (`decodeTomlFrom`). Keep legacy `applyToml` unchanged.
