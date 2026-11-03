@@ -267,7 +267,7 @@ pub fn build(b: *std.Build) void {
         const c_dir = gen_c.addOutputDirectoryArg("cpp-conditions-c");
         gen_c.addFileArg(b.path("test/integration/cpp_conditions/dcps.idl"));
         const gen_cpp = b.addRunArtifact(exe);
-        gen_cpp.addArgs(&.{ "-b", "cpp", "--generate-interfaces", "--cpp-generate-impl", "-o" });
+        gen_cpp.addArgs(&.{ "-b", "cpp", "--generate-interfaces", "--cpp-generate-impl", "--handle-retire-hook", "test_retire", "-o" });
         const cpp_dir = gen_cpp.addOutputDirectoryArg("cpp-conditions-cpp");
         gen_cpp.addFileArg(b.path("test/integration/cpp_conditions/dcps.idl"));
         const gen_topic = b.addRunArtifact(exe);
@@ -945,7 +945,8 @@ pub fn build(b: *std.Build) void {
                 gen_entity_java.addArgs(&.{
                     "-b",                    "java",
                     "--generate-interfaces", "--java-jni-library",
-                    "entity_jni",            "-o",
+                    "entity_jni",            "--handle-retire-hook",
+                    "entity_retire",         "-o",
                 });
                 const gen_entity_java_dir = gen_entity_java.addOutputDirectoryArg("integ-java-entity-java");
                 gen_entity_java.addFileArg(b.path("test/integration/java/entity.idl"));
@@ -980,7 +981,7 @@ pub fn build(b: *std.Build) void {
                 // directory (a `LazyPath`) — pass each as its own file arg so
                 // Zig's build graph also picks up the dependency on the run
                 // step that generates them.
-                for (&[_][]const u8{ "Entity.java", "FactoryImpl.java", "WidgetImpl.java" }) |f| {
+                for (&[_][]const u8{ "Entity.java", "FactoryImpl.java", "WidgetImpl.java", "PartImpl.java", "GearImpl.java", "SpringImpl.java" }) |f| {
                     compile_entity_java.addFileArg(gen_entity_java_dir.path(b, f));
                 }
 

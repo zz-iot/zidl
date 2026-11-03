@@ -1204,6 +1204,13 @@ const Generator = struct {
         // listener_data) as one listener. Set by bindings whose
         // listener_data is per registration (C++: an owning reference).
         try self.write("    void *listener_identity;\n");
+        // Also trailing. Optional: when set, a callee that hands this
+        // registration's listener_data back to a caller other than through a
+        // callback (a get_listener) calls it first, and the caller then owns
+        // that reference and drops it with release_listener_data. Lets a
+        // binding recover its listener object from the callee without racing
+        // a concurrent replacement that releases the registration.
+        try self.write("    void (*retain_listener_data)(void *listener_data);\n");
         try self.print("}} {s};\n\n", .{c_name});
     }
 
@@ -5624,7 +5631,7 @@ test "c_backend: listener interface emits callback struct not free functions" {
     try testing.expect(has(s, "void *listener_data;"));
     try testing.expect(has(s, "void (*on_change)(Entity e, void *listener_data);"));
     // Trailing fields, release hook then identity, after every callback.
-    try testing.expect(has(s, "    void (*release_listener_data)(void *listener_data);\n    void *listener_identity;\n} EntityListener;"));
+    try testing.expect(has(s, "    void (*release_listener_data)(void *listener_data);\n    void *listener_identity;\n    void (*retain_listener_data)(void *listener_data);\n} EntityListener;"));
     // Listener must NOT get an opaque typedef
     try testing.expect(!has(s, "typedef struct EntityListener_s *EntityListener;"));
     try testing.expect(!has(s, "EntityListener_enable"));

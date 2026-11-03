@@ -3,17 +3,50 @@
 // `WidgetImpl`), `get_widget_value` takes one (unboxes it back to a native
 // handle) alongside plain scalar in/out.
 //
+// `Part`, `Gear` and `Spring` form a `@shared_c_abi_box` family, so they
+// share the box-identity cache. The native side hands out one address for
+// every part: a deleted gear's address comes back as a new spring (see
+// entity_native.c).
+//
 // Module deliberately not named "Entity" (matching the file stem / top-level
 // Java wrapper class `Entity`) — a Java nested class can't share its
 // enclosing class's simple name (JLS), so `Entity.java`'s generated
 // `class Entity { static class Entity { ... } }` would fail to compile.
 module Widgets {
+    // What an operation on a retired wrapper returns (--handle-retire-hook).
+    @retired_result(ALREADY_DELETED) typedef long Result;
+    const Result ALREADY_DELETED = 9;
+
     interface Widget {
         long get_value();
+    };
+
+    @shared_c_abi_box
+    interface Part {
+        long get_id();
+    };
+
+    @shared_c_abi_box
+    interface Gear : Part {
+        long get_teeth();
+        Result turn();
+    };
+
+    @shared_c_abi_box
+    interface Spring : Part {
+        long get_rate();
     };
 
     interface Factory {
         Widget create_widget(in long value);
         long get_widget_value(in Widget w);
+
+        Gear create_gear(in long teeth);
+        Spring create_spring(in long rate);
+        // Reports the freed handle through the retire hook.
+        void delete_part(in Part p);
+        // Frees without reporting it, as a provider without the hook would.
+        void forget_part(in Part p);
+        Part current_part();
     };
 };

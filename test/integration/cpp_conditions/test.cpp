@@ -43,7 +43,61 @@ static DDS_OctetSeqSeq *expected_payloads;
 static DDS_OctetSeq *expected_hashes;
 static DDS_SampleInfoSeq *expected_infos;
 
+// The checked downcasts need to know each condition's real type, which a real
+// provider reads from its own object. Here main() records it in this table.
+struct KnownCondition {
+    DDS_Condition root;
+    DDS_ReadCondition read;
+    DDS_QueryCondition query;
+    DDS_GuardCondition guard;
+    DDS_StatusCondition status;
+};
+static KnownCondition known[8];
+static int known_count;
+static void know(KnownCondition k) { known[known_count++] = k; }
+static void forget(DDS_Condition root) {
+    for (int i = 0; i < known_count; ++i)
+        if (known[i].root == root) known[i] = KnownCondition{};
+}
+
+// The handle-retire hook: the provider reports a handle it frees. Here
+// retire() stands in for freeing one.
+static void (*retire_observer)(void*, void*);
+static void* retire_ctx;
+static void retire(void* handle) {
+    if (retire_observer) retire_observer(retire_ctx, handle);
+}
+
 extern "C" {
+int test_retire_observe(void (*fn)(void*, void*), void* ctx) {
+    if (retire_observer) return 1;
+    retire_observer = fn;
+    retire_ctx = ctx;
+    return 0;
+}
+int test_retire_unobserve(void (*fn)(void*, void*), void* ctx) {
+    if (retire_observer != fn || retire_ctx != ctx) return 1;
+    retire_observer = nullptr;
+    return 0;
+}
+DDS_ReadCondition DDS_Condition_as_DDS_ReadCondition(DDS_Condition h) {
+    for (int i = 0; i < known_count; ++i) if (known[i].root == h && known[i].read) return known[i].read;
+    return nullptr;
+}
+DDS_QueryCondition DDS_ReadCondition_as_DDS_QueryCondition(DDS_ReadCondition h) {
+    for (int i = 0; i < known_count; ++i) if (known[i].read == h && known[i].query) return known[i].query;
+    return nullptr;
+}
+DDS_GuardCondition DDS_Condition_as_DDS_GuardCondition(DDS_Condition h) {
+    for (int i = 0; i < known_count; ++i) if (known[i].root == h && known[i].guard) return known[i].guard;
+    return nullptr;
+}
+DDS_StatusCondition DDS_Condition_as_DDS_StatusCondition(DDS_Condition h) {
+    for (int i = 0; i < known_count; ++i) if (known[i].root == h && known[i].status) return known[i].status;
+    return nullptr;
+}
+static int enables;
+DDS_ReturnCode_t DDS_DataReader_enable(DDS_DataReader) { ++enables; return DDS_RETCODE_OK; }
 DDS_Condition DDS_ReadCondition_as_DDS_Condition(DDS_ReadCondition h) { return h ? h->root : nullptr; }
 DDS_ReadCondition DDS_QueryCondition_as_DDS_ReadCondition(DDS_QueryCondition h) { return h ? h->base : nullptr; }
 DDS_Condition DDS_GuardCondition_as_DDS_Condition(DDS_GuardCondition h) { return h ? h->root : nullptr; }
@@ -98,6 +152,10 @@ int main() {
     auto query = DDS::QueryConditionImpl::_getOrCreate(&query_handle);
     auto guard = DDS::GuardConditionImpl::_getOrCreate(&guard_handle);
     auto status = DDS::StatusConditionImpl::_getOrCreate(&status_handle);
+    know({&roots[0], &read_handle, nullptr, nullptr, nullptr});
+    know({&roots[1], &query_read_handle, &query_handle, nullptr, nullptr});
+    know({&roots[2], nullptr, nullptr, &guard_handle, nullptr});
+    know({&roots[3], nullptr, nullptr, nullptr, &status_handle});
 
     DDS_OctetSeqSeq payloads{};
     DDS_OctetSeq hashes{};
@@ -183,4 +241,39 @@ int main() {
     auto foreign = std::make_shared<DDS::ReadCondition>();
     exercise_typed(foreign, nullptr);
     assert(calls == 32 && loans == 12);
+
+    // A root-typed lookup boxes the member a handle really is. A destroyed
+    // ReadCondition's still-live wrapper is not returned for the
+    // GuardCondition that now has its address, even unreported.
+    DDS_Condition_s reused_root;
+    DDS_ReadCondition_s old_read{&reused_root};
+    know({&reused_root, &old_read, nullptr, nullptr, nullptr});
+    auto old = DDS::ConditionImpl::_getOrCreate(&reused_root);
+    assert(old == DDS::ReadConditionImpl::_getOrCreate(&old_read));
+    forget(&reused_root);
+    DDS_GuardCondition_s new_guard{&reused_root};
+    know({&reused_root, nullptr, nullptr, &new_guard, nullptr});
+    auto now = DDS::ConditionImpl::_getOrCreate(&reused_root);
+    assert(now && now != old);
+    assert(now == DDS::GuardConditionImpl::_getOrCreate(&new_guard));
+
+    // Once the provider reports a handle retired, its wrapper is retired: it
+    // no longer reaches the provider, returns @retired_result's value, hands
+    // out no handle, and the address gets a new wrapper.
+    DDS_DataReader_s doomed_handle;
+    auto doomed = DDS::DataReaderImpl::_getOrCreate(&doomed_handle);
+    assert(doomed->enable() == DDS_RETCODE_OK && enables == 1);
+    retire(&doomed_handle);
+    assert(doomed->_zidl_is_retired());
+    assert(doomed->enable() == 9 && enables == 1);
+    assert(doomed->native_handle() == nullptr);
+    auto reborn = DDS::DataReaderImpl::_getOrCreate(&doomed_handle);
+    assert(reborn && reborn != doomed && !reborn->_zidl_is_retired());
+    // The same for a member of a family, whose cache is keyed by the root's
+    // handle.
+    retire(&roots[2]);
+    assert(guard->_zidl_is_retired());
+    auto guard2 = DDS::GuardConditionImpl::_getOrCreate(&guard_handle);
+    assert(guard2 && guard2 != guard);
+    assert(!read->_zidl_is_retired());
 }

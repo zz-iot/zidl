@@ -1622,6 +1622,44 @@ fn testBuildWithImport(base_source: []const u8, derived_source: []const u8) !ir.
     );
 }
 
+test "builder: @retired_result resolves a literal or a named constant through typedefs" {
+    var ir_spec = try testBuild(
+        \\module A {
+        \\    const long DELETED = 9;
+        \\    @retired_result(DELETED) typedef long Code;
+        \\    typedef Code Alias;
+        \\    @retired_result(4) typedef long Literal;
+        \\    typedef long Plain;
+        \\};
+        \\module B { const long DELETED = 7; };
+    );
+    defer ir_spec.deinit();
+    const items = ir_spec.items[0].module.items;
+    var code: ?ir.TypeRef = null;
+    var alias: ?ir.TypeRef = null;
+    var literal: ?ir.TypeRef = null;
+    var plain: ?ir.TypeRef = null;
+    for (items) |item| switch (item) {
+        .type_decl => |td| switch (td) {
+            .typedef => |t| {
+                const tr: ir.TypeRef = .{ .named = .{ .typedef = t } };
+                if (std.mem.eql(u8, t.name, "Code")) code = tr;
+                if (std.mem.eql(u8, t.name, "Alias")) alias = tr;
+                if (std.mem.eql(u8, t.name, "Literal")) literal = tr;
+                if (std.mem.eql(u8, t.name, "Plain")) plain = tr;
+            },
+            else => {},
+        },
+        else => {},
+    };
+    // The constant in the typedef's own module wins over B's.
+    try testing.expectEqual(@as(?i64, 9), ir.retiredResult(ir_spec.items, code.?));
+    try testing.expectEqual(@as(?i64, 9), ir.retiredResult(ir_spec.items, alias.?));
+    try testing.expectEqual(@as(?i64, 4), ir.retiredResult(ir_spec.items, literal.?));
+    try testing.expectEqual(@as(?i64, null), ir.retiredResult(ir_spec.items, plain.?));
+    try testing.expectEqual(@as(?i64, null), ir.retiredResult(ir_spec.items, .{ .base = .long }));
+}
+
 test "builder: simple struct" {
     var ir_spec = try testBuild(
         \\struct Point { long x; long y; };

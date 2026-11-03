@@ -86,7 +86,152 @@ pub fn unboxAsView(comptime T: type, handle: *anyopaque) T {
 /// Free a box previously created by `boxEntity`. Does not touch whatever
 /// `box.ptr` refers to — that's the concrete entity implementation's own
 /// lifetime, freed separately by the native `deinit`/delete path.
+///
+/// Reports the handle to every handle-retire observer first (see
+/// `observeHandleRetire`), so a binding can drop its wrapper for the handle
+/// before the allocator can hand the address to another entity.
 pub fn freeEntityBox(alloc: std.mem.Allocator, handle: *anyopaque) void {
+    notifyHandleRetired(handle);
     const box: *EntityBox = @ptrCast(@alignCast(handle));
     alloc.destroy(box);
+}
+
+// ── Handle-retire observers ───────────────────────────────────────────────────
+//
+// The provider side of zidl's handle-retire contract
+// (zidl/docs/design/handle-lifetime.md). A language binding that caches one
+// wrapper per C-ABI handle registers an observer; every handle this runtime
+// frees is reported to every observer before its memory is released.
+//
+// A fixed table rather than a list, because this package has no mutex: a slot
+// is claimed with a CAS, and a notification counts itself in `active` so that
+// removing an observer can wait for calls already under way.
+
+/// Called with the observer's own context and the handle being retired. Runs
+/// on whatever thread frees the handle, possibly concurrently with other
+/// calls. It must not call back into the provider, block, or run application
+/// code; it may take the binding's own short internal locks.
+pub const HandleRetiredFn = *const fn (ctx: ?*anyopaque, handle: *anyopaque) callconv(.c) void;
+
+/// Most observers one runtime instance accepts. One per binding per IDL file
+/// is the expected use, so a handful.
+pub const max_handle_retire_observers = 16;
+
+const Slot = struct {
+    /// 0 free, 1 being changed, 2 live.
+    state: std.atomic.Value(u8) = .init(0),
+    func: ?HandleRetiredFn = null,
+    ctx: ?*anyopaque = null,
+};
+
+var observer_slots: [max_handle_retire_observers]Slot = @splat(.{});
+var active_notifications: std.atomic.Value(u32) = .init(0);
+
+/// Registers `func`/`ctx` as a handle-retire observer. Returns false if the
+/// table is full. Registering the same pair twice gets two notifications.
+pub fn observeHandleRetire(func: HandleRetiredFn, ctx: ?*anyopaque) bool {
+    for (&observer_slots) |*slot| {
+        if (slot.state.cmpxchgStrong(0, 1, .acquire, .monotonic) == null) {
+            slot.func = func;
+            slot.ctx = ctx;
+            slot.state.store(2, .release);
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Removes one registration of `func`/`ctx`, then waits for notifications
+/// already under way to finish, so the observer is not running when this
+/// returns. Must not be called from inside an observer. Returns false if the
+/// pair was not registered.
+pub fn unobserveHandleRetire(func: HandleRetiredFn, ctx: ?*anyopaque) bool {
+    for (&observer_slots) |*slot| {
+        if (slot.state.load(.acquire) != 2) continue;
+        if (slot.func != func or slot.ctx != ctx) continue;
+        if (slot.state.cmpxchgStrong(2, 1, .acquire, .monotonic) != null) continue;
+        while (active_notifications.load(.acquire) != 0) std.atomic.spinLoopHint();
+        slot.func = null;
+        slot.ctx = null;
+        slot.state.store(0, .release);
+        return true;
+    }
+    return false;
+}
+
+/// Reports `handle` to every observer. `freeEntityBox` calls this; a provider
+/// that retires handles some other way (its own boxes, or reusing a handle's
+/// address for a different object) must call it before the address can name
+/// anything else.
+pub fn notifyHandleRetired(handle: *anyopaque) void {
+    _ = active_notifications.fetchAdd(1, .acq_rel);
+    defer _ = active_notifications.fetchSub(1, .acq_rel);
+    for (&observer_slots) |*slot| {
+        if (slot.state.load(.acquire) != 2) continue;
+        if (slot.func) |f| f(slot.ctx, handle);
+    }
+}
+
+/// Exports the C entry points a binding generated with
+/// `--handle-retire-hook=<name>` links against:
+///
+///     int  <name>_observe(void (*fn)(void *ctx, void *handle), void *ctx);
+///     int  <name>_unobserve(void (*fn)(void *ctx, void *handle), void *ctx);
+///
+/// Both return 0 on success, nonzero otherwise. Call from a `comptime` block
+/// in the library that owns this runtime instance, so the observers it
+/// registers see that instance's frees: `comptime { zidl_rt.exportHandleRetireHook("mylib_handle_retire"); }`.
+pub fn exportHandleRetireHook(comptime name: []const u8) void {
+    const S = struct {
+        fn observe(func: ?HandleRetiredFn, ctx: ?*anyopaque) callconv(.c) c_int {
+            const f = func orelse return 1;
+            return if (observeHandleRetire(f, ctx)) 0 else 1;
+        }
+        fn unobserve(func: ?HandleRetiredFn, ctx: ?*anyopaque) callconv(.c) c_int {
+            const f = func orelse return 1;
+            return if (unobserveHandleRetire(f, ctx)) 0 else 1;
+        }
+    };
+    @export(&S.observe, .{ .name = name ++ "_observe" });
+    @export(&S.unobserve, .{ .name = name ++ "_unobserve" });
+}
+
+test "freeEntityBox reports the handle to observers before freeing it" {
+    const Rec = struct {
+        var seen: ?*anyopaque = null;
+        var count: usize = 0;
+        fn on(ctx: ?*anyopaque, handle: *anyopaque) callconv(.c) void {
+            std.debug.assert(ctx == @as(?*anyopaque, @ptrFromInt(0x10)));
+            seen = handle;
+            count += 1;
+        }
+    };
+    const ctx: ?*anyopaque = @ptrFromInt(0x10);
+    try std.testing.expect(observeHandleRetire(&Rec.on, ctx));
+    var target: u8 = 0;
+    const h = try boxEntity(std.testing.allocator, @ptrCast(&target), @ptrCast(&target));
+    freeEntityBox(std.testing.allocator, h);
+    try std.testing.expectEqual(h, Rec.seen.?);
+    try std.testing.expectEqual(@as(usize, 1), Rec.count);
+
+    try std.testing.expect(unobserveHandleRetire(&Rec.on, ctx));
+    try std.testing.expect(!unobserveHandleRetire(&Rec.on, ctx));
+    const h2 = try boxEntity(std.testing.allocator, @ptrCast(&target), @ptrCast(&target));
+    freeEntityBox(std.testing.allocator, h2);
+    try std.testing.expectEqual(@as(usize, 1), Rec.count);
+}
+
+test "the observer table rejects registrations once full" {
+    const Noop = struct {
+        fn on(_: ?*anyopaque, _: *anyopaque) callconv(.c) void {}
+    };
+    var i: usize = 0;
+    while (i < max_handle_retire_observers) : (i += 1) {
+        try std.testing.expect(observeHandleRetire(&Noop.on, @ptrFromInt(i + 1)));
+    }
+    try std.testing.expect(!observeHandleRetire(&Noop.on, @ptrFromInt(0x99)));
+    i = 0;
+    while (i < max_handle_retire_observers) : (i += 1) {
+        try std.testing.expect(unobserveHandleRetire(&Noop.on, @ptrFromInt(i + 1)));
+    }
 }

@@ -4,6 +4,9 @@ module DDS {
     typedef sequence<octet> OctetSeq;
     typedef sequence<OctetSeq> OctetSeqSeq;
     struct SampleInfo { boolean valid_data; };
+    // What an operation on a retired wrapper returns (--handle-retire-hook).
+    @retired_result(RETCODE_ALREADY_DELETED) typedef long ReturnCode_t;
+    const ReturnCode_t RETCODE_ALREADY_DELETED = 9;
     typedef sequence<SampleInfo> SampleInfoSeq;
     @shared_c_abi_box interface Condition {};
     @shared_c_abi_box interface GuardCondition : Condition {};
@@ -13,6 +16,7 @@ module DDS {
     @shared_base @shared_c_abi_box interface ReadCondition : Condition {};
     @shared_c_abi_box interface QueryCondition : ReadCondition {};
     interface DataReader {
+        ReturnCode_t enable();
         DataReader get_reader();
         Condition get_condition();
         ReadCondition get_readcondition();

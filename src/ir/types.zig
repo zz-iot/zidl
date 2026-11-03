@@ -369,6 +369,58 @@ pub fn hasSharedCAbiBox(iface: *const Interface) bool {
     return false;
 }
 
+/// The value an operation returning `type_ref` gives on a retired receiver,
+/// from `@retired_result(value)` on `type_ref`'s typedef or any typedef it
+/// aliases (see docs/design/handle-lifetime.md). `value` is an integer
+/// literal or the name of an integer constant, found in the typedef's own
+/// module first, then anywhere in `items`. Null when no typedef in the chain
+/// carries the annotation or its constant cannot be resolved.
+pub fn retiredResult(items: []const ModuleItem, type_ref: TypeRef) ?i64 {
+    var tr = type_ref;
+    while (true) {
+        const td = switch (tr) {
+            .named => |n| switch (n) {
+                .typedef => |t| t,
+                else => return null,
+            },
+            else => return null,
+        };
+        for (td.raw) |ann| {
+            if (!std.mem.eql(u8, ann.name, "retired_result") or ann.params.len != 1) continue;
+            switch (ann.params[0].value) {
+                .integer => |v| return v,
+                .scoped_name => |name| {
+                    const scope = if (std.mem.lastIndexOf(u8, td.qualified_name, "::")) |i| td.qualified_name[0..i] else "";
+                    return findIntConst(items, name, scope) orelse findIntConst(items, name, null);
+                },
+                else => return null,
+            }
+        }
+        tr = td.type_ref;
+    }
+}
+
+/// Finds an integer constant named `name`, in module `scope` only (its
+/// qualified name, `""` for the global scope) or anywhere when `scope` is null.
+fn findIntConst(items: []const ModuleItem, name: []const u8, scope: ?[]const u8) ?i64 {
+    for (items) |item| switch (item) {
+        .const_ => |c| {
+            if (!std.mem.eql(u8, c.name, name)) continue;
+            if (scope) |s| {
+                const own = if (std.mem.lastIndexOf(u8, c.qualified_name, "::")) |i| c.qualified_name[0..i] else "";
+                if (!std.mem.eql(u8, own, s)) continue;
+            }
+            switch (c.value) {
+                .integer => |v| return v,
+                else => {},
+            }
+        },
+        .module => |m| if (findIntConst(m.items, name, scope)) |v| return v,
+        .type_decl => {},
+    };
+    return null;
+}
+
 pub const Operation = struct {
     name: []const u8,
     span: ast.Span,

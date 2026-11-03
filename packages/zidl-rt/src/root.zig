@@ -48,6 +48,12 @@ pub const unboxEntity = entity_box.unboxEntity;
 pub const unboxAs = entity_box.unboxAs;
 pub const unboxAsView = entity_box.unboxAsView;
 pub const freeEntityBox = entity_box.freeEntityBox;
+pub const HandleRetiredFn = entity_box.HandleRetiredFn;
+pub const max_handle_retire_observers = entity_box.max_handle_retire_observers;
+pub const observeHandleRetire = entity_box.observeHandleRetire;
+pub const unobserveHandleRetire = entity_box.unobserveHandleRetire;
+pub const notifyHandleRetired = entity_box.notifyHandleRetired;
+pub const exportHandleRetireHook = entity_box.exportHandleRetireHook;
 pub const NIL_PTR = entity_box.NIL_PTR;
 
 pub const ZidlAllocator = allocator_mod.ZidlAllocator;

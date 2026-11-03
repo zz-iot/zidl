@@ -90,6 +90,13 @@ pub const Options = struct {
     /// Java: name passed to `System.loadLibrary()` in generated `*Impl` classes.
     /// Only used when `generate_interfaces` is true.
     jni_library: []const u8 = "zidl_dds_jni",
+    /// C++ (`--cpp-generate-impl`) and Java backends: base name of the C
+    /// functions `<name>_observe`/`<name>_unobserve` through which the C ABI
+    /// provider reports entity handles it frees (see
+    /// docs/design/handle-lifetime.md). When set, a wrapper whose handle is
+    /// freed is dropped from the identity cache and marked retired: its
+    /// operations no longer reach the provider. Empty: no hook.
+    handle_retire_hook: []const u8 = "",
     /// Target profile.  Backends may use this to adjust output; the CLI
     /// calls `validateXrce` before invoking backends when profile is `.xrce`.
     profile: Profile = .full,

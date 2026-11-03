@@ -41,6 +41,9 @@ interface WriterListener {
 pub const WriterListener = extern struct {
     listener_data: ?*anyopaque = null,
     on_change: ?*const fn (DDS.DataWriter, *const DDS.Status, ?*anyopaque) callconv(.c) void = null,
+    release_listener_data: ?*const fn (?*anyopaque) callconv(.c) void = null,
+    listener_identity: ?*anyopaque = null,
+    retain_listener_data: ?*const fn (?*anyopaque) callconv(.c) void = null,
 };
 
 pub const noop_WriterListener: WriterListener = .{};
@@ -53,6 +56,12 @@ Key properties:
   no callbacks are needed.
 - The struct is `extern`, so it has a stable C-ABI layout identical to the
   C backend's `DDS_WriterListener` output.
+- The three trailing fields are for bindings and default to null. The callee
+  calls `release_listener_data` once it drops a registration. Registrations
+  with the same non-null `listener_identity` (else the same `listener_data`)
+  are one listener. When `retain_listener_data` is set, a callee handing
+  `listener_data` back to a caller (a `get_listener`) calls it first, and the
+  caller drops that reference with `release_listener_data`.
 
 **Usage:** Implement a listener by constructing the struct inline:
 ```zig
@@ -68,6 +77,20 @@ not carry `@callback`, the backends apply the callback treatment automatically.
 This heuristic exists for backwards compatibility with IDL files that predate
 the `@callback` annotation.  Annotate your IDL files explicitly to suppress
 the deprecation warning when it is added.
+
+### `@retired_result`
+
+**Target:** `typedef` of an integer type.
+
+```idl
+@retired_result(RETCODE_ALREADY_DELETED) typedef long ReturnCode_t;
+```
+
+With `--handle-retire-hook`, an operation of a C++ or Java wrapper whose entity's
+handle has been freed returns this value, without calling the provider, when its
+return type is this typedef or a typedef aliasing it. The parameter is an integer
+literal or the name of an integer constant, looked up in the typedef's module
+first. See [`design/handle-lifetime.md`](design/handle-lifetime.md).
 
 ### `@pl_repeated`
 

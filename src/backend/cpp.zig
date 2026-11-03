@@ -287,7 +287,7 @@ const Generator = struct {
         if (self.opts.cpp_pmr_containers) try self.write("#include <memory_resource>\n");
         // Entity interfaces and entity_in adapters use std::shared_ptr whenever
         // interface generation is enabled.
-        if (self.opts.generate_interfaces) try self.write("#include <memory>\n");
+        if (self.opts.generate_interfaces) try self.write("#include <atomic>\n#include <memory>\n");
         if (needs.map) try self.write("#include <map>\n");
         if (needs.optional) try self.write("#include <optional>\n");
         if (needs.union_arrays) try self.write("#include <cstring>\n");
@@ -1029,14 +1029,27 @@ const Generator = struct {
 
         // c_listener() declaration — implemented in dcps_impl.cpp. Each
         // registration owns a reference to the listener: its listener_data
-        // is a heap shared_ptr, which release_c_listener deletes once the
-        // core drops the registration (replaced, cleared or its entity
-        // deleted, after any dispatch through it returns). It takes the
-        // interface, not this class: the trampolines dispatch through the
-        // interface's virtual functions, so a listener implementing the
-        // interface directly works too, and no cast to this class is needed.
+        // is a heap _Reg holding the listener, which release_c_listener
+        // deletes once the core drops the registration (replaced, cleared or
+        // its entity deleted, after any dispatch through it returns) and every
+        // reference retain_c_listener handed out is released too. The core
+        // retains before a get_listener hands listener_data back, so the
+        // entity wrapper can read the listener out of it without racing a
+        // replacement. It takes the interface, not this class: the
+        // trampolines dispatch through the interface's virtual functions, so
+        // a listener implementing the interface directly works too, and no
+        // cast to this class is needed.
+        try self.print(
+            "    struct _Reg {{\n" ++
+                "        explicit _Reg(std::shared_ptr<{s}> o) noexcept : owner(std::move(o)) {{}}\n" ++
+                "        std::shared_ptr<{s}> owner;\n" ++
+                "        std::atomic<unsigned> refs{{1}};\n" ++
+                "    }};\n",
+            .{ iface.name, iface.name },
+        );
         try self.print("    static {s} c_listener(std::shared_ptr<{s}> owner);\n", .{ c_name, iface.name });
         try self.write("    static void release_c_listener(void* d);\n");
+        try self.write("    static void retain_c_listener(void* d);\n");
         try self.write("private:\n");
 
         // Static trampoline declarations
@@ -4104,6 +4117,10 @@ pub fn generateConcreteImpl(
     defer gen.entity_base_ifaces.deinit(alloc);
     defer gen.wrapped_entities.deinit(alloc);
     defer interface.deinitFamilies(alloc, &gen.families);
+    defer {
+        for (gen.retire_caches.items) |c| alloc.free(c);
+        gen.retire_caches.deinit(alloc);
+    }
     try gen.emit(spec);
 }
 
@@ -4127,6 +4144,13 @@ const ConcreteImplGenerator = struct {
     /// instead of each member keeping its own independent one; see
     /// `familyOf`, `emitEntityImplDecl`, and `emitEntityImplMethods`.
     families: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(*const ir.Interface)) = .{},
+    /// The whole spec's items, imported modules included, for resolving
+    /// `@retired_result` constants (`emitRetiredGuard`).
+    spec_items: []const ir.ModuleItem = &.{},
+    /// Each wrapped interface's identity cache, as the C++ expression of the
+    /// class owning it, for `emitRetireObserver`. Filled while emitting
+    /// methods, so in the real pass, not the pre-scan.
+    retire_caches: std.ArrayListUnmanaged([]u8) = .empty,
 
     /// The `Family` a given interface belongs to: its shared-box root and
     /// how many members are in that root's group. `size <= 1` means "no
@@ -4173,7 +4197,7 @@ const ConcreteImplGenerator = struct {
             // header, so std::mutex/std::unordered_map must already be
             // complete types by the time this file's own class bodies are
             // parsed -- not just by the time the .cpp implementing them is.
-            "#include \"{s}.hpp\"\n#include \"{s}.h\"\n#include \"zzdds_c.h\"\n#include <memory>\n#include <mutex>\n#include <unordered_map>\n\n",
+            "#include \"{s}.hpp\"\n#include \"{s}.h\"\n#include \"zzdds_c.h\"\n#include <atomic>\n#include <memory>\n#include <mutex>\n#include <unordered_map>\n\n",
             .{ self.opts.input_stem, self.opts.input_stem },
         );
         for (spec.imports) |import_name| {
@@ -4186,6 +4210,7 @@ const ConcreteImplGenerator = struct {
         try interface.collectEntityBaseNames(self.alloc, spec.items, &self.entity_base_ifaces);
         try interface.collectEntityBaseNamesFromList(self.alloc, spec.imported_interfaces, &self.entity_base_ifaces);
         try interface.collectSharedCAbiBoxFamilies(self.alloc, spec.items, &self.families);
+        self.spec_items = spec.items;
 
         // Pre-scan: discover which entity interfaces are ever wrapped via
         // _getOrCreate (op return, attribute, sequence element, listener
@@ -4267,8 +4292,10 @@ const ConcreteImplGenerator = struct {
                     "#endif\n",
             );
         }
+        try self.emitRetireObserverDecls();
         try self.srcWrite("\n");
         try self.emitItems(spec.items);
+        try self.emitRetireObserver();
     }
 
     fn emitItems(self: *ConcreteImplGenerator, items: []const ir.ModuleItem) anyerror!void {
@@ -4385,9 +4412,14 @@ const ConcreteImplGenerator = struct {
         if (self.wrapped_entities.contains(iface.qualified_name)) {
             const fam = self.familyOf(iface);
             if (fam.size <= 1) {
+                // The cache lives in class statics, not in _getOrCreate, so the
+                // retire observer can reach it (_zidlEvict).
                 try self.hdrPrint(
-                    "    static std::shared_ptr<{s}Impl> _getOrCreate({s} h);\n",
-                    .{ iface.name, c_name },
+                    "    static std::shared_ptr<{s}Impl> _getOrCreate({s} h);\n" ++
+                        "    static std::mutex& _soloMutex();\n" ++
+                        "    static std::unordered_map<{s}, std::weak_ptr<{s}Impl>>& _soloCache();\n" ++
+                        "    static void _zidlEvict(void* h);\n",
+                    .{ iface.name, c_name, c_name, iface.name },
                 );
             } else if (fam.root == iface) {
                 // Family root with real sibling implementors (e.g. Condition:
@@ -4438,15 +4470,23 @@ const ConcreteImplGenerator = struct {
                 // shared_ptr from `obj` (aliasing the locked `ref`), so it
                 // never downcasts from the interface: that downcast cannot be
                 // static when a @shared_base (virtual base) lies between the
-                // two, and dynamic would need RTTI.
+                // two, and dynamic would need RTTI. `retire` is the creating
+                // class's _zidlRetire, so the retire observer can mark `obj`
+                // retired; null in an entry that predates it.
+                //
+                // Both accessors leak their object on purpose: the provider can
+                // report a retired handle during static destruction, after a
+                // function-local static map would already be gone.
                 try self.hdrPrint(
                     "    struct _FamilyEntry {{\n" ++
                         "        std::weak_ptr<{s}> ref;\n" ++
                         "        const void* tag;\n" ++
                         "        void* obj;\n" ++
+                        "        void (*retire)(void*) noexcept = nullptr;\n" ++
                         "    }};\n" ++
                         "    static std::mutex& _familyMutex();\n" ++
-                        "    static std::pmr::unordered_map<{s}, _FamilyEntry>& _familyCache();\n",
+                        "    static std::pmr::unordered_map<{s}, _FamilyEntry>& _familyCache();\n" ++
+                        "    static void _zidlEvict(void* h);\n",
                     .{ iface.name, c_name },
                 );
             } else {
@@ -4488,17 +4528,17 @@ const ConcreteImplGenerator = struct {
             const handle_expr = try self.handleExprForOwner(iface, base_iface, "ptr_");
             defer self.alloc.free(handle_expr);
             try self.hdrPrint(
-                "    {s} native_handle() const noexcept override {{ return {s}; }}\n\n",
+                "    {s} native_handle() const noexcept override {{ return _zidl_is_retired() ? nullptr : {s}; }}\n\n",
                 .{ base_c, handle_expr },
             );
         } else if (self.ifaceDeclaresNativeHandle(iface)) {
             try self.hdrPrint(
-                "    {s} native_handle() const noexcept override {{ return ptr_; }}\n\n",
+                "    {s} native_handle() const noexcept override {{ return _zidl_is_retired() ? nullptr : ptr_; }}\n\n",
                 .{c_name},
             );
         } else {
             try self.hdrPrint(
-                "    {s} native_handle() const noexcept {{ return ptr_; }}\n\n",
+                "    {s} native_handle() const noexcept {{ return _zidl_is_retired() ? nullptr : ptr_; }}\n\n",
                 .{c_name},
             );
         }
@@ -4521,15 +4561,24 @@ const ConcreteImplGenerator = struct {
         }
 
         try self.hdrPrint(
-            "\nprivate:\n    friend {s} zidl_concrete_handle(const {s}Impl& self) noexcept {{ return self.ptr_; }}\n",
+            "\nprivate:\n    friend {s} zidl_concrete_handle(const {s}Impl& self) noexcept {{ return self._zidl_is_retired() ? nullptr : self.ptr_; }}\n",
             .{ c_name, iface.name },
         );
-        if (listenerTypeOf(ops.items)) |listener_tr| {
-            const cpp_listener = try self.typeRefToCpp(listener_tr);
-            defer self.alloc.free(cpp_listener);
-            try self.hdrPrint("    {s} listener_;\n", .{cpp_listener});
-        }
-        try self.hdrPrint("    {s} ptr_;\n}};\n\n", .{c_name});
+        try self.hdrPrint("    {s} ptr_;\n", .{c_name});
+        // Set once the provider reports ptr_ freed (--handle-retire-hook; see
+        // emitRetireObserver). From then on no operation reaches the provider
+        // and every handle accessor returns null.
+        try self.hdrWrite("    std::atomic<bool> _zidl_retired_{false};\n");
+        try self.hdrWrite("public:\n");
+        try self.hdrWrite("    bool _zidl_is_retired() const noexcept { return _zidl_retired_.load(std::memory_order_acquire); }\n");
+        // Marks the object at `obj` (one of this class) retired. An identity
+        // cache entry records it, so an observer can retire an entry's object
+        // without knowing its class.
+        try self.hdrPrint(
+            "    static void _zidlRetire(void* obj) noexcept {{ static_cast<{s}Impl*>(obj)->_zidl_retired_.store(true, std::memory_order_release); }}\n",
+            .{iface.name},
+        );
+        try self.hdrWrite("};\n\n");
     }
 
     /// Header declaration for one of `isRawLoanOp`'s ops -- see that
@@ -4578,19 +4627,40 @@ const ConcreteImplGenerator = struct {
             const c_name = try cNameOf(self.alloc, iface.qualified_name);
             defer self.alloc.free(c_name);
             const fam = self.familyOf(iface);
+            // With --handle-retire-hook, the first use of a cache registers
+            // this file's retire observer (emitRetireObserver).
+            const observe: []const u8 = if (self.opts.handle_retire_hook.len > 0) "    ::_zidl_observe_retire();\n" else "";
             if (fam.size <= 1) {
                 try self.srcPrint(
-                    "std::shared_ptr<{s}Impl> {s}Impl::_getOrCreate({s} h) {{\n" ++
+                    "std::mutex& {[n]s}Impl::_soloMutex() {{\n" ++
+                        "    static auto* m = new std::mutex;\n" ++
+                        "    return *m;\n" ++
+                        "}}\n" ++
+                        "std::unordered_map<{[c]s}, std::weak_ptr<{[n]s}Impl>>& {[n]s}Impl::_soloCache() {{\n" ++
+                        "    static auto* c = new std::unordered_map<{[c]s}, std::weak_ptr<{[n]s}Impl>>;\n" ++
+                        "{[o]s}" ++
+                        "    return *c;\n" ++
+                        "}}\n" ++
+                        "void {[n]s}Impl::_zidlEvict(void* h) {{\n" ++
+                        "    std::shared_ptr<{[n]s}Impl> _gone;\n" ++
+                        "    std::lock_guard<std::mutex> _lock(_soloMutex());\n" ++
+                        "    auto& _cache = _soloCache();\n" ++
+                        "    auto _it = _cache.find(static_cast<{[c]s}>(h));\n" ++
+                        "    if (_it == _cache.end()) return;\n" ++
+                        "    _gone = _it->second.lock();\n" ++
+                        "    if (_gone) _zidlRetire(_gone.get());\n" ++
+                        "    _cache.erase(_it);\n" ++
+                        "}}\n" ++
+                        "std::shared_ptr<{[n]s}Impl> {[n]s}Impl::_getOrCreate({[c]s} h) {{\n" ++
                         "    if (!h) return nullptr;\n" ++
-                        "    static std::mutex _mtx;\n" ++
-                        "    static std::unordered_map<{s}, std::weak_ptr<{s}Impl>> _cache;\n" ++
-                        "    std::lock_guard<std::mutex> _lock(_mtx);\n" ++
+                        "    std::lock_guard<std::mutex> _lock(_soloMutex());\n" ++
+                        "    auto& _cache = _soloCache();\n" ++
                         "    auto _it = _cache.find(h);\n" ++
                         "    if (_it != _cache.end()) {{\n" ++
                         "        if (auto _sp = _it->second.lock()) return _sp;\n" ++
                         "    }}\n" ++
-                        "    auto _sp = std::allocate_shared<{s}Impl>(\n" ++
-                        "        std::pmr::polymorphic_allocator<{s}Impl>(std::pmr::get_default_resource()), h);\n" ++
+                        "    auto _sp = std::allocate_shared<{[n]s}Impl>(\n" ++
+                        "        std::pmr::polymorphic_allocator<{[n]s}Impl>(std::pmr::get_default_resource()), h);\n" ++
                         "    if (_it != _cache.end()) {{\n" ++
                         "        _it->second = _sp;\n" ++
                         "    }} else {{\n" ++
@@ -4598,46 +4668,62 @@ const ConcreteImplGenerator = struct {
                         "    }}\n" ++
                         "    return _sp;\n" ++
                         "}}\n\n",
-                    .{ iface.name, iface.name, c_name, c_name, iface.name, iface.name, iface.name },
+                    .{ .n = iface.name, .c = c_name, .o = observe },
                 );
+                try self.noteRetireCache(iface);
             } else if (fam.root == iface) {
                 // Family root: owns the one cache every sibling shares (see
-                // emitEntityImplDecl). Meyer's singletons -- thread-safe lazy
-                // init, no static-initialization-order concerns, no
-                // out-of-line data member definition needed.
+                // emitEntityImplDecl). Leaked singletons: thread-safe lazy
+                // init, and still there for a retire report during static
+                // destruction.
                 try self.srcPrint(
-                    "std::mutex& {s}Impl::_familyMutex() {{\n" ++
-                        "    static std::mutex m;\n" ++
-                        "    return m;\n" ++
+                    "std::mutex& {[n]s}Impl::_familyMutex() {{\n" ++
+                        "    static auto* m = new std::mutex;\n" ++
+                        "    return *m;\n" ++
                         "}}\n" ++
-                        "std::pmr::unordered_map<{s}, {s}Impl::_FamilyEntry>& {s}Impl::_familyCache() {{\n" ++
-                        "    static std::pmr::unordered_map<{s}, _FamilyEntry> c;\n" ++
-                        "    return c;\n" ++
-                        "}}\n",
-                    .{ iface.name, c_name, iface.name, iface.name, c_name },
-                );
-                // Cache hit may genuinely be a sibling object (constructed by
-                // its own _getOrCreate below) viewed through the shared
-                // interface type -- that's fine and correct, this root's
-                // return type is that interface, not its own concrete class
-                // (see emitEntityImplDecl). Miss falls back to constructing a
-                // real (if generically-typed) instance of this root's own
-                // class, exactly like the size<=1 case above.
-                try self.srcPrint(
-                    "std::shared_ptr<{s}> {s}Impl::_getOrCreate({s} h) {{\n" ++
-                        "    if (!h) return nullptr;\n" ++
+                        "std::pmr::unordered_map<{[c]s}, {[n]s}Impl::_FamilyEntry>& {[n]s}Impl::_familyCache() {{\n" ++
+                        "    static auto* c = new std::pmr::unordered_map<{[c]s}, _FamilyEntry>;\n" ++
+                        "{[o]s}" ++
+                        "    return *c;\n" ++
+                        "}}\n" ++
+                        "void {[n]s}Impl::_zidlEvict(void* h) {{\n" ++
+                        "    std::shared_ptr<{[n]s}> _gone;\n" ++
                         "    std::lock_guard<std::mutex> _lock(_familyMutex());\n" ++
+                        "    auto& _cache = _familyCache();\n" ++
+                        "    auto _it = _cache.find(static_cast<{[c]s}>(h));\n" ++
+                        "    if (_it == _cache.end()) return;\n" ++
+                        "    _gone = _it->second.ref.lock();\n" ++
+                        "    if (_gone && _it->second.retire) _it->second.retire(_it->second.obj);\n" ++
+                        "    _cache.erase(_it);\n" ++
+                        "}}\n",
+                    .{ .n = iface.name, .c = c_name, .o = observe },
+                );
+                try self.noteRetireCache(iface);
+                // A handle typed as the root may be any member. Resolve its
+                // real type first, through the provider's checked downcasts,
+                // deepest member first, and box it as that member, whose own
+                // _getOrCreate accepts only an entry of its own class. So a
+                // live entry of another class (the wrapper of a destroyed
+                // entity whose address was reused) is replaced, never
+                // returned as this one. Only a handle no member claims falls
+                // through to the shared cache below, which accepts any live
+                // entry. Done before taking the lock: the downcasts call into
+                // the provider.
+                try self.srcPrint("std::shared_ptr<{s}> {s}Impl::_getOrCreate({s} h) {{\n    if (!h) return nullptr;\n", .{ iface.name, iface.name, c_name });
+                try self.emitMostDerivedDispatch(iface);
+                try self.srcPrint(
+                    "    std::lock_guard<std::mutex> _lock(_familyMutex());\n" ++
                         "    auto& _cache = _familyCache();\n" ++
                         "    auto _it = _cache.find(h);\n" ++
                         "    if (_it != _cache.end()) {{\n" ++
                         "        if (auto _sp = _it->second.ref.lock()) return _sp;\n" ++
                         "    }}\n" ++
-                        "    auto _sp = std::allocate_shared<{s}Impl>(\n" ++
-                        "        std::pmr::polymorphic_allocator<{s}Impl>(std::pmr::get_default_resource()), h);\n" ++
-                        "    _cache[h] = {{_sp, _familyTag(), _sp.get()}};\n" ++
+                        "    auto _sp = std::allocate_shared<{[n]s}Impl>(\n" ++
+                        "        std::pmr::polymorphic_allocator<{[n]s}Impl>(std::pmr::get_default_resource()), h);\n" ++
+                        "    _cache[h] = {{_sp, _familyTag(), _sp.get(), &_zidlRetire}};\n" ++
                         "    return _sp;\n" ++
                         "}}\n\n",
-                    .{ iface.name, iface.name, c_name, iface.name, iface.name },
+                    .{ .n = iface.name },
                 );
             } else {
                 // Non-root family member: consults/populates the ROOT's
@@ -4652,21 +4738,21 @@ const ConcreteImplGenerator = struct {
                 const key_expr = try self.handleExprForOwner(iface, fam.root, "h");
                 defer self.alloc.free(key_expr);
                 try self.srcPrint(
-                    "std::shared_ptr<{s}Impl> {s}Impl::_getOrCreate({s} h) {{\n" ++
+                    "std::shared_ptr<{[n]s}Impl> {[n]s}Impl::_getOrCreate({[c]s} h) {{\n" ++
                         "    if (!h) return nullptr;\n" ++
-                        "    {s} _fh = {s};\n" ++
-                        "    std::lock_guard<std::mutex> _lock({s}::_familyMutex());\n" ++
-                        "    auto& _cache = {s}::_familyCache();\n" ++
+                        "    {[rc]s} _fh = {[k]s};\n" ++
+                        "    std::lock_guard<std::mutex> _lock({[ri]s}::_familyMutex());\n" ++
+                        "    auto& _cache = {[ri]s}::_familyCache();\n" ++
                         "    auto _it = _cache.find(_fh);\n" ++
                         "    if (_it != _cache.end() && _it->second.tag == _familyTag()) {{\n" ++
-                        "        if (auto _base = _it->second.ref.lock()) return std::shared_ptr<{s}Impl>(_base, static_cast<{s}Impl*>(_it->second.obj));\n" ++
+                        "        if (auto _base = _it->second.ref.lock()) return std::shared_ptr<{[n]s}Impl>(_base, static_cast<{[n]s}Impl*>(_it->second.obj));\n" ++
                         "    }}\n" ++
-                        "    auto _sp = std::allocate_shared<{s}Impl>(\n" ++
-                        "        std::pmr::polymorphic_allocator<{s}Impl>(std::pmr::get_default_resource()), h);\n" ++
-                        "    _cache[_fh] = {{_sp, _familyTag(), _sp.get()}};\n" ++
+                        "    auto _sp = std::allocate_shared<{[n]s}Impl>(\n" ++
+                        "        std::pmr::polymorphic_allocator<{[n]s}Impl>(std::pmr::get_default_resource()), h);\n" ++
+                        "    _cache[_fh] = {{_sp, _familyTag(), _sp.get(), &_zidlRetire}};\n" ++
                         "    return _sp;\n" ++
                         "}}\n\n",
-                    .{ iface.name, iface.name, c_name, root_c_name, key_expr, root_impl, root_impl, iface.name, iface.name, iface.name, iface.name },
+                    .{ .n = iface.name, .c = c_name, .rc = root_c_name, .k = key_expr, .ri = root_impl },
                 );
             }
         }
@@ -4696,6 +4782,148 @@ const ConcreteImplGenerator = struct {
         }
     }
 
+    /// With `--handle-retire-hook`, the first statement of every generated
+    /// operation and attribute accessor: a retired wrapper returns without
+    /// reaching the provider, whose handle is freed. It returns the value
+    /// `@retired_result` names for the return type, null for an entity, and
+    /// a value-initialized result otherwise; out parameters are left as they
+    /// are (see docs/design/handle-lifetime.md).
+    fn emitRetiredGuard(self: *ConcreteImplGenerator, ret: ?ir.TypeRef) !void {
+        if (self.opts.handle_retire_hook.len == 0) return;
+        const rt = ret orelse {
+            try self.srcWrite("    if (_zidl_is_retired()) return;\n");
+            return;
+        };
+        if (ir.retiredResult(self.spec_items, rt)) |v| {
+            const cpp = try self.typeRefToCpp(rt);
+            defer self.alloc.free(cpp);
+            try self.srcPrint("    if (_zidl_is_retired()) return static_cast<{s}>({d});\n", .{ cpp, v });
+        } else if (returnAdaptKind(rt) == .entity) {
+            try self.srcWrite("    if (_zidl_is_retired()) return nullptr;\n");
+        } else {
+            try self.srcWrite("    if (_zidl_is_retired()) return {};\n");
+        }
+    }
+
+    /// Records `iface` as owning an identity cache this file's retire
+    /// observer must evict from (emitRetireObserver). Once per interface:
+    /// the pre-scan and the real pass both get here.
+    fn noteRetireCache(self: *ConcreteImplGenerator, iface: *const ir.Interface) !void {
+        const owner = try std.fmt.allocPrint(self.alloc, "::{s}Impl", .{iface.qualified_name});
+        for (self.retire_caches.items) |c| if (std.mem.eql(u8, c, owner)) {
+            self.alloc.free(owner);
+            return;
+        };
+        try self.retire_caches.append(self.alloc, owner);
+    }
+
+    /// The start of a family root's `_getOrCreate`: one line per wrapped
+    /// family member, deepest first, that downcasts `h` along the member's
+    /// primary-base chain and, if every checked downcast succeeds, boxes it
+    /// through that member's own `_getOrCreate`. The provider's downcasts
+    /// exist for each direct edge of a `@shared_c_abi_box` chain, so a
+    /// two-level member takes two.
+    fn emitMostDerivedDispatch(self: *ConcreteImplGenerator, root: *const ir.Interface) !void {
+        const members = self.families.get(root.qualified_name) orelse return;
+        const Chain = struct { member: *const ir.Interface, hops: std.ArrayListUnmanaged(*const ir.Interface) };
+        var chains = std.ArrayListUnmanaged(Chain).empty;
+        defer {
+            for (chains.items) |*c| c.hops.deinit(self.alloc);
+            chains.deinit(self.alloc);
+        }
+        for (members.items) |m| {
+            if (m == root or !self.wrapped_entities.contains(m.qualified_name)) continue;
+            var hops = std.ArrayListUnmanaged(*const ir.Interface).empty;
+            var cur = m;
+            const reached = while (true) {
+                if (cur == root) break true;
+                try hops.insert(self.alloc, 0, cur);
+                if (cur.bases.len == 0) break false;
+                cur = switch (cur.bases[0]) {
+                    .interface => |b| b,
+                    else => break false,
+                };
+            };
+            if (!reached) {
+                hops.deinit(self.alloc);
+                continue;
+            }
+            try chains.append(self.alloc, .{ .member = m, .hops = hops });
+        }
+        std.mem.sort(Chain, chains.items, {}, struct {
+            fn deeper(_: void, a: Chain, b: Chain) bool {
+                return a.hops.items.len > b.hops.items.len;
+            }
+        }.deeper);
+        for (chains.items) |c| {
+            try self.srcWrite("    ");
+            var prev = root;
+            for (c.hops.items, 0..) |hop, i| {
+                const from_c = try cNameOf(self.alloc, prev.qualified_name);
+                defer self.alloc.free(from_c);
+                const to_c = try cNameOf(self.alloc, hop.qualified_name);
+                defer self.alloc.free(to_c);
+                if (i == 0) {
+                    try self.srcPrint("if (auto _d0 = {s}_as_{s}(h)) ", .{ from_c, to_c });
+                } else {
+                    try self.srcPrint("if (auto _d{d} = {s}_as_{s}(_d{d})) ", .{ i, from_c, to_c, i - 1 });
+                }
+                prev = hop;
+            }
+            const impl_name = try self.entityImplName(.{ .named = .{ .interface = @constCast(c.member) } });
+            defer self.alloc.free(impl_name);
+            try self.srcPrint("return {s}::_getOrCreate(_d{d});\n", .{ impl_name, c.hops.items.len - 1 });
+        }
+    }
+
+    /// With `--handle-retire-hook`: the declarations every `_getOrCreate`
+    /// and cache accessor needs, emitted before any of them.
+    fn emitRetireObserverDecls(self: *ConcreteImplGenerator) !void {
+        const hook = self.opts.handle_retire_hook;
+        if (hook.len == 0) return;
+        try self.srcPrint(
+            "\n// Handle-retire hook (docs/design/handle-lifetime.md in zidl).\n" ++
+                "extern \"C\" {{\n" ++
+                "typedef void (*_zidl_handle_retired_fn)(void* ctx, void* handle);\n" ++
+                "int {[h]s}_observe(_zidl_handle_retired_fn fn, void* ctx);\n" ++
+                "int {[h]s}_unobserve(_zidl_handle_retired_fn fn, void* ctx);\n" ++
+                "}}\n" ++
+                "[[maybe_unused]] static void _zidl_observe_retire();\n",
+            .{ .h = hook },
+        );
+    }
+
+    /// With `--handle-retire-hook`: this file's retire observer, registered
+    /// by the first use of any of its identity caches. The provider reports
+    /// each handle it frees before the address can name another object; the
+    /// observer drops the handle from every cache and marks the wrapper it
+    /// held retired. It may run on any thread, inside the provider's own
+    /// teardown, so it takes only the caches' locks. The last reference to a
+    /// wrapper can drop inside it, so a wrapper's destructor must not reach
+    /// the provider.
+    fn emitRetireObserver(self: *ConcreteImplGenerator) !void {
+        const hook = self.opts.handle_retire_hook;
+        if (hook.len == 0) return;
+        try self.srcWrite("namespace {\n\nvoid _zidl_on_handle_retired(void*, void* h) noexcept {\n");
+        for (self.retire_caches.items) |owner| {
+            try self.srcPrint("    {s}::_zidlEvict(h);\n", .{owner});
+        }
+        try self.srcPrint(
+            "}}\n\n" ++
+                "struct _ZidlRetireObserver {{\n" ++
+                "    bool ok;\n" ++
+                "    _ZidlRetireObserver() : ok({[h]s}_observe(&_zidl_on_handle_retired, nullptr) == 0) {{}}\n" ++
+                "    ~_ZidlRetireObserver() {{ if (ok) {[h]s}_unobserve(&_zidl_on_handle_retired, nullptr); }}\n" ++
+                "}};\n\n" ++
+                "}} // namespace\n\n" ++
+                "[[maybe_unused]] static void _zidl_observe_retire() {{\n" ++
+                "    static _ZidlRetireObserver _o;\n" ++
+                "    (void)_o;\n" ++
+                "}}\n",
+            .{ .h = hook },
+        );
+    }
+
     fn emitEntityMethod(
         self: *ConcreteImplGenerator,
         iface: *const ir.Interface,
@@ -4723,10 +4951,30 @@ const ConcreteImplGenerator = struct {
         }
         try self.srcWrite(") {\n");
 
-        if (listener_tr != null and op.params.len == 0 and std.mem.eql(u8, op.name, "get_listener")) {
-            try self.srcWrite("    return listener_;\n}\n\n");
+        try self.emitRetiredGuard(op.return_type);
+
+        // The listener comes back from the core's own registration, so it is
+        // whatever was installed last, through any create_* or set_listener
+        // of any binding. The core retained the registration before handing
+        // it out (retain_listener_data), so it cannot be released under us;
+        // this drops that reference once the listener is copied out. A
+        // registration another binding made holds no listener of ours.
+        if (listener_tr) |ltr| if (op.params.len == 0 and std.mem.eql(u8, op.name, "get_listener")) {
+            const lc = try self.listenerCType(ltr);
+            defer self.alloc.free(lc);
+            const bridge_name = try self.listenerBridgeName(ltr);
+            defer self.alloc.free(bridge_name);
+            try self.srcPrint(
+                "    {[lc]s} _l = {[c]s}_get_listener({[h]s});\n" ++
+                    "    {[r]s} _r;\n" ++
+                    "    if (_l.listener_data && _l.release_listener_data == &{[b]s}::release_c_listener)\n" ++
+                    "        _r = static_cast<{[b]s}::_Reg*>(_l.listener_data)->owner;\n" ++
+                    "    if (_l.listener_data && _l.retain_listener_data && _l.release_listener_data) _l.release_listener_data(_l.listener_data);\n" ++
+                    "    return _r;\n}}\n\n",
+                .{ .lc = lc, .c = owner_c_name, .h = handle_expr, .r = ret_cpp, .b = bridge_name },
+            );
             return;
-        }
+        };
 
         if (!self.opIsAdaptable(op)) {
             try self.srcWrite("    /* TODO: adapt parameters/return (sequence or complex QoS) */\n");
@@ -4810,21 +5058,6 @@ const ConcreteImplGenerator = struct {
             }
         }
 
-        // Stash the listener shared_ptr so a later get_listener() can return it —
-        // the C ABI has no call to read it back out. Only stashed once the C call
-        // reports success, so a rejected set_listener doesn't diverge from the
-        // middleware's actual listener state.
-        const is_listener_setter = if (listener_tr) |ltr| blk: {
-            const listener_qname = switch (ltr) {
-                .named => |td| switch (td) {
-                    .interface => |listener_iface| listener_iface.qualified_name,
-                    else => "",
-                },
-                else => "",
-            };
-            break :blk isListenerSetterParam(op, listener_qname);
-        } else false;
-
         // Build the C call
         const ret_kind = returnAdaptKind(op.return_type);
         switch (ret_kind) {
@@ -4848,7 +5081,7 @@ const ConcreteImplGenerator = struct {
                 try self.srcPrint("    return _r ? {s}(_r) : {s}{{}};\n", .{ str_t, str_t });
             },
             .direct => {
-                const needs_post = is_listener_setter or for (op.params) |p| {
+                const needs_post = for (op.params) |p| {
                     const k = paramAdaptKind(p);
                     if (k == .complex_struct_out or k == .seq_out or k == .listener_in) break true;
                 } else false;
@@ -4867,20 +5100,12 @@ const ConcreteImplGenerator = struct {
                             else => {},
                         }
                     }
-                    if (is_listener_setter) {
-                        if (op.return_type != null) {
-                            try self.srcPrint("    if (_rc == 0) listener_ = {s};\n", .{op.params[0].name});
-                        } else {
-                            try self.srcPrint("    listener_ = {s};\n", .{op.params[0].name});
-                        }
-                    }
                     // A set_listener that fails installs no listener, so the
                     // core never releases the registration built for it. Only
-                    // set_listener has a known zero-means-success contract
-                    // (the stash above relies on it too): another op's nonzero
-                    // return may well mean success, and releasing then would
-                    // free a listener the core still holds. Unlike the stash,
-                    // this needs no get_listener on the interface.
+                    // set_listener has a known zero-means-success contract:
+                    // another op's nonzero return may well mean success, and
+                    // releasing then would free a listener the core still
+                    // holds.
                     if (isListenerSetterOp(op) and op.return_type != null) for (op.params) |p| {
                         if (paramAdaptKind(p) != .listener_in) continue;
                         const bridge_name = try self.listenerBridgeName(p.type_ref);
@@ -4935,8 +5160,15 @@ const ConcreteImplGenerator = struct {
             if (paramAdaptKind(p) != .listener_in) continue;
             const bridge_name = try self.listenerBridgeName(p.type_ref);
             defer self.alloc.free(bridge_name);
+            // The read-back is retained by the core (retain_listener_data),
+            // so it is released whether or not it is ours.
             try self.srcPrint(
-                "    if (_lp_{[n]s} && {[c]s}_get_listener(_h).listener_data != _l_{[n]s}.listener_data) {[b]s}::release_c_listener(_l_{[n]s}.listener_data);\n",
+                "    if (_lp_{[n]s}) {{\n" ++
+                    "        auto _gl = {[c]s}_get_listener(_h);\n" ++
+                    "        const bool _installed = _gl.listener_data == _l_{[n]s}.listener_data;\n" ++
+                    "        if (_gl.listener_data && _gl.retain_listener_data && _gl.release_listener_data) _gl.release_listener_data(_gl.listener_data);\n" ++
+                    "        if (!_installed) {[b]s}::release_c_listener(_l_{[n]s}.listener_data);\n" ++
+                    "    }}\n",
                 .{ .n = p.name, .c = ret_c, .b = bridge_name },
             );
         }
@@ -4958,6 +5190,7 @@ const ConcreteImplGenerator = struct {
 
         // Getter
         try self.srcPrint("{s} {s}Impl::{s}() const {{\n", .{ at, class_name, attr.name });
+        try self.emitRetiredGuard(attr.type_ref);
         switch (returnAdaptKind(attr.type_ref)) {
             .entity => {
                 const ret_c = try self.typeRefToCType(attr.type_ref);
@@ -4988,6 +5221,7 @@ const ConcreteImplGenerator = struct {
 
         if (!attr.readonly) {
             try self.srcPrint("void {s}Impl::{s}({s} value) {{\n", .{ class_name, attr.name, at });
+            try self.emitRetiredGuard(null);
             switch (paramAdaptKindForTypeRef(attr.type_ref, .in_)) {
                 .direct => {
                     if (typeRefIsEnumLike(attr.type_ref)) {
@@ -5092,6 +5326,7 @@ const ConcreteImplGenerator = struct {
             }
         }
         try self.srcWrite(") {\n");
+        try self.emitRetiredGuard(op.return_type);
 
         // Setup locals: only the non-raw `seq_in` params (e.g. publish_loan_raw's
         // `key_hash`) need one; raw-loan params are passed through directly below.
@@ -5623,13 +5858,21 @@ const ConcreteImplGenerator = struct {
                     "#endif\n",
             );
         }
-        try self.srcPrint("    return {{new std::shared_ptr<::{s}>(std::move(owner))", .{iface.qualified_name});
+        try self.srcWrite("    return {new _Reg(std::move(owner))");
         for (ops.items) |op| {
             try self.srcPrint(", s_{s}", .{op.name});
         }
-        try self.srcWrite(", release_c_listener, _identity};\n}\n\n");
-        try self.srcPrint("void {s}Base::release_c_listener(void* d) {{\n", .{iface.name});
-        try self.srcPrint("    delete static_cast<std::shared_ptr<::{s}>*>(d);\n}}\n\n", .{iface.qualified_name});
+        try self.srcWrite(", release_c_listener, _identity, retain_c_listener};\n}\n\n");
+        try self.srcPrint(
+            "void {s}Base::release_c_listener(void* d) {{\n" ++
+                "    auto* _r = static_cast<_Reg*>(d);\n" ++
+                "    if (_r->refs.fetch_sub(1, std::memory_order_acq_rel) == 1) delete _r;\n" ++
+                "}}\n\n" ++
+                "void {s}Base::retain_c_listener(void* d) {{\n" ++
+                "    static_cast<_Reg*>(d)->refs.fetch_add(1, std::memory_order_relaxed);\n" ++
+                "}}\n\n",
+            .{ iface.name, iface.name },
+        );
 
         // Trampoline static implementations
         for (ops.items) |op| {
@@ -5642,7 +5885,7 @@ const ConcreteImplGenerator = struct {
             }
             if (op.params.len > 0) try self.srcWrite(", ");
             try self.srcWrite("void* d) {\n");
-            try self.srcPrint("    (*static_cast<std::shared_ptr<::{s}>*>(d))->{s}(", .{ iface.qualified_name, op.name });
+            try self.srcPrint("    static_cast<_Reg*>(d)->owner->{s}(", .{op.name});
             for (op.params, 0..) |p, i| {
                 if (i > 0) try self.srcWrite(", ");
                 switch (p.type_ref) {
@@ -5838,7 +6081,7 @@ const ConcreteImplGenerator = struct {
             const expr = try self.handleExprForOwner(owner, target, "ptr_");
             defer self.alloc.free(expr);
             try self.hdrPrint(
-                "    {s} {s}() const noexcept override {{ return {s}; }}\n",
+                "    {s} {s}() const noexcept override {{ return _zidl_is_retired() ? nullptr : {s}; }}\n",
                 .{ c_type, accessor, expr },
             );
         }
@@ -6183,7 +6426,8 @@ fn sharedBaseOf(iface: *const ir.Interface) ?*const ir.Interface {
 }
 
 /// If `ops` contains a zero-param `get_listener` operation returning a `@callback`
-/// interface, return that return type so the caller can emit a stash member for it.
+/// interface, return that return type, so the caller can read the listener back
+/// out of the core's registration (emitEntityMethod).
 fn listenerTypeOf(ops: []const OwnedOperation) ?ir.TypeRef {
     for (ops) |o| {
         if (o.op.params.len != 0) continue;
@@ -6209,21 +6453,6 @@ fn isListenerSetterOp(op: *const ir.Operation) bool {
     return switch (p0.type_ref) {
         .named => |td| switch (td) {
             .interface => |iface| isCallbackIface(iface),
-            else => false,
-        },
-        else => false,
-    };
-}
-
-/// True when `op` is the `set_listener` half of a `listenerTypeOf` pair: a first
-/// `in` parameter whose type is the same callback interface as `listener_qname`.
-fn isListenerSetterParam(op: *const ir.Operation, listener_qname: []const u8) bool {
-    if (!std.mem.eql(u8, op.name, "set_listener") or op.params.len == 0) return false;
-    const p0 = op.params[0];
-    if (p0.mode != .in_) return false;
-    return switch (p0.type_ref) {
-        .named => |td| switch (td) {
-            .interface => |iface| std.mem.eql(u8, iface.qualified_name, listener_qname),
             else => false,
         },
         else => false,
@@ -7181,7 +7410,7 @@ fn generateTypeHeader(
     try gen.write("#include <string>\n");
     try gen.write("#include <vector>\n");
     if (opts.cpp_pmr_containers) try gen.write("#include <memory_resource>\n");
-    if (opts.generate_interfaces and needs.memory) try gen.write("#include <memory>\n");
+    if (opts.generate_interfaces and needs.memory) try gen.write("#include <atomic>\n#include <memory>\n");
     if (needs.map) try gen.write("#include <map>\n");
     if (needs.optional) try gen.write("#include <optional>\n");
     if (needs.union_lifetime) try gen.write("#include <new>\n");
@@ -9159,6 +9388,7 @@ fn testGenConcreteImplOpts(source: []const u8, extra: struct {
     cpp_pmr_containers: bool = false,
     cpp_impl_overrides: []const []const u8 = &.{},
     cpp_impl_includes: []const []const u8 = &.{},
+    handle_retire_hook: []const u8 = "",
 }) !ConcreteImplResult {
     const alloc = testing.allocator;
     var ast_arena = std.heap.ArenaAllocator.init(alloc);
@@ -9176,6 +9406,7 @@ fn testGenConcreteImplOpts(source: []const u8, extra: struct {
         .cpp_pmr_containers = extra.cpp_pmr_containers,
         .cpp_impl_overrides = extra.cpp_impl_overrides,
         .cpp_impl_includes = extra.cpp_impl_includes,
+        .handle_retire_hook = extra.handle_retire_hook,
     };
     var hdr_out = std.ArrayList(u8).empty;
     errdefer hdr_out.deinit(alloc);
@@ -9203,7 +9434,7 @@ test "cpp_backend: B1+B3 — entity Impl class generated" {
     // Foo : Entity now owns its own native_handle() -- Entity is a pure
     // mixin (excluded, used as a base by Foo), so Foo has no qualifying
     // ancestor to inherit from and must declare + override its own.
-    try testing.expect(has(hdr, "DDS_Foo native_handle() const noexcept override { return ptr_; }"));
+    try testing.expect(has(hdr, "DDS_Foo native_handle() const noexcept override { return _zidl_is_retired() ? nullptr : ptr_; }"));
     // FooListenerBase declaration moved to dcps.hpp (Generator); not in dcps_impl.hpp
     try testing.expect(!has(hdr, "class FooListenerBridge"));
     try testing.expect(has(src, "DDS_Foo_do_something(ptr_)"));
@@ -9226,7 +9457,7 @@ test "cpp_backend: entity with multiple mixin bases (Topic-shaped) owns its own 
     );
     defer res.deinit();
     const hdr = res.hdr.items;
-    try testing.expect(has(hdr, "DDS_Multi native_handle() const noexcept override { return ptr_; }"));
+    try testing.expect(has(hdr, "DDS_Multi native_handle() const noexcept override { return _zidl_is_retired() ? nullptr : ptr_; }"));
 }
 
 test "cpp_backend: QueryCondition-shaped derived interface owns its own native_handle(), base does not" {
@@ -9245,10 +9476,10 @@ test "cpp_backend: QueryCondition-shaped derived interface owns its own native_h
     );
     defer res.deinit();
     const hdr = res.hdr.items;
-    try testing.expect(has(hdr, "DDS_Derived native_handle() const noexcept override { return ptr_; }"));
+    try testing.expect(has(hdr, "DDS_Derived native_handle() const noexcept override { return _zidl_is_retired() ? nullptr : ptr_; }"));
     // Base's impl keeps the ad hoc, non-virtual fallback -- it's excluded,
     // not owning its own, and nothing inherits a compatible one for it either.
-    try testing.expect(has(hdr, "DDS_Base native_handle() const noexcept { return ptr_; }"));
+    try testing.expect(has(hdr, "DDS_Base native_handle() const noexcept { return _zidl_is_retired() ? nullptr : ptr_; }"));
 }
 
 test "cpp_backend: --cpp-pmr-containers on — str_ret operation/attribute adapters use std::pmr::string" {
@@ -9303,7 +9534,7 @@ test "cpp_backend: extension Impl forwards inherited operations through generate
     defer res.deinit();
     const hdr = res.hdr.items;
     const src = res.src.items;
-    try testing.expect(has(hdr, "DDS_DomainParticipantFactory native_handle() const noexcept override { return zzdds_DomainParticipantFactory_as_DDS_DomainParticipantFactory(ptr_); }"));
+    try testing.expect(has(hdr, "DDS_DomainParticipantFactory native_handle() const noexcept override { return _zidl_is_retired() ? nullptr : zzdds_DomainParticipantFactory_as_DDS_DomainParticipantFactory(ptr_); }"));
     try testing.expect(has(hdr, "std::shared_ptr<::DDS::DomainParticipant> create_participant() override;"));
     try testing.expect(has(hdr, "std::shared_ptr<::DDS::DomainParticipant> create_participant_ex() override;"));
     try testing.expect(has(src, "DDS_DomainParticipantFactory_create_participant(zzdds_DomainParticipantFactory_as_DDS_DomainParticipantFactory(ptr_))"));
@@ -9339,7 +9570,7 @@ test "cpp_backend: cross-module extension of a base with multiple bases itself (
     // all. That's a test-harness artifact of combining both modules, not a
     // real-world case; the DomainParticipantFactory tests above already
     // cover a real separate generation pass's actual behavior.)
-    try testing.expect(has(hdr, "DDS_Topic native_handle() const noexcept override { return zzdds_Topic_as_DDS_Topic(ptr_); }"));
+    try testing.expect(has(hdr, "DDS_Topic native_handle() const noexcept override { return _zidl_is_retired() ? nullptr : zzdds_Topic_as_DDS_Topic(ptr_); }"));
 }
 
 test "cpp_backend: imported leaf base native_handle detection is generic" {
@@ -9358,7 +9589,7 @@ test "cpp_backend: imported leaf base native_handle detection is generic" {
     defer res.deinit();
     const hdr = res.hdr.items;
     const src = res.src.items;
-    try testing.expect(has(hdr, "Base_Leaf native_handle() const noexcept override { return Ext_Leaf_as_Base_Leaf(ptr_); }"));
+    try testing.expect(has(hdr, "Base_Leaf native_handle() const noexcept override { return _zidl_is_retired() ? nullptr : Ext_Leaf_as_Base_Leaf(ptr_); }"));
     try testing.expect(has(src, "Base_Leaf_inherited_op(Ext_Leaf_as_Base_Leaf(ptr_))"));
     try testing.expect(has(src, "Ext_Leaf_extension_op(ptr_)"));
 }
@@ -9521,7 +9752,7 @@ test "cpp_backend: B1+B3 — entity return wraps in Impl" {
     try testing.expect(has(src, "return ::DDS::BarImpl::_getOrCreate(_h);"));
     try testing.expect(has(src, "std::shared_ptr<BarImpl> BarImpl::_getOrCreate(DDS_Bar h) {"));
     try testing.expect(has(src, "if (!h) return nullptr;"));
-    try testing.expect(has(src, "static std::unordered_map<DDS_Bar, std::weak_ptr<BarImpl>> _cache;"));
+    try testing.expect(has(src, "static auto* c = new std::unordered_map<DDS_Bar, std::weak_ptr<BarImpl>>;"));
     try testing.expect(has(src, "std::allocate_shared<BarImpl>("));
     try testing.expect(has(src, "std::pmr::polymorphic_allocator<BarImpl>(std::pmr::get_default_resource())"));
 }
@@ -9544,7 +9775,10 @@ test "cpp_backend: entity wrapper identity — _getOrCreate declared and cache m
     // Cache-hit path returns the existing wrapper instead of allocating.
     try testing.expect(has(src, "auto _it = _cache.find(h);"));
     try testing.expect(has(src, "if (auto _sp = _it->second.lock()) return _sp;"));
-    try testing.expect(has(src, "std::lock_guard<std::mutex> _lock(_mtx);"));
+    try testing.expect(has(src, "std::lock_guard<std::mutex> _lock(_soloMutex());"));
+    // The cache is reachable from the retire observer, not local to _getOrCreate.
+    try testing.expect(has(hdr, "static std::unordered_map<DDS_Bar, std::weak_ptr<BarImpl>>& _soloCache();"));
+    try testing.expect(has(src, "void BarImpl::_zidlEvict(void* h) {"));
     // Expired-but-present entries are updated via the already-found iterator
     // rather than a second hash lookup; only a genuinely new handle inserts.
     try testing.expect(has(src, "_it->second = _sp;"));
@@ -9632,12 +9866,18 @@ test "cpp_backend: family root's _familyCache is std::pmr::unordered_map, not pl
     try testing.expect(has(hdr, "std::weak_ptr<Bar> ref;"));
     try testing.expect(has(hdr, "static std::pmr::unordered_map<DDS_Bar, _FamilyEntry>& _familyCache();"));
     try testing.expect(has(src, "std::pmr::unordered_map<DDS_Bar, BarImpl::_FamilyEntry>& BarImpl::_familyCache() {"));
-    try testing.expect(has(src, "static std::pmr::unordered_map<DDS_Bar, _FamilyEntry> c;"));
+    try testing.expect(has(src, "static auto* c = new std::pmr::unordered_map<DDS_Bar, _FamilyEntry>;"));
     try testing.expect(!has(hdr, "static std::unordered_map<DDS_Bar,"));
     // Each member tags its entries, and recognises its own by tag, not RTTI.
     try testing.expect(has(hdr, "static const void* _familyTag() noexcept;"));
     try testing.expect(has(src, "const void* BazImpl::_familyTag() noexcept {"));
-    try testing.expect(has(src, "_cache[h] = {_sp, _familyTag(), _sp.get()};"));
+    try testing.expect(has(src, "_cache[h] = {_sp, _familyTag(), _sp.get(), &_zidlRetire};"));
+    // A root-typed handle is boxed as the member it really is, resolved by
+    // the provider's checked downcast before the root's own cache is used.
+    try testing.expect(has(src, "    if (auto _d0 = DDS_Bar_as_DDS_Baz(h)) return ::DDS::BazImpl::_getOrCreate(_d0);\n    std::lock_guard<std::mutex> _lock(_familyMutex());"));
+    // An entry records how to retire its object, for the retire observer.
+    try testing.expect(has(hdr, "void (*retire)(void*) noexcept = nullptr;"));
+    try testing.expect(has(src, "void BarImpl::_zidlEvict(void* h) {"));
     try testing.expect(has(src, "if (_it != _cache.end() && _it->second.tag == _familyTag()) {"));
     try testing.expect(has(src, "return std::shared_ptr<BazImpl>(_base, static_cast<BazImpl*>(_it->second.obj));"));
     try testing.expect(!has(src, "dynamic_pointer_cast"));
@@ -9719,7 +9959,57 @@ test "cpp_backend: entity sequence field adapts in through the handle accessor (
     try testing.expect(!has(src, "TODO"));
 }
 
-test "cpp_backend: get_listener/set_listener stash pattern" {
+test "cpp_backend: --handle-retire-hook retires wrappers of freed handles" {
+    var res = try testGenConcreteImplOpts(
+        \\module DDS {
+        \\    @retired_result(RETCODE_ALREADY_DELETED) typedef long ReturnCode_t;
+        \\    const ReturnCode_t RETCODE_ALREADY_DELETED = 9;
+        \\    interface Bar {};
+        \\    interface Foo {
+        \\        ReturnCode_t enable();
+        \\        Bar get_bar();
+        \\        long count();
+        \\        void reset();
+        \\        attribute long level;
+        \\    };
+        \\    interface Factory { Foo create_foo(); };
+        \\};
+    , .{ .handle_retire_hook = "test_retire" });
+    defer res.deinit();
+    const hdr = res.hdr.items;
+    const src = res.src.items;
+    // The provider's registration functions, and one observer per file.
+    try testing.expect(has(src, "int test_retire_observe(_zidl_handle_retired_fn fn, void* ctx);"));
+    try testing.expect(has(src, "_ZidlRetireObserver() : ok(test_retire_observe(&_zidl_on_handle_retired, nullptr) == 0) {}"));
+    try testing.expect(has(src, "    ::DDS::FooImpl::_zidlEvict(h);\n"));
+    try testing.expect(has(src, "    ::DDS::BarImpl::_zidlEvict(h);\n"));
+    // A cache's first use registers it.
+    try testing.expect(has(src, "    ::_zidl_observe_retire();\n    return *c;\n"));
+    // Evicting marks the cached wrapper retired.
+    try testing.expect(has(src, "    if (_gone) _zidlRetire(_gone.get());\n    _cache.erase(_it);\n"));
+    try testing.expect(has(hdr, "std::atomic<bool> _zidl_retired_{false};"));
+    // A retired wrapper never reaches the provider: @retired_result for its
+    // typedef, null for an entity, a value-initialized result otherwise.
+    try testing.expect(has(src, "::DDS::ReturnCode_t FooImpl::enable() {\n    if (_zidl_is_retired()) return static_cast<::DDS::ReturnCode_t>(9);\n"));
+    try testing.expect(has(src, "FooImpl::get_bar() {\n    if (_zidl_is_retired()) return nullptr;\n"));
+    try testing.expect(has(src, "int32_t FooImpl::count() {\n    if (_zidl_is_retired()) return {};\n"));
+    try testing.expect(has(src, "void FooImpl::reset() {\n    if (_zidl_is_retired()) return;\n"));
+    try testing.expect(has(src, "int32_t FooImpl::level() const {\n    if (_zidl_is_retired()) return {};\n"));
+    try testing.expect(has(src, "void FooImpl::level(int32_t value) {\n    if (_zidl_is_retired()) return;\n"));
+
+    // Without the hook: no observer and no guards.
+    var plain = try testGenConcreteImpl(
+        \\module DDS {
+        \\    interface Bar {};
+        \\    interface Foo { Bar get_bar(); };
+        \\};
+    );
+    defer plain.deinit();
+    try testing.expect(!has(plain.src.items, "_zidl_observe_retire"));
+    try testing.expect(!has(plain.src.items, "if (_zidl_is_retired())"));
+}
+
+test "cpp_backend: get_listener reads the core's registration back, retained" {
     var res = try testGenConcreteImpl(
         \\module DDS {
         \\    @callback interface FooListener {};
@@ -9732,10 +10022,15 @@ test "cpp_backend: get_listener/set_listener stash pattern" {
     defer res.deinit();
     const hdr = res.hdr.items;
     const src = res.src.items;
-    try testing.expect(has(hdr, "std::shared_ptr<::DDS::FooListener> listener_;"));
-    try testing.expect(has(src, "FooImpl::get_listener() {\n    return listener_;\n}"));
+    // No wrapper-side copy of the listener: the core is the one record.
+    try testing.expect(!has(hdr, "listener_;"));
+    try testing.expect(has(src, "DDS_FooListener _l = DDS_Foo_get_listener(ptr_);"));
+    // Only this binding's registrations hold a FooListener.
+    try testing.expect(has(src, "if (_l.listener_data && _l.release_listener_data == &::DDS::FooListenerBase::release_c_listener)\n        _r = static_cast<::DDS::FooListenerBase::_Reg*>(_l.listener_data)->owner;"));
+    // The core retained it for the read; drop that reference.
+    try testing.expect(has(src, "if (_l.listener_data && _l.retain_listener_data && _l.release_listener_data) _l.release_listener_data(_l.listener_data);"));
     try testing.expect(has(src, "const auto _rc = DDS_Foo_set_listener(ptr_"));
-    try testing.expect(has(src, "if (_rc == 0) listener_ = a_listener;"));
+    try testing.expect(!has(src, "listener_ = a_listener;"));
     try testing.expect(has(src, "return _rc;"));
     try testing.expect(!has(src, "TODO"));
 }
@@ -9762,7 +10057,9 @@ test "cpp_backend: listener registrations own the listener; a call that installs
     // set_listener: a failed call installs nothing, so nothing else releases it.
     try testing.expect(has(src, "if (_rc != 0 && _lp_a_listener) ::DDS::FooListenerBase::release_c_listener(_l_a_listener.listener_data);"));
     // create_*: a failed create returns a nil entity, whose listener is not ours.
-    try testing.expect(has(src, "if (_lp_a_listener && DDS_Foo_get_listener(_h).listener_data != _l_a_listener.listener_data) ::DDS::FooListenerBase::release_c_listener(_l_a_listener.listener_data);"));
+    // The read-back is retained by the core, so it is released either way.
+    try testing.expect(has(src, "        auto _gl = DDS_Foo_get_listener(_h);\n        const bool _installed = _gl.listener_data == _l_a_listener.listener_data;\n"));
+    try testing.expect(has(src, "        if (!_installed) ::DDS::FooListenerBase::release_c_listener(_l_a_listener.listener_data);\n"));
     try testing.expect(!has(src, "TODO"));
 }
 
@@ -9845,7 +10142,7 @@ test "cpp_backend: @shared_base on an interface with operations is rejected" {
     ));
 }
 
-test "cpp_backend: get_listener/set_listener stash — void set_listener return stashes unconditionally" {
+test "cpp_backend: a void set_listener just forwards" {
     var res = try testGenConcreteImpl(
         \\module DDS {
         \\    @callback interface FooListener {};
@@ -9858,7 +10155,7 @@ test "cpp_backend: get_listener/set_listener stash — void set_listener return 
     defer res.deinit();
     const src = res.src.items;
     try testing.expect(has(src, "DDS_Foo_set_listener(ptr_"));
-    try testing.expect(has(src, "    listener_ = a_listener;\n}"));
+    try testing.expect(!has(src, "listener_ = a_listener;"));
     try testing.expect(!has(src, "TODO"));
 }
 
@@ -9900,11 +10197,13 @@ test "cpp_backend: B1+B3 — listener base is in dcps_impl.cpp; decl moved to dc
     try testing.expect(has(src, "DDS_DataWriterListener DataWriterListenerBase::c_listener(std::shared_ptr<::DDS::DataWriterListener> owner)"));
     try testing.expect(has(src, "DataWriterListenerBase::s_on_data"));
     // Each registration owns a reference to the listener, released by the core.
-    try testing.expect(has(src, "return {new std::shared_ptr<::DDS::DataWriterListener>(std::move(owner)), s_on_data, release_c_listener, _identity};"));
+    // It is counted: the core retains it for a get_listener.
+    try testing.expect(has(src, "return {new _Reg(std::move(owner)), s_on_data, release_c_listener, _identity, retain_c_listener};"));
     // No @shared_base: the identity is the complete object where RTTI allows.
     try testing.expect(has(src, "void* _identity = dynamic_cast<void*>(owner.get());"));
-    try testing.expect(has(src, "delete static_cast<std::shared_ptr<::DDS::DataWriterListener>*>(d);"));
-    try testing.expect(has(src, "(*static_cast<std::shared_ptr<::DDS::DataWriterListener>*>(d))->on_data("));
+    try testing.expect(has(src, "if (_r->refs.fetch_sub(1, std::memory_order_acq_rel) == 1) delete _r;"));
+    try testing.expect(has(src, "static_cast<_Reg*>(d)->refs.fetch_add(1, std::memory_order_relaxed);"));
+    try testing.expect(has(src, "static_cast<_Reg*>(d)->owner->on_data("));
     // Trampoline wraps the raw handle via the identity-preserving cache, not a
     // bare make_shared (see _getOrCreate).
     try testing.expect(has(src, "DataWriterImpl::_getOrCreate(w)"));
@@ -10237,7 +10536,7 @@ test "cpp_backend: entity_in param converts through the interface's handle acces
     const hdr = res.hdr.items;
     const src = res.src.items;
     try testing.expect(has(src, "(t ? t->_zidl_handle_DDS_Topic() : nullptr)"));
-    try testing.expect(has(hdr, "DDS_Topic _zidl_handle_DDS_Topic() const noexcept override { return ptr_; }"));
+    try testing.expect(has(hdr, "DDS_Topic _zidl_handle_DDS_Topic() const noexcept override { return _zidl_is_retired() ? nullptr : ptr_; }"));
     try testing.expect(!has(src, "dynamic_cast"));
     try testing.expect(!has(src, "throw"));
 }
@@ -10257,8 +10556,8 @@ test "cpp_backend: an Impl overrides the accessor of each entity interface it in
     defer res.deinit();
     const hdr = res.hdr.items;
     const src = res.src.items;
-    try testing.expect(has(hdr, "zzdds_DomainParticipantFactory _zidl_handle_zzdds_DomainParticipantFactory() const noexcept override { return ptr_; }"));
-    try testing.expect(has(hdr, "DDS_DomainParticipantFactory _zidl_handle_DDS_DomainParticipantFactory() const noexcept override { return zzdds_DomainParticipantFactory_as_DDS_DomainParticipantFactory(ptr_); }"));
+    try testing.expect(has(hdr, "zzdds_DomainParticipantFactory _zidl_handle_zzdds_DomainParticipantFactory() const noexcept override { return _zidl_is_retired() ? nullptr : ptr_; }"));
+    try testing.expect(has(hdr, "DDS_DomainParticipantFactory _zidl_handle_DDS_DomainParticipantFactory() const noexcept override { return _zidl_is_retired() ? nullptr : zzdds_DomainParticipantFactory_as_DDS_DomainParticipantFactory(ptr_); }"));
     try testing.expect(has(src, "(f ? f->_zidl_handle_zzdds_DomainParticipantFactory() : nullptr)"));
 }
 
@@ -10280,9 +10579,9 @@ test "cpp_backend: entity_in param for a base with several sibling implementors 
     const hdr = res.hdr.items;
     const src = res.src.items;
     try testing.expect(has(src, "(b ? b->_zidl_handle_DDS_Base() : nullptr)"));
-    try testing.expect(has(hdr, "DDS_Base _zidl_handle_DDS_Base() const noexcept override { return DDS_LeafA_as_DDS_Base(ptr_); }"));
-    try testing.expect(has(hdr, "DDS_Base _zidl_handle_DDS_Base() const noexcept override { return DDS_LeafB_as_DDS_Base(ptr_); }"));
-    try testing.expect(has(hdr, "DDS_Base _zidl_handle_DDS_Base() const noexcept override { return ptr_; }"));
+    try testing.expect(has(hdr, "DDS_Base _zidl_handle_DDS_Base() const noexcept override { return _zidl_is_retired() ? nullptr : DDS_LeafA_as_DDS_Base(ptr_); }"));
+    try testing.expect(has(hdr, "DDS_Base _zidl_handle_DDS_Base() const noexcept override { return _zidl_is_retired() ? nullptr : DDS_LeafB_as_DDS_Base(ptr_); }"));
+    try testing.expect(has(hdr, "DDS_Base _zidl_handle_DDS_Base() const noexcept override { return _zidl_is_retired() ? nullptr : ptr_; }"));
 }
 
 test "cpp_backend: the abstract interface's accessor defaults to nullptr" {
@@ -10517,6 +10816,6 @@ test "cpp_backend: cross-file base parameter adapter also accepts the imported f
     // The parameter converts through the base's accessor, which every
     // subtype's Impl overrides, whichever file declares the subtype.
     try testing.expect(has(s, "ext_Subscriber_create_datareader_ex(ptr_, (a_topic ? a_topic->_zidl_handle_DDS_TopicDescription() : nullptr))"));
-    try testing.expect(has(h, "DDS_TopicDescription _zidl_handle_DDS_TopicDescription() const noexcept override { return DDS_Topic_as_DDS_TopicDescription(ext_Topic_as_DDS_Topic(ptr_)); }"));
+    try testing.expect(has(h, "DDS_TopicDescription _zidl_handle_DDS_TopicDescription() const noexcept override { return _zidl_is_retired() ? nullptr : DDS_Topic_as_DDS_TopicDescription(ext_Topic_as_DDS_Topic(ptr_)); }"));
     try testing.expect(!has(s, "dynamic_cast"));
 }
