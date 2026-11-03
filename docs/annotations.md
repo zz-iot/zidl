@@ -89,8 +89,8 @@ the deprecation warning when it is added.
 With `--handle-retire-hook`, an operation of a C++ or Java wrapper whose entity's
 handle has been freed returns this value, without calling the provider, when its
 return type is this typedef or a typedef aliasing it. The parameter is an integer
-literal or the name of an integer constant, looked up in the typedef's module
-first. See [`design/handle-lifetime.md`](design/handle-lifetime.md).
+constant expression, evaluated in the typedef's scope by IDL scoping rules. See
+[`design/handle-lifetime.md`](design/handle-lifetime.md).
 
 ### `@pl_repeated`
 

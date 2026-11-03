@@ -46,6 +46,11 @@ consumer's types or operations.
   claims falls through to the shared cache.
 - **Every entity interface has a cache** in both bindings (Java used to cache only
   `@shared_c_abi_box` families), hashed on the handle.
+- **A handle keeps every live wrapper.** It can have one per class it was boxed
+  as: a QueryCondition boxed as a ReadCondition, then through the root as a
+  QueryCondition. A lookup returns the one of the requested type; the others
+  stay cached, so retirement reaches all of them. Entries whose wrapper is gone
+  are reclaimed as the cache is searched.
 
 This needs no provider support beyond the checked downcasts a
 `@shared_c_abi_box` hierarchy already declares. It cannot catch the same type at
@@ -90,7 +95,10 @@ The observer may drop the last reference to a C++ wrapper, so a wrapper's
 destructor runs on the provider's thread and must not call the provider. The
 generated destructors do nothing. The caches themselves are never destroyed, so
 a report during static destruction is safe. Java never unregisters its observer
-(a JNI library is not unloaded); C++ unregisters in a static destructor.
+(a JNI library is not unloaded); C++ unregisters in a static destructor. zidl-rt's
+observer table grows as needed, so registration fails only if memory runs out;
+a binding whose registration fails aborts with a message rather than hand out
+wrappers that would never be retired.
 
 The hook does not make a wrapper safe to use **while** its entity is being
 deleted on another thread: a call already past the retired check uses the
@@ -102,9 +110,10 @@ has reported the handle, no wrapper reaches it.
 
 An annotation on a typedef: an operation whose return type is that typedef, or a
 typedef aliasing it, returns `value` from a retired wrapper. `value` is an integer
-literal or the name of an integer constant, looked up in the typedef's own module
-first. Other return types give null for an entity, `false`/zero for a Java
-primitive, null for another Java object, and a value-initialized result in C++.
+constant expression, evaluated in the typedef's scope when the IR is built, so a
+name resolves by IDL scoping rules, including in an imported file. Other return
+types give null for an entity, `false`/zero for a Java primitive, null for
+another Java object, and a value-initialized result in C++.
 For example, `@retired_result(RETCODE_ALREADY_DELETED) typedef long ReturnCode_t;`
 makes every return-code operation on a deleted entity's wrapper report
 `ALREADY_DELETED`.
