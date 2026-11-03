@@ -369,6 +369,32 @@ pub fn hasSharedCAbiBox(iface: *const Interface) bool {
     return false;
 }
 
+/// The value an operation returning `type_ref` gives on a retired receiver,
+/// from `@retired_result(value)` on `type_ref`'s typedef or any typedef it
+/// aliases (see docs/design/handle-lifetime.md). The IR builder has already
+/// evaluated `value` in the typedef's scope into an integer parameter. Null
+/// when no typedef in the chain carries the annotation.
+pub fn retiredResult(type_ref: TypeRef) ?i64 {
+    var tr = type_ref;
+    while (true) {
+        const td = switch (tr) {
+            .named => |n| switch (n) {
+                .typedef => |t| t,
+                else => return null,
+            },
+            else => return null,
+        };
+        for (td.raw) |ann| {
+            if (!std.mem.eql(u8, ann.name, "retired_result") or ann.params.len != 1) continue;
+            switch (ann.params[0].value) {
+                .integer => |v| return v,
+                else => return null,
+            }
+        }
+        tr = td.type_ref;
+    }
+}
+
 pub const Operation = struct {
     name: []const u8,
     span: ast.Span,

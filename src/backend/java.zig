@@ -4628,6 +4628,33 @@ const ImplFileGenerator = struct {
         try self.out.appendSlice(self.alloc, s);
     }
 
+    /// With `--handle-retire-hook`, the statement a forwarding method runs
+    /// first: once the provider has freed this wrapper's handle (ptr_ zeroed
+    /// by the JNI bridge's retire observer), the method returns without
+    /// reaching it. The value is `@retired_result`'s for the return type, a
+    /// primitive's zero, or null; out parameters are left as they are. Empty
+    /// without the hook.
+    fn retiredGuard(self: *ImplFileGenerator, ret: ?ir.TypeRef) ![]u8 {
+        if (self.opts.handle_retire_hook.len == 0) return self.alloc.dupe(u8, "");
+        const rt = ret orelse return self.alloc.dupe(u8, "if (ptr_ == 0) return; ");
+        const jt = try self.typeRefToJava(rt);
+        defer self.alloc.free(jt);
+        if (ir.retiredResult(rt)) |v| {
+            const suffix: []const u8 = if (std.mem.eql(u8, jt, "long")) "L" else "";
+            return std.fmt.allocPrint(self.alloc, "if (ptr_ == 0) return ({s}) {d}{s}; ", .{ jt, v, suffix });
+        }
+        const zero: []const u8 = if (std.mem.eql(u8, jt, "boolean"))
+            "false"
+        else if (std.mem.eql(u8, jt, "int") or std.mem.eql(u8, jt, "long") or std.mem.eql(u8, jt, "short") or
+            std.mem.eql(u8, jt, "byte") or std.mem.eql(u8, jt, "float") or std.mem.eql(u8, jt, "double") or
+            std.mem.eql(u8, jt, "char"))
+            "0"
+        else
+            "null";
+        if (std.mem.eql(u8, zero, "0")) return std.fmt.allocPrint(self.alloc, "if (ptr_ == 0) return ({s}) 0; ", .{jt});
+        return std.fmt.allocPrint(self.alloc, "if (ptr_ == 0) return {s}; ", .{zero});
+    }
+
     fn print(self: *ImplFileGenerator, comptime fmt: []const u8, args: anytype) !void {
         const s = try std.fmt.allocPrint(self.alloc, fmt, args);
         defer self.alloc.free(s);
@@ -4657,7 +4684,13 @@ const ImplFileGenerator = struct {
         const pfx = self.opts.type_prefix;
         try self.print("public class {s}{s}Impl implements {s} {{\n", .{ pfx, iface.name, java_iface_path });
         try self.print("    static {{ System.loadLibrary(\"{s}\"); }}\n\n", .{self.opts.jni_library});
-        try self.write("    private final long ptr_;\n\n");
+        // With the retire hook the JNI bridge zeroes ptr_ once the provider
+        // frees the handle (retiredGuard).
+        if (self.opts.handle_retire_hook.len > 0) {
+            try self.write("    private volatile long ptr_;\n\n");
+        } else {
+            try self.write("    private final long ptr_;\n\n");
+        }
         try self.print("    public {s}{s}Impl(long ptr) {{ this.ptr_ = ptr; }}\n\n", .{ pfx, iface.name });
 
         // @Override forwarding methods.
@@ -4738,7 +4771,17 @@ const ImplFileGenerator = struct {
         try self.write("    @Override\n");
         try self.print("    public {s} {s}(", .{ ret_java, op.name });
         try self.writeLoanBufferParamDecls(op, null);
-        try self.print(") {{\n        return n_{s}(", .{op.name});
+        try self.write(") {\n");
+        if (self.opts.handle_retire_hook.len > 0) {
+            if (std.mem.eql(u8, ret_java, "int")) {
+                const guard = try self.retiredGuard(op.return_type);
+                defer self.alloc.free(guard);
+                try self.print("        {s}\n", .{std.mem.trimEnd(u8, guard, " ")});
+            } else {
+                try self.write("        if (ptr_ == 0) return null;\n");
+            }
+        }
+        try self.print("        return n_{s}(", .{op.name});
         try self.writeLoanBufferParamNames(op, true);
         try self.write(");\n    }\n");
     }
@@ -4755,11 +4798,15 @@ const ImplFileGenerator = struct {
     /// from -- it only ever releases); the other four keep their existing
     /// params and gain a trailing `loanHandles` array.
     fn emitReadLoanBufferForwardingOp(self: *ImplFileGenerator, op: *const ir.Operation) !void {
+        const guard_raw = try self.retiredGuard(op.return_type);
+        defer self.alloc.free(guard_raw);
+        const guard = std.mem.trimEnd(u8, guard_raw, " ");
+        const nl: []const u8 = if (guard.len > 0) "\n        " else "";
         try self.write("    @Override\n");
         if (std.mem.eql(u8, op.name, "return_loan_raw")) {
             try self.print(
-                "    public int {s}(java.nio.ByteBuffer[] loanHandles) {{\n        return n_{s}(ptr_, loanHandles);\n    }}\n",
-                .{ op.name, op.name },
+                "    public int {s}(java.nio.ByteBuffer[] loanHandles) {{\n        {s}{s}return n_{s}(ptr_, loanHandles);\n    }}\n",
+                .{ op.name, guard, nl, op.name },
             );
             return;
         }
@@ -4769,7 +4816,7 @@ const ImplFileGenerator = struct {
             defer self.alloc.free(pt);
             try self.print("{s} {s}, ", .{ pt, p.name });
         }
-        try self.print("java.nio.ByteBuffer[] loanHandles) {{\n        return n_{s}(ptr_", .{op.name});
+        try self.print("java.nio.ByteBuffer[] loanHandles) {{\n        {s}{s}return n_{s}(ptr_", .{ guard, nl, op.name });
         for (op.params) |p| try self.print(", {s}", .{p.name});
         try self.write(", loanHandles);\n    }\n");
     }
@@ -4822,6 +4869,9 @@ const ImplFileGenerator = struct {
             return;
         }
 
+        const guard = try self.retiredGuard(op.return_type);
+        defer self.alloc.free(guard);
+        if (guard.len > 0) try self.print("        {s}\n", .{std.mem.trimEnd(u8, guard, " ")});
         if (op.return_type != null) {
             try self.print("        return n_{s}(ptr_", .{op.name});
         } else {
@@ -4850,15 +4900,19 @@ const ImplFileGenerator = struct {
             return;
         }
 
+        const get_guard = try self.retiredGuard(attr.type_ref);
+        defer self.alloc.free(get_guard);
         try self.write("    @Override\n");
-        try self.print("    public {s} get_{s}() {{ return n_get_{s}(ptr_); }}\n", .{
-            at, attr.name, attr.name,
+        try self.print("    public {s} get_{s}() {{ {s}return n_get_{s}(ptr_); }}\n", .{
+            at, attr.name, get_guard, attr.name,
         });
         if (!attr.readonly) {
+            const set_guard = try self.retiredGuard(null);
+            defer self.alloc.free(set_guard);
             try self.write("    @Override\n");
             try self.print(
-                "    public void set_{s}({s} value) {{ n_set_{s}(ptr_, value); }}\n",
-                .{ attr.name, at, attr.name },
+                "    public void set_{s}({s} value) {{ {s}n_set_{s}(ptr_, value); }}\n",
+                .{ attr.name, at, set_guard, attr.name },
             );
         }
     }
@@ -5222,9 +5276,8 @@ const JniBridgeGenerator = struct {
 
     /// The `Family` a given interface belongs to: its shared-box root and how
     /// many members are in that root's LOCAL group. `size <= 1` means "no
-    /// sharing needed here" — `iface` keeps its own independent box-helper
-    /// identity behavior exactly as it always has (which today is "none":
-    /// every `zidl_java_box_<c_name>` call constructs a fresh Java object).
+    /// sharing needed here": `iface` has an identity cache of its own (see
+    /// `cacheRootOf`).
     const Family = struct {
         root: *const ir.Interface,
         size: usize,
@@ -5421,6 +5474,15 @@ const JniBridgeGenerator = struct {
                     "    JNIEnv *env = zidl_java_get_env();\n" ++
                     "    if (env == NULL) return;\n" ++
                     "    zidl_java_release_listener_ctx(env, listener_data);\n" ++
+                    "}\n" ++
+                    "/* Generic `retain_listener_data` hook: the core calls it before a\n" ++
+                    " * get_listener hands the context back, so the context outlives a\n" ++
+                    " * concurrent replacement until the caller releases it. */\n" ++
+                    "void zidl_java_retain_listener_data(void *listener_data) {\n" ++
+                    "    if (listener_data == NULL) return;\n" ++
+                    "    pthread_mutex_lock(&zidl_java_listener_mtx);\n" ++
+                    "    ((zidl_java_listener_ctx *)listener_data)->refs++;\n" ++
+                    "    pthread_mutex_unlock(&zidl_java_listener_mtx);\n" ++
                     "}\n\n",
             );
         } else {
@@ -5433,7 +5495,8 @@ const JniBridgeGenerator = struct {
                     "extern zidl_java_listener_ctx *zidl_java_listener_ctx_acquire(JNIEnv *env, jobject obj);\n" ++
                     "extern void zidl_java_release_listener_ctx(JNIEnv *env, void *listener_data);\n" ++
                     "extern JNIEnv *zidl_java_get_env(void);\n" ++
-                    "extern void zidl_java_release_listener_data(void *listener_data);\n\n",
+                    "extern void zidl_java_release_listener_data(void *listener_data);\n" ++
+                    "extern void zidl_java_retain_listener_data(void *listener_data);\n\n",
             );
         }
 
@@ -5488,16 +5551,22 @@ const JniBridgeGenerator = struct {
         // and lookup/insert functions, all self-contained and independent of
         // per-interface emission order, so emitted once up front rather than
         // tied to whichever interface happens to be the family's root.
+        // Every local entity interface gets one: a family member shares its
+        // root's, any other interface has its own (`cacheRootOf`).
+        try self.emitCachePrelude();
         {
             var emitted_roots = std.StringHashMapUnmanaged(void).empty;
             defer emitted_roots.deinit(self.alloc);
+            var roots = std.ArrayListUnmanaged(*const ir.Interface).empty;
+            defer roots.deinit(self.alloc);
             for (entity_ifaces.items) |iface| {
-                const fam = self.familyOf(iface);
-                if (fam.size <= 1) continue;
-                if (emitted_roots.contains(fam.root.qualified_name)) continue;
-                try emitted_roots.put(self.alloc, fam.root.qualified_name, {});
-                try self.emitSharedFamilyCache(fam.root);
+                const root = self.cacheRootOf(iface);
+                if (emitted_roots.contains(root.qualified_name)) continue;
+                try emitted_roots.put(self.alloc, root.qualified_name, {});
+                try self.emitSharedFamilyCache(root);
+                try roots.append(self.alloc, root);
             }
+            try self.emitRetireObserver(roots.items);
         }
 
         // Cross-file references (e.g. `create_participant_ex` taking/returning
@@ -5805,12 +5874,13 @@ const JniBridgeGenerator = struct {
         try self.write("}\n\n");
     }
 
-    /// Emits the shared box-identity cache for `root`'s whole family: a
-    /// singly-linked list of `{handle, jweak}` nodes (not a hash table —
-    /// realistic family sizes are small; simplicity and auditability win
-    /// over raw lookup speed here) protected by one mutex, plus a
-    /// lock-already-held lookup function every family member's box helper
-    /// (see `emitBoxHelper`) consults before constructing a new object.
+    /// Emits the box-identity cache for `root` (`cacheRootOf`): `{handle,
+    /// jweak}` nodes in buckets hashed on the handle (every live entity of
+    /// the family is in it, and a listener callback boxes on every call)
+    /// protected by one mutex, plus a lock-already-held lookup function
+    /// every family member's box helper (see `emitBoxHelper`) consults
+    /// before constructing a new object, and the `_evict` the retire
+    /// observer calls (`emitRetireObserver`).
     /// Keyed directly on the raw `void *` handle with no per-view conversion
     /// needed — unlike the C++ backend, this file's `zidl_java_box_<c>`
     /// functions already take a bare `void *`, and `@shared_c_abi_box`
@@ -5825,51 +5895,168 @@ const JniBridgeGenerator = struct {
     /// re-entering this file's own native methods, so nothing holds the
     /// mutex across the `NewObject` call that constructs the object being
     /// inserted).
+    /// The interface whose identity cache `iface`'s box helper uses: its
+    /// family root when it shares one (`familyOf`), else itself.
+    fn cacheRootOf(self: *JniBridgeGenerator, iface: *const ir.Interface) *const ir.Interface {
+        const fam = self.familyOf(iface);
+        return if (fam.size > 1) fam.root else iface;
+    }
+
+    /// Definitions every identity cache in this file uses, emitted once
+    /// before them: the bucket hash, `zidl_java_mark_retired`, and the
+    /// once-only registration of this file's retire observer
+    /// (`ZIDL_JAVA_OBSERVE_RETIRE`, a no-op without `--handle-retire-hook`).
+    fn emitCachePrelude(self: *JniBridgeGenerator) !void {
+        try self.write(
+            "/* Box-identity caches: one per entity interface, or one shared by a\n" ++
+                " * `@shared_c_abi_box` family, hashed on the handle. */\n" ++
+                "#define ZIDL_JAVA_CACHE_BUCKETS 64\n" ++
+                "#define ZIDL_JAVA_CACHE_BUCKET(h) ((unsigned)(((uintptr_t)(h) >> 4) % ZIDL_JAVA_CACHE_BUCKETS))\n" ++
+                "#ifndef ZIDL_JAVA_MAYBE_UNUSED\n" ++
+                "#if defined(__GNUC__) || defined(__clang__)\n" ++
+                "#define ZIDL_JAVA_MAYBE_UNUSED __attribute__((unused))\n" ++
+                "#else\n" ++
+                "#define ZIDL_JAVA_MAYBE_UNUSED\n" ++
+                "#endif\n" ++
+                "#endif\n" ++
+                "\n" ++
+                "/* Zeroes a wrapper's ptr_, after which its methods return without\n" ++
+                " * reaching the provider (see the generated *Impl classes). */\n" ++
+                "static ZIDL_JAVA_MAYBE_UNUSED void zidl_java_mark_retired(JNIEnv *env, jobject obj) {\n" ++
+                "    jclass cls = (*env)->GetObjectClass(env, obj);\n" ++
+                "    jfieldID fid = (*env)->GetFieldID(env, cls, \"ptr_\", \"J\");\n" ++
+                "    if (fid == NULL) (*env)->ExceptionClear(env);\n" ++
+                "    else (*env)->SetLongField(env, obj, fid, 0);\n" ++
+                "    (*env)->DeleteLocalRef(env, cls);\n" ++
+                "}\n\n",
+        );
+        const hook = self.opts.handle_retire_hook;
+        if (hook.len == 0) {
+            try self.write("#define ZIDL_JAVA_OBSERVE_RETIRE() ((void)0)\n\n");
+            return;
+        }
+        try self.print(
+            "/* Handle-retire hook (docs/design/handle-lifetime.md in zidl): the\n" ++
+                " * provider reports each entity handle it frees, before the address can\n" ++
+                " * name another object. The first use of any cache in this file\n" ++
+                " * registers the observer, defined after the caches. Without it,\n" ++
+                " * wrappers of freed handles would keep calling into them, so a failed\n" ++
+                " * registration stops the program rather than hand any out. */\n" ++
+                "#include <stdio.h>\n" ++
+                "extern int {[h]s}_observe(void (*fn)(void *ctx, void *handle), void *ctx);\n" ++
+                "static void _zidl_java_on_handle_retired(void *ctx, void *handle);\n" ++
+                "static pthread_once_t _zidl_java_retire_once = PTHREAD_ONCE_INIT;\n" ++
+                "static ZIDL_JAVA_MAYBE_UNUSED void _zidl_java_retire_register(void) {{\n" ++
+                "    if ({[h]s}_observe(_zidl_java_on_handle_retired, NULL) != 0) {{\n" ++
+                "        fputs(\"zidl: {[h]s}_observe failed\\n\", stderr);\n" ++
+                "        abort();\n" ++
+                "    }}\n" ++
+                "}}\n" ++
+                "#define ZIDL_JAVA_OBSERVE_RETIRE() pthread_once(&_zidl_java_retire_once, _zidl_java_retire_register)\n\n",
+            .{ .h = hook },
+        );
+    }
+
+    /// With `--handle-retire-hook`: the observer, evicting a retired handle
+    /// from every cache in this file. It runs on whatever thread the provider
+    /// frees the handle on, attaching it to the JVM if needed, and takes only
+    /// the caches' own locks. Never unregistered: a JNI library stays loaded.
+    fn emitRetireObserver(self: *JniBridgeGenerator, roots: []const *const ir.Interface) !void {
+        if (self.opts.handle_retire_hook.len == 0) return;
+        try self.write(
+            "static void _zidl_java_on_handle_retired(void *ctx, void *handle) {\n" ++
+                "    (void)ctx;\n" ++
+                "    JNIEnv *env = zidl_java_get_env();\n" ++
+                "    if (env == NULL) return;\n",
+        );
+        for (roots) |root| {
+            const root_c = try interface.prefixedCNameFromQualified(self.alloc, root.qualified_name, self.opts.type_prefix);
+            defer self.alloc.free(root_c);
+            try self.print("    _zidl_family_{s}_evict(env, handle);\n", .{root_c});
+        }
+        try self.write("}\n\n");
+    }
+
     fn emitSharedFamilyCache(self: *JniBridgeGenerator, root: *const ir.Interface) !void {
         const root_c = try interface.prefixedCNameFromQualified(self.alloc, root.qualified_name, self.opts.type_prefix);
         defer self.alloc.free(root_c);
         try self.print(
-            "/* Shared box-identity cache for the {s} family. */\n" ++
-                "typedef struct _zidl_family_{s}_node {{\n" ++
+            "/* Box-identity cache for {[q]s} and every interface sharing its box. */\n" ++
+                "typedef struct _zidl_family_{[r]s}_node {{\n" ++
                 "    void *handle;\n" ++
                 "    jweak ref;\n" ++
-                "    struct _zidl_family_{s}_node *next;\n" ++
-                "}} _zidl_family_{s}_node;\n" ++
-                "static pthread_mutex_t _zidl_family_{s}_mtx = PTHREAD_MUTEX_INITIALIZER;\n" ++
-                "static _zidl_family_{s}_node *_zidl_family_{s}_head = NULL;\n" ++
+                "    struct _zidl_family_{[r]s}_node *next;\n" ++
+                "}} _zidl_family_{[r]s}_node;\n" ++
+                "static pthread_mutex_t _zidl_family_{[r]s}_mtx = PTHREAD_MUTEX_INITIALIZER;\n" ++
+                "static _zidl_family_{[r]s}_node *_zidl_family_{[r]s}_buckets[ZIDL_JAVA_CACHE_BUCKETS];\n" ++
                 "\n" ++
-                "/* Caller must hold _zidl_family_{s}_mtx. Returns a NEW LOCAL ref for\n" ++
-                " * `handle` if a live one is cached, else NULL (reclaiming the node\n" ++
-                " * first if its weak ref has expired -- a GC'd Java object). */\n" ++
-                "static jobject _zidl_family_{s}_lookup_locked(JNIEnv *env, void *handle) {{\n" ++
-                "    _zidl_family_{s}_node **pp = &_zidl_family_{s}_head;\n" ++
+                "/* Caller must hold _zidl_family_{[r]s}_mtx. Returns a NEW LOCAL ref to\n" ++
+                " * the live object cached for `handle` that is an instance of `want`, or\n" ++
+                " * NULL. A handle can have several live objects: one boxed as a base\n" ++
+                " * interface and later one as a derived one, or, without a handle-retire\n" ++
+                " * hook, a destroyed entity's whose address now names an object of\n" ++
+                " * another type. All stay cached, so the hook can retire every one.\n" ++
+                " * Reclaims every node in the bucket whose object Java has collected. */\n" ++
+                "static jobject _zidl_family_{[r]s}_lookup_locked(JNIEnv *env, void *handle, jclass want) {{\n" ++
+                "    _zidl_family_{[r]s}_node **pp = &_zidl_family_{[r]s}_buckets[ZIDL_JAVA_CACHE_BUCKET(handle)];\n" ++
                 "    while (*pp != NULL) {{\n" ++
-                "        _zidl_family_{s}_node *n = *pp;\n" ++
-                "        if (n->handle == handle) {{\n" ++
-                "            if (!(*env)->IsSameObject(env, n->ref, NULL)) {{\n" ++
-                "                jobject local = (*env)->NewLocalRef(env, n->ref);\n" ++
-                "                if (local != NULL) return local;\n" ++
-                "            }}\n" ++
+                "        _zidl_family_{[r]s}_node *n = *pp;\n" ++
+                "        jobject local = (*env)->NewLocalRef(env, n->ref);\n" ++
+                "        if (local == NULL) {{\n" ++
                 "            *pp = n->next;\n" ++
                 "            (*env)->DeleteWeakGlobalRef(env, n->ref);\n" ++
                 "            free(n);\n" ++
-                "            return NULL;\n" ++
+                "            continue;\n" ++
                 "        }}\n" ++
+                "        if (n->handle == handle && (*env)->IsInstanceOf(env, local, want)) return local;\n" ++
+                "        (*env)->DeleteLocalRef(env, local);\n" ++
                 "        pp = &n->next;\n" ++
                 "    }}\n" ++
                 "    return NULL;\n" ++
                 "}}\n" ++
                 "\n" ++
-                "/* Caller must hold _zidl_family_{s}_mtx and must already have\n" ++
+                "/* Caller must hold _zidl_family_{[r]s}_mtx and must already have\n" ++
                 " * re-checked _lookup_locked found nothing since `obj` was\n" ++
                 " * constructed (double-checked locking). */\n" ++
-                "static void _zidl_family_{s}_insert_locked(JNIEnv *env, void *handle, jobject obj) {{\n" ++
-                "    _zidl_family_{s}_node *n = (_zidl_family_{s}_node *)malloc(sizeof(_zidl_family_{s}_node));\n" ++
+                "static void _zidl_family_{[r]s}_insert_locked(JNIEnv *env, void *handle, jobject obj) {{\n" ++
+                "    _zidl_family_{[r]s}_node *n = (_zidl_family_{[r]s}_node *)malloc(sizeof(_zidl_family_{[r]s}_node));\n" ++
                 "    if (n == NULL) return; /* best-effort: OOM just means no caching for this handle */\n" ++
+                "    _zidl_family_{[r]s}_node **head = &_zidl_family_{[r]s}_buckets[ZIDL_JAVA_CACHE_BUCKET(handle)];\n" ++
                 "    n->handle = handle;\n" ++
                 "    n->ref = (*env)->NewWeakGlobalRef(env, obj);\n" ++
-                "    n->next = _zidl_family_{s}_head;\n" ++
-                "    _zidl_family_{s}_head = n;\n" ++
+                "    n->next = *head;\n" ++
+                "    *head = n;\n" ++
+                "}}\n" ++
+                "\n" ++
+                "/* Drops every node for `handle` and marks each live object retired\n" ++
+                " * (ptr_ = 0), for the handle-retire observer: the provider freed the\n" ++
+                " * handle, so no wrapper of it may reach it again. */\n" ++
+                "static ZIDL_JAVA_MAYBE_UNUSED void _zidl_family_{[r]s}_evict(JNIEnv *env, void *handle) {{\n" ++
+                "    _zidl_family_{[r]s}_node *gone = NULL;\n" ++
+                "    _zidl_family_{[r]s}_node **pp = &_zidl_family_{[r]s}_buckets[ZIDL_JAVA_CACHE_BUCKET(handle)];\n" ++
+                "    pthread_mutex_lock(&_zidl_family_{[r]s}_mtx);\n" ++
+                "    while (*pp != NULL) {{\n" ++
+                "        _zidl_family_{[r]s}_node *n = *pp;\n" ++
+                "        if (n->handle == handle) {{\n" ++
+                "            *pp = n->next;\n" ++
+                "            n->next = gone;\n" ++
+                "            gone = n;\n" ++
+                "            continue;\n" ++
+                "        }}\n" ++
+                "        pp = &n->next;\n" ++
+                "    }}\n" ++
+                "    pthread_mutex_unlock(&_zidl_family_{[r]s}_mtx);\n" ++
+                "    while (gone != NULL) {{\n" ++
+                "        _zidl_family_{[r]s}_node *n = gone;\n" ++
+                "        gone = n->next;\n" ++
+                "        jobject obj = (*env)->NewLocalRef(env, n->ref);\n" ++
+                "        (*env)->DeleteWeakGlobalRef(env, n->ref);\n" ++
+                "        free(n);\n" ++
+                "        if (obj != NULL) {{\n" ++
+                "            zidl_java_mark_retired(env, obj);\n" ++
+                "            (*env)->DeleteLocalRef(env, obj);\n" ++
+                "        }}\n" ++
+                "    }}\n" ++
                 "}}\n" ++
                 "\n" ++
                 "/* Registers `obj` as the cached identity for `handle`, for hand-written\n" ++
@@ -5877,33 +6064,28 @@ const JniBridgeGenerator = struct {
                 " * zidl_java_box_<c_name> -- e.g. an app-instantiated type with no\n" ++
                 " * factory operation, so nothing in generated code ever calls box for it\n" ++
                 " * (GuardCondition is a real example: see zzdds's docs/roadmap.md). If a\n" ++
-                " * still-live registration for the same handle already exists, `obj` is\n" ++
-                " * simply not registered -- the caller's own `obj` reference remains\n" ++
-                " * perfectly valid to use either way; this only affects what FUTURE\n" ++
-                " * zidl_java_box_* / lookup calls for this handle see, and a type with no\n" ++
-                " * factory operation to race against never hits that case in practice.\n" ++
-                " * Non-static and forward-declared nowhere in this file on purpose: the\n" ++
-                " * only expected callers are hand-written, in a different translation\n" ++
-                " * unit within the same linked library, which must declare it `extern`\n" ++
-                " * themselves. */\n" ++
-                "void _zidl_family_{s}_register_external(JNIEnv *env, void *handle, jobject obj) {{\n" ++
+                " * still-live registration of `obj`'s class for the same handle already\n" ++
+                " * exists, `obj` is simply not registered (one of another class is\n" ++
+                " * kept beside it) -- the caller's own `obj`\n" ++
+                " * reference remains perfectly valid to use either way; this only\n" ++
+                " * affects what FUTURE zidl_java_box_* / lookup calls for this handle\n" ++
+                " * see, and a type with no factory operation to race against never\n" ++
+                " * hits that case in practice. Non-static and forward-declared nowhere\n" ++
+                " * in this file on purpose: the only expected callers are hand-written,\n" ++
+                " * in a different translation unit within the same linked library,\n" ++
+                " * which must declare it `extern` themselves. */\n" ++
+                "void _zidl_family_{[r]s}_register_external(JNIEnv *env, void *handle, jobject obj) {{\n" ++
                 "    if (handle == NULL || obj == NULL) return;\n" ++
-                "    pthread_mutex_lock(&_zidl_family_{s}_mtx);\n" ++
-                "    jobject existing = _zidl_family_{s}_lookup_locked(env, handle);\n" ++
-                "    if (existing != NULL) {{\n" ++
-                "        pthread_mutex_unlock(&_zidl_family_{s}_mtx);\n" ++
-                "        (*env)->DeleteLocalRef(env, existing);\n" ++
-                "        return;\n" ++
-                "    }}\n" ++
-                "    _zidl_family_{s}_insert_locked(env, handle, obj);\n" ++
-                "    pthread_mutex_unlock(&_zidl_family_{s}_mtx);\n" ++
+                "    ZIDL_JAVA_OBSERVE_RETIRE();\n" ++
+                "    jclass cls = (*env)->GetObjectClass(env, obj);\n" ++
+                "    pthread_mutex_lock(&_zidl_family_{[r]s}_mtx);\n" ++
+                "    jobject existing = _zidl_family_{[r]s}_lookup_locked(env, handle, cls);\n" ++
+                "    if (existing == NULL) _zidl_family_{[r]s}_insert_locked(env, handle, obj);\n" ++
+                "    pthread_mutex_unlock(&_zidl_family_{[r]s}_mtx);\n" ++
+                "    if (existing != NULL) (*env)->DeleteLocalRef(env, existing);\n" ++
+                "    (*env)->DeleteLocalRef(env, cls);\n" ++
                 "}}\n\n",
-            .{
-                root.qualified_name, root_c, root_c, root_c, root_c, root_c, root_c,
-                root_c,              root_c, root_c, root_c, root_c, root_c, root_c,
-                root_c,              root_c, root_c, root_c, root_c, root_c, root_c,
-                root_c,              root_c, root_c, root_c,
-            },
+            .{ .q = root.qualified_name, .r = root_c },
         );
     }
 
@@ -5914,43 +6096,41 @@ const JniBridgeGenerator = struct {
     /// from a concurrent first call is harmless).
     ///
     /// For an interface belonging to a multi-member family (`familyOf`), a
-    /// found identity is returned as-is (not re-typed): the cached object's
-    /// REAL runtime class already implements whatever this function's own
-    /// declared return type needs, since it's a `jobject` either way — no
+    /// found identity is returned as-is (not re-typed) if it implements this
+    /// interface's Java interface, which a cached derived object does — no
     /// analog of the C++ backend's `dynamic_pointer_cast` recovery is needed
-    /// here.
+    /// here. A cached object that does not implement it is another live
+    /// wrapper of the handle (boxed as a base interface), or one of a
+    /// destroyed entity whose address was reused for another type (without
+    /// the retire hook nothing evicts it). JNI does not type-check a native
+    /// method's returned `jobject`, so handing it out would surface only at the
+    /// caller's first interface call, as `IncompatibleClassChangeError`. The
+    /// lookup skips it, and a fresh object is cached beside it.
     fn emitBoxHelper(self: *JniBridgeGenerator, iface: *const ir.Interface, c_name: []const u8) !void {
         const bin_class = try self.implBinaryClassName(iface);
         defer self.alloc.free(bin_class);
-        const fam = self.familyOf(iface);
-        if (fam.size <= 1) {
-            try self.print(
-                "jobject zidl_java_box_{s}(JNIEnv *env, void *handle) {{\n" ++
-                    "    static jclass cls = NULL;\n" ++
-                    "    static jmethodID ctor = NULL;\n" ++
-                    "    if (handle == NULL) return NULL;\n" ++
-                    "    if (cls == NULL) {{\n" ++
-                    "        jclass local = (*env)->FindClass(env, \"{s}\");\n" ++
-                    "        if (local == NULL) return NULL;\n" ++
-                    "        cls = (jclass)(*env)->NewGlobalRef(env, local);\n" ++
-                    "        (*env)->DeleteLocalRef(env, local);\n" ++
-                    "        ctor = (*env)->GetMethodID(env, cls, \"<init>\", \"(J)V\");\n" ++
-                    "    }}\n" ++
-                    "    return (*env)->NewObject(env, cls, ctor, (jlong)(intptr_t)handle);\n" ++
-                    "}}\n\n",
-                .{ c_name, bin_class },
-            );
-            return;
-        }
-        const root_c = try interface.prefixedCNameFromQualified(self.alloc, fam.root.qualified_name, self.opts.type_prefix);
+        const root_c = try interface.prefixedCNameFromQualified(self.alloc, self.cacheRootOf(iface).qualified_name, self.opts.type_prefix);
         defer self.alloc.free(root_c);
+        // The Java interface, not the `*Impl` class: Impl classes do not
+        // extend each other, so boxing as the root must still accept a cached
+        // object of a derived Impl.
+        const iface_bin = try dataTypeBinaryClassName(self.alloc, self.opts, self.stem_class, self.cross_file, iface.qualified_name);
+        defer self.alloc.free(iface_bin);
         try self.print(
             "jobject zidl_java_box_{s}(JNIEnv *env, void *handle) {{\n" ++
                 "    static jclass cls = NULL;\n" ++
+                "    static jclass want = NULL;\n" ++
                 "    static jmethodID ctor = NULL;\n" ++
                 "    if (handle == NULL) return NULL;\n" ++
+                "    ZIDL_JAVA_OBSERVE_RETIRE();\n" ++
+                "    if (want == NULL) {{\n" ++
+                "        jclass local = (*env)->FindClass(env, \"{s}\");\n" ++
+                "        if (local == NULL) return NULL;\n" ++
+                "        want = (jclass)(*env)->NewGlobalRef(env, local);\n" ++
+                "        (*env)->DeleteLocalRef(env, local);\n" ++
+                "    }}\n" ++
                 "    pthread_mutex_lock(&_zidl_family_{s}_mtx);\n" ++
-                "    jobject cached = _zidl_family_{s}_lookup_locked(env, handle);\n" ++
+                "    jobject cached = _zidl_family_{s}_lookup_locked(env, handle, want);\n" ++
                 "    pthread_mutex_unlock(&_zidl_family_{s}_mtx);\n" ++
                 "    if (cached != NULL) return cached;\n" ++
                 "    if (cls == NULL) {{\n" ++
@@ -5964,7 +6144,7 @@ const JniBridgeGenerator = struct {
                 "    if (obj == NULL) return NULL;\n" ++
                 "    pthread_mutex_lock(&_zidl_family_{s}_mtx);\n" ++
                 "    {{\n" ++
-                "        jobject winner = _zidl_family_{s}_lookup_locked(env, handle);\n" ++
+                "        jobject winner = _zidl_family_{s}_lookup_locked(env, handle, want);\n" ++
                 "        if (winner != NULL) {{\n" ++
                 "            pthread_mutex_unlock(&_zidl_family_{s}_mtx);\n" ++
                 "            (*env)->DeleteLocalRef(env, obj);\n" ++
@@ -5975,7 +6155,7 @@ const JniBridgeGenerator = struct {
                 "    pthread_mutex_unlock(&_zidl_family_{s}_mtx);\n" ++
                 "    return obj;\n" ++
                 "}}\n\n",
-            .{ c_name, root_c, root_c, root_c, bin_class, root_c, root_c, root_c, root_c, root_c },
+            .{ c_name, iface_bin, root_c, root_c, root_c, bin_class, root_c, root_c, root_c, root_c, root_c },
         );
     }
 
@@ -6313,7 +6493,8 @@ const JniBridgeGenerator = struct {
                 "    if ({[name]s} != NULL) {{\n" ++
                 "        memset(&_c_{[name]s}, 0, sizeof(_c_{[name]s}));\n" ++
                 "        _c_{[name]s}.listener_data = zidl_java_listener_ctx_acquire(env, {[name]s});\n" ++
-                "        _c_{[name]s}.release_listener_data = zidl_java_release_listener_data;\n",
+                "        _c_{[name]s}.release_listener_data = zidl_java_release_listener_data;\n" ++
+                "        _c_{[name]s}.retain_listener_data = zidl_java_retain_listener_data;\n",
             .{ .pc = pc, .name = p.name },
         );
         for (ops.items) |op| {
@@ -6894,7 +7075,9 @@ const JniBridgeGenerator = struct {
             try self.print(
                 "    if (_p_{[name]s} != NULL) {{\n" ++
                     "        {[lc]s} _now_{[name]s} = {[rc]s}_get_listener(_h);\n" ++
-                    "        if (_now_{[name]s}.listener_data != _c_{[name]s}.listener_data) zidl_java_release_listener_ctx(env, _c_{[name]s}.listener_data);\n" ++
+                    "        int _installed_{[name]s} = _now_{[name]s}.listener_data == _c_{[name]s}.listener_data;\n" ++
+                    "        if (_now_{[name]s}.listener_data != NULL && _now_{[name]s}.retain_listener_data != NULL && _now_{[name]s}.release_listener_data != NULL) _now_{[name]s}.release_listener_data(_now_{[name]s}.listener_data);\n" ++
+                    "        if (!_installed_{[name]s}) zidl_java_release_listener_ctx(env, _c_{[name]s}.listener_data);\n" ++
                     "    }}\n",
                 .{ .lc = lp.listener_c, .name = lp.name, .rc = ret_c_name.? },
             );
@@ -6959,7 +7142,17 @@ const JniBridgeGenerator = struct {
             defer self.alloc.free(box_fn);
             try self.print("    return {s}(env, _h);\n", .{box_fn});
         } else if (ret_is_callback) {
-            try self.write("    return _l.listener_data != NULL ? ((zidl_java_listener_ctx *)_l.listener_data)->ref : NULL;\n");
+            // The core retained the context before handing it back
+            // (retain_listener_data); take a local ref to the listener, then
+            // drop that reference. A registration another binding made holds
+            // no Java listener.
+            try self.write(
+                "    jobject _lr = NULL;\n" ++
+                    "    if (_l.listener_data != NULL && _l.release_listener_data == zidl_java_release_listener_data)\n" ++
+                    "        _lr = (*env)->NewLocalRef(env, ((zidl_java_listener_ctx *)_l.listener_data)->ref);\n" ++
+                    "    if (_l.listener_data != NULL && _l.retain_listener_data != NULL && _l.release_listener_data != NULL) _l.release_listener_data(_l.listener_data);\n" ++
+                    "    return _lr;\n",
+            );
         } else if (ret_is_string) {
             try self.write("    return _rets != NULL ? (*env)->NewStringUTF(env, _rets) : NULL;\n");
         } else if (op.return_type != null) {
@@ -9793,6 +9986,63 @@ test "java: set_listener populates release_listener_data, no ad-hoc release book
     try testing.expect(std.mem.indexOf(u8, s, "Widget_get_listener") != null);
 }
 
+test "java: --handle-retire-hook retires wrappers of freed handles" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc,
+        \\module M {
+        \\    @retired_result(ALREADY_DELETED) typedef long Result;
+        \\    const Result ALREADY_DELETED = 9;
+        \\    interface Bar {};
+        \\    interface Foo {
+        \\        Result enable();
+        \\        Bar get_bar();
+        \\        boolean busy();
+        \\        void reset();
+        \\    };
+        \\};
+    );
+    defer ir_spec.deinit();
+    var ifaces = std.ArrayListUnmanaged(*const ir.Interface).empty;
+    defer ifaces.deinit(alloc);
+    try collectInterfaces(alloc, ir_spec.items, &ifaces);
+    const foo = for (ifaces.items) |i| {
+        if (std.mem.eql(u8, i.name, "Foo")) break i;
+    } else return error.FooNotFound;
+    const stem_class = try stemToClassName(alloc, "widget");
+    defer alloc.free(stem_class);
+    const opts: interface.Options = .{ .input_stem = "widget", .handle_retire_hook = "w_retire" };
+
+    var java_out = std.ArrayList(u8).empty;
+    defer java_out.deinit(alloc);
+    try generateImplFile(alloc, &ir_spec, foo, stem_class, opts, &java_out);
+    const j = java_out.items;
+    // The bridge zeroes ptr_ on retire; each method then returns without
+    // reaching the provider.
+    try testing.expect(std.mem.indexOf(u8, j, "private volatile long ptr_;") != null);
+    try testing.expect(std.mem.indexOf(u8, j, "        if (ptr_ == 0) return (int) 9;\n        return n_enable(ptr_);") != null);
+    try testing.expect(std.mem.indexOf(u8, j, "        if (ptr_ == 0) return null;\n        return n_get_bar(ptr_);") != null);
+    try testing.expect(std.mem.indexOf(u8, j, "        if (ptr_ == 0) return false;\n        return n_busy(ptr_);") != null);
+    try testing.expect(std.mem.indexOf(u8, j, "        if (ptr_ == 0) return;\n        n_reset(ptr_);") != null);
+
+    var jni_out = std.ArrayList(u8).empty;
+    defer jni_out.deinit(alloc);
+    try generateJniSource(alloc, &ir_spec, opts, &jni_out);
+    const c = jni_out.items;
+    // Every entity interface has a cache, evicted by this file's observer,
+    // registered by the cache's first use.
+    try testing.expect(std.mem.indexOf(u8, c, "extern int w_retire_observe(void (*fn)(void *ctx, void *handle), void *ctx);") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "    _zidl_family_M_Bar_evict(env, handle);\n    _zidl_family_M_Foo_evict(env, handle);\n") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "    if (handle == NULL) return NULL;\n    ZIDL_JAVA_OBSERVE_RETIRE();\n") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "        zidl_java_mark_retired(env, obj);\n") != null);
+
+    // Without the hook: final ptr_, no guards, no observer.
+    var plain = std.ArrayList(u8).empty;
+    defer plain.deinit(alloc);
+    try generateImplFile(alloc, &ir_spec, foo, stem_class, .{ .input_stem = "widget" }, &plain);
+    try testing.expect(std.mem.indexOf(u8, plain.items, "private final long ptr_;") != null);
+    try testing.expect(std.mem.indexOf(u8, plain.items, "ptr_ == 0") == null);
+}
+
 test "java: get_listener() is a real round-trip, not a stub" {
     const alloc = testing.allocator;
     var ir_spec = try buildIrSpec(alloc,
@@ -9831,7 +10081,10 @@ test "java: get_listener() is a real round-trip, not a stub" {
     const c = jni_out.items;
     try testing.expect(std.mem.indexOf(u8, c, "JNIEXPORT jobject JNICALL") != null);
     try testing.expect(std.mem.indexOf(u8, c, "FooListener _l = Widget_get_listener((void *)(intptr_t)ptr);") != null);
-    try testing.expect(std.mem.indexOf(u8, c, "return _l.listener_data != NULL ? ((zidl_java_listener_ctx *)_l.listener_data)->ref : NULL;") != null);
+    // Only this bridge's registrations hold a Java listener, and the core's
+    // retained reference is dropped once a local ref is taken.
+    try testing.expect(std.mem.indexOf(u8, c, "if (_l.listener_data != NULL && _l.release_listener_data == zidl_java_release_listener_data)\n        _lr = (*env)->NewLocalRef(env, ((zidl_java_listener_ctx *)_l.listener_data)->ref);") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "if (_l.listener_data != NULL && _l.retain_listener_data != NULL && _l.release_listener_data != NULL) _l.release_listener_data(_l.listener_data);") != null);
 }
 
 test "java: create_* listener param has no old-listener capture, but does verify installation" {

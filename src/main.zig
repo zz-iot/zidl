@@ -32,6 +32,9 @@
 //!                                  default impl for <Interface> (C++ backend, --cpp-generate-impl)
 //!   --cpp-impl-include <header>    Extra #include for a --cpp-impl-override class (C++ backend)
 //!
+//!   --handle-retire-hook <name>    Provider functions <name>_observe/_unobserve reporting freed
+//!                                  entity handles (C++ --cpp-generate-impl, Java)
+//!
 //!   --java-jni-library <name>      System.loadLibrary() name for JNI impls (Java backend)
 //!   --java-package <pkg>           Package prefix, e.g. com.example (Java backend)
 //!   --java-import-package <Mod>=<pkg>  Java package of an imported module's own output, if not this file's own --java-package (Java backend, repeatable)
@@ -76,6 +79,7 @@ const Opts = struct {
     java_package: []const u8 = "",
     default_extensibility: zidl.ir.Extensibility = .final,
     jni_library: []const u8 = "zidl_dds_jni",
+    handle_retire_hook: []const u8 = "",
     split_files: bool = false,
     pragma_once: bool = false,
     extern_c: bool = false,
@@ -250,6 +254,14 @@ pub fn main(init: std.process.Init) !void {
                 try stderr.flush();
                 std.process.exit(1);
             };
+        } else if (std.mem.eql(u8, arg, "--handle-retire-hook")) {
+            i += 1;
+            if (i >= args.len) {
+                try stderr.print("error: --handle-retire-hook requires an argument\n", .{});
+                try stderr.flush();
+                std.process.exit(1);
+            }
+            opts.handle_retire_hook = args[i];
         } else if (std.mem.eql(u8, arg, "--java-jni-library")) {
             i += 1;
             if (i >= args.len) {
@@ -686,6 +698,7 @@ fn processFile(
         .java_package = opts.java_package,
         .default_extensibility = opts.default_extensibility,
         .jni_library = opts.jni_library,
+        .handle_retire_hook = opts.handle_retire_hook,
         .split_files = opts.split_files,
         .pragma_once = opts.pragma_once,
         .extern_c = opts.extern_c,
@@ -809,6 +822,11 @@ fn printUsage(w: *Io.Writer) !void {
         \\                                 --cpp-generate-impl only)
         \\  --cpp-impl-include <header>    Extra #include for a --cpp-impl-override class to be visible
         \\                                 (repeatable, --cpp-generate-impl only)
+        \\
+        \\  --handle-retire-hook <name>    C functions <name>_observe/_unobserve through which the
+        \\                                 provider reports freed entity handles; a freed handle's
+        \\                                 wrapper is dropped and fails cleanly (C++ --cpp-generate-impl,
+        \\                                 Java)
         \\
         \\  --java-jni-library <name>      System.loadLibrary() name for JNI impls (Java backend)
         \\  --java-package <pkg>           Package prefix, e.g. com.example (Java backend)

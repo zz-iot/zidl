@@ -18,6 +18,31 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Java: boxing an entity no longer returns a destroyed entity's wrapper of the wrong class. The
+  shared box-identity cache of a `@shared_c_abi_box` family kept an entry until its Java object
+  was collected, so once an entity was deleted and its address reused for an entity of another
+  type in the family, boxing the new one returned the old wrapper (for example a `DataReaderImpl`
+  from `create_datawriter`), and its first interface call threw `IncompatibleClassChangeError`. A
+  cached object is now returned only if it implements the requested interface; otherwise a new
+  wrapper is made. Every Java entity interface now has an identity cache, hashed on the handle,
+  that keeps every live wrapper of a handle and reclaims collected ones as it is searched.
+- C++: a family root's `_getOrCreate` (e.g. `EntityImpl`, used by `StatusCondition::get_entity`
+  and WaitSet results) boxes a handle as the member it really is, resolved through the provider's
+  checked downcasts, so it no longer returns a destroyed entity's wrapper of another class.
+- New `--handle-retire-hook <name>` (C++ `--cpp-generate-impl`, Java): the provider exports
+  `<name>_observe`/`<name>_unobserve` and reports each entity handle it frees, including by
+  cascading deletes. The binding drops the handle's wrapper from its cache and retires it: its
+  operations no longer reach the provider and its handle accessors return null, and the address
+  gets a new wrapper. zidl-rt's `freeEntityBox` reports, and `exportHandleRetireHook` exports the
+  two functions. New `@retired_result(value)` on a typedef sets what a retired wrapper's
+  operations returning it give (e.g. `RETCODE_ALREADY_DELETED`). See
+  `docs/design/handle-lifetime.md`.
+- C++: `get_listener()` reads the listener back from the provider instead of a copy in the
+  wrapper, which was empty for an entity created with a listener and outlived the entity.
+- Callback structs (C and Zig) end with an optional `retain_listener_data`, after
+  `listener_identity`: a provider handing `listener_data` back through a `get_listener` calls it
+  first, and the caller releases that reference, so a concurrent replacement cannot free it.
+  The C++ and Java bindings set it.
 - Listener identity: callback structs (C and Zig) end with `listener_identity`, after
   `release_listener_data`. A middleware treats registrations with the same non-null identity,
   or else the same `listener_data`, as one listener. New `@shared_base` interface annotation:

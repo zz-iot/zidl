@@ -36,6 +36,108 @@ int32_t Widgets_Widget_get_value(Widgets_Widget self) {
     return self->value;
 }
 
+/* Parts. Every part lives in one static slot, so a part created after one is
+ * deleted has the deleted part's address: what a real allocator may do for
+ * entities of different types, made deterministic. */
+enum { PART_NONE, PART_GEAR, PART_SPRING };
+
+typedef struct {
+    int kind;
+    int32_t id;
+    int32_t value;
+} PartObj;
+
+static PartObj g_part_slot;
+static int32_t g_next_part_id = 1;
+
+static void *part_create(int kind, int32_t value) {
+    g_part_slot.kind = kind;
+    g_part_slot.id = g_next_part_id++;
+    g_part_slot.value = value;
+    return &g_part_slot;
+}
+
+Widgets_Gear Widgets_Factory_create_gear(Widgets_Factory self, int32_t teeth) {
+    (void)self;
+    return (Widgets_Gear)part_create(PART_GEAR, teeth);
+}
+
+Widgets_Spring Widgets_Factory_create_spring(Widgets_Factory self, int32_t rate) {
+    (void)self;
+    return (Widgets_Spring)part_create(PART_SPRING, rate);
+}
+
+/* The handle-retire hook (--handle-retire-hook entity_retire): a provider
+ * reports each handle it frees before the address can name anything else. */
+static void (*g_retire_fn)(void *ctx, void *handle);
+static void *g_retire_ctx;
+
+int entity_retire_observe(void (*fn)(void *ctx, void *handle), void *ctx) {
+    if (g_retire_fn != NULL) return 1;
+    g_retire_fn = fn;
+    g_retire_ctx = ctx;
+    return 0;
+}
+
+int entity_retire_unobserve(void (*fn)(void *ctx, void *handle), void *ctx) {
+    if (g_retire_fn != fn || g_retire_ctx != ctx) return 1;
+    g_retire_fn = NULL;
+    return 0;
+}
+
+void Widgets_Factory_delete_part(Widgets_Factory self, Widgets_Part p) {
+    (void)self;
+    if (g_retire_fn != NULL) g_retire_fn(g_retire_ctx, p);
+    ((PartObj *)p)->kind = PART_NONE;
+}
+
+void Widgets_Factory_forget_part(Widgets_Factory self, Widgets_Part p) {
+    (void)self;
+    ((PartObj *)p)->kind = PART_NONE;
+}
+
+/* Counts calls that reach the native side, so the test can tell a retired
+ * wrapper did not. */
+static int32_t g_turns;
+
+int32_t Widgets_Gear_turn(Widgets_Gear self) {
+    (void)self;
+    g_turns++;
+    return 0;
+}
+
+JNIEXPORT jint JNICALL Java_EntityTest_nTurns(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+    return g_turns;
+}
+
+Widgets_Part Widgets_Factory_current_part(Widgets_Factory self) {
+    (void)self;
+    return g_part_slot.kind == PART_NONE ? NULL : (Widgets_Part)&g_part_slot;
+}
+
+static int32_t part_id(void *p) { return ((PartObj *)p)->id; }
+static int32_t part_value(void *p, int kind) {
+    PartObj *o = (PartObj *)p;
+    return o->kind == kind ? o->value : -1;
+}
+
+int32_t Widgets_Part_get_id(Widgets_Part self) { return part_id(self); }
+int32_t Widgets_Gear_get_id(Widgets_Gear self) { return part_id(self); }
+int32_t Widgets_Spring_get_id(Widgets_Spring self) { return part_id(self); }
+int32_t Widgets_Gear_get_teeth(Widgets_Gear self) { return part_value(self, PART_GEAR); }
+int32_t Widgets_Spring_get_rate(Widgets_Spring self) { return part_value(self, PART_SPRING); }
+
+Widgets_Part Widgets_Gear_as_Widgets_Part(Widgets_Gear child) { return (Widgets_Part)child; }
+Widgets_Part Widgets_Spring_as_Widgets_Part(Widgets_Spring child) { return (Widgets_Part)child; }
+Widgets_Gear Widgets_Part_as_Widgets_Gear(Widgets_Part base) {
+    return base != NULL && ((PartObj *)base)->kind == PART_GEAR ? (Widgets_Gear)base : NULL;
+}
+Widgets_Spring Widgets_Part_as_Widgets_Spring(Widgets_Part base) {
+    return base != NULL && ((PartObj *)base)->kind == PART_SPRING ? (Widgets_Spring)base : NULL;
+}
+
 /* Synthetic deinit hooks the JNI bridge declares/calls itself (not part of
  * the real generated C ABI above) — see zidl's Java backend `_deinit`. */
 void Widgets_Widget_deinit(void *ptr) { free(ptr); }
