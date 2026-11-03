@@ -4725,21 +4725,23 @@ const ConcreteImplGenerator = struct {
                         "        _cache.emplace(h, std::move(e));\n" ++
                         "    }}\n" ++
                         "}}\n" ++
+                        // Allocates nothing (it runs inside the provider's
+                        // free, where a full allocator must not stop it):
+                        // the entry's node is moved out under the lock, and
+                        // its wrappers retired, and released, after it.
                         "void {[n]s}Impl::_zidlEvict(void* h) {{\n" ++
-                        "    std::pmr::vector<std::shared_ptr<{[n]s}>> _gone;\n" ++
-                        "    std::lock_guard<std::mutex> _lock(_familyMutex());\n" ++
-                        "    auto& _cache = _familyCache();\n" ++
-                        "    auto _it = _cache.find(static_cast<{[c]s}>(h));\n" ++
-                        "    if (_it == _cache.end()) return;\n" ++
-                        "    auto _retire = [&_gone](_FamilyEntry& _e) {{\n" ++
+                        "    auto _node = [h] {{\n" ++
+                        "        std::lock_guard<std::mutex> _lock(_familyMutex());\n" ++
+                        "        return _familyCache().extract(static_cast<{[c]s}>(h));\n" ++
+                        "    }}();\n" ++
+                        "    if (!_node) return;\n" ++
+                        "    auto _retire = [](_FamilyEntry& _e) {{\n" ++
                         "        if (auto _sp = _e.ref.lock()) {{\n" ++
                         "            if (_e.retire) _e.retire(_e.obj);\n" ++
-                        "            _gone.push_back(std::move(_sp));\n" ++
                         "        }}\n" ++
                         "    }};\n" ++
-                        "    _retire(_it->second);\n" ++
-                        "    for (auto& _e : _it->second.others) _retire(_e);\n" ++
-                        "    _cache.erase(_it);\n" ++
+                        "    _retire(_node.mapped());\n" ++
+                        "    for (auto& _e : _node.mapped().others) _retire(_e);\n" ++
                         "}}\n",
                     .{ .n = iface.name, .c = c_name, .o = observe },
                 );
@@ -9925,7 +9927,9 @@ test "cpp_backend: family root's _familyCache is std::pmr::unordered_map, not pl
     // other live wrappers, so the retire observer can retire every one.
     try testing.expect(has(hdr, "void (*retire)(void*) noexcept = nullptr;"));
     try testing.expect(has(hdr, "std::pmr::vector<_FamilyEntry> others{};"));
-    try testing.expect(has(src, "    for (auto& _e : _it->second.others) _retire(_e);\n"));
+    try testing.expect(has(src, "    for (auto& _e : _node.mapped().others) _retire(_e);\n"));
+    // Eviction allocates nothing: the node is moved out under the lock.
+    try testing.expect(has(src, "        return _familyCache().extract(static_cast<DDS_Bar>(h));\n"));
     try testing.expect(has(src, "        if (!_old.ref.expired()) e.others.push_back(std::move(_old));\n"));
     try testing.expect(has(src, "if (auto* _e = ::DDS::BarImpl::_familyFind(_fh, _familyTag())) {"));
     try testing.expect(has(src, "return std::shared_ptr<BazImpl>(_base, static_cast<BazImpl*>(_e->obj));"));
