@@ -4194,7 +4194,7 @@ const ConcreteImplGenerator = struct {
             // header, so std::mutex/std::unordered_map must already be
             // complete types by the time this file's own class bodies are
             // parsed -- not just by the time the .cpp implementing them is.
-            "#include \"{s}.hpp\"\n#include \"{s}.h\"\n#include \"zzdds_c.h\"\n#include <atomic>\n#include <memory>\n#include <memory_resource>\n#include <mutex>\n#include <unordered_map>\n#include <vector>\n\n",
+            "#include \"{s}.hpp\"\n#include \"{s}.h\"\n#include \"zzdds_c.h\"\n#include <atomic>\n#include <memory>\n#include <memory_resource>\n#include <mutex>\n#include <new>\n#include <unordered_map>\n#include <vector>\n\n",
             .{ self.opts.input_stem, self.opts.input_stem },
         );
         for (spec.imports) |import_name| {
@@ -4641,11 +4641,14 @@ const ConcreteImplGenerator = struct {
             if (fam.size <= 1) {
                 try self.srcPrint(
                     "std::mutex& {[n]s}Impl::_soloMutex() {{\n" ++
-                        "    static auto* m = new std::mutex;\n" ++
+                        "    alignas(std::mutex) static unsigned char s[sizeof(std::mutex)];\n" ++
+                        "    static auto* m = ::new (static_cast<void*>(s)) std::mutex;\n" ++
                         "    return *m;\n" ++
                         "}}\n" ++
                         "std::unordered_map<{[c]s}, std::weak_ptr<{[n]s}Impl>>& {[n]s}Impl::_soloCache() {{\n" ++
-                        "    static auto* c = new std::unordered_map<{[c]s}, std::weak_ptr<{[n]s}Impl>>;\n" ++
+                        "    using T = std::unordered_map<{[c]s}, std::weak_ptr<{[n]s}Impl>>;\n" ++
+                        "    alignas(T) static unsigned char s[sizeof(T)];\n" ++
+                        "    static auto* c = ::new (static_cast<void*>(s)) T;\n" ++
                         "{[o]s}" ++
                         "    return *c;\n" ++
                         "}}\n" ++
@@ -4681,16 +4684,22 @@ const ConcreteImplGenerator = struct {
                 try self.noteRetireCache(iface);
             } else if (fam.root == iface) {
                 // Family root: owns the one cache every sibling shares (see
-                // emitEntityImplDecl). Leaked singletons: thread-safe lazy
-                // init, and still there for a retire report during static
-                // destruction.
+                // emitEntityImplDecl). Never-destroyed singletons: thread-safe
+                // lazy init, and still there for a retire report during
+                // static destruction. Built in static storage rather than
+                // with `new`, so first use allocates nothing on the heap (an
+                // application may first create an entity of the family, such
+                // as a GuardCondition, after forbidding heap allocation).
                 try self.srcPrint(
                     "std::mutex& {[n]s}Impl::_familyMutex() {{\n" ++
-                        "    static auto* m = new std::mutex;\n" ++
+                        "    alignas(std::mutex) static unsigned char s[sizeof(std::mutex)];\n" ++
+                        "    static auto* m = ::new (static_cast<void*>(s)) std::mutex;\n" ++
                         "    return *m;\n" ++
                         "}}\n" ++
                         "std::pmr::unordered_map<{[c]s}, {[n]s}Impl::_FamilyEntry>& {[n]s}Impl::_familyCache() {{\n" ++
-                        "    static auto* c = new std::pmr::unordered_map<{[c]s}, _FamilyEntry>;\n" ++
+                        "    using T = std::pmr::unordered_map<{[c]s}, _FamilyEntry>;\n" ++
+                        "    alignas(T) static unsigned char s[sizeof(T)];\n" ++
+                        "    static auto* c = ::new (static_cast<void*>(s)) T;\n" ++
                         "{[o]s}" ++
                         "    return *c;\n" ++
                         "}}\n" ++
@@ -9800,7 +9809,10 @@ test "cpp_backend: B1+B3 — entity return wraps in Impl" {
     try testing.expect(has(src, "return ::DDS::BarImpl::_getOrCreate(_h);"));
     try testing.expect(has(src, "std::shared_ptr<BarImpl> BarImpl::_getOrCreate(DDS_Bar h) {"));
     try testing.expect(has(src, "if (!h) return nullptr;"));
-    try testing.expect(has(src, "static auto* c = new std::unordered_map<DDS_Bar, std::weak_ptr<BarImpl>>;"));
+    try testing.expect(has(src, "    using T = std::unordered_map<DDS_Bar, std::weak_ptr<BarImpl>>;\n    alignas(T) static unsigned char s[sizeof(T)];\n    static auto* c = ::new (static_cast<void*>(s)) T;\n"));
+    // The cache's singletons live in static storage: first use allocates
+    // nothing on the heap.
+    try testing.expect(!has(src, "= new std::"));
     try testing.expect(has(src, "std::allocate_shared<BarImpl>("));
     try testing.expect(has(src, "std::pmr::polymorphic_allocator<BarImpl>(std::pmr::get_default_resource())"));
 }
@@ -9914,7 +9926,9 @@ test "cpp_backend: family root's _familyCache is std::pmr::unordered_map, not pl
     try testing.expect(has(hdr, "std::weak_ptr<Bar> ref;"));
     try testing.expect(has(hdr, "static std::pmr::unordered_map<DDS_Bar, _FamilyEntry>& _familyCache();"));
     try testing.expect(has(src, "std::pmr::unordered_map<DDS_Bar, BarImpl::_FamilyEntry>& BarImpl::_familyCache() {"));
-    try testing.expect(has(src, "static auto* c = new std::pmr::unordered_map<DDS_Bar, _FamilyEntry>;"));
+    try testing.expect(has(src, "    using T = std::pmr::unordered_map<DDS_Bar, _FamilyEntry>;\n    alignas(T) static unsigned char s[sizeof(T)];\n    static auto* c = ::new (static_cast<void*>(s)) T;\n"));
+    try testing.expect(has(src, "    static auto* m = ::new (static_cast<void*>(s)) std::mutex;\n"));
+    try testing.expect(!has(src, "= new std::"));
     try testing.expect(!has(hdr, "static std::unordered_map<DDS_Bar,"));
     // Each member tags its entries, and recognises its own by tag, not RTTI.
     try testing.expect(has(hdr, "static const void* _familyTag() noexcept;"));
