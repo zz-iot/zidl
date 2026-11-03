@@ -23,9 +23,9 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   was collected, so once an entity was deleted and its address reused for an entity of another
   type in the family, boxing the new one returned the old wrapper (for example a `DataReaderImpl`
   from `create_datawriter`), and its first interface call threw `IncompatibleClassChangeError`. A
-  cached object is now returned only if it implements the requested interface; otherwise the
-  entry is dropped and a new wrapper is made. `_register_external` likewise replaces an entry of
-  another class. Every Java entity interface now has an identity cache, hashed on the handle.
+  cached object is now returned only if it implements the requested interface; otherwise a new
+  wrapper is made. Every Java entity interface now has an identity cache, hashed on the handle,
+  that keeps every live wrapper of a handle and reclaims collected ones as it is searched.
 - C++: a family root's `_getOrCreate` (e.g. `EntityImpl`, used by `StatusCondition::get_entity`
   and WaitSet results) boxes a handle as the member it really is, resolved through the provider's
   checked downcasts, so it no longer returns a destroyed entity's wrapper of another class.

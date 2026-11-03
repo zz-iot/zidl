@@ -38,8 +38,7 @@ consumer's types or operations.
 - **Java:** a cache hit counts only if the cached object implements the Java
   interface being boxed (the interface, not the `*Impl` class: Impl classes do
   not extend each other, so a `DataWriterImpl` is a valid hit when boxing an
-  `Entity`). Otherwise the entry is dropped and a new wrapper made.
-  `_register_external` replaces an entry of another class.
+  `Entity`). Otherwise a new wrapper is made and cached beside the other.
 - **C++:** a family member's `_getOrCreate` already accepted only entries its own
   class created. The family root's `_getOrCreate` now first resolves the handle's
   real type through the provider's checked downcasts (`<Base>_as_<Derived>`,

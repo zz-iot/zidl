@@ -103,9 +103,12 @@ pub fn freeEntityBox(alloc: std.mem.Allocator, handle: *anyopaque) void {
 // wrapper per C-ABI handle registers an observer; every handle this runtime
 // frees is reported to every observer before its memory is released.
 //
-// A fixed table rather than a list, because this package has no mutex: a slot
-// is claimed with a CAS, and a notification counts itself in `active` so that
-// removing an observer can wait for calls already under way.
+// This package has no mutex, so the table is lock-free: blocks of slots,
+// appended as needed and never freed. A slot's state word carries a generation
+// that changes with every registration, so a removal acts only on the
+// registration it matched. A notification counts itself in the slot's `busy`
+// while it calls the observer, so removing an observer waits only for calls to
+// that observer.
 
 /// Called with the observer's own context and the handle being retired. Runs
 /// on whatever thread frees the handle, possibly concurrently with other
@@ -113,48 +116,80 @@ pub fn freeEntityBox(alloc: std.mem.Allocator, handle: *anyopaque) void {
 /// code; it may take the binding's own short internal locks.
 pub const HandleRetiredFn = *const fn (ctx: ?*anyopaque, handle: *anyopaque) callconv(.c) void;
 
-/// Most observers one runtime instance accepts. One per binding per IDL file
-/// is the expected use, so a handful.
-pub const max_handle_retire_observers = 16;
+const state_free: u32 = 0;
+const state_changing: u32 = 1;
+const state_live: u32 = 2;
+const state_mask: u32 = 3;
 
 const Slot = struct {
-    /// 0 free, 1 being changed, 2 live.
-    state: std.atomic.Value(u8) = .init(0),
-    func: ?HandleRetiredFn = null,
-    ctx: ?*anyopaque = null,
+    /// generation << 2 | state.
+    state: std.atomic.Value(u32) = .init(state_free),
+    busy: std.atomic.Value(u32) = .init(0),
+    func: std.atomic.Value(?HandleRetiredFn) = .init(null),
+    ctx: std.atomic.Value(?*anyopaque) = .init(null),
 };
 
-var observer_slots: [max_handle_retire_observers]Slot = @splat(.{});
-var active_notifications: std.atomic.Value(u32) = .init(0);
+const block_len = 16;
 
-/// Registers `func`/`ctx` as a handle-retire observer. Returns false if the
-/// table is full. Registering the same pair twice gets two notifications.
+const Block = struct {
+    slots: [block_len]Slot = @splat(.{}),
+    next: std.atomic.Value(?*Block) = .init(null),
+};
+
+var first_block: Block = .{};
+
+/// Registers `func`/`ctx` as a handle-retire observer. Returns false only if
+/// the table needed to grow and allocation failed. Registering the same pair
+/// twice gets two notifications.
 pub fn observeHandleRetire(func: HandleRetiredFn, ctx: ?*anyopaque) bool {
-    for (&observer_slots) |*slot| {
-        if (slot.state.cmpxchgStrong(0, 1, .acquire, .monotonic) == null) {
-            slot.func = func;
-            slot.ctx = ctx;
-            slot.state.store(2, .release);
+    var block: *Block = &first_block;
+    while (true) {
+        for (&block.slots) |*slot| {
+            const s = slot.state.load(.acquire);
+            if (s & state_mask != state_free) continue;
+            const claimed = ((s >> 2) +% 1) << 2 | state_changing;
+            if (slot.state.cmpxchgStrong(s, claimed, .acq_rel, .monotonic) != null) continue;
+            slot.func.store(func, .release);
+            slot.ctx.store(ctx, .release);
+            slot.state.store((claimed & ~state_mask) | state_live, .seq_cst);
             return true;
         }
+        if (block.next.load(.acquire)) |next| {
+            block = next;
+            continue;
+        }
+        const grown = std.heap.page_allocator.create(Block) catch return false;
+        grown.* = .{};
+        if (block.next.cmpxchgStrong(null, grown, .acq_rel, .acquire)) |winner| {
+            std.heap.page_allocator.destroy(grown);
+            block = winner.?;
+        } else {
+            block = grown;
+        }
     }
-    return false;
 }
 
-/// Removes one registration of `func`/`ctx`, then waits for notifications
+/// Removes one registration of `func`/`ctx`, then waits for calls to it
 /// already under way to finish, so the observer is not running when this
 /// returns. Must not be called from inside an observer. Returns false if the
 /// pair was not registered.
 pub fn unobserveHandleRetire(func: HandleRetiredFn, ctx: ?*anyopaque) bool {
-    for (&observer_slots) |*slot| {
-        if (slot.state.load(.acquire) != 2) continue;
-        if (slot.func != func or slot.ctx != ctx) continue;
-        if (slot.state.cmpxchgStrong(2, 1, .acquire, .monotonic) != null) continue;
-        while (active_notifications.load(.acquire) != 0) std.atomic.spinLoopHint();
-        slot.func = null;
-        slot.ctx = null;
-        slot.state.store(0, .release);
-        return true;
+    var it: ?*Block = &first_block;
+    while (it) |block| : (it = block.next.load(.acquire)) {
+        for (&block.slots) |*slot| {
+            const s = slot.state.load(.acquire);
+            if (s & state_mask != state_live) continue;
+            if (slot.func.load(.acquire) != func or slot.ctx.load(.acquire) != ctx) continue;
+            // Only this exact registration: the generation in `s` changes if
+            // it was removed and the slot reused since the reads above.
+            const changing = (s & ~state_mask) | state_changing;
+            if (slot.state.cmpxchgStrong(s, changing, .seq_cst, .monotonic) != null) continue;
+            while (slot.busy.load(.seq_cst) != 0) std.atomic.spinLoopHint();
+            slot.func.store(null, .release);
+            slot.ctx.store(null, .release);
+            slot.state.store((s & ~state_mask) | state_free, .release);
+            return true;
+        }
     }
     return false;
 }
@@ -164,11 +199,18 @@ pub fn unobserveHandleRetire(func: HandleRetiredFn, ctx: ?*anyopaque) bool {
 /// address for a different object) must call it before the address can name
 /// anything else.
 pub fn notifyHandleRetired(handle: *anyopaque) void {
-    _ = active_notifications.fetchAdd(1, .acq_rel);
-    defer _ = active_notifications.fetchSub(1, .acq_rel);
-    for (&observer_slots) |*slot| {
-        if (slot.state.load(.acquire) != 2) continue;
-        if (slot.func) |f| f(slot.ctx, handle);
+    var it: ?*Block = &first_block;
+    while (it) |block| : (it = block.next.load(.acquire)) {
+        for (&block.slots) |*slot| {
+            const s = slot.state.load(.seq_cst);
+            if (s & state_mask != state_live) continue;
+            _ = slot.busy.fetchAdd(1, .seq_cst);
+            defer _ = slot.busy.fetchSub(1, .seq_cst);
+            // A removal that began before `busy` was raised is not waiting
+            // for this call: skip.
+            if (slot.state.load(.seq_cst) != s) continue;
+            if (slot.func.load(.acquire)) |f| f(slot.ctx.load(.acquire), handle);
+        }
     }
 }
 
@@ -221,17 +263,37 @@ test "freeEntityBox reports the handle to observers before freeing it" {
     try std.testing.expectEqual(@as(usize, 1), Rec.count);
 }
 
-test "the observer table rejects registrations once full" {
-    const Noop = struct {
-        fn on(_: ?*anyopaque, _: *anyopaque) callconv(.c) void {}
+test "the observer table grows past one block, and a removal frees only its own slot" {
+    const Count = struct {
+        var calls: usize = 0;
+        fn on(_: ?*anyopaque, _: *anyopaque) callconv(.c) void {
+            calls += 1;
+        }
     };
+    const n = block_len * 2 + 3;
     var i: usize = 0;
-    while (i < max_handle_retire_observers) : (i += 1) {
-        try std.testing.expect(observeHandleRetire(&Noop.on, @ptrFromInt(i + 1)));
+    while (i < n) : (i += 1) {
+        try std.testing.expect(observeHandleRetire(&Count.on, @ptrFromInt(i + 1)));
     }
-    try std.testing.expect(!observeHandleRetire(&Noop.on, @ptrFromInt(0x99)));
-    i = 0;
-    while (i < max_handle_retire_observers) : (i += 1) {
-        try std.testing.expect(unobserveHandleRetire(&Noop.on, @ptrFromInt(i + 1)));
+    var target: u8 = 0;
+    notifyHandleRetired(@ptrCast(&target));
+    try std.testing.expectEqual(@as(usize, n), Count.calls);
+
+    // Remove one, register another (it may take the freed slot), then remove
+    // the first again: the newcomer must stay registered.
+    try std.testing.expect(unobserveHandleRetire(&Count.on, @ptrFromInt(1)));
+    try std.testing.expect(observeHandleRetire(&Count.on, @ptrFromInt(0x1000)));
+    try std.testing.expect(!unobserveHandleRetire(&Count.on, @ptrFromInt(1)));
+    Count.calls = 0;
+    notifyHandleRetired(@ptrCast(&target));
+    try std.testing.expectEqual(@as(usize, n), Count.calls);
+
+    i = 1;
+    while (i < n) : (i += 1) {
+        try std.testing.expect(unobserveHandleRetire(&Count.on, @ptrFromInt(i + 1)));
     }
+    try std.testing.expect(unobserveHandleRetire(&Count.on, @ptrFromInt(0x1000)));
+    Count.calls = 0;
+    notifyHandleRetired(@ptrCast(&target));
+    try std.testing.expectEqual(@as(usize, 0), Count.calls);
 }

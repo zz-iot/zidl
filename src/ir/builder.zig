@@ -580,6 +580,7 @@ const Builder = struct {
             .typedef => |*td| {
                 const type_ref = try self.resolveTypeRef(&td.declarator.type_spec, module_qpath, scope);
                 const raw = try self.extractRaw(annotations);
+                try self.resolveRetiredResult(raw, annotations, scope);
                 for (td.declarator.declarators) |*decl| {
                     const name = declaratorName(decl);
                     const qname = try qualifyName(self.alloc, module_qpath, name);
@@ -1276,6 +1277,35 @@ const Builder = struct {
 
     /// Convert ALL annotations to raw (for types that have no pre-interpreted fields:
     /// typedef, native, exception, const, operation, parameter, attribute, bitset).
+    /// `@retired_result(expr)` on a typedef: evaluates `expr` in the typedef's
+    /// own scope, so a scoped or imported constant names exactly the constant
+    /// IDL scoping rules give it, and stores the result as the annotation's
+    /// integer parameter (`ir.retiredResult` reads it). A non-integer value
+    /// is an error.
+    fn resolveRetiredResult(
+        self: *Builder,
+        raw: []const ir.RawAnnotation,
+        annotations: []const ast.AnnotationAppl,
+        scope: *const Scope,
+    ) !void {
+        for (raw, annotations) |*r, *a| {
+            if (!std.mem.eql(u8, r.name, "retired_result")) continue;
+            const expr: *const ast.ConstExpr = switch (a.params) {
+                .positional => |*e| e,
+                else => return error.InvalidRetiredResult,
+            };
+            var tmp: std.ArrayListUnmanaged(error_mod.Diagnostic) = .empty;
+            const cv = try const_eval.evaluate(expr, scope, self.alloc, &tmp);
+            const v = switch (cv) {
+                .integer => |i| i,
+                else => return error.InvalidRetiredResult,
+            };
+            const params = try self.alloc.alloc(ir.AnnotationParam, 1);
+            params[0] = .{ .name = null, .value = .{ .integer = v } };
+            @constCast(r).params = params;
+        }
+    }
+
     fn extractRaw(self: *Builder, annotations: []const ast.AnnotationAppl) ![]const ir.RawAnnotation {
         if (annotations.len == 0) return &.{};
         var list: std.ArrayListUnmanaged(ir.RawAnnotation) = .empty;
@@ -1622,42 +1652,58 @@ fn testBuildWithImport(base_source: []const u8, derived_source: []const u8) !ir.
     );
 }
 
-test "builder: @retired_result resolves a literal or a named constant through typedefs" {
+fn findTypedef(items: []const ir.ModuleItem, name: []const u8) ?ir.TypeRef {
+    for (items) |item| switch (item) {
+        .type_decl => |td| switch (td) {
+            .typedef => |t| if (std.mem.eql(u8, t.name, name)) return .{ .named = .{ .typedef = t } },
+            else => {},
+        },
+        .module => |m| if (findTypedef(m.items, name)) |tr| return tr,
+        .const_ => {},
+    };
+    return null;
+}
+
+test "builder: @retired_result resolves its constant by IDL scoping, through typedefs" {
     var ir_spec = try testBuild(
+        \\module B { const long DELETED = 7; };
         \\module A {
         \\    const long DELETED = 9;
         \\    @retired_result(DELETED) typedef long Code;
         \\    typedef Code Alias;
+        \\    @retired_result(B::DELETED) typedef long Other;
         \\    @retired_result(4) typedef long Literal;
         \\    typedef long Plain;
         \\};
-        \\module B { const long DELETED = 7; };
     );
     defer ir_spec.deinit();
-    const items = ir_spec.items[0].module.items;
-    var code: ?ir.TypeRef = null;
-    var alias: ?ir.TypeRef = null;
-    var literal: ?ir.TypeRef = null;
-    var plain: ?ir.TypeRef = null;
-    for (items) |item| switch (item) {
-        .type_decl => |td| switch (td) {
-            .typedef => |t| {
-                const tr: ir.TypeRef = .{ .named = .{ .typedef = t } };
-                if (std.mem.eql(u8, t.name, "Code")) code = tr;
-                if (std.mem.eql(u8, t.name, "Alias")) alias = tr;
-                if (std.mem.eql(u8, t.name, "Literal")) literal = tr;
-                if (std.mem.eql(u8, t.name, "Plain")) plain = tr;
-            },
-            else => {},
-        },
+    // An unqualified name is A's own constant; a scoped one is exactly the
+    // constant it names.
+    try testing.expectEqual(@as(?i64, 9), ir.retiredResult(findTypedef(ir_spec.items, "Code").?));
+    try testing.expectEqual(@as(?i64, 9), ir.retiredResult(findTypedef(ir_spec.items, "Alias").?));
+    try testing.expectEqual(@as(?i64, 7), ir.retiredResult(findTypedef(ir_spec.items, "Other").?));
+    try testing.expectEqual(@as(?i64, 4), ir.retiredResult(findTypedef(ir_spec.items, "Literal").?));
+    try testing.expectEqual(@as(?i64, null), ir.retiredResult(findTypedef(ir_spec.items, "Plain").?));
+    try testing.expectEqual(@as(?i64, null), ir.retiredResult(.{ .base = .long }));
+}
+
+test "builder: @retired_result on an imported typedef keeps its value" {
+    var ir_spec = try testBuildWithImport(
+        \\module Base {
+        \\    @retired_result(DELETED) typedef long Code;
+        \\    const Code DELETED = 9;
+        \\};
+    ,
+        \\module Ext { interface Thing { Base::Code reset(); }; };
+    );
+    defer ir_spec.deinit();
+    // Reached as backends reach it: through the operation's return type.
+    const ext = for (ir_spec.items) |item| switch (item) {
+        .module => |m| if (std.mem.eql(u8, m.name, "Ext")) break m,
         else => {},
-    };
-    // The constant in the typedef's own module wins over B's.
-    try testing.expectEqual(@as(?i64, 9), ir.retiredResult(ir_spec.items, code.?));
-    try testing.expectEqual(@as(?i64, 9), ir.retiredResult(ir_spec.items, alias.?));
-    try testing.expectEqual(@as(?i64, 4), ir.retiredResult(ir_spec.items, literal.?));
-    try testing.expectEqual(@as(?i64, null), ir.retiredResult(ir_spec.items, plain.?));
-    try testing.expectEqual(@as(?i64, null), ir.retiredResult(ir_spec.items, .{ .base = .long }));
+    } else return error.TestUnexpectedResult;
+    const thing = ext.items[0].type_decl.interface;
+    try testing.expectEqual(@as(?i64, 9), ir.retiredResult(thing.operations[0].return_type.?));
 }
 
 test "builder: simple struct" {

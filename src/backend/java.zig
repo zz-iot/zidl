@@ -4586,7 +4586,6 @@ pub fn generateImplFile(
         .opts = opts,
         .out = out,
         .cross_file = cross_file,
-        .spec_items = spec.items,
     };
     try gen.emit();
 }
@@ -4624,8 +4623,6 @@ const ImplFileGenerator = struct {
     /// See `CrossFileResolver`. Default-empty: every type reference resolves
     /// as local to the current file, today's behavior.
     cross_file: CrossFileResolver = .{},
-    /// For resolving `@retired_result` constants (`retiredReturn`).
-    spec_items: []const ir.ModuleItem = &.{},
 
     fn write(self: *ImplFileGenerator, s: []const u8) !void {
         try self.out.appendSlice(self.alloc, s);
@@ -4642,7 +4639,7 @@ const ImplFileGenerator = struct {
         const rt = ret orelse return self.alloc.dupe(u8, "if (ptr_ == 0) return; ");
         const jt = try self.typeRefToJava(rt);
         defer self.alloc.free(jt);
-        if (ir.retiredResult(self.spec_items, rt)) |v| {
+        if (ir.retiredResult(rt)) |v| {
             const suffix: []const u8 = if (std.mem.eql(u8, jt, "long")) "L" else "";
             return std.fmt.allocPrint(self.alloc, "if (ptr_ == 0) return ({s}) {d}{s}; ", .{ jt, v, suffix });
         }
@@ -5942,12 +5939,18 @@ const JniBridgeGenerator = struct {
             "/* Handle-retire hook (docs/design/handle-lifetime.md in zidl): the\n" ++
                 " * provider reports each entity handle it frees, before the address can\n" ++
                 " * name another object. The first use of any cache in this file\n" ++
-                " * registers the observer, defined after the caches. */\n" ++
+                " * registers the observer, defined after the caches. Without it,\n" ++
+                " * wrappers of freed handles would keep calling into them, so a failed\n" ++
+                " * registration stops the program rather than hand any out. */\n" ++
+                "#include <stdio.h>\n" ++
                 "extern int {[h]s}_observe(void (*fn)(void *ctx, void *handle), void *ctx);\n" ++
                 "static void _zidl_java_on_handle_retired(void *ctx, void *handle);\n" ++
                 "static pthread_once_t _zidl_java_retire_once = PTHREAD_ONCE_INIT;\n" ++
                 "static ZIDL_JAVA_MAYBE_UNUSED void _zidl_java_retire_register(void) {{\n" ++
-                "    (void){[h]s}_observe(_zidl_java_on_handle_retired, NULL);\n" ++
+                "    if ({[h]s}_observe(_zidl_java_on_handle_retired, NULL) != 0) {{\n" ++
+                "        fputs(\"zidl: {[h]s}_observe failed\\n\", stderr);\n" ++
+                "        abort();\n" ++
+                "    }}\n" ++
                 "}}\n" ++
                 "#define ZIDL_JAVA_OBSERVE_RETIRE() pthread_once(&_zidl_java_retire_once, _zidl_java_retire_register)\n\n",
             .{ .h = hook },
@@ -5987,30 +5990,26 @@ const JniBridgeGenerator = struct {
                 "static pthread_mutex_t _zidl_family_{[r]s}_mtx = PTHREAD_MUTEX_INITIALIZER;\n" ++
                 "static _zidl_family_{[r]s}_node *_zidl_family_{[r]s}_buckets[ZIDL_JAVA_CACHE_BUCKETS];\n" ++
                 "\n" ++
-                "/* Caller must hold _zidl_family_{[r]s}_mtx. Returns a NEW LOCAL ref for\n" ++
-                " * `handle` if a live one is cached and is an instance of `want`, else\n" ++
-                " * NULL. Reclaims the node first if its weak ref has expired (a GC'd\n" ++
-                " * Java object) or its object is not a `want`: without a handle-retire\n" ++
-                " * hook nothing evicts a node when its native object is destroyed, so a\n" ++
-                " * live node can belong to a destroyed object whose address now holds\n" ++
-                " * an object of another type. */\n" ++
+                "/* Caller must hold _zidl_family_{[r]s}_mtx. Returns a NEW LOCAL ref to\n" ++
+                " * the live object cached for `handle` that is an instance of `want`, or\n" ++
+                " * NULL. A handle can have several live objects: one boxed as a base\n" ++
+                " * interface and later one as a derived one, or, without a handle-retire\n" ++
+                " * hook, a destroyed entity's whose address now names an object of\n" ++
+                " * another type. All stay cached, so the hook can retire every one.\n" ++
+                " * Reclaims every node in the bucket whose object Java has collected. */\n" ++
                 "static jobject _zidl_family_{[r]s}_lookup_locked(JNIEnv *env, void *handle, jclass want) {{\n" ++
                 "    _zidl_family_{[r]s}_node **pp = &_zidl_family_{[r]s}_buckets[ZIDL_JAVA_CACHE_BUCKET(handle)];\n" ++
                 "    while (*pp != NULL) {{\n" ++
                 "        _zidl_family_{[r]s}_node *n = *pp;\n" ++
-                "        if (n->handle == handle) {{\n" ++
-                "            if (!(*env)->IsSameObject(env, n->ref, NULL)) {{\n" ++
-                "                jobject local = (*env)->NewLocalRef(env, n->ref);\n" ++
-                "                if (local != NULL) {{\n" ++
-                "                    if ((*env)->IsInstanceOf(env, local, want)) return local;\n" ++
-                "                    (*env)->DeleteLocalRef(env, local);\n" ++
-                "                }}\n" ++
-                "            }}\n" ++
+                "        jobject local = (*env)->NewLocalRef(env, n->ref);\n" ++
+                "        if (local == NULL) {{\n" ++
                 "            *pp = n->next;\n" ++
                 "            (*env)->DeleteWeakGlobalRef(env, n->ref);\n" ++
                 "            free(n);\n" ++
-                "            return NULL;\n" ++
+                "            continue;\n" ++
                 "        }}\n" ++
+                "        if (n->handle == handle && (*env)->IsInstanceOf(env, local, want)) return local;\n" ++
+                "        (*env)->DeleteLocalRef(env, local);\n" ++
                 "        pp = &n->next;\n" ++
                 "    }}\n" ++
                 "    return NULL;\n" ++
@@ -6029,30 +6028,34 @@ const JniBridgeGenerator = struct {
                 "    *head = n;\n" ++
                 "}}\n" ++
                 "\n" ++
-                "/* Drops `handle`'s node and marks its object retired (ptr_ = 0), for\n" ++
-                " * the handle-retire observer: the provider freed the handle, so the\n" ++
-                " * wrapper must stop reaching it. */\n" ++
+                "/* Drops every node for `handle` and marks each live object retired\n" ++
+                " * (ptr_ = 0), for the handle-retire observer: the provider freed the\n" ++
+                " * handle, so no wrapper of it may reach it again. */\n" ++
                 "static ZIDL_JAVA_MAYBE_UNUSED void _zidl_family_{[r]s}_evict(JNIEnv *env, void *handle) {{\n" ++
-                "    jweak ref = NULL;\n" ++
+                "    _zidl_family_{[r]s}_node *gone = NULL;\n" ++
                 "    _zidl_family_{[r]s}_node **pp = &_zidl_family_{[r]s}_buckets[ZIDL_JAVA_CACHE_BUCKET(handle)];\n" ++
                 "    pthread_mutex_lock(&_zidl_family_{[r]s}_mtx);\n" ++
                 "    while (*pp != NULL) {{\n" ++
                 "        _zidl_family_{[r]s}_node *n = *pp;\n" ++
                 "        if (n->handle == handle) {{\n" ++
                 "            *pp = n->next;\n" ++
-                "            ref = n->ref;\n" ++
-                "            free(n);\n" ++
-                "            break;\n" ++
+                "            n->next = gone;\n" ++
+                "            gone = n;\n" ++
+                "            continue;\n" ++
                 "        }}\n" ++
                 "        pp = &n->next;\n" ++
                 "    }}\n" ++
                 "    pthread_mutex_unlock(&_zidl_family_{[r]s}_mtx);\n" ++
-                "    if (ref == NULL) return;\n" ++
-                "    jobject obj = (*env)->NewLocalRef(env, ref);\n" ++
-                "    (*env)->DeleteWeakGlobalRef(env, ref);\n" ++
-                "    if (obj != NULL) {{\n" ++
-                "        zidl_java_mark_retired(env, obj);\n" ++
-                "        (*env)->DeleteLocalRef(env, obj);\n" ++
+                "    while (gone != NULL) {{\n" ++
+                "        _zidl_family_{[r]s}_node *n = gone;\n" ++
+                "        gone = n->next;\n" ++
+                "        jobject obj = (*env)->NewLocalRef(env, n->ref);\n" ++
+                "        (*env)->DeleteWeakGlobalRef(env, n->ref);\n" ++
+                "        free(n);\n" ++
+                "        if (obj != NULL) {{\n" ++
+                "            zidl_java_mark_retired(env, obj);\n" ++
+                "            (*env)->DeleteLocalRef(env, obj);\n" ++
+                "        }}\n" ++
                 "    }}\n" ++
                 "}}\n" ++
                 "\n" ++
@@ -6062,8 +6065,8 @@ const JniBridgeGenerator = struct {
                 " * factory operation, so nothing in generated code ever calls box for it\n" ++
                 " * (GuardCondition is a real example: see zzdds's docs/roadmap.md). If a\n" ++
                 " * still-live registration of `obj`'s class for the same handle already\n" ++
-                " * exists, `obj` is simply not registered (one of another class belongs\n" ++
-                " * to a destroyed object, and is replaced) -- the caller's own `obj`\n" ++
+                " * exists, `obj` is simply not registered (one of another class is\n" ++
+                " * kept beside it) -- the caller's own `obj`\n" ++
                 " * reference remains perfectly valid to use either way; this only\n" ++
                 " * affects what FUTURE zidl_java_box_* / lookup calls for this handle\n" ++
                 " * see, and a type with no factory operation to race against never\n" ++
@@ -6096,14 +6099,13 @@ const JniBridgeGenerator = struct {
     /// found identity is returned as-is (not re-typed) if it implements this
     /// interface's Java interface, which a cached derived object does — no
     /// analog of the C++ backend's `dynamic_pointer_cast` recovery is needed
-    /// here. A cached object that does not implement it is stale, not a
-    /// shallower view of the same object: the native object it wrapped was
-    /// destroyed (nothing evicts cache nodes on destruction, and a cascading
-    /// delete never passes through Java) and its address reused for an
-    /// object of another type. JNI does not type-check a native method's
-    /// returned `jobject`, so handing it out would surface only at the
+    /// here. A cached object that does not implement it is another live
+    /// wrapper of the handle (boxed as a base interface), or one of a
+    /// destroyed entity whose address was reused for another type (without
+    /// the retire hook nothing evicts it). JNI does not type-check a native
+    /// method's returned `jobject`, so handing it out would surface only at the
     /// caller's first interface call, as `IncompatibleClassChangeError`. The
-    /// lookup drops such a node and a fresh object is constructed.
+    /// lookup skips it, and a fresh object is cached beside it.
     fn emitBoxHelper(self: *JniBridgeGenerator, iface: *const ir.Interface, c_name: []const u8) !void {
         const bin_class = try self.implBinaryClassName(iface);
         defer self.alloc.free(bin_class);

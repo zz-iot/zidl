@@ -193,30 +193,26 @@ typedef struct _zidl_family_Greeter_node {
 static pthread_mutex_t _zidl_family_Greeter_mtx = PTHREAD_MUTEX_INITIALIZER;
 static _zidl_family_Greeter_node *_zidl_family_Greeter_buckets[ZIDL_JAVA_CACHE_BUCKETS];
 
-/* Caller must hold _zidl_family_Greeter_mtx. Returns a NEW LOCAL ref for
- * `handle` if a live one is cached and is an instance of `want`, else
- * NULL. Reclaims the node first if its weak ref has expired (a GC'd
- * Java object) or its object is not a `want`: without a handle-retire
- * hook nothing evicts a node when its native object is destroyed, so a
- * live node can belong to a destroyed object whose address now holds
- * an object of another type. */
+/* Caller must hold _zidl_family_Greeter_mtx. Returns a NEW LOCAL ref to
+ * the live object cached for `handle` that is an instance of `want`, or
+ * NULL. A handle can have several live objects: one boxed as a base
+ * interface and later one as a derived one, or, without a handle-retire
+ * hook, a destroyed entity's whose address now names an object of
+ * another type. All stay cached, so the hook can retire every one.
+ * Reclaims every node in the bucket whose object Java has collected. */
 static jobject _zidl_family_Greeter_lookup_locked(JNIEnv *env, void *handle, jclass want) {
     _zidl_family_Greeter_node **pp = &_zidl_family_Greeter_buckets[ZIDL_JAVA_CACHE_BUCKET(handle)];
     while (*pp != NULL) {
         _zidl_family_Greeter_node *n = *pp;
-        if (n->handle == handle) {
-            if (!(*env)->IsSameObject(env, n->ref, NULL)) {
-                jobject local = (*env)->NewLocalRef(env, n->ref);
-                if (local != NULL) {
-                    if ((*env)->IsInstanceOf(env, local, want)) return local;
-                    (*env)->DeleteLocalRef(env, local);
-                }
-            }
+        jobject local = (*env)->NewLocalRef(env, n->ref);
+        if (local == NULL) {
             *pp = n->next;
             (*env)->DeleteWeakGlobalRef(env, n->ref);
             free(n);
-            return NULL;
+            continue;
         }
+        if (n->handle == handle && (*env)->IsInstanceOf(env, local, want)) return local;
+        (*env)->DeleteLocalRef(env, local);
         pp = &n->next;
     }
     return NULL;
@@ -235,30 +231,34 @@ static void _zidl_family_Greeter_insert_locked(JNIEnv *env, void *handle, jobjec
     *head = n;
 }
 
-/* Drops `handle`'s node and marks its object retired (ptr_ = 0), for
- * the handle-retire observer: the provider freed the handle, so the
- * wrapper must stop reaching it. */
+/* Drops every node for `handle` and marks each live object retired
+ * (ptr_ = 0), for the handle-retire observer: the provider freed the
+ * handle, so no wrapper of it may reach it again. */
 static ZIDL_JAVA_MAYBE_UNUSED void _zidl_family_Greeter_evict(JNIEnv *env, void *handle) {
-    jweak ref = NULL;
+    _zidl_family_Greeter_node *gone = NULL;
     _zidl_family_Greeter_node **pp = &_zidl_family_Greeter_buckets[ZIDL_JAVA_CACHE_BUCKET(handle)];
     pthread_mutex_lock(&_zidl_family_Greeter_mtx);
     while (*pp != NULL) {
         _zidl_family_Greeter_node *n = *pp;
         if (n->handle == handle) {
             *pp = n->next;
-            ref = n->ref;
-            free(n);
-            break;
+            n->next = gone;
+            gone = n;
+            continue;
         }
         pp = &n->next;
     }
     pthread_mutex_unlock(&_zidl_family_Greeter_mtx);
-    if (ref == NULL) return;
-    jobject obj = (*env)->NewLocalRef(env, ref);
-    (*env)->DeleteWeakGlobalRef(env, ref);
-    if (obj != NULL) {
-        zidl_java_mark_retired(env, obj);
-        (*env)->DeleteLocalRef(env, obj);
+    while (gone != NULL) {
+        _zidl_family_Greeter_node *n = gone;
+        gone = n->next;
+        jobject obj = (*env)->NewLocalRef(env, n->ref);
+        (*env)->DeleteWeakGlobalRef(env, n->ref);
+        free(n);
+        if (obj != NULL) {
+            zidl_java_mark_retired(env, obj);
+            (*env)->DeleteLocalRef(env, obj);
+        }
     }
 }
 
@@ -268,8 +268,8 @@ static ZIDL_JAVA_MAYBE_UNUSED void _zidl_family_Greeter_evict(JNIEnv *env, void 
  * factory operation, so nothing in generated code ever calls box for it
  * (GuardCondition is a real example: see zzdds's docs/roadmap.md). If a
  * still-live registration of `obj`'s class for the same handle already
- * exists, `obj` is simply not registered (one of another class belongs
- * to a destroyed object, and is replaced) -- the caller's own `obj`
+ * exists, `obj` is simply not registered (one of another class is
+ * kept beside it) -- the caller's own `obj`
  * reference remains perfectly valid to use either way; this only
  * affects what FUTURE zidl_java_box_* / lookup calls for this handle
  * see, and a type with no factory operation to race against never
@@ -298,30 +298,26 @@ typedef struct _zidl_family_AdvancedGreeter_node {
 static pthread_mutex_t _zidl_family_AdvancedGreeter_mtx = PTHREAD_MUTEX_INITIALIZER;
 static _zidl_family_AdvancedGreeter_node *_zidl_family_AdvancedGreeter_buckets[ZIDL_JAVA_CACHE_BUCKETS];
 
-/* Caller must hold _zidl_family_AdvancedGreeter_mtx. Returns a NEW LOCAL ref for
- * `handle` if a live one is cached and is an instance of `want`, else
- * NULL. Reclaims the node first if its weak ref has expired (a GC'd
- * Java object) or its object is not a `want`: without a handle-retire
- * hook nothing evicts a node when its native object is destroyed, so a
- * live node can belong to a destroyed object whose address now holds
- * an object of another type. */
+/* Caller must hold _zidl_family_AdvancedGreeter_mtx. Returns a NEW LOCAL ref to
+ * the live object cached for `handle` that is an instance of `want`, or
+ * NULL. A handle can have several live objects: one boxed as a base
+ * interface and later one as a derived one, or, without a handle-retire
+ * hook, a destroyed entity's whose address now names an object of
+ * another type. All stay cached, so the hook can retire every one.
+ * Reclaims every node in the bucket whose object Java has collected. */
 static jobject _zidl_family_AdvancedGreeter_lookup_locked(JNIEnv *env, void *handle, jclass want) {
     _zidl_family_AdvancedGreeter_node **pp = &_zidl_family_AdvancedGreeter_buckets[ZIDL_JAVA_CACHE_BUCKET(handle)];
     while (*pp != NULL) {
         _zidl_family_AdvancedGreeter_node *n = *pp;
-        if (n->handle == handle) {
-            if (!(*env)->IsSameObject(env, n->ref, NULL)) {
-                jobject local = (*env)->NewLocalRef(env, n->ref);
-                if (local != NULL) {
-                    if ((*env)->IsInstanceOf(env, local, want)) return local;
-                    (*env)->DeleteLocalRef(env, local);
-                }
-            }
+        jobject local = (*env)->NewLocalRef(env, n->ref);
+        if (local == NULL) {
             *pp = n->next;
             (*env)->DeleteWeakGlobalRef(env, n->ref);
             free(n);
-            return NULL;
+            continue;
         }
+        if (n->handle == handle && (*env)->IsInstanceOf(env, local, want)) return local;
+        (*env)->DeleteLocalRef(env, local);
         pp = &n->next;
     }
     return NULL;
@@ -340,30 +336,34 @@ static void _zidl_family_AdvancedGreeter_insert_locked(JNIEnv *env, void *handle
     *head = n;
 }
 
-/* Drops `handle`'s node and marks its object retired (ptr_ = 0), for
- * the handle-retire observer: the provider freed the handle, so the
- * wrapper must stop reaching it. */
+/* Drops every node for `handle` and marks each live object retired
+ * (ptr_ = 0), for the handle-retire observer: the provider freed the
+ * handle, so no wrapper of it may reach it again. */
 static ZIDL_JAVA_MAYBE_UNUSED void _zidl_family_AdvancedGreeter_evict(JNIEnv *env, void *handle) {
-    jweak ref = NULL;
+    _zidl_family_AdvancedGreeter_node *gone = NULL;
     _zidl_family_AdvancedGreeter_node **pp = &_zidl_family_AdvancedGreeter_buckets[ZIDL_JAVA_CACHE_BUCKET(handle)];
     pthread_mutex_lock(&_zidl_family_AdvancedGreeter_mtx);
     while (*pp != NULL) {
         _zidl_family_AdvancedGreeter_node *n = *pp;
         if (n->handle == handle) {
             *pp = n->next;
-            ref = n->ref;
-            free(n);
-            break;
+            n->next = gone;
+            gone = n;
+            continue;
         }
         pp = &n->next;
     }
     pthread_mutex_unlock(&_zidl_family_AdvancedGreeter_mtx);
-    if (ref == NULL) return;
-    jobject obj = (*env)->NewLocalRef(env, ref);
-    (*env)->DeleteWeakGlobalRef(env, ref);
-    if (obj != NULL) {
-        zidl_java_mark_retired(env, obj);
-        (*env)->DeleteLocalRef(env, obj);
+    while (gone != NULL) {
+        _zidl_family_AdvancedGreeter_node *n = gone;
+        gone = n->next;
+        jobject obj = (*env)->NewLocalRef(env, n->ref);
+        (*env)->DeleteWeakGlobalRef(env, n->ref);
+        free(n);
+        if (obj != NULL) {
+            zidl_java_mark_retired(env, obj);
+            (*env)->DeleteLocalRef(env, obj);
+        }
     }
 }
 
@@ -373,8 +373,8 @@ static ZIDL_JAVA_MAYBE_UNUSED void _zidl_family_AdvancedGreeter_evict(JNIEnv *en
  * factory operation, so nothing in generated code ever calls box for it
  * (GuardCondition is a real example: see zzdds's docs/roadmap.md). If a
  * still-live registration of `obj`'s class for the same handle already
- * exists, `obj` is simply not registered (one of another class belongs
- * to a destroyed object, and is replaced) -- the caller's own `obj`
+ * exists, `obj` is simply not registered (one of another class is
+ * kept beside it) -- the caller's own `obj`
  * reference remains perfectly valid to use either way; this only
  * affects what FUTURE zidl_java_box_* / lookup calls for this handle
  * see, and a type with no factory operation to race against never

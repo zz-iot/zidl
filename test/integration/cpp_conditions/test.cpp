@@ -269,6 +269,21 @@ int main() {
     assert(doomed->native_handle() == nullptr);
     auto reborn = DDS::DataReaderImpl::_getOrCreate(&doomed_handle);
     assert(reborn && reborn != doomed && !reborn->_zidl_is_retired());
+    // A handle can have a live wrapper per class it was boxed as: here a
+    // QueryCondition boxed as a ReadCondition, then through the root (which
+    // boxes it as a QueryCondition). Both stay identity-stable, and retiring
+    // the handle retires both.
+    DDS_Condition_s q_root;
+    DDS_ReadCondition_s q_read{&q_root};
+    DDS_QueryCondition_s q_query{&q_read};
+    know({&q_root, &q_read, &q_query, nullptr, nullptr});
+    auto as_read = DDS::ReadConditionImpl::_getOrCreate(&q_read);
+    auto as_query = DDS::QueryConditionImpl::_getOrCreate(&q_query);
+    assert(DDS::ConditionImpl::_getOrCreate(&q_root) == as_query);
+    assert(DDS::ReadConditionImpl::_getOrCreate(&q_read) == as_read);
+    retire(&q_root);
+    assert(as_read->_zidl_is_retired() && as_query->_zidl_is_retired());
+
     // The same for a member of a family, whose cache is keyed by the root's
     // handle.
     retire(&roots[2]);
