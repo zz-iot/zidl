@@ -18,6 +18,10 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- C++: the first use of an entity identity cache no longer allocates on the heap. Since
+  v0.3.25 its mutex and map were created with `new`; they now live in static storage, so an
+  application that forbids heap allocation once started can still create its first entity of
+  a family (e.g. a `GuardCondition`) afterwards.
 - Java: boxing an entity no longer returns a destroyed entity's wrapper of the wrong class. The
   shared box-identity cache of a `@shared_c_abi_box` family kept an entry until its Java object
   was collected, so once an entity was deleted and its address reused for an entity of another
