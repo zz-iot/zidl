@@ -9,6 +9,7 @@ public class EntityTest {
 
     static native long nGetFactory();
     static native int nTurns();
+    static native boolean nFailCallback(boolean frame);
 
     static void check(boolean cond, String msg) {
         if (!cond) throw new AssertionError("FAIL: " + msg);
@@ -68,10 +69,25 @@ public class EntityTest {
         check(factory.current_part() == again, "the new gear keeps its own identity");
     }
 
+    static void checkCallbackErrors(Entity.Widgets.Factory factory) {
+        final int[] callbacks = {0};
+        factory.set_listener(new Entity.Widgets.PartListener() {
+            public void on_part(Entity.Widgets.Gear part) { callbacks[0]++; }
+        });
+        check(nFailCallback(true), "failed local frame leaves no pending exception");
+        check(nFailCallback(false), "failed entity boxing leaves no pending exception");
+        check(callbacks[0] == 0, "allocation failures skip callback delivery");
+        factory.fire_part();
+        check(callbacks[0] == 1, "a later callback still succeeds");
+        factory.set_listener(null);
+    }
+
     public static void main(String[] args) {
         System.out.println("Java entity JNI integration test:");
 
         Entity.Widgets.Factory factory = new FactoryImpl(nGetFactory());
+
+        checkCallbackErrors(factory);
 
         Entity.Widgets.Widget w = factory.create_widget(42);
         check(w instanceof WidgetImpl, "create_widget returns a boxed WidgetImpl");

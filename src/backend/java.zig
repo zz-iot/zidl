@@ -5935,6 +5935,11 @@ const JniBridgeGenerator = struct {
         );
         if (self.opts.handle_retire_query.len > 0) {
             try self.print("extern int {s}(void *handle);\n#define ZIDL_JAVA_HANDLE_RETIRED(h) {s}(h)\n", .{ self.opts.handle_retire_query, self.opts.handle_retire_query });
+            try self.write(
+                "static ZIDL_JAVA_MAYBE_UNUSED void zidl_java_callback_clear_exception(JNIEnv *env) {\n" ++
+                    "    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionDescribe(env); (*env)->ExceptionClear(env); }\n" ++
+                    "}\n",
+            );
         }
         const hook = self.opts.handle_retire_hook;
         if (hook.len == 0) {
@@ -6443,7 +6448,7 @@ const JniBridgeGenerator = struct {
         try self.write("    if (env == NULL) return;\n");
 
         if (self.opts.handle_retire_query.len > 0)
-            try self.print("    if ((*env)->PushLocalFrame(env, {d}) < 0) return;\n", .{16 + op.params.len * 3});
+            try self.print("    if ((*env)->PushLocalFrame(env, {d}) < 0) {{ zidl_java_callback_clear_exception(env); return; }}\n", .{16 + op.params.len * 3});
 
         var descriptor = std.ArrayList(u8).empty;
         defer descriptor.deinit(self.alloc);
@@ -6458,7 +6463,7 @@ const JniBridgeGenerator = struct {
                     defer self.alloc.free(ebin);
                     try self.print("    jobject _a{d} = zidl_java_box_{s}(env, p{d});\n", .{ i, ec, i });
                     if (self.opts.handle_retire_query.len > 0)
-                        try self.print("    if (p{d} != NULL && _a{d} == NULL) {{ (*env)->PopLocalFrame(env, NULL); return; }}\n", .{ i, i });
+                        try self.print("    if (p{d} != NULL && _a{d} == NULL) {{ zidl_java_callback_clear_exception(env); (*env)->PopLocalFrame(env, NULL); return; }}\n", .{ i, i });
                     const _d0 = try std.fmt.allocPrint(self.alloc, "L{s};", .{ebin});
                     defer self.alloc.free(_d0);
                     try descriptor.appendSlice(self.alloc, _d0);
@@ -6498,7 +6503,10 @@ const JniBridgeGenerator = struct {
         try self.write("    (*env)->CallVoidMethod(env, ctx->ref, mid");
         for (op.params, 0..) |_, i| try self.print(", _a{d}", .{i});
         try self.write(");\n");
-        try self.write("    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionDescribe(env); (*env)->ExceptionClear(env); }\n");
+        if (self.opts.handle_retire_query.len > 0)
+            try self.write("    zidl_java_callback_clear_exception(env);\n")
+        else
+            try self.write("    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionDescribe(env); (*env)->ExceptionClear(env); }\n");
         if (self.opts.handle_retire_query.len > 0)
             try self.write("    (*env)->PopLocalFrame(env, NULL);\n");
         try self.write("}\n\n");
@@ -11344,4 +11352,26 @@ test "java: cross-file base parameter widening also accepts the imported file's 
     // is defined.
     try testing.expect(std.mem.indexOf(u8, jni, "void *_n_a_topic = zidl_java_unbox_as_DDS_TopicDescription(env, a_topic);") != null);
     try testing.expect(std.mem.indexOf(u8, jni, "static ZIDL_JAVA_MAYBE_UNUSED void *zidl_java_unbox_as_DDS_TopicDescription(JNIEnv *env, jobject obj);") != null);
+}
+
+test "java: retirement query protects boxing and callback exception cleanup" {
+    const alloc = testing.allocator;
+    var spec = try buildIrSpec(alloc,
+        \\module M {
+        \\    @shared_c_abi_box interface Entity {};
+        \\    @shared_c_abi_box interface Child : Entity {};
+        \\    @callback interface Listener { void on_entity(in Entity entity); };
+        \\    interface Factory { void set_listener(in Listener listener); Entity get_entity(); };
+        \\};
+    );
+    defer spec.deinit();
+    var output = std.ArrayList(u8).empty;
+    defer output.deinit(alloc);
+    try generateJniSource(alloc, &spec, .{ .input_stem = "widget", .handle_retire_hook = "retire", .handle_retire_query = "is_retired" }, &output);
+    const src = output.items;
+    try testing.expect(std.mem.indexOf(u8, src, "extern int is_retired(void *handle);") != null);
+    try testing.expect(std.mem.indexOf(u8, src, "pthread_mutex_lock(&_zidl_family_M_Entity_mtx);\n    if (ZIDL_JAVA_HANDLE_RETIRED(handle))") != null);
+    try testing.expect(std.mem.indexOf(u8, src, "zidl_java_mark_retired(env, obj);\n        (*env)->DeleteLocalRef(env, obj);\n        return NULL;") != null);
+    try testing.expect(std.mem.indexOf(u8, src, "if ((*env)->PushLocalFrame(env, 19) < 0) { zidl_java_callback_clear_exception(env); return; }") != null);
+    try testing.expect(std.mem.indexOf(u8, src, "if (p0 != NULL && _a0 == NULL) { zidl_java_callback_clear_exception(env); (*env)->PopLocalFrame(env, NULL); return; }") != null);
 }

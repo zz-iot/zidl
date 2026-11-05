@@ -9480,6 +9480,7 @@ fn testGenConcreteImplOpts(source: []const u8, extra: struct {
     cpp_impl_overrides: []const []const u8 = &.{},
     cpp_impl_includes: []const []const u8 = &.{},
     handle_retire_hook: []const u8 = "",
+    handle_retire_query: []const u8 = "",
 }) !ConcreteImplResult {
     const alloc = testing.allocator;
     var ast_arena = std.heap.ArenaAllocator.init(alloc);
@@ -9498,6 +9499,7 @@ fn testGenConcreteImplOpts(source: []const u8, extra: struct {
         .cpp_impl_overrides = extra.cpp_impl_overrides,
         .cpp_impl_includes = extra.cpp_impl_includes,
         .handle_retire_hook = extra.handle_retire_hook,
+        .handle_retire_query = extra.handle_retire_query,
     };
     var hdr_out = std.ArrayList(u8).empty;
     errdefer hdr_out.deinit(alloc);
@@ -10921,4 +10923,20 @@ test "cpp_backend: cross-file base parameter adapter also accepts the imported f
     try testing.expect(has(s, "ext_Subscriber_create_datareader_ex(ptr_, (a_topic ? a_topic->_zidl_handle_DDS_TopicDescription() : nullptr))"));
     try testing.expect(has(h, "DDS_TopicDescription _zidl_handle_DDS_TopicDescription() const noexcept override { return _zidl_is_retired() ? nullptr : DDS_Topic_as_DDS_TopicDescription(ext_Topic_as_DDS_Topic(ptr_)); }"));
     try testing.expect(!has(s, "dynamic_cast"));
+}
+
+test "cpp_backend: retirement query guards cache lookup and callback arguments" {
+    var res = try testGenConcreteImplOpts(
+        \\module M {
+        \\    interface Entity {};
+        \\    @callback interface Listener { void on_entity(in Entity entity, in long count); };
+        \\    interface Factory { void set_listener(in Listener listener); };
+        \\};
+    , .{ .handle_retire_hook = "retire", .handle_retire_query = "is_retired" });
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "extern \"C\" int is_retired(void* handle);"));
+    try testing.expect(has(src, "::_zidl_observe_retire();\n    std::lock_guard<std::mutex> _lock(_soloMutex());\n    if (::is_retired(h)) return nullptr;"));
+    try testing.expect(has(src, "auto _entity_entity = ::M::EntityImpl::_getOrCreate(entity);\n    if (entity && !_entity_entity) return;"));
+    try testing.expect(has(src, "owner->on_entity(_entity_entity, count)"));
 }

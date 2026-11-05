@@ -74,6 +74,50 @@ static void *part_create(int kind, int32_t value) {
     return &g_part_slot;
 }
 
+/* Inject JNI allocation failures on this thread only. Keep the VM's real
+ * functions for everything else, then restore its table before returning. */
+static void throw_test_oom(JNIEnv *env) {
+    jclass cls = (*env)->FindClass(env, "java/lang/OutOfMemoryError");
+    (*env)->ThrowNew(env, cls, "injected callback allocation failure");
+    (*env)->DeleteLocalRef(env, cls);
+}
+
+static jint JNICALL fail_push_frame(JNIEnv *env, jint capacity) {
+    (void)capacity;
+    throw_test_oom(env);
+    return JNI_ERR;
+}
+
+static jobject JNICALL fail_new_object(JNIEnv *env, jclass cls, jmethodID ctor, ...) {
+    (void)cls;
+    (void)ctor;
+    throw_test_oom(env);
+    return NULL;
+}
+
+static int callback_errors_reported;
+static void JNICALL report_callback_error(JNIEnv *env) {
+    (void)env;
+    ++callback_errors_reported;
+}
+
+JNIEXPORT jboolean JNICALL Java_EntityTest_nFailCallback(JNIEnv *env, jclass cls, jboolean frame) {
+    (void)cls;
+    const struct JNINativeInterface_ *original = *env;
+    struct JNINativeInterface_ injected = *original;
+    callback_errors_reported = 0;
+    injected.ExceptionDescribe = report_callback_error;
+    if (frame) injected.PushLocalFrame = fail_push_frame;
+    else injected.NewObject = fail_new_object;
+    part_create(PART_GEAR, 99);
+    *env = &injected;
+    Widgets_Factory_fire_part(NULL);
+    *env = original;
+    jboolean clean = !(*env)->ExceptionCheck(env);
+    if (!clean) (*env)->ExceptionClear(env);
+    return clean && callback_errors_reported == 1;
+}
+
 Widgets_Gear Widgets_Factory_create_gear(Widgets_Factory self, int32_t teeth) {
     (void)self;
     return (Widgets_Gear)part_create(PART_GEAR, teeth);

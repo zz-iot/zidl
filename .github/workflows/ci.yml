@@ -294,6 +294,18 @@ jobs:
           # Exercise the CLI's opt-in output path and the actual loadable providers.
           collect zig-out/bin/zidl -b zig --experimental-typesupport-library \
             -o "${RUNNER_TEMP}/coverage-generated" test/integration/typesupport_library/a.idl
+          # Cover opted-in binding generation and the CLI's missing-value diagnostic.
+          collect zig-out/bin/zidl -b cpp --generate-interfaces --cpp-generate-impl \
+            --handle-retire-hook test_retire --handle-retire-query test_is_retired \
+            -o "${RUNNER_TEMP}/coverage-cpp" test/integration/cpp_conditions/dcps.idl
+          collect zig-out/bin/zidl -b java --generate-interfaces \
+            --handle-retire-hook entity_retire --handle-retire-query entity_is_retired \
+            -o "${RUNNER_TEMP}/coverage-java" test/integration/java/entity.idl
+          if collect zig-out/bin/zidl --handle-retire-query >"${RUNNER_TEMP}/coverage-cli-error.log" 2>&1; then
+            echo "Expected --handle-retire-query without a value to fail" >&2
+            exit 1
+          fi
+          grep -q -- '--handle-retire-query requires an argument' "${RUNNER_TEMP}/coverage-cli-error.log"
           fixtures=zig-out/coverage-typesupport
           for host in ts-host ts-c-host; do
             collect "$fixtures/$host" "$fixtures/liba.so" "$fixtures/libb.so" "$fixtures/libconflict.so"
