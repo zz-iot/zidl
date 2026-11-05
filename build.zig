@@ -267,7 +267,7 @@ pub fn build(b: *std.Build) void {
         const c_dir = gen_c.addOutputDirectoryArg("cpp-conditions-c");
         gen_c.addFileArg(b.path("test/integration/cpp_conditions/dcps.idl"));
         const gen_cpp = b.addRunArtifact(exe);
-        gen_cpp.addArgs(&.{ "-b", "cpp", "--generate-interfaces", "--cpp-generate-impl", "--handle-retire-hook", "test_retire", "-o" });
+        gen_cpp.addArgs(&.{ "-b", "cpp", "--generate-interfaces", "--cpp-generate-impl", "--handle-retire-hook", "test_retire", "--handle-retire-query", "test_is_retired", "-o" });
         const cpp_dir = gen_cpp.addOutputDirectoryArg("cpp-conditions-cpp");
         gen_cpp.addFileArg(b.path("test/integration/cpp_conditions/dcps.idl"));
         const gen_topic = b.addRunArtifact(exe);
@@ -946,7 +946,8 @@ pub fn build(b: *std.Build) void {
                     "-b",                    "java",
                     "--generate-interfaces", "--java-jni-library",
                     "entity_jni",            "--handle-retire-hook",
-                    "entity_retire",         "-o",
+                    "entity_retire",         "--handle-retire-query",
+                    "entity_is_retired",     "-o",
                 });
                 const gen_entity_java_dir = gen_entity_java.addOutputDirectoryArg("integ-java-entity-java");
                 gen_entity_java.addFileArg(b.path("test/integration/java/entity.idl"));

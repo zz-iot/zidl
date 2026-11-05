@@ -9,6 +9,7 @@ public class EntityTest {
 
     static native long nGetFactory();
     static native int nTurns();
+    static native boolean nFailCallback(boolean frame);
 
     static void check(boolean cond, String msg) {
         if (!cond) throw new AssertionError("FAIL: " + msg);
@@ -41,10 +42,26 @@ public class EntityTest {
         int turns = nTurns();
         check(gear.turn() == 0 && nTurns() == turns + 1, "a live gear's turn() reaches the native side");
 
+        final int[] callbacks = {0};
+        final Entity.Widgets.Gear[] callbackPart = {null};
+        factory.set_listener(new Entity.Widgets.PartListener() {
+            public void on_part(Entity.Widgets.Gear part) {
+                callbacks[0]++;
+                callbackPart[0] = part;
+            }
+        });
+        factory.fire_part();
+        check(callbacks[0] == 1, "live callback is delivered");
+        check(callbackPart[0] == gear, "live callback reuses the gear wrapper");
         factory.delete_part(gear);
+        factory.fire_part();
+        check(callbacks[0] == 1, "late callback for a retired handle is skipped");
+        factory.set_listener(null);
         check(gear.turn() == 9, "a retired gear's turn() returns @retired_result's value");
         check(nTurns() == turns + 1, "a retired gear's turn() does not reach the native side");
         check(gear.get_teeth() == 0, "a retired gear's get_teeth() returns zero");
+        check(factory.current_part() == null,
+              "late lookup cannot recreate a wrapper while retired native storage is alive");
 
         Entity.Widgets.Gear again = factory.create_gear(31);
         check(again != gear, "the freed address gets a new wrapper");
@@ -52,10 +69,25 @@ public class EntityTest {
         check(factory.current_part() == again, "the new gear keeps its own identity");
     }
 
+    static void checkCallbackErrors(Entity.Widgets.Factory factory) {
+        final int[] callbacks = {0};
+        factory.set_listener(new Entity.Widgets.PartListener() {
+            public void on_part(Entity.Widgets.Gear part) { callbacks[0]++; }
+        });
+        check(nFailCallback(true), "failed local frame leaves no pending exception");
+        check(nFailCallback(false), "failed entity boxing leaves no pending exception");
+        check(callbacks[0] == 0, "allocation failures skip callback delivery");
+        factory.fire_part();
+        check(callbacks[0] == 1, "a later callback still succeeds");
+        factory.set_listener(null);
+    }
+
     public static void main(String[] args) {
         System.out.println("Java entity JNI integration test:");
 
         Entity.Widgets.Factory factory = new FactoryImpl(nGetFactory());
+
+        checkCallbackErrors(factory);
 
         Entity.Widgets.Widget w = factory.create_widget(42);
         check(w instanceof WidgetImpl, "create_widget returns a boxed WidgetImpl");

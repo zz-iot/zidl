@@ -32,6 +32,7 @@
 //!                                  default impl for <Interface> (C++ backend, --cpp-generate-impl)
 //!   --cpp-impl-include <header>    Extra #include for a --cpp-impl-override class (C++ backend)
 //!
+//!   --handle-retire-query <name>   Optional int name(void*) logical retirement query.
 //!   --handle-retire-hook <name>    Provider functions <name>_observe/_unobserve reporting freed
 //!                                  entity handles (C++ --cpp-generate-impl, Java)
 //!
@@ -80,6 +81,8 @@ const Opts = struct {
     default_extensibility: zidl.ir.Extensibility = .final,
     jni_library: []const u8 = "zidl_dds_jni",
     handle_retire_hook: []const u8 = "",
+    /// Optional int query(void *handle); requires a retire hook.
+    handle_retire_query: []const u8 = "",
     split_files: bool = false,
     pragma_once: bool = false,
     extern_c: bool = false,
@@ -262,6 +265,14 @@ pub fn main(init: std.process.Init) !void {
                 std.process.exit(1);
             }
             opts.handle_retire_hook = args[i];
+        } else if (std.mem.eql(u8, arg, "--handle-retire-query")) {
+            i += 1;
+            if (i >= args.len) {
+                try stderr.print("error: --handle-retire-query requires an argument\n", .{});
+                try stderr.flush();
+                std.process.exit(1);
+            }
+            opts.handle_retire_query = args[i];
         } else if (std.mem.eql(u8, arg, "--java-jni-library")) {
             i += 1;
             if (i >= args.len) {
@@ -699,6 +710,7 @@ fn processFile(
         .default_extensibility = opts.default_extensibility,
         .jni_library = opts.jni_library,
         .handle_retire_hook = opts.handle_retire_hook,
+        .handle_retire_query = opts.handle_retire_query,
         .split_files = opts.split_files,
         .pragma_once = opts.pragma_once,
         .extern_c = opts.extern_c,
@@ -823,6 +835,8 @@ fn printUsage(w: *Io.Writer) !void {
         \\  --cpp-impl-include <header>    Extra #include for a --cpp-impl-override class to be visible
         \\                                 (repeatable, --cpp-generate-impl only)
         \\
+        \\  --handle-retire-query <name>   Optional int name(void*) query for logically retired handles.
+        \\                               Requires --handle-retire-hook.
         \\  --handle-retire-hook <name>    C functions <name>_observe/_unobserve through which the
         \\                                 provider reports freed entity handles; a freed handle's
         \\                                 wrapper is dropped and fails cleanly (C++ --cpp-generate-impl,

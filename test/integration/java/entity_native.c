@@ -48,13 +48,74 @@ typedef struct {
 } PartObj;
 
 static PartObj g_part_slot;
+static Widgets_PartListener g_listener;
+
+void Widgets_Factory_set_listener(Widgets_Factory self, const Widgets_PartListener *listener) {
+    (void)self;
+    if (g_listener.release_listener_data)
+        g_listener.release_listener_data(g_listener.listener_data);
+    g_listener = listener ? *listener : (Widgets_PartListener){0};
+}
+
+void Widgets_Factory_fire_part(Widgets_Factory self) {
+    (void)self;
+    if (g_listener.on_part)
+        g_listener.on_part((Widgets_Gear)&g_part_slot, g_listener.listener_data);
+}
+
 static int32_t g_next_part_id = 1;
+static int g_part_retired;
 
 static void *part_create(int kind, int32_t value) {
+    g_part_retired = 0;
     g_part_slot.kind = kind;
     g_part_slot.id = g_next_part_id++;
     g_part_slot.value = value;
     return &g_part_slot;
+}
+
+/* Inject JNI allocation failures on this thread only. Keep the VM's real
+ * functions for everything else, then restore its table before returning. */
+static void throw_test_oom(JNIEnv *env) {
+    jclass cls = (*env)->FindClass(env, "java/lang/OutOfMemoryError");
+    (*env)->ThrowNew(env, cls, "injected callback allocation failure");
+    (*env)->DeleteLocalRef(env, cls);
+}
+
+static jint JNICALL fail_push_frame(JNIEnv *env, jint capacity) {
+    (void)capacity;
+    throw_test_oom(env);
+    return JNI_ERR;
+}
+
+static jobject JNICALL fail_new_object(JNIEnv *env, jclass cls, jmethodID ctor, ...) {
+    (void)cls;
+    (void)ctor;
+    throw_test_oom(env);
+    return NULL;
+}
+
+static int callback_errors_reported;
+static void JNICALL report_callback_error(JNIEnv *env) {
+    (void)env;
+    ++callback_errors_reported;
+}
+
+JNIEXPORT jboolean JNICALL Java_EntityTest_nFailCallback(JNIEnv *env, jclass cls, jboolean frame) {
+    (void)cls;
+    const struct JNINativeInterface_ *original = *env;
+    struct JNINativeInterface_ injected = *original;
+    callback_errors_reported = 0;
+    injected.ExceptionDescribe = report_callback_error;
+    if (frame) injected.PushLocalFrame = fail_push_frame;
+    else injected.NewObject = fail_new_object;
+    part_create(PART_GEAR, 99);
+    *env = &injected;
+    Widgets_Factory_fire_part(NULL);
+    *env = original;
+    jboolean clean = !(*env)->ExceptionCheck(env);
+    if (!clean) (*env)->ExceptionClear(env);
+    return clean && callback_errors_reported == 1;
 }
 
 Widgets_Gear Widgets_Factory_create_gear(Widgets_Factory self, int32_t teeth) {
@@ -72,6 +133,10 @@ Widgets_Spring Widgets_Factory_create_spring(Widgets_Factory self, int32_t rate)
 static void (*g_retire_fn)(void *ctx, void *handle);
 static void *g_retire_ctx;
 
+int entity_is_retired(void *handle) {
+    return handle == &g_part_slot && g_part_retired;
+}
+
 int entity_retire_observe(void (*fn)(void *ctx, void *handle), void *ctx) {
     if (g_retire_fn != NULL) return 1;
     g_retire_fn = fn;
@@ -87,8 +152,9 @@ int entity_retire_unobserve(void (*fn)(void *ctx, void *handle), void *ctx) {
 
 void Widgets_Factory_delete_part(Widgets_Factory self, Widgets_Part p) {
     (void)self;
+    g_part_retired = 1;
     if (g_retire_fn != NULL) g_retire_fn(g_retire_ctx, p);
-    ((PartObj *)p)->kind = PART_NONE;
+    /* Keep the native slot readable until its simulated references drain. */
 }
 
 void Widgets_Factory_forget_part(Widgets_Factory self, Widgets_Part p) {

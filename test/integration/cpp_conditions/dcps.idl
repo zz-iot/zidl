@@ -28,4 +28,5 @@ module DDS {
         long take_next_instance_raw(inout OctetSeqSeq cdr_payloads, inout OctetSeq key_hashes, inout SampleInfoSeq sample_infos, in long previous_handle, in ReadCondition a_condition, in unsigned long sample_states, in unsigned long view_states, in unsigned long instance_states, in long max_samples);
         long read_next_instance_raw(inout OctetSeqSeq cdr_payloads, inout OctetSeq key_hashes, inout SampleInfoSeq sample_infos, in long previous_handle, in ReadCondition a_condition, in unsigned long sample_states, in unsigned long view_states, in unsigned long instance_states, in long max_samples);
     };
+    @callback interface ReaderListener { void on_reader(in DataReader reader); };
 };

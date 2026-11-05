@@ -97,6 +97,8 @@ pub const Options = struct {
     /// freed is dropped from the identity cache and marked retired: its
     /// operations no longer reach the provider. Empty: no hook.
     handle_retire_hook: []const u8 = "",
+    /// Optional int query(void *handle); requires a retire hook.
+    handle_retire_query: []const u8 = "",
     /// Target profile.  Backends may use this to adjust output; the CLI
     /// calls `validateXrce` before invoking backends when profile is `.xrce`.
     profile: Profile = .full,
@@ -324,6 +326,15 @@ pub const Options = struct {
     /// only `--zig-generate-c-api` exports `_free`, nothing else exports the
     /// others, so there's nothing to collide with there.
     c_no_free: bool = false,
+
+    pub fn validateHandleRetirement(self: Options) !void {
+        if (self.handle_retire_query.len == 0) return;
+        if (self.handle_retire_hook.len == 0) return error.HandleRetireQueryRequiresHook;
+        for (self.handle_retire_query, 0..) |c, i| {
+            if (!(std.ascii.isAlphabetic(c) or c == '_' or (i > 0 and std.ascii.isDigit(c))))
+                return error.InvalidHandleRetireQueryName;
+        }
+    }
 };
 
 /// Map an imported IDL module name to the generated C/C++ include stem.
@@ -458,6 +469,7 @@ pub const Backend = struct {
     };
 
     pub fn generate(self: Backend, spec: *const ir.Spec, opts: Options) anyerror!void {
+        try opts.validateHandleRetirement();
         return self.vtable.generate(self.ctx, spec, opts);
     }
 
@@ -798,4 +810,14 @@ test "xrce validate: @appendable in nested module fails" {
     var ir_spec = try buildTestIr(testing.allocator, "module M { @appendable struct S { long x; }; };");
     defer ir_spec.deinit();
     try testing.expectError(error.XrceProfileViolation, validateXrce(&ir_spec, null));
+}
+
+test "retirement query requires a hook and a C function name" {
+    try (Options{ .input_stem = "test" }).validateHandleRetirement();
+    try (Options{ .input_stem = "test", .handle_retire_hook = "observe" }).validateHandleRetirement();
+    try std.testing.expectError(error.HandleRetireQueryRequiresHook, (Options{ .input_stem = "test", .handle_retire_query = "query" }).validateHandleRetirement());
+    try (Options{ .input_stem = "test", .handle_retire_hook = "observe", .handle_retire_query = "query_2" }).validateHandleRetirement();
+    for ([_][]const u8{ "2query", "query-name", "query()", "query name" }) |name| {
+        try std.testing.expectError(error.InvalidHandleRetireQueryName, (Options{ .input_stem = "test", .handle_retire_hook = "observe", .handle_retire_query = name }).validateHandleRetirement());
+    }
 }

@@ -74,7 +74,7 @@ binding is harmless. `unobserve` returns once no call to that observer is under
 way, and must not be called from inside one.
 
 zidl-rt implements this for providers built on it: `freeEntityBox` reports the
-handle, and `zidl_rt.exportHandleRetireHook("<name>")` exports the two functions.
+handle, and `zidl_rt.exportHandleRetireHook("<name>")` exports these functions and `<name>_is_retired` (described below).
 A provider that reuses handle addresses some other way calls
 `zidl_rt.notifyHandleRetired` itself.
 
@@ -103,8 +103,47 @@ wrappers that would never be retired.
 The hook does not make a wrapper safe to use **while** its entity is being
 deleted on another thread: a call already past the retired check uses the
 handle the provider is freeing. That is the application's synchronization to
-do, as for the raw C handle. What the hook guarantees is that once the provider
-has reported the handle, no wrapper reaches it.
+do, as for the raw C handle. After notification completes, the wrappers that were cached at notification
+are retired. Notification alone does not prevent a later lookup from creating a
+new wrapper while the native storage remains alive. Use the query below when
+logical deletion precedes memory cleanup.
+
+### Retirement query (optional: `--handle-retire-query <function>`)
+
+Providers that keep native storage alive after logical deletion can also export:
+
+```c
+int <function>(void *handle);
+```
+
+Pass both `--handle-retire-hook <name>` and `--handle-retire-query <function>`.
+The query returns nonzero for a retired handle. Set that state **before**
+notifying observers and keep it set until the allocation is freed. Each new
+allocation starts live, even if it reuses an old address. All interface views of
+one deleted entity must report retirement consistently.
+
+Generated bindings register their observer before checking retirement, then
+check under the identity-cache lock before looking up or adding a wrapper.
+Java checks again after constructing an object outside the lock. A retired
+handle produces a null wrapper; a listener bridge skips delivery if a non-null
+native entity argument cannot be wrapped. Callbacks already running in application
+code may finish with their existing wrappers, which notification retires.
+
+The query runs with a binding-cache lock held. It must be thread-safe, must not
+invoke observers or other binding operations, and must not acquire locks held
+while notifying observers. An atomic load is sufficient. The provider must keep
+the handle and native objects needed for interface conversions alive throughout
+any admitted callback or other operation that can still export that handle.
+This contract does not make arbitrary calls concurrent with deletion safe.
+
+For `boxEntity` allocations, use `zidl_rt.retireEntityBox(handle)` at logical
+deletion, and `freeEntityBox` once native references have drained. Retirement is
+idempotent: repeated retirement and the later free notify observers only once.
+`isEntityBoxRetired` reads the state; `exportHandleRetireHook("<name>")` exports
+it as `<name>_is_retired`. The public `EntityBox` contents remain unchanged; state
+lives in private allocation metadata. These helpers and the exported query accept
+only handles allocated by `boxEntity`. Providers with custom handle storage must
+supply their own query. Existing notification-only consumers need no new flag.
 
 ### 3. `@retired_result(value)`
 
