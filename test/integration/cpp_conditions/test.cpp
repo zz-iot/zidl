@@ -3,6 +3,7 @@
 #include "dcps_impl.hpp"
 #include <cassert>
 #include <type_traits>
+#include <unordered_set>
 
 static_assert(std::is_convertible_v<std::shared_ptr<DDS::QueryCondition>, std::shared_ptr<DDS::ReadCondition>>);
 static_assert(!std::is_convertible_v<std::shared_ptr<DDS::GuardCondition>, std::shared_ptr<DDS::ReadCondition>>);
@@ -64,11 +65,22 @@ static void forget(DDS_Condition root) {
 // retire() stands in for freeing one.
 static void (*retire_observer)(void*, void*);
 static void* retire_ctx;
+static std::unordered_set<void*> retired_handles;
 static void retire(void* handle) {
+    retired_handles.insert(handle);
     if (retire_observer) retire_observer(retire_ctx, handle);
 }
 
 extern "C" {
+int test_is_retired(void* handle) {
+    if (retired_handles.count(handle)) return 1;
+    for (int i = 0; i < known_count; ++i) {
+        auto& k = known[i];
+        if (handle == k.read || handle == k.query || handle == k.guard || handle == k.status)
+            if (retired_handles.count(k.root)) return 1;
+    }
+    return 0;
+}
 int test_retire_observe(void (*fn)(void*, void*), void* ctx) {
     if (retire_observer) return 1;
     retire_observer = fn;
@@ -137,6 +149,14 @@ DDS_ReturnCode_t DDS_DataReader_return_loan_raw(DDS_DataReader reader, DDS_Octet
     return DDS_RETCODE_OK;
 }
 }
+
+struct ReaderListener : DDS::ReaderListenerBase {
+    int calls = 0;
+    void on_reader(std::shared_ptr<DDS::DataReader> reader) override {
+        assert(reader);
+        ++calls;
+    }
+};
 
 int main() {
     DDS_DataReader_s reader_handle;
@@ -263,10 +283,20 @@ int main() {
     DDS_DataReader_s doomed_handle;
     auto doomed = DDS::DataReaderImpl::_getOrCreate(&doomed_handle);
     assert(doomed->enable() == DDS_RETCODE_OK && enables == 1);
+    auto listener = std::make_shared<ReaderListener>();
+    auto bridge = DDS::ReaderListenerBase::c_listener(listener);
+    bridge.on_reader(&doomed_handle, bridge.listener_data);
+    assert(listener->calls == 1);
     retire(&doomed_handle);
     assert(doomed->_zidl_is_retired());
     assert(doomed->enable() == 9 && enables == 1);
     assert(doomed->native_handle() == nullptr);
+    // An admitted callback may arrive here while native storage is pinned.
+    assert(!DDS::DataReaderImpl::_getOrCreate(&doomed_handle));
+    bridge.on_reader(&doomed_handle, bridge.listener_data);
+    assert(listener->calls == 1);
+    bridge.release_listener_data(bridge.listener_data);
+    retired_handles.erase(&doomed_handle); // a new native allocation at this address
     auto reborn = DDS::DataReaderImpl::_getOrCreate(&doomed_handle);
     assert(reborn && reborn != doomed && !reborn->_zidl_is_retired());
     // A handle can have a live wrapper per class it was boxed as: here a
@@ -283,11 +313,16 @@ int main() {
     assert(DDS::ReadConditionImpl::_getOrCreate(&q_read) == as_read);
     retire(&q_root);
     assert(as_read->_zidl_is_retired() && as_query->_zidl_is_retired());
+    assert(!DDS::ConditionImpl::_getOrCreate(&q_root));
+    assert(!DDS::ReadConditionImpl::_getOrCreate(&q_read));
+    assert(!DDS::QueryConditionImpl::_getOrCreate(&q_query));
 
     // The same for a member of a family, whose cache is keyed by the root's
     // handle.
     retire(&roots[2]);
     assert(guard->_zidl_is_retired());
+    assert(!DDS::GuardConditionImpl::_getOrCreate(&guard_handle));
+    retired_handles.erase(&roots[2]);
     auto guard2 = DDS::GuardConditionImpl::_getOrCreate(&guard_handle);
     assert(guard2 && guard2 != guard);
     assert(!read->_zidl_is_retired());

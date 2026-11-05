@@ -4113,6 +4113,7 @@ pub fn generateConcreteImpl(
     hdr_out: *std.ArrayList(u8),
     src_out: *std.ArrayList(u8),
 ) !void {
+    try opts.validateHandleRetirement();
     var gen = ConcreteImplGenerator{ .alloc = alloc, .opts = opts, .hdr = hdr_out, .src = src_out };
     defer gen.entity_base_ifaces.deinit(alloc);
     defer gen.wrapped_entities.deinit(alloc);
@@ -4638,6 +4639,11 @@ const ConcreteImplGenerator = struct {
             // With --handle-retire-hook, the first use of a cache registers
             // this file's retire observer (emitRetireObserver).
             const observe: []const u8 = if (self.opts.handle_retire_hook.len > 0) "    ::_zidl_observe_retire();\n" else "";
+            const query = if (self.opts.handle_retire_query.len > 0)
+                try std.fmt.allocPrint(self.alloc, "    if (::{s}(h)) return nullptr;\n", .{self.opts.handle_retire_query})
+            else
+                try self.alloc.dupe(u8, "");
+            defer self.alloc.free(query);
             if (fam.size <= 1) {
                 try self.srcPrint(
                     "std::mutex& {[n]s}Impl::_soloMutex() {{\n" ++
@@ -4664,7 +4670,9 @@ const ConcreteImplGenerator = struct {
                         "}}\n" ++
                         "std::shared_ptr<{[n]s}Impl> {[n]s}Impl::_getOrCreate({[c]s} h) {{\n" ++
                         "    if (!h) return nullptr;\n" ++
+                        "{[o]s}" ++
                         "    std::lock_guard<std::mutex> _lock(_soloMutex());\n" ++
+                        "{[q]s}" ++
                         "    auto& _cache = _soloCache();\n" ++
                         "    auto _it = _cache.find(h);\n" ++
                         "    if (_it != _cache.end()) {{\n" ++
@@ -4679,7 +4687,7 @@ const ConcreteImplGenerator = struct {
                         "    }}\n" ++
                         "    return _sp;\n" ++
                         "}}\n\n",
-                    .{ .n = iface.name, .c = c_name, .o = observe },
+                    .{ .n = iface.name, .c = c_name, .o = observe, .q = query },
                 );
                 try self.noteRetireCache(iface);
             } else if (fam.root == iface) {
@@ -4766,9 +4774,12 @@ const ConcreteImplGenerator = struct {
                 // before taking the lock: the downcasts call into the
                 // provider.
                 try self.srcPrint("std::shared_ptr<{s}> {s}Impl::_getOrCreate({s} h) {{\n    if (!h) return nullptr;\n", .{ iface.name, iface.name, c_name });
+                try self.srcWrite(observe);
+                try self.srcWrite(query);
                 try self.emitMostDerivedDispatch(iface);
                 try self.srcPrint(
                     "    std::lock_guard<std::mutex> _lock(_familyMutex());\n" ++
+                        "{[q]s}" ++
                         "    if (auto* _e = _familyFind(h, nullptr)) {{\n" ++
                         "        if (auto _sp = _e->ref.lock()) return _sp;\n" ++
                         "    }}\n" ++
@@ -4777,7 +4788,7 @@ const ConcreteImplGenerator = struct {
                         "    _familyInsert(h, {{_sp, _familyTag(), _sp.get(), &_zidlRetire}});\n" ++
                         "    return _sp;\n" ++
                         "}}\n\n",
-                    .{ .n = iface.name },
+                    .{ .n = iface.name, .q = query },
                 );
             } else {
                 // Non-root family member: consults/populates the ROOT's
@@ -4793,8 +4804,11 @@ const ConcreteImplGenerator = struct {
                 try self.srcPrint(
                     "std::shared_ptr<{[n]s}Impl> {[n]s}Impl::_getOrCreate({[c]s} h) {{\n" ++
                         "    if (!h) return nullptr;\n" ++
+                        "{[o]s}" ++
+                        "{[q]s}" ++
                         "    {[rc]s} _fh = {[k]s};\n" ++
                         "    std::lock_guard<std::mutex> _lock({[ri]s}::_familyMutex());\n" ++
+                        "{[q]s}" ++
                         "    if (auto* _e = {[ri]s}::_familyFind(_fh, _familyTag())) {{\n" ++
                         "        if (auto _base = _e->ref.lock()) return std::shared_ptr<{[n]s}Impl>(_base, static_cast<{[n]s}Impl*>(_e->obj));\n" ++
                         "    }}\n" ++
@@ -4803,7 +4817,7 @@ const ConcreteImplGenerator = struct {
                         "    {[ri]s}::_familyInsert(_fh, {{_sp, _familyTag(), _sp.get(), &_zidlRetire}});\n" ++
                         "    return _sp;\n" ++
                         "}}\n\n",
-                    .{ .n = iface.name, .c = c_name, .rc = root_c_name, .k = key_expr, .ri = root_impl },
+                    .{ .n = iface.name, .c = c_name, .rc = root_c_name, .k = key_expr, .ri = root_impl, .q = query, .o = observe },
                 );
             }
         }
@@ -4944,6 +4958,8 @@ const ConcreteImplGenerator = struct {
                 "[[maybe_unused]] static void _zidl_observe_retire();\n",
             .{ .h = hook },
         );
+        if (self.opts.handle_retire_query.len > 0)
+            try self.srcPrint("extern \"C\" int {s}(void* handle);\n", .{self.opts.handle_retire_query});
     }
 
     /// With `--handle-retire-hook`: this file's retire observer, registered
@@ -5942,6 +5958,21 @@ const ConcreteImplGenerator = struct {
             }
             if (op.params.len > 0) try self.srcWrite(", ");
             try self.srcWrite("void* d) {\n");
+            if (self.opts.handle_retire_query.len > 0) {
+                for (op.params) |p| {
+                    switch (p.type_ref) {
+                        .named => |td| switch (td) {
+                            .interface => |pi| if (!isCallbackIface(pi)) {
+                                const impl = try self.entityImplName(p.type_ref);
+                                defer self.alloc.free(impl);
+                                try self.srcPrint("    auto _entity_{[p]s} = {[impl]s}::_getOrCreate({[p]s});\n    if ({[p]s} && !_entity_{[p]s}) return;\n", .{ .p = p.name, .impl = impl });
+                            },
+                            else => {},
+                        },
+                        else => {},
+                    }
+                }
+            }
             try self.srcPrint("    static_cast<_Reg*>(d)->owner->{s}(", .{op.name});
             for (op.params, 0..) |p, i| {
                 if (i > 0) try self.srcWrite(", ");
@@ -5968,7 +5999,10 @@ const ConcreteImplGenerator = struct {
                                 const impl_name = try self.entityImplName(p.type_ref);
                                 defer self.alloc.free(impl_name);
                                 try self.markWrapped(p.type_ref);
-                                try self.srcPrint("{s}::_getOrCreate({s})", .{ impl_name, p.name });
+                                if (self.opts.handle_retire_query.len > 0)
+                                    try self.srcPrint("_entity_{s}", .{p.name})
+                                else
+                                    try self.srcPrint("{s}::_getOrCreate({s})", .{ impl_name, p.name });
                             } else {
                                 try self.srcPrint("/* TODO({s}) */ {s}", .{ p.name, p.name });
                             }

@@ -35,11 +35,22 @@ pub const EntityBox = struct {
 pub var nil_storage: u8 = 0;
 pub const NIL_PTR: *anyopaque = @ptrCast(&nil_storage);
 
+// Keep the public box contents unchanged; retirement is allocation metadata.
+const BoxStorage = struct {
+    entity: EntityBox,
+    retired: std.atomic.Value(bool) = .init(false),
+};
+
+fn storageOf(handle: *anyopaque) *BoxStorage {
+    const entity: *EntityBox = @ptrCast(@alignCast(handle));
+    return @fieldParentPtr("entity", entity);
+}
+
 /// Allocate a box holding `ptr`/`vtable` and return it as an opaque C-ABI handle.
 pub fn boxEntity(alloc: std.mem.Allocator, ptr: *anyopaque, vtable: *const anyopaque) !*anyopaque {
-    const box = try alloc.create(EntityBox);
-    box.* = .{ .ptr = ptr, .vtable = vtable };
-    return @ptrCast(box);
+    const storage = try alloc.create(BoxStorage);
+    storage.* = .{ .entity = .{ .ptr = ptr, .vtable = vtable } };
+    return @ptrCast(&storage.entity);
 }
 
 /// Read a box's contents back out without reconstructing a typed value.
@@ -91,9 +102,19 @@ pub fn unboxAsView(comptime T: type, handle: *anyopaque) T {
 /// `observeHandleRetire`), so a binding can drop its wrapper for the handle
 /// before the allocator can hand the address to another entity.
 pub fn freeEntityBox(alloc: std.mem.Allocator, handle: *anyopaque) void {
-    notifyHandleRetired(handle);
-    const box: *EntityBox = @ptrCast(@alignCast(handle));
-    alloc.destroy(box);
+    retireEntityBox(handle);
+    alloc.destroy(storageOf(handle));
+}
+
+/// Mark a boxEntity allocation logically deleted, notifying observers once.
+/// Storage must remain alive until all native users and observers finish.
+pub fn retireEntityBox(handle: *anyopaque) void {
+    if (!storageOf(handle).retired.swap(true, .acq_rel)) notifyHandleRetired(handle);
+}
+
+/// Query a live boxEntity allocation. This does not pin its storage.
+pub fn isEntityBoxRetired(handle: *anyopaque) bool {
+    return storageOf(handle).retired.load(.acquire);
 }
 
 // ── Handle-retire observers ───────────────────────────────────────────────────
@@ -219,12 +240,18 @@ pub fn notifyHandleRetired(handle: *anyopaque) void {
 ///
 ///     int  <name>_observe(void (*fn)(void *ctx, void *handle), void *ctx);
 ///     int  <name>_unobserve(void (*fn)(void *ctx, void *handle), void *ctx);
+///     int  <name>_is_retired(void *handle);
 ///
-/// Both return 0 on success, nonzero otherwise. Call from a `comptime` block
+/// Observe/unobserve return 0 on success, nonzero otherwise. The query returns
+/// nonzero for retired handles and only accepts boxEntity allocations.
+/// Call from a `comptime` block
 /// in the library that owns this runtime instance, so the observers it
 /// registers see that instance's frees: `comptime { zidl_rt.exportHandleRetireHook("mylib_handle_retire"); }`.
 pub fn exportHandleRetireHook(comptime name: []const u8) void {
     const S = struct {
+        fn isRetired(handle: ?*anyopaque) callconv(.c) c_int {
+            return if (handle) |h| @intFromBool(isEntityBoxRetired(h)) else 1;
+        }
         fn observe(func: ?HandleRetiredFn, ctx: ?*anyopaque) callconv(.c) c_int {
             const f = func orelse return 1;
             return if (observeHandleRetire(f, ctx)) 0 else 1;
@@ -234,6 +261,7 @@ pub fn exportHandleRetireHook(comptime name: []const u8) void {
             return if (unobserveHandleRetire(f, ctx)) 0 else 1;
         }
     };
+    @export(&S.isRetired, .{ .name = name ++ "_is_retired" });
     @export(&S.observe, .{ .name = name ++ "_observe" });
     @export(&S.unobserve, .{ .name = name ++ "_unobserve" });
 }
@@ -296,4 +324,62 @@ test "the observer table grows past one block, and a removal frees only its own 
     Count.calls = 0;
     notifyHandleRetired(@ptrCast(&target));
     try std.testing.expectEqual(@as(usize, 0), Count.calls);
+}
+
+test "logical retirement persists until free and notifies once" {
+    comptime exportHandleRetireHook("zidl_rt_test_retirement");
+    const Hook = struct {
+        extern fn zidl_rt_test_retirement_is_retired(handle: ?*anyopaque) callconv(.c) c_int;
+    };
+    try std.testing.expectEqual(@as(c_int, 1), Hook.zidl_rt_test_retirement_is_retired(null));
+    const Observer = struct {
+        var count: usize = 0;
+        fn on(_: ?*anyopaque, handle: *anyopaque) callconv(.c) void {
+            std.debug.assert(isEntityBoxRetired(handle));
+            count += 1;
+        }
+    };
+    Observer.count = 0;
+    try std.testing.expect(observeHandleRetire(Observer.on, null));
+    defer _ = unobserveHandleRetire(Observer.on, null);
+    var value: u8 = 0;
+    const handle = try boxEntity(std.testing.allocator, &value, &value);
+    try std.testing.expect(!isEntityBoxRetired(handle));
+    try std.testing.expectEqual(@as(c_int, 0), Hook.zidl_rt_test_retirement_is_retired(handle));
+    retireEntityBox(handle);
+    retireEntityBox(handle);
+    try std.testing.expect(isEntityBoxRetired(handle));
+    try std.testing.expectEqual(@as(c_int, 1), Hook.zidl_rt_test_retirement_is_retired(handle));
+    try std.testing.expectEqual(@as(*anyopaque, &value), unboxEntity(handle).ptr);
+    try std.testing.expectEqual(@as(usize, 1), Observer.count);
+    freeEntityBox(std.testing.allocator, handle);
+    try std.testing.expectEqual(@as(usize, 1), Observer.count);
+}
+
+test "concurrent logical retirement notifies once" {
+    const Observer = struct {
+        var count: std.atomic.Value(usize) = .init(0);
+        fn on(_: ?*anyopaque, _: *anyopaque) callconv(.c) void {
+            _ = count.fetchAdd(1, .monotonic);
+        }
+    };
+    Observer.count.store(0, .monotonic);
+    try std.testing.expect(observeHandleRetire(Observer.on, null));
+    defer _ = unobserveHandleRetire(Observer.on, null);
+    var value: u8 = 0;
+    const handle = try boxEntity(std.testing.allocator, &value, &value);
+    var threads: [8]std.Thread = undefined;
+    var started: usize = 0;
+    defer {
+        for (threads[0..started]) |thread| thread.join();
+        freeEntityBox(std.testing.allocator, handle);
+    }
+    for (&threads) |*thread| {
+        thread.* = try std.Thread.spawn(.{}, retireEntityBox, .{handle});
+        started += 1;
+    }
+    for (threads) |thread| thread.join();
+    started = 0;
+    try std.testing.expect(isEntityBoxRetired(handle));
+    try std.testing.expectEqual(@as(usize, 1), Observer.count.load(.acquire));
 }

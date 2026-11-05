@@ -18,6 +18,10 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Add optional `--handle-retire-query` support for C++ and Java bindings so late
+  callbacks cannot recreate wrappers after logical deletion. Add runtime box
+  retirement state and idempotent notification, separate from memory cleanup.
+
 - C++: the first use of an entity identity cache no longer allocates on the heap. Since
   v0.3.25 its mutex and map were created with `new`; they now live in static storage, so an
   application that forbids heap allocation once started can still create its first entity of

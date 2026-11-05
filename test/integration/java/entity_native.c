@@ -48,9 +48,26 @@ typedef struct {
 } PartObj;
 
 static PartObj g_part_slot;
+static Widgets_PartListener g_listener;
+
+void Widgets_Factory_set_listener(Widgets_Factory self, const Widgets_PartListener *listener) {
+    (void)self;
+    if (g_listener.release_listener_data)
+        g_listener.release_listener_data(g_listener.listener_data);
+    g_listener = listener ? *listener : (Widgets_PartListener){0};
+}
+
+void Widgets_Factory_fire_part(Widgets_Factory self) {
+    (void)self;
+    if (g_listener.on_part)
+        g_listener.on_part((Widgets_Gear)&g_part_slot, g_listener.listener_data);
+}
+
 static int32_t g_next_part_id = 1;
+static int g_part_retired;
 
 static void *part_create(int kind, int32_t value) {
+    g_part_retired = 0;
     g_part_slot.kind = kind;
     g_part_slot.id = g_next_part_id++;
     g_part_slot.value = value;
@@ -72,6 +89,10 @@ Widgets_Spring Widgets_Factory_create_spring(Widgets_Factory self, int32_t rate)
 static void (*g_retire_fn)(void *ctx, void *handle);
 static void *g_retire_ctx;
 
+int entity_is_retired(void *handle) {
+    return handle == &g_part_slot && g_part_retired;
+}
+
 int entity_retire_observe(void (*fn)(void *ctx, void *handle), void *ctx) {
     if (g_retire_fn != NULL) return 1;
     g_retire_fn = fn;
@@ -87,8 +108,9 @@ int entity_retire_unobserve(void (*fn)(void *ctx, void *handle), void *ctx) {
 
 void Widgets_Factory_delete_part(Widgets_Factory self, Widgets_Part p) {
     (void)self;
+    g_part_retired = 1;
     if (g_retire_fn != NULL) g_retire_fn(g_retire_ctx, p);
-    ((PartObj *)p)->kind = PART_NONE;
+    /* Keep the native slot readable until its simulated references drain. */
 }
 
 void Widgets_Factory_forget_part(Widgets_Factory self, Widgets_Part p) {

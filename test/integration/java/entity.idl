@@ -37,7 +37,11 @@ module Widgets {
         long get_rate();
     };
 
+    @callback interface PartListener { void on_part(in Gear part); };
+
     interface Factory {
+        void set_listener(in PartListener listener);
+        void fire_part();
         Widget create_widget(in long value);
         long get_widget_value(in Widget w);
 
