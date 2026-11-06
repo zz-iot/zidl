@@ -153,6 +153,7 @@ fn buildImpl(
 
     // Finalise all module item lists.
     try b.finalizeModuleItems();
+    try b.normalizeMemberIds();
 
     // Dupe the imports list into the spec arena.
     var import_names: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -502,6 +503,9 @@ const Builder = struct {
             switch (def.kind) {
                 .module => |*m| {
                     const qname = try qualifyName(self.alloc, module_qpath, m.name);
+                    const key = try toLower(self.alloc, qname);
+                    const module = self.module_entries.getPtr(key) orelse return error.UnregisteredModule;
+                    try self.recordModuleAnnotations(module.module, def.annotations);
                     var nbuf: [256]u8 = undefined;
                     if (m.name.len > nbuf.len) return error.NameTooLong;
                     const lname = lowerInto(nbuf[0..m.name.len], m.name);
@@ -547,8 +551,7 @@ const Builder = struct {
 
         // Preserve annotations from every opening. Consumers must be able to
         // reject unsupported inherited module semantics rather than lose them.
-        const raw = try self.extractRaw(annotations);
-        if (raw.len != 0) entry_ptr.module.raw = try std.mem.concat(self.alloc, ir.RawAnnotation, &.{ entry_ptr.module.raw, raw });
+        try self.recordModuleAnnotations(entry_ptr.module, annotations);
 
         // Add to parent items only on the first opening.
         if (!entry_ptr.in_parent) {
@@ -918,7 +921,7 @@ const Builder = struct {
         for (members) |*m| {
             const raw_ref = try self.resolveTypeRef(&m.type_spec, module_qpath, scope);
             const type_ref = self.applyBoundAnnotations(raw_ref, m.annotations);
-            const member_anns = try self.interpretMemberAnnotations(m.annotations);
+            const member_anns = try self.interpretMemberAnnotations(m.annotations, scope);
             // @pl_repeated is only valid on sequence types.
             if (member_anns.is_pl_repeated) {
                 switch (type_ref) {
@@ -958,7 +961,7 @@ const Builder = struct {
                 .span = uc.span,
                 .type_ref = self.applyBoundAnnotations(raw_case_ref, uc.annotations),
                 .dimensions = try self.extractDimensions(&uc.declarator, scope),
-                .annotations = try self.interpretMemberAnnotations(uc.annotations),
+                .annotations = try self.interpretMemberAnnotations(uc.annotations, scope),
             });
         }
         return list.toOwnedSlice(self.alloc);
@@ -1149,7 +1152,11 @@ const Builder = struct {
         var raw: std.ArrayListUnmanaged(ir.RawAnnotation) = .empty;
         for (annotations) |*a| {
             const name = simpleName(a.name.parts);
-            if (std.ascii.eqlIgnoreCase(name, "topic")) {
+            if (std.ascii.eqlIgnoreCase(name, "autoid")) {
+                if (result.autoid != null) return error.DuplicateAutoIdAnnotation;
+                result.autoid = try parseAutoId(&a.params);
+                try raw.append(self.alloc, .{ .name = try self.alloc.dupe(u8, name), .span = a.span, .params = try extractAnnotationParams(self.alloc, &a.params) });
+            } else if (std.ascii.eqlIgnoreCase(name, "topic")) {
                 result.is_topic = true;
             } else if (std.ascii.eqlIgnoreCase(name, "nested")) {
                 result.is_nested = true;
@@ -1214,7 +1221,7 @@ const Builder = struct {
         return result;
     }
 
-    fn interpretMemberAnnotations(self: *Builder, annotations: []const ast.AnnotationAppl) !ir.MemberAnnotations {
+    fn interpretMemberAnnotations(self: *Builder, annotations: []const ast.AnnotationAppl, scope: *const Scope) !ir.MemberAnnotations {
         var result = ir.MemberAnnotations{};
         var raw: std.ArrayListUnmanaged(ir.RawAnnotation) = .empty;
         for (annotations) |*a| {
@@ -1226,7 +1233,28 @@ const Builder = struct {
             } else if (std.ascii.eqlIgnoreCase(name, "must_understand")) {
                 result.must_understand = true;
             } else if (std.ascii.eqlIgnoreCase(name, "id")) {
-                result.id = extractU32Param(&a.params);
+                if (result.id != null) return error.DuplicateMemberIdAnnotation;
+                const expr = try annotationValueExpr(&a.params);
+                const value = self.evalConstAsU64(expr, scope) catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                    else => return error.InvalidMemberId,
+                };
+                if (value > std.math.maxInt(u32)) return error.InvalidMemberId;
+                result.id = @intCast(value);
+            } else if (std.ascii.eqlIgnoreCase(name, "hashid")) {
+                if (result.hash_id != null) return error.DuplicateHashIdAnnotation;
+                if (a.params == .none) {
+                    result.hash_id = "";
+                } else {
+                    const expr = try annotationValueExpr(&a.params);
+                    var diagnostics: std.ArrayListUnmanaged(error_mod.Diagnostic) = .empty;
+                    const value = try const_eval.evaluate(expr, scope, self.alloc, &diagnostics);
+                    result.hash_id = switch (value) {
+                        .string => |text| try self.alloc.dupe(u8, text),
+                        else => return error.InvalidHashId,
+                    };
+                }
+                try raw.append(self.alloc, .{ .name = try self.alloc.dupe(u8, name), .span = a.span, .params = try extractAnnotationParams(self.alloc, &a.params) });
             } else if (std.ascii.eqlIgnoreCase(name, "pl_repeated")) {
                 result.is_pl_repeated = true;
             } else if (std.ascii.eqlIgnoreCase(name, "default")) {
@@ -1244,6 +1272,7 @@ const Builder = struct {
                 });
             }
         }
+        if (result.id != null and result.hash_id != null) return error.ConflictingMemberIdAnnotations;
         result.raw = try raw.toOwnedSlice(self.alloc);
         return result;
     }
@@ -1320,6 +1349,37 @@ const Builder = struct {
     }
 
     // ── Finalisation ──────────────────────────────────────────────────────────
+
+    fn recordModuleAnnotations(self: *Builder, module: *ir.Module, annotations: []const ast.AnnotationAppl) !void {
+        var seen_autoid = false;
+        for (annotations) |*a| {
+            if (!std.ascii.eqlIgnoreCase(simpleName(a.name.parts), "autoid")) continue;
+            if (seen_autoid) return error.DuplicateAutoIdAnnotation;
+            seen_autoid = true;
+            const mode = try parseAutoId(&a.params);
+            if (module.autoid) |existing| {
+                if (mode != existing) return error.ConflictingModuleAutoId;
+            }
+            module.autoid = mode;
+        }
+        const raw = try self.extractRaw(annotations);
+        if (raw.len != 0) module.raw = try std.mem.concat(self.alloc, ir.RawAnnotation, &.{ module.raw, raw });
+    }
+
+    fn normalizeMemberIds(self: *Builder) !void {
+        var resolver = @import("member_ids.zig").Resolver{ .alloc = self.alloc };
+        defer resolver.deinit();
+        var modules = self.module_entries.iterator();
+        while (modules.next()) |entry| if (entry.value_ptr.module.autoid) |mode| {
+            try resolver.module_modes.put(self.alloc, entry.key_ptr.*, mode);
+        };
+        var types = self.type_map.valueIterator();
+        while (types.next()) |td| switch (td.*) {
+            .struct_ => |s| try resolver.structure(s),
+            .union_ => |u| try resolver.unionType(u),
+            else => {},
+        };
+    }
 
     fn finalizeModuleItems(self: *Builder) !void {
         var it = self.module_entries.iterator();
@@ -1459,27 +1519,24 @@ fn parseExtensibilityParam(params: *const ast.AnnotationApplParams) ?ir.Extensib
     return null;
 }
 
-fn extractU32Param(params: *const ast.AnnotationApplParams) ?u32 {
-    const expr: *const ast.ConstExpr = switch (params.*) {
-        .none => return null,
-        .positional => |*e| e,
-        .named => |named| blk: {
-            for (named) |*p| {
-                if (std.ascii.eqlIgnoreCase(p.name, "value")) break :blk &p.value;
-            }
-            return null;
-        },
+fn annotationValueExpr(params: *const ast.AnnotationApplParams) !*const ast.ConstExpr {
+    return switch (params.*) {
+        .none => error.MissingAnnotationValue,
+        .positional => |*expr| expr,
+        .named => |named| if (named.len == 1 and std.ascii.eqlIgnoreCase(named[0].name, "value")) &named[0].value else error.InvalidAnnotationValue,
     };
-    switch (expr.*) {
-        .literal => |*lit| switch (lit.value) {
-            .integer => |v| {
-                if (v >= 0 and v <= std.math.maxInt(u32)) return @intCast(v);
-            },
-            else => {},
-        },
-        else => {},
-    }
-    return null;
+}
+
+fn parseAutoId(params: *const ast.AnnotationApplParams) !ir.AutoId {
+    if (params.* == .none) return .hash; // IDL 4.2 @autoid's member default.
+    const expr = try annotationValueExpr(params);
+    const name = switch (expr.*) {
+        .scoped_name => |sn| simpleName(sn.parts),
+        else => return error.InvalidAutoId,
+    };
+    if (std.ascii.eqlIgnoreCase(name, "HASH")) return .hash;
+    if (std.ascii.eqlIgnoreCase(name, "SEQUENTIAL")) return .sequential;
+    return error.InvalidAutoId;
 }
 
 fn extractU16Param(params: *const ast.AnnotationApplParams) ?u16 {
@@ -2175,4 +2232,107 @@ test "builder: enum and bitmask extensibility annotations" {
     try testing.expectEqual(ir.Extensibility.appendable, ir_spec.items[2].type_decl.enum_.annotations.extensibility);
     try testing.expectEqual(ir.Extensibility.mutable, ir_spec.items[3].type_decl.bitmask.annotations.extensibility);
     try testing.expectEqual(ir.Extensibility.appendable, ir_spec.items[4].type_decl.enum_.annotations.extensibility);
+}
+
+fn memberIdTestType(items: []const ir.ModuleItem, name: []const u8) ?ir.TypeDecl {
+    for (items) |item| switch (item) {
+        .type_decl => |td| if (std.mem.eql(u8, ir.typeDeclName(td), name)) return td,
+        .module => |m| if (memberIdTestType(m.items, name)) |td| return td,
+        else => {},
+    };
+    return null;
+}
+
+test "builder: member IDs continue after explicit expressions and last inherited ID" {
+    var spec = try testBuild(
+        \\const long START = 10;
+        \\struct Parent { @id(value=START + 1) long first; long second; @id(3) long last; };
+        \\struct Empty : Parent {};
+        \\struct Child : Empty { long a, b; };
+    );
+    defer spec.deinit();
+    const parent = memberIdTestType(spec.items, "Parent").?.struct_;
+    const child = memberIdTestType(spec.items, "Child").?.struct_;
+    for (parent.members, [_]u32{ 11, 12, 3 }) |m, id| try testing.expectEqual(id, m.annotations.resolved_id.?);
+    for (child.members, [_]u32{ 4, 5 }) |m, id| try testing.expectEqual(id, m.annotations.resolved_id.?);
+    try testing.expectEqual(@as(?u32, null), parent.members[1].annotations.id);
+}
+
+test "builder: normative HASH IDs, hashid aliases and default autoid argument" {
+    var spec = try testBuild(
+        \\const string ALIAS = "shapesize";
+        \\@autoid struct Hashed {
+        \\ long color;
+        \\ @hashid(ALIAS) long size;
+        \\ @id(7) long explicit_value;
+        \\ @hashid("") long other;
+        \\};
+        \\struct Sequential { @hashid long color; long next; };
+    );
+    defer spec.deinit();
+    const hashed = memberIdTestType(spec.items, "Hashed").?.struct_;
+    try testing.expectEqual(@as(u32, 0x0fa5dd70), hashed.members[0].annotations.resolved_id.?);
+    try testing.expectEqual(@as(u32, 0x047790da), hashed.members[1].annotations.resolved_id.?);
+    try testing.expectEqual(@as(u32, 7), hashed.members[2].annotations.resolved_id.?);
+    try testing.expectEqual(@import("member_ids.zig").hashId("other"), hashed.members[3].annotations.resolved_id.?);
+    const seq = memberIdTestType(spec.items, "Sequential").?.struct_;
+    try testing.expectEqual(@as(u32, 0x0fa5dd71), seq.members[1].annotations.resolved_id.?);
+}
+
+test "builder: module HASH inheritance, nested and type overrides, reopened module" {
+    var spec = try testBuild(
+        \\@autoid(HASH) module M {
+        \\ struct A { long color; };
+        \\ module N { struct B { long color; }; };
+        \\ @autoid(SEQUENTIAL) module S { struct C { long color; }; };
+        \\ @autoid(value=SEQUENTIAL) struct D { long color; };
+        \\};
+        \\module M { struct E { long color; }; };
+    );
+    defer spec.deinit();
+    for ([_][]const u8{ "A", "B", "E" }) |name| try testing.expectEqual(@as(u32, 0x0fa5dd70), memberIdTestType(spec.items, name).?.struct_.members[0].annotations.resolved_id.?);
+    for ([_][]const u8{ "C", "D" }) |name| try testing.expectEqual(@as(u32, 0), memberIdTestType(spec.items, name).?.struct_.members[0].annotations.resolved_id.?);
+}
+
+test "builder: imported module modes and base IDs are normalized before derived types" {
+    var spec = try testBuildWithImport(
+        "@autoid(HASH) module M { struct Parent { @id(20) long first; @id(7) long last; }; };",
+        "module N { struct Child : M::Parent { long next; }; }; module M { struct Added { long color; }; };",
+    );
+    defer spec.deinit();
+    try testing.expectEqual(@as(u32, 8), memberIdTestType(spec.items, "Child").?.struct_.members[0].annotations.resolved_id.?);
+    try testing.expectEqual(@as(u32, 0x0fa5dd70), memberIdTestType(spec.items, "Added").?.struct_.members[0].annotations.resolved_id.?);
+}
+
+test "builder: union cases and default receive sequential IDs after explicit ID" {
+    var spec = try testBuild("@mutable union U switch(long) { @id(10) case 0: long first; case 1: long second; default: long other; };");
+    defer spec.deinit();
+    const u = memberIdTestType(spec.items, "U").?.union_;
+    for (u.cases, [_]u32{ 10, 11, 12 }) |cas, id| try testing.expectEqual(id, cas.annotations.resolved_id.?);
+}
+
+test "builder: invalid, duplicate, reserved and overflowing member IDs are rejected" {
+    // General IDL exception annotations retain their 32-bit range; only
+    // XTypes structures/unions apply the narrower application member range.
+    var exception_spec = try testBuild("exception E { @id(0xffffffff) long x; };");
+    defer exception_spec.deinit();
+    const ex = memberIdTestType(exception_spec.items, "E").?.exception;
+    try testing.expectEqual(@as(?u32, 0xffffffff), ex.members[0].annotations.id);
+    try testing.expectEqual(@as(?u32, null), ex.members[0].annotations.resolved_id);
+    try testing.expectError(error.InvalidMemberId, testBuild("struct S { @id(0x10000000) long a; };"));
+    try testing.expectError(error.DuplicateMemberId, testBuild("struct S { @id(2) long a; @id(2) long b; };"));
+    try testing.expectError(error.DuplicateMemberId, testBuild("struct B { long a; }; struct D : B { @id(0) long b; };"));
+    try testing.expectError(error.DuplicateMemberId, testBuild("struct S { @hashid(\"x\") long a; @hashid(\"x\") long b; };"));
+    try testing.expectError(error.ConflictingMemberIdAnnotations, testBuild("struct S { @id(1) @hashid long a; };"));
+    try testing.expectError(error.DuplicateMemberIdAnnotation, testBuild("struct S { @id(1) @id(2) long a; };"));
+    try testing.expectError(error.InvalidMemberId, testBuild("struct S { @id(-1) long a; };"));
+    try testing.expectError(error.ReservedMemberId, testBuild("struct S { @id(0x0fffc000) long a; };"));
+    try testing.expectError(error.MemberIdOverflow, testBuild("struct S { @id(0x0fffbfff) long a; long b; };"));
+    try testing.expectError(error.MissingAnnotationValue, testBuild("struct S { @id long a; };"));
+    try testing.expectError(error.InvalidHashId, testBuild("struct S { @hashid(123) long a; };"));
+    try testing.expectError(error.InvalidAutoId, testBuild("@autoid(OTHER) struct S { long a; };"));
+    try testing.expectError(error.DuplicateAutoIdAnnotation, testBuild("@autoid @autoid module M {};"));
+    try testing.expectError(error.DuplicateMemberId, testBuild("struct S { @id(0x0fa5dd70) long a; @hashid(\"color\") long b; };"));
+    try testing.expectError(error.ConflictingModuleAutoId, testBuild("@autoid(HASH) module M {}; @autoid(SEQUENTIAL) module M {};"));
+    try testing.expectError(error.DuplicateMemberId, testBuild("union U switch(long) { @id(0) case 1: long a; };"));
 }

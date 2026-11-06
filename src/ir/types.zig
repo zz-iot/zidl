@@ -58,8 +58,11 @@ pub const RawAnnotation = struct {
 /// `@appendable` / `@mutable`.  Default is `final` per IDL4 §8.3.1.
 pub const Extensibility = enum { final, appendable, mutable };
 
+pub const AutoId = enum { sequential, hash };
+
 /// Pre-interpreted annotations on a type declaration (struct, union, enum, …).
 pub const TypeAnnotations = struct {
+    autoid: ?AutoId = null,
     extensibility: Extensibility = .final,
     /// `@topic` — this type is a DDS topic type.
     is_topic: bool = false,
@@ -83,6 +86,11 @@ pub const MemberAnnotations = struct {
     is_optional: bool = false,
     /// `@id(N)` — explicit XTYPES member ID.  Null when not specified.
     id: ?u32 = null,
+    /// Explicit @hashid value; empty string means the member's own name.
+    hash_id: ?[]const u8 = null,
+    /// Canonical ID assigned after all local/imported declarations are filled.
+    resolved_id: ?u32 = null,
+
     /// `@must_understand` — receivers that don't know this member must drop.
     must_understand: bool = false,
     /// `@pl_repeated` — serialize as one PID entry per element (RTPS repeated-parameter
@@ -94,6 +102,10 @@ pub const MemberAnnotations = struct {
     /// C++, Zig, and Java emit inline initializers for both optional and non-optional members.
     default_value: ?AnnotationParamValue = null,
     raw: []const RawAnnotation = &.{},
+    /// Fallback supports manually constructed IR; built struct/union Specs resolve IDs.
+    pub fn memberId(self: MemberAnnotations, fallback: u32) u32 {
+        return self.resolved_id orelse self.id orelse fallback;
+    }
 };
 
 /// Pre-interpreted annotations on an enum or bitmask declaration.
@@ -448,6 +460,7 @@ pub const ModuleItem = union(enum) {
 };
 
 pub const Module = struct {
+    autoid: ?AutoId = null,
     name: []const u8,
     /// `""` for the synthetic top-level (global) scope.
     qualified_name: []const u8,

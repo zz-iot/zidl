@@ -463,8 +463,17 @@ pub fn encodeMinimalStruct(alloc: std.mem.Allocator, s: *const ir.Struct) ![]u8 
     const base_count = baseStructMemberCount(s.base);
     const seq_dh = try enc.reserveDheader(alloc);
     try enc.writeU32Le(alloc, @intCast(s.members.len));
-    for (s.members, 0..) |m, i| {
-        try encodeMinimalStructMember(&enc, alloc, &m, @intCast(base_count + i));
+    const Index = struct { index: usize, id: u32 };
+    const indices = try alloc.alloc(Index, s.members.len);
+    defer alloc.free(indices);
+    for (s.members, 0..) |m, i| indices[i] = .{ .index = i, .id = m.annotations.memberId(@intCast(base_count + i)) };
+    std.mem.sort(Index, indices, {}, struct {
+        fn less(_: void, a: Index, b: Index) bool {
+            return a.id < b.id;
+        }
+    }.less);
+    for (indices) |entry| {
+        try encodeMinimalStructMember(&enc, alloc, &s.members[entry.index], entry.id);
     }
     enc.patchDheader(seq_dh);
 
@@ -501,7 +510,7 @@ fn encodeMinimalStructMember(
     const msm_dh = try enc.reserveDheader(alloc);
 
     // CommonStructMember (@final struct): member_id, member_flags, member_type_id
-    const member_id: u32 = m.annotations.id orelse member_idx;
+    const member_id: u32 = m.annotations.memberId(member_idx);
     try enc.writeU32Le(alloc, member_id);
     try enc.writeU16Le(alloc, memberFlags(m.annotations));
     try writeTypeIdentifier(enc, alloc, m.type_ref, m.dimensions);
@@ -688,7 +697,7 @@ pub fn encodeMinimalUnion(alloc: std.mem.Allocator, u: *const ir.Union) ![]u8 {
             .seq_idx = @intCast(i),
             // The discriminator is member 0; cases default to index + 1, as
             // the @mutable wire encoding numbers them.
-            .member_id = c.annotations.id orelse @as(u32, @intCast(i + 1)),
+            .member_id = c.annotations.memberId(@intCast(i + 1)),
         };
     }
     std.mem.sort(Idx, indices, {}, struct {
@@ -1832,4 +1841,18 @@ test "typeobject: a plain sequence of a fully descriptive element is itself full
     var inner = ir.TypeRef{ .sequence = .{ .element = @constCast(&seq_long), .bound = null } };
     const outer = ir.TypeRef{ .sequence = .{ .element = &inner, .bound = null } };
     try std.testing.expect(typeRefIsFullyDescriptive(outer));
+}
+
+test "MinimalStruct members use resolved IDs in ascending order" {
+    const members = [_]ir.StructMember{
+        .{ .name = "a", .span = undefined, .type_ref = .{ .base = .long }, .dimensions = &.{}, .annotations = .{ .id = 9, .resolved_id = 9 } },
+        .{ .name = "b", .span = undefined, .type_ref = .{ .base = .octet }, .dimensions = &.{}, .annotations = .{ .resolved_id = 2 } },
+    };
+    const s = ir.Struct{ .name = "S", .qualified_name = "S", .span = undefined, .base = null, .members = &members, .annotations = .{ .extensibility = .mutable } };
+    const bytes = try encodeMinimalStruct(testing.allocator, &s);
+    defer testing.allocator.free(bytes);
+    // Independently packed XCDR2: member b (ID 2) precedes a (ID 9).
+    var expected: [59]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected, "0007000033000000f1510400010000000000000023000000020000000b0000000200000001000292eb5ffe000b000000090000000100040cc175b9");
+    try testing.expectEqualSlices(u8, &expected, bytes);
 }

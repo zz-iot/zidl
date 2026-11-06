@@ -699,7 +699,7 @@ const Generator = struct {
             try self.write("        switch (value._d) {\n");
             for (u.cases, 0..) |cas, cas_idx| {
                 if (isDefaultUnionCase(cas)) continue;
-                const case_member_id: u32 = if (cas.annotations.id) |id| id else @intCast(cas_idx + 1);
+                const case_member_id: u32 = cas.annotations.memberId(@intCast(cas_idx + 1));
                 try self.emitZigUnionCaseArmPattern(u.discriminant, cas, "            ");
                 try self.write(" => {\n");
                 const access = try std.fmt.allocPrint(self.alloc, "value._u.{s}", .{cas.name});
@@ -727,7 +727,7 @@ const Generator = struct {
                 try self.write("            },\n");
             }
             if (default_case) |dc| {
-                const dc_member_id: u32 = if (dc.annotations.id) |id| id else 0xFFFF_FFFF;
+                const dc_member_id: u32 = dc.annotations.memberId(0xFFFF_FFFF);
                 const dc_access = try std.fmt.allocPrint(self.alloc, "value._u.{s}", .{dc.name});
                 defer self.alloc.free(dc_access);
                 try self.ind();
@@ -7678,10 +7678,9 @@ fn lcForTypeRef(type_ref: ir.TypeRef, dimensions: []const u64) ?u2 {
     };
 }
 
-/// Return the XTYPES member ID for a struct member.
-/// Uses the `@id` annotation if present; otherwise the declaration index.
+/// Resolved XTypes ID; index supports manually constructed IR.
 fn memberIdAt(m: ir.StructMember, idx: usize) u32 {
-    return if (m.annotations.id) |id| id else @intCast(idx);
+    return m.annotations.memberId(@intCast(idx));
 }
 
 fn typeRefNeedsAllocator(tr: ir.TypeRef) bool {
@@ -10130,8 +10129,8 @@ test "zig_backend pl_cdr: explicit @id used as PID" {
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "reservePlParam(42)"));
-    // y is member index 1 (no explicit @id)
-    try testing.expect(has(s, "reservePlParam(1)"));
+    // Sequential numbering follows the explicit ID.
+    try testing.expect(has(s, "reservePlParam(43)"));
 }
 
 // ── @pl_repeated ──────────────────────────────────────────────────────────────
