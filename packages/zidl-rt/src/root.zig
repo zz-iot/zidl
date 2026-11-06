@@ -62,6 +62,12 @@ pub const toAllocator = allocator_mod.toAllocator;
 
 pub const XcdrVersion = cdr.XcdrVersion;
 pub const ByteOrder = cdr.ByteOrder;
+/// Staging APIs for the shared native CDR core.
+pub const cdr_primitives = @import("cdr_primitives.zig");
+pub const cdr_cursor = @import("cdr_cursor.zig");
+pub const cdr_strings = @import("cdr_strings.zig");
+pub const cdr_framing = @import("cdr_framing.zig");
+pub const PrimitiveWriter = @import("primitive_writer.zig").PrimitiveWriter;
 pub const CdrWriter = cdr.CdrWriter;
 pub const CdrReader = cdr.CdrReader;
 pub const BoundedArray = cdr.BoundedArray;
@@ -88,3 +94,5 @@ pub const ENCAP_PL_CDR_BE = cdr.ENCAP_PL_CDR_BE;
 test {
     std.testing.refAllDecls(@This());
 }
+
+pub const cdr_keys = @import("cdr_keys.zig");

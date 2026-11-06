@@ -1,0 +1,14 @@
+module Validation {
+    @appendable struct App { @key long value; };
+    @mutable struct Mut { string text; };
+    struct Wide { wstring text; @key long id; };
+    struct Collections { sequence<string> text; };
+    struct AppParent { App inner; long tail; };
+    struct MutParent { Mut inner; long tail; };
+    struct CollParent { Collections inner; long tail; };
+    struct ArrayFields { string text[2]; long tail; };
+    @appendable struct AppText { @key string key; long tail; };
+    @mutable struct MutKey { @key string key; long tail; };
+    @mutable union MutUnion switch (long) { case 0: long value; };
+    struct UnionParent { MutUnion inner; long tail; };
+};

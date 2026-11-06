@@ -1145,3 +1145,115 @@ test "encap: XCDR2 appendable/mutable ids are written by kind and accepted by th
         try std.testing.expectEqual(@as(c_int, c.ZIDL_CDR_BE), r.byte_order);
     }
 }
+
+// The additive checked APIs must work with both the C reference and Zig adapter.
+test "checked patch APIs reject invalid offsets without changing written bytes" {
+    var bytes: [8]u8 = undefined;
+    var w: c.ZidlCdrWriter = undefined;
+    c.zidl_cdr_writer_init_fixed(&w, &bytes, bytes.len, c.ZIDL_XCDR2);
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_u32(&w, 0));
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_u32(&w, 0x12345678));
+    const original = bytes;
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_INVALID), c.zidl_cdr_patch_dheader_checked(&w, std.math.maxInt(usize)));
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_INVALID), c.zidl_cdr_patch_emheader_checked(&w, 0, 3));
+    try testing.expectEqualSlices(u8, &original, &bytes);
+    try testing.expectEqual(@as(usize, 8), w.len);
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_patch_dheader_checked(&w, 0));
+    try testing.expectEqualSlices(u8, &.{ 4, 0, 0, 0, 0x78, 0x56, 0x34, 0x12 }, &bytes);
+}
+
+test "bounded reader APIs confine values even when more input bytes exist" {
+    const bytes = [_]u8{ 0, 7, 0, 0, 5, 0, 0, 0x20, 0x78, 0x56, 0x34, 0x12 };
+    var r: c.ZidlCdrReader = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_reader_init(&r, &bytes, bytes.len));
+    var em: c.ZidlEmHeader = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_read_emheader(&r, &em));
+    var end: usize = 0;
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_emheader_end(&r, &em, &end));
+    try testing.expectEqual(bytes.len, end);
+    var limited: c.ZidlCdrReader = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_reader_limit(&r, 8, &limited));
+    end = 77;
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_TRUNCATED), c.zidl_cdr_emheader_end(&limited, &em, &end));
+    try testing.expectEqual(@as(usize, 77), end);
+    var value: u32 = 42;
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_TRUNCATED), c.zidl_cdr_read_u32(&limited, &value));
+    try testing.expectEqual(@as(u32, 42), value);
+    try testing.expectEqual(@as(usize, 8), r.pos);
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_TRUNCATED), c.zidl_cdr_reader_limit(&r, bytes.len + 1, &limited));
+    try testing.expectEqual(@as(usize, 8), limited.data_len);
+}
+
+// The allocation-free validator is shared by generated C/C++ traversal paths.
+test "wide span skip validates byte lengths in both byte orders" {
+    for ([_]u8{ 1, 0 }) |le| {
+        var bytes = [_]u8{ 0, 6 + le, 0, 0, 0, 0, 0, 0, 0x12, 0x34, 0, 0, 0, 0 };
+        bytes[if (le == 1) 4 else 7] = 6;
+        if (le == 1) {
+            bytes[8] = 0x34;
+            bytes[9] = 0x12;
+        }
+        var r: c.ZidlCdrReader = undefined;
+        try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_reader_init(&r, &bytes, bytes.len));
+        try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_skip_wstring(&r));
+        try testing.expectEqual(bytes.len, r.pos); // Interior NUL is valid.
+        for (0..bytes.len) |len| {
+            if (len < 4) continue;
+            try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_reader_init(&r, &bytes, len));
+            try testing.expectEqual(@as(c_int, c.ZIDL_CDR_TRUNCATED), c.zidl_cdr_skip_wstring(&r));
+            try testing.expect(r.pos <= len);
+        }
+        bytes[if (le == 1) 4 else 7] = 5;
+        try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_reader_init(&r, &bytes, bytes.len));
+        try testing.expectEqual(@as(c_int, c.ZIDL_CDR_INVALID), c.zidl_cdr_skip_wstring(&r));
+        try testing.expectEqual(@as(usize, 8), r.pos);
+        bytes[if (le == 1) 4 else 7] = 0;
+        try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_reader_init(&r, &bytes, bytes.len));
+        try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_skip_wstring(&r));
+        try testing.expectEqual(@as(usize, 8), r.pos);
+        @memset(bytes[4..8], 0xff);
+        bytes[if (le == 1) 4 else 7] = 0xfe;
+        try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_reader_init(&r, &bytes, bytes.len));
+        try testing.expectEqual(@as(c_int, c.ZIDL_CDR_TRUNCATED), c.zidl_cdr_skip_wstring(&r));
+        try testing.expectEqual(@as(usize, 8), r.pos);
+    }
+}
+
+test "canonical hash policy preserves the byte-only compatibility helper" {
+    const bytes = [_]u8{ 0x12, 0x34, 0x56, 0x78, 0, 0, 0, 5, 'B', 'L', 'U', 'E', 0 };
+    var digest: [16]u8 = undefined;
+    c.zidl_cdr_compute_key_hash_for_type(&bytes, bytes.len, true, &digest);
+    try testing.expectEqualSlices(u8, &.{ 0x37, 0x4b, 0x96, 0xe2, 0xe7, 0x27, 0x23, 0x7f, 0x01, 0x6c, 0xc4, 0xce, 0xbb, 0x6e, 0xb7, 0x1e }, &digest);
+    c.zidl_cdr_compute_key_hash(&bytes, bytes.len, &digest);
+    try testing.expectEqualSlices(u8, &.{ 0x12, 0x34, 0x56, 0x78, 0, 0, 0, 5, 'B', 'L', 'U', 'E', 0, 0, 0, 0 }, &digest);
+    c.zidl_cdr_compute_key_hash_for_type(null, 0, true, &digest);
+    try testing.expectEqualSlices(u8, &.{ 0xd4, 0x1d, 0x8c, 0xd9, 0x8f, 0, 0xb2, 4, 0xe9, 0x80, 9, 0x98, 0xec, 0xf8, 0x42, 0x7e }, &digest);
+}
+
+test "canonical wide strings use byte counts without a terminator in both orders" {
+    for ([_]c_int{ c.ZIDL_CDR_LE, c.ZIDL_CDR_BE }) |order| {
+        var bytes: [8]u8 = undefined;
+        var w: c.ZidlCdrWriter = undefined;
+        c.zidl_cdr_writer_init_fixed(&w, &bytes, bytes.len, c.ZIDL_XCDR2);
+        c.zidl_cdr_writer_set_byte_order(&w, order);
+        const units = [_]u16{ 'A', 0x1234 };
+        try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_key_wstring(&w, &units, units.len));
+        try testing.expectEqual(@as(usize, 8), w.len);
+        try testing.expectEqualSlices(u8, if (order == c.ZIDL_CDR_BE) &.{ 0, 0, 0, 4, 0, 'A', 0x12, 0x34 } else &.{ 4, 0, 0, 0, 'A', 0, 0x34, 0x12 }, &bytes);
+        const before = bytes;
+        try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OVERFLOW), c.zidl_cdr_write_key_wstring_length(&w, 0x80000000));
+        try testing.expectEqualSlices(u8, &before, &bytes);
+        try testing.expectEqual(@as(usize, 8), w.len);
+        c.zidl_cdr_writer_init_counting(&w, c.ZIDL_XCDR2);
+        try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_key_wstring(&w, &units, units.len));
+        try testing.expectEqual(@as(usize, 8), w.len);
+    }
+}
+
+test "empty narrow strings accept a null content pointer without a zero-length memcpy" {
+    var bytes: [5]u8 = undefined;
+    var writer: c.ZidlCdrWriter = undefined;
+    c.zidl_cdr_writer_init_fixed(&writer, &bytes, bytes.len, c.ZIDL_XCDR2);
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_string(&writer, null, 0));
+    try testing.expectEqualSlices(u8, &.{ 1, 0, 0, 0, 0 }, &bytes);
+}

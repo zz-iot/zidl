@@ -538,6 +538,138 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_cpp_test.step);
     }
 
+    // Canonical key holders: independent RTPS bytes and type-maximum hash policy.
+    {
+        const key_step = b.step("test-canonical-keys", "Check native canonical key holders and type-aware hashes");
+        test_step.dependOn(key_step);
+        const dir = "test/integration/canonical_keys/";
+        const gen_zig = b.addRunArtifact(exe);
+        gen_zig.addArgs(&.{ "-b", "zig", "-o" });
+        const zig_dir = gen_zig.addOutputDirectoryArg("canonical-keys-zig");
+        gen_zig.addFileArg(b.path(dir ++ "keys.idl"));
+        const fixture = b.createModule(.{
+            .root_source_file = zig_dir.path(b, "keys.zig"),
+            .target = target,
+            .sanitize_thread = sanitize_thread,
+            .imports = &.{.{ .name = "zidl_rt", .module = zidl_rt_mod }},
+        });
+        const tests = b.addTest(.{ .name = "zidl-canonical-keys", .root_module = b.createModule(.{
+            .root_source_file = b.path(dir ++ "test.zig"),
+            .target = target,
+            .sanitize_thread = sanitize_thread,
+            .imports = &.{ .{ .name = "zidl_rt", .module = zidl_rt_mod }, .{ .name = "fixture", .module = fixture } },
+        }) });
+        key_step.dependOn(&b.addRunArtifact(tests).step);
+        for ([_][]const u8{ "c", "cpp" }) |lang| {
+            const cpp = std.mem.eql(u8, lang, "cpp");
+            const gen = b.addRunArtifact(exe);
+            gen.addArgs(&.{ "-b", lang, "-o" });
+            const generated = gen.addOutputDirectoryArg(b.fmt("canonical-keys-{s}", .{lang}));
+            gen.addFileArg(b.path(dir ++ "keys.idl"));
+            const m = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .sanitize_thread = sanitize_thread, .link_libc = true, .link_libcpp = cpp });
+            const flags: []const []const u8 = if (cpp) &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" } else &.{ "-std=c99", "-Wall", "-Werror" };
+            m.addCSourceFile(.{ .file = b.path(if (cpp) dir ++ "test.cpp" else dir ++ "test.c"), .flags = flags });
+            m.addCSourceFile(.{ .file = generated.path(b, if (cpp) "keys_cdr.cpp" else "keys_cdr.c"), .flags = flags });
+            m.addCSourceFile(.{ .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"), .flags = &.{"-std=c99"} });
+            m.addIncludePath(generated);
+            m.addIncludePath(b.path("packages/zidl-cdr/include"));
+            const app = b.addExecutable(.{ .name = b.fmt("zidl-canonical-keys-{s}", .{lang}), .root_module = m });
+            const run = b.addRunArtifact(app);
+            run.addFileArg(b.path(dir ++ "vectors.txt"));
+            for ([_][]const u8{ "wire_ids.txt", "wide_wire.txt", "key_wire.txt" }) |name| run.addFileInput(b.path(b.fmt("{s}{s}", .{ dir, name })));
+            key_step.dependOn(&run.step);
+        }
+        const maybe_javac = b.findProgram(.{ .names = &.{"javac"} });
+        const maybe_java = b.findProgram(.{ .names = &.{"java"} });
+        if (maybe_javac != null and maybe_java != null) {
+            for ([_]bool{ false, true }) |split| {
+                const gen = b.addRunArtifact(exe);
+                gen.addArgs(&.{ "-b", "java" });
+                if (split) gen.addArgs(&.{ "--split-files", "--java-package", "canonicalkeys" });
+                gen.addArg("-o");
+                const generated = gen.addOutputDirectoryArg(if (split) "canonical-keys-java-split" else "canonical-keys-java");
+                gen.addFileArg(b.path(dir ++ "keys.idl"));
+                const compile_java = b.addSystemCommand(&.{ maybe_javac.?, "-Xlint:unchecked", "-Werror", "-d" });
+                const classes = compile_java.addOutputDirectoryArg(if (split) "canonical-keys-java-split-classes" else "canonical-keys-java-classes");
+                if (split) {
+                    for ([_][]const u8{ "KeysCdrUtils", "Align", "Nested", "Example", "Bounded16", "Bounded17", "Unbounded", "Seq16", "Seq17", "InnerNoKeys", "UnkeyedNested", "ArrayKey", "SeqAgg", "Choice", "UnionKey", "Wide16", "Wide17", "Base", "Derived", "Sequential", "Hashed", "AutoBase", "AutoDerived", "IdChoice", "UnionDefault", "WideSeq" }) |name| {
+                        compile_java.addFileArg(generated.path(b, b.fmt("{s}.java", .{name})));
+                    }
+                } else compile_java.addFileArg(generated.path(b, "Keys.java"));
+                compile_java.addFileArg(b.path(dir ++ "KeysTest.java"));
+                const run = b.addSystemCommand(&.{ maybe_java.?, "-cp" });
+                run.addDirectoryArg(classes);
+                run.addArg("KeysTest");
+                run.addFileArg(b.path(dir ++ "vectors.txt"));
+                for ([_][]const u8{ "wire_ids.txt", "wide_wire.txt", "key_wire.txt" }) |name| run.addFileInput(b.path(b.fmt("{s}{s}", .{ dir, name })));
+                run.addArg(if (split) "canonicalkeys." else "Keys$Canonical$");
+                key_step.dependOn(&run.step);
+            }
+        }
+    }
+
+    // Generated-code validation: patch errors and allocation-free wide spans.
+    {
+        const validation_step = b.step("test-cdr-validation", "Check generated patch error propagation and wide-string validation");
+        test_step.dependOn(validation_step);
+        const fixture_dir = "test/integration/cdr_validation/";
+        const gen_zig = b.addRunArtifact(exe);
+        gen_zig.addArgs(&.{ "-b", "zig", "-o" });
+        const zig_dir = gen_zig.addOutputDirectoryArg("cdr-validation-zig");
+        gen_zig.addFileArg(b.path(fixture_dir ++ "validation.idl"));
+        const fixture = b.createModule(.{
+            .root_source_file = zig_dir.path(b, "validation.zig"),
+            .target = target,
+            .imports = &.{.{ .name = "zidl_rt", .module = zidl_rt_mod }},
+        });
+        const validation_tests = b.addTest(.{
+            .name = "zidl-cdr-validation",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(fixture_dir ++ "test.zig"),
+                .target = target,
+                .imports = &.{
+                    .{ .name = "zidl_rt", .module = zidl_rt_mod },
+                    .{ .name = "fixture", .module = fixture },
+                },
+            }),
+        });
+        validation_step.dependOn(&b.addRunArtifact(validation_tests).step);
+        for ([_][]const u8{ "c", "cpp" }) |lang| {
+            const cpp = std.mem.eql(u8, lang, "cpp");
+            const gen = b.addRunArtifact(exe);
+            gen.addArgs(&.{ "-b", lang, "-o" });
+            const dir = gen.addOutputDirectoryArg(b.fmt("cdr-validation-{s}", .{lang}));
+            gen.addFileArg(b.path(fixture_dir ++ "validation.idl"));
+            const validation_mod = b.createModule(.{
+                .root_source_file = null,
+                .target = target,
+                .optimize = .Debug,
+                .link_libc = true,
+                .link_libcpp = cpp,
+            });
+            const flags: []const []const u8 = if (cpp)
+                &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" }
+            else
+                &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" };
+            validation_mod.addCSourceFile(.{ .file = b.path(if (cpp) fixture_dir ++ "test.cpp" else fixture_dir ++ "test.c"), .flags = flags });
+            // Redirect only generated calls. Test injectors forward to the actual
+            // runtime by default, and return OVERFLOW when failure is requested.
+            const generated_flags = b.allocator.alloc([]const u8, flags.len + 2) catch @panic("OOM");
+            @memcpy(generated_flags[0..flags.len], flags);
+            generated_flags[flags.len] = "-Dzidl_cdr_patch_dheader_checked=validation_patch_dheader";
+            generated_flags[flags.len + 1] = "-Dzidl_cdr_patch_emheader_checked=validation_patch_emheader";
+            validation_mod.addCSourceFile(.{
+                .file = dir.path(b, if (cpp) "validation_cdr.cpp" else "validation_cdr.c"),
+                .flags = generated_flags,
+            });
+            validation_mod.addCSourceFile(.{ .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"), .flags = &.{"-std=c99"} });
+            validation_mod.addIncludePath(dir);
+            validation_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+            const validation_exe = b.addExecutable(.{ .name = b.fmt("zidl-cdr-validation-{s}", .{lang}), .root_module = validation_mod });
+            validation_step.dependOn(&b.addRunArtifact(validation_exe).step);
+        }
+    }
+
     // ── XCDR known-answer checks ──────────────────────────────────────────────
     // test/integration/xcdr_known_answer/ka.idl covers every collection kind
     // (primitive / non-primitive / nested / array-typedef elements, multi-
@@ -546,6 +678,7 @@ pub fn build(b: *std.Build) void {
     // (from an independent XTypes implementation), decodes the reference
     // bytes, and (Zig) reproduces the reference minimal TypeObject hashes.
     {
+        const ka_step = b.step("test-cdr-known-answer", "Check generated codecs against independent XCDR framing/collection vectors");
         const ka_idl = b.path("test/integration/xcdr_known_answer/ka.idl");
 
         const gen_zig = b.addRunArtifact(exe);
@@ -572,7 +705,9 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
-        test_step.dependOn(&b.addRunArtifact(zig_tests).step);
+        const run_zig = b.addRunArtifact(zig_tests);
+        test_step.dependOn(&run_zig.step);
+        ka_step.dependOn(&run_zig.step);
 
         const vectors = b.path("test/integration/xcdr_known_answer/vectors.txt");
 
@@ -606,6 +741,7 @@ pub fn build(b: *std.Build) void {
         run_c.addFileArg(vectors);
         if (!verbose_tests) run_c.expectStdOutMatch("xcdr_known_answer C: all checks passed");
         test_step.dependOn(&run_c.step);
+        ka_step.dependOn(&run_c.step);
 
         const gen_cpp = b.addRunArtifact(exe);
         gen_cpp.addArgs(&.{ "-b", "cpp", "-o" });
@@ -638,6 +774,7 @@ pub fn build(b: *std.Build) void {
         run_cpp.addFileArg(vectors);
         if (!verbose_tests) run_cpp.expectStdOutMatch("xcdr_known_answer C++: all checks passed");
         test_step.dependOn(&run_cpp.step);
+        ka_step.dependOn(&run_cpp.step);
 
         // Java: only when a JDK is on PATH.
         const maybe_javac = b.findProgram(.{ .names = &.{"javac"} });
@@ -657,6 +794,7 @@ pub fn build(b: *std.Build) void {
             run_java.addFileArg(vectors);
             if (!verbose_tests) run_java.expectStdOutMatch("xcdr_known_answer Java: all checks passed");
             test_step.dependOn(&run_java.step);
+            ka_step.dependOn(&run_java.step);
         }
     }
 

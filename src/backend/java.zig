@@ -47,6 +47,7 @@
 
 const std = @import("std");
 const cdr_skip = @import("cdr_skip.zig");
+const canonical = @import("canonical_key.zig");
 const ast = @import("../ast.zig");
 const ir = @import("../ir/root.zig");
 const interface = @import("interface.zig");
@@ -150,6 +151,8 @@ const Generator = struct {
     /// Nesting depth of the collection whose element code is being emitted;
     /// suffixes loop locals, since Java rejects a local that shadows another.
     coll_depth: u32 = 0,
+    canonical_key: bool = false,
+    wire_key: bool = false,
     alloc: std.mem.Allocator,
     opts: interface.Options,
     out: *std.ArrayList(u8),
@@ -196,13 +199,14 @@ const Generator = struct {
     /// inline text only (no trailing newline); the caller appends the
     /// actual read/write expression immediately after.
     fn writeAlignCall(self: *Generator, b: ast.BaseTypeSpec, extra: []const u8) !void {
-        if (baseCdrIsWide(b)) {
+        const align_fn = if (self.canonical_key) "_cdrAlignKey" else "_cdrAlign";
+        if (baseCdrIsWide(b) and !self.canonical_key) {
             try self.print("{s}_cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); ", .{extra});
             return;
         }
-        const align_v = baseCdrAlign(b);
+        const align_v = if (self.canonical_key) @min(baseCdrAlign(b), 4) else baseCdrAlign(b);
         if (align_v > 1) {
-            try self.print("{s}_cdrAlign(_buf, _cdrBase, {d}); ", .{ extra, align_v });
+            try self.print("{s}{s}(_buf, _cdrBase, {d}); ", .{ extra, align_fn, align_v });
         } else {
             try self.print("{s}", .{extra});
         }
@@ -236,8 +240,51 @@ const Generator = struct {
         try self.write("}\n");
     }
 
+    fn emitKeyAlignmentHelper(self: *Generator, comptime visibility: []const u8) !void {
+        try self.ind();
+        try self.write(visibility ++ " static void _cdrAlignKey(java.nio.ByteBuffer _buf, int _cdrBase, int _align) {\n");
+        try self.ind();
+        try self.write("    int _padding = (_align - (_buf.position() - _cdrBase) % _align) % _align;\n");
+        try self.ind();
+        try self.write("    for (int _i = 0; _i < _padding; _i++) _buf.put((byte)0);\n");
+        try self.ind();
+        try self.write("}\n");
+    }
+
     /// Emit private static CDR helper methods into the outer class body.
+    fn emitWideStringHelpers(self: *Generator, comptime visibility: []const u8) !void {
+        const methods = [_][]const u8{
+            visibility ++ " static void _cdrWriteWstring(java.nio.ByteBuffer _buf, int _cdrBase, String _s) {\n" ++
+                "    if (_s.length() > Integer.MAX_VALUE / 2) throw new IllegalArgumentException(\"wide string length overflow\");\n" ++
+                "    _cdrAlignKey(_buf, _cdrBase, 4); _buf.putInt(_s.length() * 2);\n" ++
+                "    for (int _i = 0; _i < _s.length(); _i++) _buf.putChar(_s.charAt(_i));\n" ++ "}\n",
+            visibility ++ " static int _cdrWstringBytes(java.nio.ByteBuffer _buf, int _cdrBase) {\n" ++
+                "    int _pad = (4 - (_buf.position() - _cdrBase) % 4) % 4;\n" ++
+                "    if (_pad > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n" ++
+                "    _buf.position(_buf.position() + _pad); int _bytes = _buf.getInt();\n" ++
+                "    if ((_bytes & 1) != 0) throw new IllegalArgumentException(\"odd wide string byte count\");\n" ++
+                "    if (_bytes < 0 || _bytes > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n" ++
+                "    return _bytes;\n" ++ "}\n",
+            visibility ++ " static String _cdrReadWstring(java.nio.ByteBuffer _buf, int _cdrBase) {\n" ++
+                "    int _bytes = _cdrWstringBytes(_buf, _cdrBase); char[] _units = new char[_bytes / 2];\n" ++
+                "    for (int _i = 0; _i < _units.length; _i++) _units[_i] = _buf.getChar();\n" ++
+                "    return new String(_units);\n" ++ "}\n",
+            visibility ++ " static void _cdrSkipWstring(java.nio.ByteBuffer _buf, int _cdrBase) {\n" ++
+                "    int _bytes = _cdrWstringBytes(_buf, _cdrBase); _buf.position(_buf.position() + _bytes);\n" ++ "}\n",
+        };
+        for (methods) |method| {
+            var lines = std.mem.splitScalar(u8, method, '\n');
+            while (lines.next()) |line| {
+                if (line.len == 0) continue;
+                try self.ind();
+                try self.print("{s}\n", .{line});
+            }
+        }
+    }
+
     fn emitCdrHelpers(self: *Generator) !void {
+        try self.emitKeyAlignmentHelper("private");
+        try self.emitWideStringHelpers("private");
         try self.ind();
         try self.write("private static void _cdrAlign(java.nio.ByteBuffer _buf, int _cdrBase, int _align) {\n");
         try self.ind();
@@ -315,7 +362,9 @@ const Generator = struct {
         try self.ind();
         try self.write("}\n\n");
         try self.ind();
-        try self.write("private static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf) {\n");
+        try self.write("private static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf) { return _cdrComputeKeyHash(_buf, false); }\n");
+        try self.ind();
+        try self.write("private static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf, boolean _forceMd5) {\n");
         try self.ind();
         try self.write("    int _len = _buf.position();\n");
         try self.ind();
@@ -323,7 +372,7 @@ const Generator = struct {
         try self.ind();
         try self.write("    _buf.position(0); _buf.get(_key);\n");
         try self.ind();
-        try self.write("    if (_len <= 16) {\n");
+        try self.write("    if (!_forceMd5 && _len <= 16) {\n");
         try self.ind();
         try self.write("        byte[] _out = new byte[16];\n");
         try self.ind();
@@ -509,6 +558,7 @@ const Generator = struct {
         // CDR serialization
         if (!self.opts.no_typesupport) {
             try self.emitStructSerializeFns(s);
+            try self.emitCanonicalStruct(s);
         }
 
         self.depth -= 1;
@@ -580,11 +630,107 @@ const Generator = struct {
 
         if (!self.opts.no_typesupport) {
             try self.emitUnionSerializeFns(u);
+            try self.emitCanonicalUnion(u);
         }
 
         self.depth -= 1;
         try self.ind();
         try self.print("}} // {s}{s}\n\n", .{ pfx, u.name });
+    }
+
+    fn emitCanonicalValue(self: *Generator, tr: ir.TypeRef, dims: []const u64, access: []const u8) anyerror!void {
+        if (dims.len > 0) {
+            try self.emitSerializeArray(tr, access, dims, "", 0);
+        } else {
+            try self.emitSerializeForTypeRef(tr, access, "");
+        }
+    }
+
+    fn emitCanonicalStruct(self: *Generator, s: *const ir.Struct) anyerror!void {
+        if (structHasKeyJava(s)) {
+            const force = try canonical.forceMd5(self.alloc, s);
+            try self.ind();
+            try self.print("public static final boolean KEY_HASH_FORCE_MD5 = {s};\n", .{if (force) "true" else "false"});
+        }
+        try self.ind();
+        try self.write("public void serializeKeyHolder(java.nio.ByteBuffer _buf, int _cdrBase) {\n");
+        self.depth += 1;
+        defer self.depth -= 1;
+        const old = self.canonical_key;
+        self.canonical_key = true;
+        defer self.canonical_key = old;
+        if (!try canonical.supported(self.alloc, .{ .named = .{ .struct_ = @constCast(s) } })) {
+            try self.ind();
+            try self.write("throw new IllegalArgumentException(\"unsupported canonical key type\");\n");
+        } else {
+            const fields = try canonical.fields(self.alloc, s);
+            defer self.alloc.free(fields);
+            for (fields) |field| {
+                const access = try std.fmt.allocPrint(self.alloc, "this.get_{s}()", .{field.member.name});
+                defer self.alloc.free(access);
+                try self.emitCanonicalValue(field.member.type_ref, field.member.dimensions, access);
+            }
+        }
+        self.depth -= 1;
+        try self.ind();
+        try self.write("}\n");
+        self.depth += 1;
+    }
+
+    fn emitCanonicalUnion(self: *Generator, u: *const ir.Union) anyerror!void {
+        try self.ind();
+        try self.write("public void serializeKeyHolder(java.nio.ByteBuffer _buf, int _cdrBase) {\n");
+        self.depth += 1;
+        defer self.depth -= 1;
+        const old = self.canonical_key;
+        self.canonical_key = true;
+        defer self.canonical_key = old;
+        if (!try canonical.supported(self.alloc, .{ .named = .{ .union_ = @constCast(u) } })) {
+            try self.ind();
+            try self.write("throw new IllegalArgumentException(\"unsupported canonical key type\");\n");
+        } else {
+            try self.emitSerializeForTypeRef(u.discriminant, "this._discriminator", "");
+            var first = true;
+            var default_case: ?ir.UnionCase = null;
+            for (u.cases) |cas| {
+                if (isDefaultUnionCase(cas)) {
+                    default_case = cas;
+                    continue;
+                }
+                try self.ind();
+                try self.print("{s} (", .{if (first) "if" else "else if"});
+                first = false;
+                for (cas.labels, 0..) |label, i| {
+                    if (i != 0) try self.write(" || ");
+                    const expr = try self.unionLabelExpr(u.discriminant, &.{label});
+                    defer self.alloc.free(expr);
+                    try self.print("this._discriminator == {s}", .{expr});
+                }
+                try self.write(") {\n");
+                self.depth += 1;
+                const access = try std.fmt.allocPrint(self.alloc, "this.{s}", .{cas.name});
+                defer self.alloc.free(access);
+                try self.emitCanonicalValue(cas.type_ref, cas.dimensions, access);
+                self.depth -= 1;
+                try self.ind();
+                try self.write("}\n");
+            }
+            if (default_case) |cas| {
+                try self.ind();
+                try self.write(if (first) "{\n" else "else {\n");
+                self.depth += 1;
+                const access = try std.fmt.allocPrint(self.alloc, "this.{s}", .{cas.name});
+                defer self.alloc.free(access);
+                try self.emitCanonicalValue(cas.type_ref, cas.dimensions, access);
+                self.depth -= 1;
+                try self.ind();
+                try self.write("}\n");
+            }
+        }
+        self.depth -= 1;
+        try self.ind();
+        try self.write("}\n");
+        self.depth += 1;
     }
 
     fn emitUnionSerializeFns(self: *Generator, u: *const ir.Union) anyerror!void {
@@ -1641,6 +1787,72 @@ const Generator = struct {
 
     // ── CDR serialization emission ────────────────────────────────────────────
 
+    fn emitMutableStructWrite(self: *Generator, s: *const ir.Struct, key_only: bool) anyerror!void {
+        const previous = self.wire_key;
+        self.wire_key = key_only;
+        defer self.wire_key = previous;
+        if (key_only) {
+            try self.ind();
+            try self.write("    if (_xcdrVersion != 2) throw new IllegalArgumentException(\"mutable key requires XCDR2\");\n");
+        }
+        // @mutable: DHEADER + per-member EMHEADER framing.
+        try self.ind();
+        try self.write("    _cdrAlign(_buf, _cdrBase, 4);\n");
+        try self.ind();
+        try self.write("    int _dhPos = _buf.position(); _buf.putInt(0);\n");
+        for (s.members, 0..) |m, idx| {
+            if (key_only and !m.annotations.is_key) continue;
+            const member_id: u32 = memberIdAtJava(m, idx);
+            const mu_flag = m.annotations.must_understand;
+            const lc_opt = lcForJavaTypeRef(m.type_ref, m.dimensions);
+            // Variable-length EMHEADER word (LC=4, always followed by NEXTINT):
+            const vword: u32 = (if (mu_flag) @as(u32, 0x8000_0000) else 0) | 0x4000_0000 | member_id;
+            // Fixed-length EMHEADER word (LC=0..3):
+            const fword: u32 = if (lc_opt) |lc|
+                (if (mu_flag) @as(u32, 0x8000_0000) else 0) | (@as(u32, lc) << 28) | member_id
+            else
+                vword;
+            if (m.annotations.is_optional) {
+                // @mutable + @optional: only emit EMHEADER when value is present.
+                try self.ind();
+                try self.print("    if (this.{s} != null) {{\n", .{m.name});
+                try self.ind();
+                if (lc_opt) |_| {
+                    try self.print("        _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0x{X:0>8});\n", .{fword});
+                } else {
+                    try self.print("        _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0x{X:0>8}); int _niPos_{s} = _buf.position(); _buf.putInt(0);\n", .{ vword, m.name });
+                }
+                const access = try std.fmt.allocPrint(self.alloc, "this.{s}", .{m.name});
+                defer self.alloc.free(access);
+                if (m.dimensions.len > 0) {
+                    try self.emitSerializeArray(m.type_ref, access, m.dimensions, "        ", 0);
+                } else {
+                    try self.emitSerializeForTypeRef(m.type_ref, access, "        ");
+                }
+                if (lc_opt == null) {
+                    try self.ind();
+                    try self.print("        _buf.putInt(_niPos_{s}, _buf.position() - _niPos_{s} - 4);\n", .{ m.name, m.name });
+                }
+                try self.ind();
+                try self.write("    }\n");
+            } else {
+                try self.ind();
+                if (lc_opt) |_| {
+                    try self.print("    _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0x{X:0>8});\n", .{fword});
+                } else {
+                    try self.print("    _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0x{X:0>8}); int _niPos_{s} = _buf.position(); _buf.putInt(0);\n", .{ vword, m.name });
+                }
+                try self.emitMemberSerialize(m, "    ");
+                if (lc_opt == null) {
+                    try self.ind();
+                    try self.print("    _buf.putInt(_niPos_{s}, _buf.position() - _niPos_{s} - 4);\n", .{ m.name, m.name });
+                }
+            }
+        }
+        try self.ind();
+        try self.write("    _buf.putInt(_dhPos, _buf.position() - _dhPos - 4);\n");
+    }
+
     fn emitStructSerializeFns(self: *Generator, s: *const ir.Struct) anyerror!void {
         const ext = s.annotations.extensibility;
         const appendable = ext == .appendable;
@@ -1660,61 +1872,7 @@ const Generator = struct {
         try self.write("    _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
 
         if (mutable) {
-            // @mutable: DHEADER + per-member EMHEADER framing.
-            try self.ind();
-            try self.write("    _cdrAlign(_buf, _cdrBase, 4);\n");
-            try self.ind();
-            try self.write("    int _dhPos = _buf.position(); _buf.putInt(0);\n");
-            for (s.members, 0..) |m, idx| {
-                const member_id: u32 = memberIdAtJava(m, idx);
-                const mu_flag = m.annotations.must_understand;
-                const lc_opt = lcForJavaTypeRef(m.type_ref, m.dimensions);
-                // Variable-length EMHEADER word (LC=4, always followed by NEXTINT):
-                const vword: u32 = (if (mu_flag) @as(u32, 0x8000_0000) else 0) | 0x4000_0000 | member_id;
-                // Fixed-length EMHEADER word (LC=0..3):
-                const fword: u32 = if (lc_opt) |lc|
-                    (if (mu_flag) @as(u32, 0x8000_0000) else 0) | (@as(u32, lc) << 28) | member_id
-                else
-                    vword;
-                if (m.annotations.is_optional) {
-                    // @mutable + @optional: only emit EMHEADER when value is present.
-                    try self.ind();
-                    try self.print("    if (this.{s} != null) {{\n", .{m.name});
-                    try self.ind();
-                    if (lc_opt) |_| {
-                        try self.print("        _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0x{X:0>8});\n", .{fword});
-                    } else {
-                        try self.print("        _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0x{X:0>8}); int _niPos_{s} = _buf.position(); _buf.putInt(0);\n", .{ vword, m.name });
-                    }
-                    const access = try std.fmt.allocPrint(self.alloc, "this.{s}", .{m.name});
-                    defer self.alloc.free(access);
-                    if (m.dimensions.len > 0) {
-                        try self.emitSerializeArray(m.type_ref, access, m.dimensions, "        ", 0);
-                    } else {
-                        try self.emitSerializeForTypeRef(m.type_ref, access, "        ");
-                    }
-                    if (lc_opt == null) {
-                        try self.ind();
-                        try self.print("        _buf.putInt(_niPos_{s}, _buf.position() - _niPos_{s} - 4);\n", .{ m.name, m.name });
-                    }
-                    try self.ind();
-                    try self.write("    }\n");
-                } else {
-                    try self.ind();
-                    if (lc_opt) |_| {
-                        try self.print("    _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0x{X:0>8});\n", .{fword});
-                    } else {
-                        try self.print("    _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0x{X:0>8}); int _niPos_{s} = _buf.position(); _buf.putInt(0);\n", .{ vword, m.name });
-                    }
-                    try self.emitMemberSerialize(m, "    ");
-                    if (lc_opt == null) {
-                        try self.ind();
-                        try self.print("    _buf.putInt(_niPos_{s}, _buf.position() - _niPos_{s} - 4);\n", .{ m.name, m.name });
-                    }
-                }
-            }
-            try self.ind();
-            try self.write("    _buf.putInt(_dhPos, _buf.position() - _dhPos - 4);\n");
+            try self.emitMutableStructWrite(s, false);
         } else {
             if (appendable) {
                 try self.ind();
@@ -1892,6 +2050,10 @@ const Generator = struct {
 
         // serializeKey / deserializeKey / computeKeyHash (only if has_key)
         if (has_key) {
+            const previous_wire_key = self.wire_key;
+            self.wire_key = true;
+            defer self.wire_key = previous_wire_key;
+
             try self.write("\n");
             try self.ind();
             try self.write("protected void serializeKeyFields(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {\n");
@@ -1913,17 +2075,21 @@ const Generator = struct {
             try self.write("public void serializeKey(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {\n");
             try self.ind();
             try self.write("    _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
-            if (appendable) {
+            if (mutable) {
+                try self.emitMutableStructWrite(s, true);
+            } else {
+                if (appendable) {
+                    try self.ind();
+                    try self.write("    int _dhPos = 0;\n");
+                    try self.ind();
+                    try self.write("    if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _dhPos = _buf.position(); _buf.putInt(0); }\n");
+                }
                 try self.ind();
-                try self.write("    int _dhPos = 0;\n");
-                try self.ind();
-                try self.write("    if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _dhPos = _buf.position(); _buf.putInt(0); }\n");
-            }
-            try self.ind();
-            try self.write("    serializeKeyFields(_buf, _cdrBase, _xcdrVersion);\n");
-            if (appendable) {
-                try self.ind();
-                try self.write("    if (_xcdrVersion == 2) { _buf.putInt(_dhPos, _buf.position() - _dhPos - 4); }\n");
+                try self.write("    serializeKeyFields(_buf, _cdrBase, _xcdrVersion);\n");
+                if (appendable) {
+                    try self.ind();
+                    try self.write("    if (_xcdrVersion == 2) { _buf.putInt(_dhPos, _buf.position() - _dhPos - 4); }\n");
+                }
             }
             try self.ind();
             try self.write("}\n");
@@ -1947,15 +2113,29 @@ const Generator = struct {
             try self.print("protected static void deserializeKeyInto({s}{s} _out, java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {{\n", .{ self.opts.type_prefix, s.name });
             if (mutable) {
                 try self.ind();
-                try self.write("    _cdrAlign(_buf, _cdrBase, 4); int _emEnd = _buf.position() + _buf.getInt();\n");
+                try self.write("    if (_xcdrVersion != 2) throw new IllegalArgumentException(\"mutable key requires XCDR2\");\n");
                 try self.ind();
-                try self.write("    while (_buf.position() < _emEnd) {\n");
+                try self.write("    _cdrAlign(_buf, _cdrBase, 4); int _frameLimit = _buf.limit(); int _emSize = _buf.getInt();\n");
                 try self.ind();
-                try self.write("        _cdrAlign(_buf, _cdrBase, 4); int _emWord = _buf.getInt(); int _memberId = _emWord & 0x0FFFFFFF;\n");
+                try self.write("    if (_emSize < 0 || _emSize > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
                 try self.ind();
-                try self.write("        int _emLc = (_emWord >>> 28) & 0x7; int _emPayload; if (_emLc == 0) _emPayload = 1; else if (_emLc == 1) _emPayload = 2; else if (_emLc == 2) _emPayload = 4; else if (_emLc == 3) _emPayload = 8; else if (_emLc == 4) _emPayload = _buf.getInt(); else { int _emNext = _buf.getInt(_buf.position()); _emPayload = 4 + (_emLc == 5 ? _emNext : _emLc == 6 ? _emNext * 4 : _emNext * 8); }\n");
+                try self.write("    int _emEnd = _buf.position() + _emSize; _buf.limit(_emEnd);\n");
                 try self.ind();
-                try self.write("        switch (_memberId) {\n");
+                try self.write("    try { while (_buf.position() < _emEnd) {\n");
+                try self.ind();
+                try self.write("        int _pad = (4 - (_buf.position() - _cdrBase) % 4) % 4; if (_pad > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
+                try self.ind();
+                try self.write("        _buf.position(_buf.position() + _pad); if (_buf.position() == _emEnd) break;\n");
+                try self.ind();
+                try self.write("        int _emWord = _buf.getInt(); int _memberId = _emWord & 0x0FFFFFFF; int _emLc = (_emWord >>> 28) & 7; long _emPayload;\n");
+                try self.ind();
+                try self.write("        if (_emLc < 4) _emPayload = 1L << _emLc; else if (_emLc == 4) _emPayload = Integer.toUnsignedLong(_buf.getInt()); else { long _next = Integer.toUnsignedLong(_buf.getInt(_buf.position())); _emPayload = 4 + _next * (_emLc == 5 ? 1L : _emLc == 6 ? 4L : 8L); }\n");
+                try self.ind();
+                try self.write("        if (_emPayload > 0xFFFFFFFFL) throw new IllegalArgumentException(\"EMHEADER size overflow\"); if (_emPayload > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
+                try self.ind();
+                try self.write("        int _memberEnd = _buf.position() + (int)_emPayload; _buf.limit(_memberEnd);\n");
+                try self.ind();
+                try self.write("        try { switch (_memberId) {\n");
                 for (s.members, 0..) |m, idx| {
                     if (!m.annotations.is_key) continue;
                     const member_id: u32 = memberIdAtJava(m, idx);
@@ -1966,11 +2146,13 @@ const Generator = struct {
                     try self.write("                break;\n");
                 }
                 try self.ind();
-                try self.write("            default: _buf.position(_buf.position() + _emPayload); break;\n");
+                try self.write("            default: if ((_emWord & 0x80000000) != 0) throw new IllegalArgumentException(\"unknown must-understand key member\"); break;\n");
                 try self.ind();
-                try self.write("        }\n");
+                try self.write("        } } finally { _buf.limit(_emEnd); }\n");
                 try self.ind();
-                try self.write("    }\n");
+                try self.write("        _buf.position(_memberEnd);\n");
+                try self.ind();
+                try self.write("    } } finally { _buf.limit(_frameLimit); }\n");
             } else {
                 // XCDR2 has a real DHEADER to bound the key-only payload;
                 // XCDR1 has none, so (like skip() above) it must fall back to
@@ -2030,18 +2212,13 @@ const Generator = struct {
             try self.ind();
             try self.write("        try {\n");
             try self.ind();
-            // Fixed XCDR1, not whatever this instance would negotiate on the
-            // wire -- matches the C backend's {c_name}_compute_key_hash
-            // (c.zig: "XCDR1: reserve_dheader_maybe is a no-op, so key bytes
-            // are written without a DHEADER regardless of extensibility").
-            // The key hash is a representation-independent identifier: two
-            // entities that chose different wire representations for the
-            // same instance must still compute the same hash.
-            try self.write("            serializeKeyFields(_buf, 0, 1);\n");
+            try self.write("            serializeKeyHolder(_buf, 0);\n");
             try self.ind();
-            try self.write("            return _cdrComputeKeyHash(_buf);\n");
+            try self.write("            return _cdrComputeKeyHash(_buf, KEY_HASH_FORCE_MD5);\n");
             try self.ind();
             try self.write("        } catch (java.nio.BufferOverflowException _e) {\n");
+            try self.ind();
+            try self.write("            if (_cap > Integer.MAX_VALUE / 2) throw new IllegalArgumentException(\"canonical key exceeds Java buffer capacity\", _e);\n");
             try self.ind();
             try self.write("            _cap *= 2;\n");
             try self.ind();
@@ -2428,6 +2605,7 @@ const Generator = struct {
     /// `int _cdh = -1; if (_xcdrVersion == 2) { ...; _cdh = pos; putInt(0); }`
     /// and returns the local's name (caller frees via closeCollectionDheader).
     fn openCollectionDheader(self: *Generator, needed: bool, extra: []const u8) !?[]u8 {
+        if (self.canonical_key) return null;
         if (!needed) return null;
         const name = try self.collName("_cdh");
         try self.ind();
@@ -2499,7 +2677,11 @@ const Generator = struct {
                     .any, .object, .value_base => try self.write("throw new IllegalArgumentException(\"unsupported CDR skip type\");\n"),
                 }
             },
-            .string, .wstring => {
+            .wstring => {
+                try self.ind();
+                try self.print("{s}_cdrSkipWstring(_buf, _cdrBase);\n", .{extra});
+            },
+            .string => {
                 try self.ind();
                 try self.print("{s}_cdrReadString(_buf, _cdrBase);\n", .{extra});
             },
@@ -2592,6 +2774,22 @@ const Generator = struct {
         access: []const u8,
         extra: []const u8,
     ) anyerror!void {
+        if (!self.canonical_key and self.wire_key and tr == .named and typeDeclHasKeyJava(tr.named)) {
+            try self.ind();
+            try self.print("{s}{s}.serializeKey(_buf, _cdrBase, _xcdrVersion);\n", .{ extra, access });
+            return;
+        }
+        if (self.canonical_key) switch (tr) {
+            .named => |td| switch (td) {
+                .struct_, .union_ => {
+                    try self.ind();
+                    try self.print("{s}{s}.serializeKeyHolder(_buf, _cdrBase);\n", .{ extra, access });
+                    return;
+                },
+                else => {},
+            },
+            else => {},
+        };
         switch (tr) {
             .base => |b| {
                 try self.ind();
@@ -2609,7 +2807,39 @@ const Generator = struct {
                     .any, .object, .value_base => try self.print("// TODO: any/object {s}\n", .{access}),
                 }
             },
-            .string, .wstring => {
+            .string, .wstring => |bound| {
+                if (self.canonical_key) {
+                    try self.ind();
+                    try self.print("{s}{{ String _keyString = {s};\n", .{ extra, access });
+                    try self.ind();
+                    if (tr == .wstring) {
+                        if (bound) |n| try self.print("{s}  if (_keyString.length() > {d}) throw new IllegalArgumentException(\"wide key exceeds bound\");\n", .{ extra, n });
+                        try self.print("{s}  if (_keyString.length() > Integer.MAX_VALUE / 2) throw new IllegalArgumentException(\"wide key length overflow\");\n", .{extra});
+                        try self.ind();
+                        try self.print("{s}  _cdrAlignKey(_buf, _cdrBase, 4); _buf.putInt(_keyString.length() * 2);\n", .{extra});
+                        try self.ind();
+                        try self.print("{s}  for (int _ki = 0; _ki < _keyString.length(); _ki++) _buf.putChar(_keyString.charAt(_ki));\n", .{extra});
+                    } else {
+                        try self.print("{s}  byte[] _keyBytes = _keyString.getBytes(java.nio.charset.StandardCharsets.UTF_8);\n", .{extra});
+                        try self.ind();
+                        if (bound) |n| try self.print("{s}  if (_keyBytes.length > {d}) throw new IllegalArgumentException(\"string key exceeds bound\");\n", .{ extra, n });
+                        try self.print("{s}  if (_keyBytes.length == Integer.MAX_VALUE) throw new IllegalArgumentException(\"string key length overflow\");\n", .{extra});
+                        try self.ind();
+                        try self.print("{s}  _cdrAlignKey(_buf, _cdrBase, 4); _buf.putInt(_keyBytes.length + 1); _buf.put(_keyBytes); _buf.put((byte)0);\n", .{extra});
+                    }
+                    try self.ind();
+                    try self.print("{s}}}\n", .{extra});
+                    return;
+                }
+                if (tr == .wstring) {
+                    if (bound) |n| {
+                        try self.ind();
+                        try self.print("{s}if ({s}.length() > {d}) throw new IllegalArgumentException(\"wide string exceeds bound\");\n", .{ extra, access, n });
+                    }
+                    try self.ind();
+                    try self.print("{s}_cdrWriteWstring(_buf, _cdrBase, {s});\n", .{ extra, access });
+                    return;
+                }
                 try self.ind();
                 try self.print(
                     "{s}_cdrWriteString(_buf, _cdrBase, {s});\n",
@@ -2617,14 +2847,18 @@ const Generator = struct {
                 );
             },
             .sequence => |seq| {
+                if (self.canonical_key) if (seq.bound) |n| {
+                    try self.ind();
+                    try self.print("{s}if ({s}.size() > {d}) throw new IllegalArgumentException(\"sequence key exceeds bound\");\n", .{ extra, access, n });
+                };
                 // XCDR2 prefixes a collection of non-primitive elements with a DHEADER.
                 const cdh = try self.openCollectionDheader(!cdr_skip.isPrimitiveElement(seq.element.*), extra);
                 const e = try self.collName("_e");
                 defer self.alloc.free(e);
                 try self.ind();
                 try self.print(
-                    "{s}_cdrAlign(_buf, _cdrBase, 4); _buf.putInt({s}.size());\n",
-                    .{ extra, access },
+                    "{s}{s}(_buf, _cdrBase, 4); _buf.putInt({s}.size());\n",
+                    .{ extra, if (self.canonical_key) "_cdrAlignKey" else "_cdrAlign", access },
                 );
                 const elem_java = try self.typeRefToJavaElem(seq.element.*);
                 defer self.alloc.free(elem_java);
@@ -2713,6 +2947,13 @@ const Generator = struct {
         out_expr: []const u8,
         extra: []const u8,
     ) anyerror!void {
+        if (self.wire_key and tr == .named and typeDeclHasKeyJava(tr.named)) {
+            const qname = try self.qualNameToJava(ir.typeDeclQualifiedName(tr.named));
+            defer self.alloc.free(qname);
+            try self.ind();
+            try self.print("{s}{s} = {s}.deserializeKey(_buf, _cdrBase, _xcdrVersion);\n", .{ extra, out_expr, qname });
+            return;
+        }
         switch (tr) {
             .base => |b| {
                 const read_expr = baseCdrReadExpr(b);
@@ -2720,7 +2961,17 @@ const Generator = struct {
                 try self.writeAlignCall(b, extra);
                 try self.print("{s} = {s};\n", .{ out_expr, read_expr });
             },
-            .string, .wstring => {
+            .wstring => |bound| {
+                try self.ind();
+                try self.print("{s}{{ String _wide = _cdrReadWstring(_buf, _cdrBase);\n", .{extra});
+                if (bound) |n| {
+                    try self.ind();
+                    try self.print("{s}  if (_wide.length() > {d}) throw new IllegalArgumentException(\"wide string exceeds bound\");\n", .{ extra, n });
+                }
+                try self.ind();
+                try self.print("{s}  {s} = _wide; }}\n", .{ extra, out_expr });
+            },
+            .string => {
                 try self.ind();
                 try self.print(
                     "{s}{s} = _cdrReadString(_buf, _cdrBase);\n",
@@ -2858,6 +3109,13 @@ const Generator = struct {
         seq_expr: []const u8,
         extra: []const u8,
     ) anyerror!void {
+        if (self.wire_key and elem_tr == .named and typeDeclHasKeyJava(elem_tr.named)) {
+            const qname = try self.qualNameToJava(ir.typeDeclQualifiedName(elem_tr.named));
+            defer self.alloc.free(qname);
+            try self.ind();
+            try self.print("{s}{s}.add({s}.deserializeKey(_buf, _cdrBase, _xcdrVersion));\n", .{ extra, seq_expr, qname });
+            return;
+        }
         switch (elem_tr) {
             .base => |b| {
                 const read_expr = baseCdrReadExpr(b);
@@ -2865,7 +3123,10 @@ const Generator = struct {
                 try self.writeAlignCall(b, extra);
                 try self.print("{s}.add({s});\n", .{ seq_expr, read_expr });
             },
-            .string, .wstring => {
+            .wstring => {
+                try self.emitSequenceElemDeserializeViaTemp(elem_tr, seq_expr, extra);
+            },
+            .string => {
                 try self.ind();
                 try self.print(
                     "{s}{s}.add(_cdrReadString(_buf, _cdrBase));\n",
@@ -3259,6 +3520,7 @@ const Generator = struct {
             defer self.alloc.free(local);
             return std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ entry.package, local });
         }
+        if (self.top_level) return splitFileJavaClassName(self.alloc, qname, self.opts.type_prefix);
         return self.qualNameToJavaLocal(qname);
     }
 
@@ -3359,8 +3621,7 @@ fn lcForJavaTypeRef(type_ref: ir.TypeRef, dimensions: []const u64) ?u2 {
     };
 }
 
-/// Return the XTYPES member ID for a struct member.
-/// Uses the `@id` annotation if present; otherwise the declaration index.
+/// Resolved XTypes ID; index supports manually constructed IR.
 fn memberIdAtJava(m: ir.StructMember, idx: usize) u32 {
     return m.annotations.memberId(@intCast(idx));
 }
@@ -8669,6 +8930,8 @@ fn generateCdrUtils(
     defer alloc.free(class_name);
     try gen.print("public class {s}CdrUtils {{\n", .{class_name});
     gen.depth = 1;
+    try gen.emitKeyAlignmentHelper("public");
+    try gen.emitWideStringHelpers("public");
     // Emit CDR helpers as public static (not private static).
     try gen.write("    public static void _cdrAlign(java.nio.ByteBuffer _buf, int _cdrBase, int _align) {\n");
     try gen.write("        if (_align <= 1) return;\n");
@@ -8690,11 +8953,12 @@ fn generateCdrUtils(
     try gen.write("        _buf.get(); // null terminator\n");
     try gen.write("        return new String(_b, java.nio.charset.StandardCharsets.UTF_8);\n");
     try gen.write("    }\n");
-    try gen.write("    public static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf) {\n");
+    try gen.write("    public static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf) { return _cdrComputeKeyHash(_buf, false); }\n");
+    try gen.write("    public static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf, boolean _forceMd5) {\n");
     try gen.write("        int _len = _buf.position();\n");
     try gen.write("        byte[] _key = new byte[_len];\n");
     try gen.write("        _buf.position(0); _buf.get(_key);\n");
-    try gen.write("        if (_len <= 16) {\n");
+    try gen.write("        if (!_forceMd5 && _len <= 16) {\n");
     try gen.write("            byte[] _out = new byte[16];\n");
     try gen.write("            System.arraycopy(_key, 0, _out, 0, _len);\n");
     try gen.write("            return _out;\n");
@@ -8780,7 +9044,7 @@ pub fn generateSplitFiles(
         // CDR helpers import (for types that use serialization).
         if (needs_cdr) {
             switch (td) {
-                .struct_, .exception => {
+                .struct_, .union_, .exception => {
                     if (opts.java_package.len > 0) {
                         try gen.print("import static {s}.{s}CdrUtils.*;\n", .{ opts.java_package, class_name });
                     } else {

@@ -158,7 +158,21 @@ struct ReaderListener : DDS::ReaderListenerBase {
     }
 };
 
+static void selected_frame_bounds() {
+    uint8_t bytes[] = { 0,9,0,0, 8,0,0,0, 42,0,0,0, 99,0,0,0, 7,0,0,0 };
+    ZidlCdrReader reader;
+    Topic value{};
+    assert(zidl_cdr_reader_init(&reader, bytes, sizeof bytes) == ZIDL_CDR_OK);
+    assert(Topic_deserialize_selected(&reader, 1, &value) == ZIDL_CDR_OK);
+    assert(value.id == 42 && reader.pos == 16 && reader.data_len == sizeof bytes);
+    bytes[4] = 2;
+    assert(zidl_cdr_reader_init(&reader, bytes, sizeof bytes) == ZIDL_CDR_OK);
+    assert(Topic_deserialize_selected(&reader, 1, &value) == ZIDL_CDR_TRUNCATED);
+    assert(reader.pos <= 10 && reader.data_len == sizeof bytes);
+}
+
 int main() {
+    selected_frame_bounds();
     DDS_DataReader_s reader_handle;
     auto reader = DDS::DataReaderImpl::_getOrCreate(&reader_handle);
     assert(reader == reader->get_reader());

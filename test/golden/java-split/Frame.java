@@ -59,5 +59,13 @@ public class Frame implements java.io.Serializable {
             _cdrReadString(_buf, _cdrBase);
         }
     }
+    public void serializeKeyHolder(java.nio.ByteBuffer _buf, int _cdrBase) {
+        _cdrAlignKey(_buf, _cdrBase, 4); _buf.putInt(this.get_seq_num());
+        { String _keyString = this.get_topic();
+          byte[] _keyBytes = _keyString.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+          if (_keyBytes.length == Integer.MAX_VALUE) throw new IllegalArgumentException("string key length overflow");
+          _cdrAlignKey(_buf, _cdrBase, 4); _buf.putInt(_keyBytes.length + 1); _buf.put(_keyBytes); _buf.put((byte)0);
+        }
+    }
 } // Frame
 

@@ -33,6 +33,11 @@ pub const Point = extern struct {
     pub fn default() @This() {
         return .{};
     }
+    pub fn serializeKeyHolder(writer: anytype, value: @This()) !void {
+        try writer.writeI32(value.x);
+        try writer.writeI32(value.y);
+    }
+
 
     pub const has_key = false;
 
@@ -79,6 +84,11 @@ pub const Sample = struct {
     pub fn default() @This() {
         return .{};
     }
+    pub const KEY_HASH_FORCE_MD5 = false;
+    pub fn serializeKeyHolder(writer: anytype, value: @This()) !void {
+        try writer.writeU32(value.id);
+    }
+
 
     pub const has_key = true;
 
@@ -182,9 +192,13 @@ pub const Sample = struct {
     }
 
     pub fn computeKeyHash(value: *const @This()) [16]u8 {
+        return @This().computeKeyHashChecked(value) catch unreachable;
+    }
+
+    pub fn computeKeyHashChecked(value: *const @This()) ![16]u8 {
         var _khw = zidl_rt.KeyHashWriter.init();
-        @This().serializeKey(&_khw, value.*) catch unreachable;
-        return _khw.final();
+        try @This().serializeKeyHolder(&_khw, value.*);
+        return _khw.finalForType(KEY_HASH_FORCE_MD5);
     }
 
     pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
@@ -231,6 +245,11 @@ pub const Frame = struct {
     pub fn default() @This() {
         return .{};
     }
+    pub fn serializeKeyHolder(writer: anytype, value: @This()) !void {
+        try writer.writeU32(value.seq_num);
+        try writer.writeString(value.topic);
+    }
+
 
     pub const has_key = false;
 
@@ -238,12 +257,14 @@ pub const Frame = struct {
         const _dh = try writer.reserveDheaderMaybe();
         try writer.writeU32(value.seq_num);
         try writer.writeString(value.topic);
-        writer.patchDheaderMaybe(_dh);
+        try writer.patchDheaderMaybeChecked(_dh);
     }
 
     pub fn deserializeInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {
         errdefer out.deinit(allocator);
-        try reader.skipDheaderIfXcdr2();
+        var _read_window_0 = if (if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null) |_limit| try reader.window(_limit) else null;
+        defer if (_read_window_0) |*_window| _window.close();
+        errdefer if (_read_window_0) |*_window| _window.cancel();
         out.seq_num = try reader.readU32();
         out.topic = try reader.readString(allocator);
     }
@@ -282,6 +303,11 @@ pub const Beacon = struct {
     pub fn default() @This() {
         return .{};
     }
+    pub const KEY_HASH_FORCE_MD5 = false;
+    pub fn serializeKeyHolder(writer: anytype, value: @This()) !void {
+        try writer.writeU32(value.id);
+    }
+
 
     pub const has_key = true;
 
@@ -289,12 +315,14 @@ pub const Beacon = struct {
         const _dh = try writer.reserveDheaderMaybe();
         try writer.writeU32(value.id);
         try writer.writeString(value.payload);
-        writer.patchDheaderMaybe(_dh);
+        try writer.patchDheaderMaybeChecked(_dh);
     }
 
     pub fn deserializeInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {
         errdefer out.deinit(allocator);
-        try reader.skipDheaderIfXcdr2();
+        var _read_window_1 = if (if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null) |_limit| try reader.window(_limit) else null;
+        defer if (_read_window_1) |*_window| _window.close();
+        errdefer if (_read_window_1) |*_window| _window.cancel();
         out.id = try reader.readU32();
         out.payload = try reader.readString(allocator);
     }
@@ -312,23 +340,27 @@ pub const Beacon = struct {
     pub fn serializeKey(writer: anytype, value: @This()) !void {
         const _dh = try writer.reserveDheaderMaybe();
         try writer.writeU32(value.id);
-        writer.patchDheaderMaybe(_dh);
+        try writer.patchDheaderMaybeChecked(_dh);
     }
 
     pub fn deserializeKeyInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {
         _ = allocator;
-        const _key_end: ?usize = if (reader.xcdr_version == .xcdr2) blk: {
-            const _size = try reader.readDheader();
-            break :blk reader.pos + _size;
-        } else null;
+        const _key_end: ?usize = if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null;
+        var _read_window_2 = if (_key_end) |_limit| try reader.window(_limit) else null;
+        defer if (_read_window_2) |*_window| _window.close();
+        errdefer if (_read_window_2) |*_window| _window.cancel();
         out.id = try reader.readU32();
         if (_key_end) |_end| try reader.seekTo(_end);
     }
 
     pub fn computeKeyHash(value: *const @This()) [16]u8 {
+        return @This().computeKeyHashChecked(value) catch unreachable;
+    }
+
+    pub fn computeKeyHashChecked(value: *const @This()) ![16]u8 {
         var _khw = zidl_rt.KeyHashWriter.init();
-        @This().serializeKey(&_khw, value.*) catch unreachable;
-        return _khw.final();
+        try @This().serializeKeyHolder(&_khw, value.*);
+        return _khw.finalForType(KEY_HASH_FORCE_MD5);
     }
 
     pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {

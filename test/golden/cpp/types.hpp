@@ -83,11 +83,14 @@ extern "C" {
 
 #define Point_has_key 0
 int Point_serialize(ZidlCdrWriter *_w, const ::Point *_v);
+int Point_serialize_key_holder(ZidlCdrWriter *_w, const ::Point *_v);
 int Point_deserialize(ZidlCdrReader *_r, ::Point *_v);
 int Point_skip(ZidlCdrReader *_r);
 
 #define Sample_has_key 1
+#define Sample_KEY_HASH_FORCE_MD5 0
 int Sample_serialize(ZidlCdrWriter *_w, const ::Sample *_v);
+int Sample_serialize_key_holder(ZidlCdrWriter *_w, const ::Sample *_v);
 int Sample_deserialize(ZidlCdrReader *_r, ::Sample *_v);
 int Sample_skip(ZidlCdrReader *_r);
 int Sample_serialize_key(ZidlCdrWriter *_w, const ::Sample *_v);
@@ -98,11 +101,14 @@ int Sample_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8
 
 #define Frame_has_key 0
 int Frame_serialize(ZidlCdrWriter *_w, const ::Frame *_v);
+int Frame_serialize_key_holder(ZidlCdrWriter *_w, const ::Frame *_v);
 int Frame_deserialize(ZidlCdrReader *_r, ::Frame *_v);
 int Frame_skip(ZidlCdrReader *_r);
 
 #define Beacon_has_key 1
+#define Beacon_KEY_HASH_FORCE_MD5 0
 int Beacon_serialize(ZidlCdrWriter *_w, const ::Beacon *_v);
+int Beacon_serialize_key_holder(ZidlCdrWriter *_w, const ::Beacon *_v);
 int Beacon_deserialize(ZidlCdrReader *_r, ::Beacon *_v);
 int Beacon_skip(ZidlCdrReader *_r);
 int Beacon_serialize_key(ZidlCdrWriter *_w, const ::Beacon *_v);
