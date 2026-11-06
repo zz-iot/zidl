@@ -1,5 +1,11 @@
 # Runtime Libraries Reference
 
+> Planned changes: [shared native CDR core](design/shared-native-cdr.md) and
+> [shared Java CDR runtime](design/java-cdr-runtime.md). These decisions supersede
+> the historical strategy rationale below. The migrations have not shipped;
+> this reference also contains aspirational Rust entries that are not evidence
+> of implemented bindings.
+
 ## CDR Runtime Strategy
 
 Different backends take different approaches to CDR serialization, chosen based on deployment
