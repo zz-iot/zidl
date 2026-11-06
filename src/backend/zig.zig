@@ -3785,8 +3785,6 @@ const Generator = struct {
             break :blk false;
         };
 
-        try self.write("\n");
-
         // has_key constant
         try self.ind();
         try self.print("    pub const has_key = {s};\n\n", .{if (has_key) "true" else "false"});

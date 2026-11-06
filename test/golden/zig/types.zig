@@ -38,7 +38,6 @@ pub const Point = extern struct {
         try writer.writeI32(value.y);
     }
 
-
     pub const has_key = false;
 
     pub fn serialize(writer: anytype, value: @This()) !void {
@@ -88,7 +87,6 @@ pub const Sample = struct {
     pub fn serializeKeyHolder(writer: anytype, value: @This()) !void {
         try writer.writeU32(value.id);
     }
-
 
     pub const has_key = true;
 
@@ -250,7 +248,6 @@ pub const Frame = struct {
         try writer.writeString(value.topic);
     }
 
-
     pub const has_key = false;
 
     pub fn serialize(writer: anytype, value: @This()) !void {
@@ -307,7 +304,6 @@ pub const Beacon = struct {
     pub fn serializeKeyHolder(writer: anytype, value: @This()) !void {
         try writer.writeU32(value.id);
     }
-
 
     pub const has_key = true;
 

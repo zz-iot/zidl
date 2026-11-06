@@ -3,6 +3,8 @@
 
 const cursor = @import("cdr_cursor.zig");
 
+pub const ByteOrder = enum { little, big };
+
 pub fn writeUnsigned(sink: anytype, comptime T: type, value: T, pos: usize, alignment_cap: usize, order: ByteOrder) !void {
     const size = @sizeOf(T);
     const boundary = @min(size, alignment_cap);
