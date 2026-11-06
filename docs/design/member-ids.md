@@ -22,8 +22,8 @@ and overflow fail during IR construction. XTypes application IDs end at
 `0x0fffbfff`; general IDL exception annotations retain their 32-bit range.
 Minimal structure and union member sequences are ordered by member ID.
 
-Affected schemas can change mutable wire headers, TypeObject hashes and key
-ordering. Coordinate regeneration across participants. Reader/writer ABI layouts
+Affected schemas can change mutable wire headers and TypeObject hashes.
+Coordinate regeneration across participants. Reader/writer ABI layouts
 and ordinary declaration-order wire serialization are unchanged.
 
 References: [XTypes 1.3](https://www.omg.org/spec/DDS-XTypes/1.3/PDF)
