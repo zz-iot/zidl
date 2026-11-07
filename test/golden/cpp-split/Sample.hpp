@@ -35,7 +35,9 @@ struct Sample {
 }; // struct Sample
 
 #define Sample_has_key 1
+#define Sample_KEY_HASH_FORCE_MD5 0
 int Sample_serialize(ZidlCdrWriter *_w, const ::Sample *_v);
+int Sample_serialize_key_holder(ZidlCdrWriter *_w, const ::Sample *_v);
 int Sample_deserialize(ZidlCdrReader *_r, ::Sample *_v);
 int Sample_skip(ZidlCdrReader *_r);
 int Sample_serialize_key(ZidlCdrWriter *_w, const ::Sample *_v);

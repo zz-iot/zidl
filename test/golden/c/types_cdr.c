@@ -4,6 +4,16 @@
 #include "zidl_cdr.h"
 #include <string.h>
 
+int Point_serialize_key_holder(ZidlCdrWriter *_w, const Point *_v) {
+    (void)_w; (void)_v;
+    int _rc = ZIDL_CDR_OK;
+    _rc = zidl_cdr_write_i32(_w, _v->x);
+    if (_rc) return _rc;
+    _rc = zidl_cdr_write_i32(_w, _v->y);
+    if (_rc) return _rc;
+    return _rc;
+}
+
 int Point_serialize(ZidlCdrWriter *_w, const Point *_v) {
     int _rc;
     _rc = zidl_cdr_write_i32(_w, _v->x);
@@ -13,7 +23,15 @@ int Point_serialize(ZidlCdrWriter *_w, const Point *_v) {
     return ZIDL_CDR_OK;
 }
 
+static int Point_deserialize_bounded_impl(ZidlCdrReader *_r, Point *_v);
 int Point_deserialize(ZidlCdrReader *_r, Point *_v) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Point_deserialize_bounded_impl(&_local, _v);
+    _r->pos = !_rc && (0) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Point_deserialize_bounded_impl(ZidlCdrReader *_r, Point *_v) {
     int _rc;
     _rc = zidl_cdr_read_i32(_r, &_v->x);
     if (_rc) return _rc;
@@ -22,7 +40,15 @@ int Point_deserialize(ZidlCdrReader *_r, Point *_v) {
     return ZIDL_CDR_OK;
 }
 
+static int Point_skip_bounded_impl(ZidlCdrReader *_r);
 int Point_skip(ZidlCdrReader *_r) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Point_skip_bounded_impl(&_local);
+    _r->pos = !_rc && (0) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Point_skip_bounded_impl(ZidlCdrReader *_r) {
     int _rc;
     { int32_t _tmp; _rc = zidl_cdr_read_i32(_r, &_tmp); if (_rc) return _rc; }
     { int32_t _tmp; _rc = zidl_cdr_read_i32(_r, &_tmp); if (_rc) return _rc; }
@@ -31,6 +57,14 @@ int Point_skip(ZidlCdrReader *_r) {
 
 void Point_default(Point *_v) {
     memset(_v, 0, sizeof(*_v));
+}
+
+int Sample_serialize_key_holder(ZidlCdrWriter *_w, const Sample *_v) {
+    (void)_w; (void)_v;
+    int _rc = ZIDL_CDR_OK;
+    _rc = zidl_cdr_write_u32(_w, _v->id);
+    if (_rc) return _rc;
+    return _rc;
 }
 
 int Sample_serialize(ZidlCdrWriter *_w, const Sample *_v) {
@@ -80,7 +114,15 @@ int Sample_serialize(ZidlCdrWriter *_w, const Sample *_v) {
     return ZIDL_CDR_OK;
 }
 
+static int Sample_deserialize_bounded_impl(ZidlCdrReader *_r, Sample *_v);
 int Sample_deserialize(ZidlCdrReader *_r, Sample *_v) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Sample_deserialize_bounded_impl(&_local, _v);
+    _r->pos = !_rc && (0) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Sample_deserialize_bounded_impl(ZidlCdrReader *_r, Sample *_v) {
     int _rc;
     _rc = zidl_cdr_read_u32(_r, &_v->id);
     if (_rc) return _rc;
@@ -151,7 +193,15 @@ int Sample_deserialize(ZidlCdrReader *_r, Sample *_v) {
     return ZIDL_CDR_OK;
 }
 
+static int Sample_skip_bounded_impl(ZidlCdrReader *_r);
 int Sample_skip(ZidlCdrReader *_r) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Sample_skip_bounded_impl(&_local);
+    _r->pos = !_rc && (0) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Sample_skip_bounded_impl(ZidlCdrReader *_r) {
     int _rc;
     { uint32_t _tmp; _rc = zidl_cdr_read_u32(_r, &_tmp); if (_rc) return _rc; }
     { bool _tmp; _rc = zidl_cdr_read_bool(_r, &_tmp); if (_rc) return _rc; }
@@ -185,7 +235,15 @@ int Sample_serialize_key(ZidlCdrWriter *_w, const Sample *_v) {
     return ZIDL_CDR_OK;
 }
 
+static int Sample_deserialize_key_bounded_impl(ZidlCdrReader *_r, Sample *_v);
 int Sample_deserialize_key(ZidlCdrReader *_r, Sample *_v) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Sample_deserialize_key_bounded_impl(&_local, _v);
+    _r->pos = !_rc && (0) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Sample_deserialize_key_bounded_impl(ZidlCdrReader *_r, Sample *_v) {
     int _rc;
     _rc = zidl_cdr_read_u32(_r, &_v->id);
     if (_rc) return _rc;
@@ -194,11 +252,11 @@ int Sample_deserialize_key(ZidlCdrReader *_r, Sample *_v) {
 
 int Sample_compute_key_hash(const Sample *_v, uint8_t _hash[16]) {
     ZidlCdrWriter _w;
-    int _rc = zidl_cdr_writer_init(&_w, ZIDL_XCDR1);
+    int _rc = zidl_cdr_writer_init(&_w, ZIDL_XCDR2);
     if (_rc) return _rc;
     zidl_cdr_writer_set_byte_order(&_w, ZIDL_CDR_BE);
-    _rc = Sample_serialize_key(&_w, _v);
-    if (!_rc) zidl_cdr_compute_key_hash(_w.buf, _w.len, _hash);
+    _rc = Sample_serialize_key_holder(&_w, _v);
+    if (!_rc) zidl_cdr_compute_key_hash_for_type(_w.buf, _w.len, false, _hash);
     zidl_cdr_writer_deinit(&_w);
     return _rc;
 }
@@ -240,6 +298,19 @@ void Sample_free(Sample *v) {
     }
 }
 
+int Frame_serialize_key_holder(ZidlCdrWriter *_w, const Frame *_v) {
+    (void)_w; (void)_v;
+    int _rc = ZIDL_CDR_OK;
+    _rc = zidl_cdr_write_u32(_w, _v->seq_num);
+    if (_rc) return _rc;
+    { size_t _key_len = 0; const char *_key_value = _v->topic;
+        while (_key_value && _key_value[_key_len]) _key_len++;
+        if (_key_len >= UINT32_MAX) return ZIDL_CDR_OVERFLOW;
+        _rc = zidl_cdr_write_string(_w, _key_value, (uint32_t)_key_len); if (_rc) return _rc;
+    }
+    return _rc;
+}
+
 int Frame_serialize(ZidlCdrWriter *_w, const Frame *_v) {
     int _rc;
     size_t _dh;
@@ -249,14 +320,27 @@ int Frame_serialize(ZidlCdrWriter *_w, const Frame *_v) {
     if (_rc) return _rc;
     _rc = zidl_cdr_write_string(_w, _v->topic ? _v->topic : "", _v->topic ? (uint32_t)strlen(_v->topic) : 0u);
     if (_rc) return _rc;
-    zidl_cdr_patch_dheader_maybe(_w, _dh);
+    if (_dh != (size_t)-1) { _rc = zidl_cdr_patch_dheader_checked(_w, _dh); if (_rc) return _rc; }
     return ZIDL_CDR_OK;
 }
 
+static int Frame_deserialize_bounded_impl(ZidlCdrReader *_r, Frame *_v);
 int Frame_deserialize(ZidlCdrReader *_r, Frame *_v) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Frame_deserialize_bounded_impl(&_local, _v);
+    _r->pos = !_rc && (_r->xcdr_version == ZIDL_XCDR2) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Frame_deserialize_bounded_impl(ZidlCdrReader *_r, Frame *_v) {
     int _rc;
-    _rc = zidl_cdr_skip_dheader_if_xcdr2(_r);
-    if (_rc) return _rc;
+    if (_r->xcdr_version == ZIDL_XCDR2) {
+        size_t _body_end;
+        _rc = zidl_cdr_read_mutable_dheader(_r, &_body_end);
+        if (_rc) return _rc;
+        _rc = zidl_cdr_reader_limit(_r, _body_end, _r);
+        if (_rc) return _rc;
+    }
     _rc = zidl_cdr_read_u32(_r, &_v->seq_num);
     if (_rc) return _rc;
     _rc = zidl_cdr_read_string(_r, &_v->topic);
@@ -264,7 +348,15 @@ int Frame_deserialize(ZidlCdrReader *_r, Frame *_v) {
     return ZIDL_CDR_OK;
 }
 
+static int Frame_skip_bounded_impl(ZidlCdrReader *_r);
 int Frame_skip(ZidlCdrReader *_r) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Frame_skip_bounded_impl(&_local);
+    _r->pos = !_rc && (0) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Frame_skip_bounded_impl(ZidlCdrReader *_r) {
     int _rc;
     if (_r->xcdr_version == ZIDL_XCDR2) {
         uint32_t _size;
@@ -285,6 +377,14 @@ void Frame_free(Frame *v) {
     zidl_cdr_free_str(v->topic);
 }
 
+int Beacon_serialize_key_holder(ZidlCdrWriter *_w, const Beacon *_v) {
+    (void)_w; (void)_v;
+    int _rc = ZIDL_CDR_OK;
+    _rc = zidl_cdr_write_u32(_w, _v->id);
+    if (_rc) return _rc;
+    return _rc;
+}
+
 int Beacon_serialize(ZidlCdrWriter *_w, const Beacon *_v) {
     int _rc;
     size_t _dh;
@@ -294,14 +394,27 @@ int Beacon_serialize(ZidlCdrWriter *_w, const Beacon *_v) {
     if (_rc) return _rc;
     _rc = zidl_cdr_write_string(_w, _v->payload ? _v->payload : "", _v->payload ? (uint32_t)strlen(_v->payload) : 0u);
     if (_rc) return _rc;
-    zidl_cdr_patch_dheader_maybe(_w, _dh);
+    if (_dh != (size_t)-1) { _rc = zidl_cdr_patch_dheader_checked(_w, _dh); if (_rc) return _rc; }
     return ZIDL_CDR_OK;
 }
 
+static int Beacon_deserialize_bounded_impl(ZidlCdrReader *_r, Beacon *_v);
 int Beacon_deserialize(ZidlCdrReader *_r, Beacon *_v) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Beacon_deserialize_bounded_impl(&_local, _v);
+    _r->pos = !_rc && (_r->xcdr_version == ZIDL_XCDR2) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Beacon_deserialize_bounded_impl(ZidlCdrReader *_r, Beacon *_v) {
     int _rc;
-    _rc = zidl_cdr_skip_dheader_if_xcdr2(_r);
-    if (_rc) return _rc;
+    if (_r->xcdr_version == ZIDL_XCDR2) {
+        size_t _body_end;
+        _rc = zidl_cdr_read_mutable_dheader(_r, &_body_end);
+        if (_rc) return _rc;
+        _rc = zidl_cdr_reader_limit(_r, _body_end, _r);
+        if (_rc) return _rc;
+    }
     _rc = zidl_cdr_read_u32(_r, &_v->id);
     if (_rc) return _rc;
     _rc = zidl_cdr_read_string(_r, &_v->payload);
@@ -309,7 +422,15 @@ int Beacon_deserialize(ZidlCdrReader *_r, Beacon *_v) {
     return ZIDL_CDR_OK;
 }
 
+static int Beacon_skip_bounded_impl(ZidlCdrReader *_r);
 int Beacon_skip(ZidlCdrReader *_r) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Beacon_skip_bounded_impl(&_local);
+    _r->pos = !_rc && (0) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Beacon_skip_bounded_impl(ZidlCdrReader *_r) {
     int _rc;
     if (_r->xcdr_version == ZIDL_XCDR2) {
         uint32_t _size;
@@ -329,18 +450,26 @@ int Beacon_serialize_key(ZidlCdrWriter *_w, const Beacon *_v) {
     if (_rc) return _rc;
     _rc = zidl_cdr_write_u32(_w, _v->id);
     if (_rc) return _rc;
-    zidl_cdr_patch_dheader_maybe(_w, _dh);
+    if (_dh != (size_t)-1) { _rc = zidl_cdr_patch_dheader_checked(_w, _dh); if (_rc) return _rc; }
     return ZIDL_CDR_OK;
 }
 
+static int Beacon_deserialize_key_bounded_impl(ZidlCdrReader *_r, Beacon *_v);
 int Beacon_deserialize_key(ZidlCdrReader *_r, Beacon *_v) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Beacon_deserialize_key_bounded_impl(&_local, _v);
+    _r->pos = !_rc && (_r->xcdr_version == ZIDL_XCDR2) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Beacon_deserialize_key_bounded_impl(ZidlCdrReader *_r, Beacon *_v) {
     int _rc;
     size_t _key_end = (size_t)-1;
     if (_r->xcdr_version == ZIDL_XCDR2) {
-        uint32_t _size;
-        _rc = zidl_cdr_read_dheader(_r, &_size);
+        _rc = zidl_cdr_read_mutable_dheader(_r, &_key_end);
         if (_rc) return _rc;
-        _key_end = _r->pos + (size_t)_size;
+        _rc = zidl_cdr_reader_limit(_r, _key_end, _r);
+        if (_rc) return _rc;
     }
     _rc = zidl_cdr_read_u32(_r, &_v->id);
     if (_rc) return _rc;
@@ -350,11 +479,11 @@ int Beacon_deserialize_key(ZidlCdrReader *_r, Beacon *_v) {
 
 int Beacon_compute_key_hash(const Beacon *_v, uint8_t _hash[16]) {
     ZidlCdrWriter _w;
-    int _rc = zidl_cdr_writer_init(&_w, ZIDL_XCDR1);
+    int _rc = zidl_cdr_writer_init(&_w, ZIDL_XCDR2);
     if (_rc) return _rc;
     zidl_cdr_writer_set_byte_order(&_w, ZIDL_CDR_BE);
-    _rc = Beacon_serialize_key(&_w, _v);
-    if (!_rc) zidl_cdr_compute_key_hash(_w.buf, _w.len, _hash);
+    _rc = Beacon_serialize_key_holder(&_w, _v);
+    if (!_rc) zidl_cdr_compute_key_hash_for_type(_w.buf, _w.len, false, _hash);
     zidl_cdr_writer_deinit(&_w);
     return _rc;
 }
@@ -369,10 +498,10 @@ int Beacon_compute_key_hash_from_cdr_key_only(const uint8_t *_payload, size_t _l
     Beacon *_v = &_v_data;
     size_t _key_end = (size_t)-1;
     if (_r->xcdr_version == ZIDL_XCDR2) {
-        uint32_t _dh_size;
-        _rc = zidl_cdr_read_dheader(_r, &_dh_size);
+        _rc = zidl_cdr_read_mutable_dheader(_r, &_key_end);
         if (_rc) return _rc;
-        _key_end = _r->pos + (size_t)_dh_size;
+        _rc = zidl_cdr_reader_limit(_r, _key_end, _r);
+        if (_rc) return _rc;
     }
     _rc = zidl_cdr_read_u32(_r, &_v->id);
     if (_rc) return _rc;

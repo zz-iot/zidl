@@ -9,6 +9,18 @@ for planned work see [`roadmap.md`](roadmap.md); for shipped changes see
 
 ## CDR runtime
 
+**Planned consolidation: one native core in Zig, with direct Zig and C ABI
+interfaces.** Preserve the required capabilities of both existing codecs; do not
+route native Zig through the C ABI. See the scope, compatibility constraints and
+acceptance requirements in [Shared native CDR core](design/shared-native-cdr.md).
+This is an agreed direction, not a claim that the migration has shipped.
+
+**Java retains its own codec, with common helpers moving to a shared Java
+runtime.** Generated code continues to traverse Java values. Application builds
+using prebuilt tools and native libraries must not require C or Zig compilers.
+See [Shared Java CDR runtime](design/java-cdr-runtime.md) for rationale,
+alternatives and migration questions.
+
 **The user-supplied CDR allocator (`zidl_cdr_set_allocator`) is process-wide, not
 per-reader.** A decoded unbounded `string`/`sequence` field is later freed by a generated
 `{Type}_free()`-adjacent function that has no `ZidlCdrReader` or other per-call context in

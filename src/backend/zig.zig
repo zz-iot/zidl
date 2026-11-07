@@ -38,6 +38,8 @@ const ast = @import("../ast.zig");
 const ir = @import("../ir/root.zig");
 const interface = @import("interface.zig");
 const zig_to = @import("zig_typeobject.zig");
+const canonical = @import("canonical_key.zig");
+const cdr_skip = @import("cdr_skip.zig");
 
 // ── Public backend struct ─────────────────────────────────────────────────────
 
@@ -290,6 +292,9 @@ const Generator = struct {
     /// Nesting depth of the collection (sequence/array/map) whose element code
     /// is being emitted; suffixes loop locals so nested loops never shadow.
     coll_depth: u8 = 0,
+    reader_window_id: usize = 0,
+    canonical_key: bool = false,
+    wire_key: bool = false,
 
     fn deinit(self: *Generator) void {
         self.toml_applied_structs.deinit(self.alloc);
@@ -672,6 +677,8 @@ const Generator = struct {
             break :blk null;
         };
 
+        try self.emitCanonicalUnion(u, default_case);
+
         // ── serialize ────────────────────────────────────────────────────────
         try self.write("\n");
         try self.ind();
@@ -692,9 +699,9 @@ const Generator = struct {
                 try self.write("        const _em_disc = try writer.reserveEmheader(0, false);\n");
                 try self.emitDiscWriteZig(u.discriminant, "value._d", "        ");
                 try self.ind();
-                try self.write("        writer.patchEmheader(_em_disc);\n");
+                try self.write("        try writer.patchEmheaderChecked(_em_disc);\n");
             }
-            // Case value: member_id = annotation.id ?? (case_index + 1)
+            // Case value uses the normalized IR member identity.
             try self.ind();
             try self.write("        switch (value._d) {\n");
             for (u.cases, 0..) |cas, cas_idx| {
@@ -721,7 +728,7 @@ const Generator = struct {
                         try self.emitWriteForTypeRef(cas.type_ref, access, "                ");
                     }
                     try self.ind();
-                    try self.write("                writer.patchEmheader(_em_case);\n");
+                    try self.write("                try writer.patchEmheaderChecked(_em_case);\n");
                 }
                 try self.ind();
                 try self.write("            },\n");
@@ -749,7 +756,7 @@ const Generator = struct {
                         try self.emitWriteForTypeRef(dc.type_ref, dc_access, "                ");
                     }
                     try self.ind();
-                    try self.write("                writer.patchEmheader(_em_case);\n");
+                    try self.write("                try writer.patchEmheaderChecked(_em_case);\n");
                 }
                 try self.ind();
                 try self.write("            },\n");
@@ -760,7 +767,7 @@ const Generator = struct {
             try self.ind();
             try self.write("        }\n");
             try self.ind();
-            try self.write("        writer.patchDheader(_dh);\n");
+            try self.write("        try writer.patchDheaderChecked(_dh);\n");
         } else {
             if (appendable) {
                 try self.ind();
@@ -809,7 +816,7 @@ const Generator = struct {
             try self.write("        }\n");
             if (appendable) {
                 try self.ind();
-                try self.write("        writer.patchDheaderMaybe(_dh);\n");
+                try self.write("        try writer.patchDheaderMaybeChecked(_dh);\n");
             }
         }
         try self.ind();
@@ -888,10 +895,12 @@ const Generator = struct {
             try self.print("        var _d: {s} = {s};\n", .{ disc_zig, disc_default });
             try self.ind();
             try self.write("        const _em_end = try reader.readMutableDheader();\n");
+            try self.emitReaderWindow("        ", "@as(?usize, _em_end)");
             try self.ind();
             try self.write("        while (reader.mutableHasMore(_em_end)) {\n");
             try self.ind();
             try self.write("            const _emh = try reader.readEmheader();\n");
+            try self.emitReaderWindow("            ", "@as(?usize, try reader.emheaderEnd(_emh))");
             try self.ind();
             try self.write("            if (_emh.member_id == 0) {\n");
             // Discriminant
@@ -954,8 +963,7 @@ const Generator = struct {
             // undefined-payload hazard this whole scheme exists to avoid.
         } else {
             if (appendable) {
-                try self.ind();
-                try self.write("        try reader.skipDheaderIfXcdr2();\n");
+                try self.emitReaderWindow("        ", "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
             }
             // Read discriminant into a local -- unconditionally overwritten
             // (or the function returns on error) before ever being read, so
@@ -3604,20 +3612,179 @@ const Generator = struct {
 
     // ── CDR serialization emission ────────────────────────────────────────────
 
+    fn emitCanonicalStruct(self: *Generator, s: *const ir.Struct) !void {
+        if (structHasKey(s)) {
+            const force = try canonical.forceMd5(self.alloc, s);
+            try self.ind();
+            try self.print("    pub const KEY_HASH_FORCE_MD5 = {s};\n", .{if (force) "true" else "false"});
+        }
+        try self.ind();
+        try self.write("    pub fn serializeKeyHolder(writer: anytype, value: @This()) !void {\n");
+        const tr: ir.TypeRef = .{ .named = .{ .struct_ = @constCast(s) } };
+        if (!try canonical.supported(self.alloc, tr)) {
+            try self.ind();
+            try self.write("        _ = writer; _ = value; return error.UnsupportedCanonicalKeyType;\n");
+        } else {
+            const members = try canonical.fields(self.alloc, s);
+            defer self.alloc.free(members);
+            const old = self.canonical_key;
+            self.canonical_key = true;
+            defer self.canonical_key = old;
+            if (members.len == 0) {
+                try self.ind();
+                try self.write("        _ = writer; _ = value;\n");
+            }
+            for (members) |field| {
+                var path = std.ArrayList(u8).empty;
+                defer path.deinit(self.alloc);
+                try path.appendSlice(self.alloc, "value");
+                for (0..field.base_depth) |_| try path.appendSlice(self.alloc, "._base");
+                const access = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ path.items, field.member.name });
+                defer self.alloc.free(access);
+                if (field.member.dimensions.len != 0) {
+                    try self.emitWriteArray(field.member.type_ref, access, field.member.dimensions, "        ", 0);
+                } else try self.emitWriteForTypeRef(field.member.type_ref, access, "        ");
+            }
+        }
+        try self.ind();
+        try self.write("    }\n\n");
+    }
+
+    fn emitCanonicalUnion(self: *Generator, u: *const ir.Union, default_case: ?ir.UnionCase) anyerror!void {
+        try self.ind();
+        try self.write("    pub fn serializeKeyHolder(writer: anytype, value: @This()) !void {\n");
+        if (!try canonical.supported(self.alloc, .{ .named = .{ .union_ = @constCast(u) } })) {
+            try self.ind();
+            try self.write("        _ = writer; _ = value; return error.UnsupportedCanonicalKeyType;\n");
+        } else {
+            const old = self.canonical_key;
+            self.canonical_key = true;
+            defer self.canonical_key = old;
+            // Write discriminant
+            try self.emitDiscWriteZig(u.discriminant, "value._d", "        ");
+            // Switch on discriminant
+            try self.ind();
+            try self.write("        switch (value._d) {\n");
+            for (u.cases) |cas| {
+                if (isDefaultUnionCase(cas)) continue; // emit as else arm
+                try self.emitZigUnionCaseArmPattern(u.discriminant, cas, "            ");
+                try self.write(" => {\n");
+                if (cas.dimensions.len > 0) {
+                    const access = try std.fmt.allocPrint(self.alloc, "value._u.{s}", .{cas.name});
+                    defer self.alloc.free(access);
+                    try self.emitWriteArray(cas.type_ref, access, cas.dimensions, "            ", 0);
+                } else {
+                    const access = try std.fmt.allocPrint(self.alloc, "value._u.{s}", .{cas.name});
+                    defer self.alloc.free(access);
+                    try self.emitWriteForTypeRef(cas.type_ref, access, "            ");
+                }
+                try self.ind();
+                try self.write("            },\n");
+            }
+            if (default_case) |dc| {
+                try self.ind();
+                try self.write("            else => {\n");
+                if (dc.dimensions.len > 0) {
+                    const access = try std.fmt.allocPrint(self.alloc, "value._u.{s}", .{dc.name});
+                    defer self.alloc.free(access);
+                    try self.emitWriteArray(dc.type_ref, access, dc.dimensions, "                ", 0);
+                } else {
+                    const access = try std.fmt.allocPrint(self.alloc, "value._u.{s}", .{dc.name});
+                    defer self.alloc.free(access);
+                    try self.emitWriteForTypeRef(dc.type_ref, access, "                ");
+                }
+                try self.ind();
+                try self.write("            },\n");
+            } else {
+                try self.ind();
+                try self.write("            else => {},\n");
+            }
+            try self.ind();
+            try self.write("        }\n");
+        }
+        try self.ind();
+        try self.write("    }\n\n");
+    }
+
+    fn emitMutableStructWrite(self: *Generator, s: *const ir.Struct, key_only: bool) anyerror!void {
+        const previous = self.wire_key;
+        self.wire_key = key_only;
+        defer self.wire_key = previous;
+        // @mutable: outer DHEADER + per-member EMHEADER framing.
+        try self.ind();
+        if (key_only) {
+            try self.write("        const _dh = (try writer.reserveDheaderMaybe()) orelse return error.UnsupportedKeyEncoding;\n");
+        } else try self.write("        const _dh = try writer.reserveDheader();\n");
+        for (s.members, 0..) |m, idx| {
+            if (key_only and !m.annotations.is_key) continue;
+            const member_id: u32 = memberIdAt(m, idx);
+            const mu_flag = m.annotations.must_understand;
+            const mu_str = if (mu_flag) "true" else "false";
+            if (m.annotations.is_optional) {
+                // Optional member: only emit EMHEADER when value is present.
+                const opt_var = try std.fmt.allocPrint(self.alloc, "_opt_{s}", .{m.name});
+                defer self.alloc.free(opt_var);
+                try self.ind();
+                try self.print("        if (value.{s}) |{s}| {{\n", .{ m.name, opt_var });
+                if (lcForTypeRef(m.type_ref, m.dimensions)) |lc| {
+                    try self.ind();
+                    try self.print("            try writer.writeEmheaderFixed({d}, {s}, {d});\n", .{ member_id, mu_str, lc });
+                } else {
+                    try self.ind();
+                    try self.print("            const _em{d} = try writer.reserveEmheader({d}, {s});\n", .{ idx, member_id, mu_str });
+                }
+                if (m.dimensions.len > 0) {
+                    try self.emitWriteArray(m.type_ref, opt_var, m.dimensions, "            ", 0);
+                } else {
+                    try self.emitWriteForTypeRef(m.type_ref, opt_var, "            ");
+                }
+                if (lcForTypeRef(m.type_ref, m.dimensions) == null) {
+                    try self.ind();
+                    try self.print("            try writer.patchEmheaderChecked(_em{d});\n", .{idx});
+                }
+                try self.ind();
+                try self.write("        }\n");
+                continue;
+            }
+            const access = try std.fmt.allocPrint(self.alloc, "value.{s}", .{m.name});
+            defer self.alloc.free(access);
+            if (lcForTypeRef(m.type_ref, m.dimensions)) |lc| {
+                try self.ind();
+                try self.print("        try writer.writeEmheaderFixed({d}, {s}, {d});\n", .{ member_id, mu_str, lc });
+                if (m.dimensions.len > 0) {
+                    try self.emitWriteArray(m.type_ref, access, m.dimensions, "        ", 0);
+                } else {
+                    try self.emitWriteForTypeRef(m.type_ref, access, "        ");
+                }
+            } else {
+                try self.ind();
+                try self.print("        const _em{d} = try writer.reserveEmheader({d}, {s});\n", .{ idx, member_id, mu_str });
+                if (m.dimensions.len > 0) {
+                    try self.emitWriteArray(m.type_ref, access, m.dimensions, "        ", 0);
+                } else {
+                    try self.emitWriteForTypeRef(m.type_ref, access, "        ");
+                }
+                try self.ind();
+                try self.print("        try writer.patchEmheaderChecked(_em{d});\n", .{idx});
+            }
+        }
+        try self.ind();
+        try self.write("        try writer.patchDheaderChecked(_dh);\n");
+    }
+
     fn emitStructSerializeFns(self: *Generator, s: *const ir.Struct) anyerror!void {
         const ext = s.annotations.extensibility;
         const mutable = ext == .mutable;
         const appendable = ext == .appendable; // true only for strictly @appendable
 
         const has_key = structHasKey(s);
+        try self.emitCanonicalStruct(s);
         const needs_alloc = blk: {
             for (s.members) |m| {
                 if (typeRefNeedsAllocator(m.type_ref)) break :blk true;
             }
             break :blk false;
         };
-
-        try self.write("\n");
 
         // has_key constant
         try self.ind();
@@ -3628,63 +3795,7 @@ const Generator = struct {
         try self.write("    pub fn serialize(writer: anytype, value: @This()) !void {\n");
 
         if (mutable) {
-            // @mutable: outer DHEADER + per-member EMHEADER framing.
-            try self.ind();
-            try self.write("        const _dh = try writer.reserveDheader();\n");
-            for (s.members, 0..) |m, idx| {
-                const member_id: u32 = memberIdAt(m, idx);
-                const mu_flag = m.annotations.must_understand;
-                const mu_str = if (mu_flag) "true" else "false";
-                if (m.annotations.is_optional) {
-                    // Optional member: only emit EMHEADER when value is present.
-                    const opt_var = try std.fmt.allocPrint(self.alloc, "_opt_{s}", .{m.name});
-                    defer self.alloc.free(opt_var);
-                    try self.ind();
-                    try self.print("        if (value.{s}) |{s}| {{\n", .{ m.name, opt_var });
-                    if (lcForTypeRef(m.type_ref, m.dimensions)) |lc| {
-                        try self.ind();
-                        try self.print("            try writer.writeEmheaderFixed({d}, {s}, {d});\n", .{ member_id, mu_str, lc });
-                    } else {
-                        try self.ind();
-                        try self.print("            const _em{d} = try writer.reserveEmheader({d}, {s});\n", .{ idx, member_id, mu_str });
-                    }
-                    if (m.dimensions.len > 0) {
-                        try self.emitWriteArray(m.type_ref, opt_var, m.dimensions, "            ", 0);
-                    } else {
-                        try self.emitWriteForTypeRef(m.type_ref, opt_var, "            ");
-                    }
-                    if (lcForTypeRef(m.type_ref, m.dimensions) == null) {
-                        try self.ind();
-                        try self.print("            writer.patchEmheader(_em{d});\n", .{idx});
-                    }
-                    try self.ind();
-                    try self.write("        }\n");
-                    continue;
-                }
-                const access = try std.fmt.allocPrint(self.alloc, "value.{s}", .{m.name});
-                defer self.alloc.free(access);
-                if (lcForTypeRef(m.type_ref, m.dimensions)) |lc| {
-                    try self.ind();
-                    try self.print("        try writer.writeEmheaderFixed({d}, {s}, {d});\n", .{ member_id, mu_str, lc });
-                    if (m.dimensions.len > 0) {
-                        try self.emitWriteArray(m.type_ref, access, m.dimensions, "        ", 0);
-                    } else {
-                        try self.emitWriteForTypeRef(m.type_ref, access, "        ");
-                    }
-                } else {
-                    try self.ind();
-                    try self.print("        const _em{d} = try writer.reserveEmheader({d}, {s});\n", .{ idx, member_id, mu_str });
-                    if (m.dimensions.len > 0) {
-                        try self.emitWriteArray(m.type_ref, access, m.dimensions, "        ", 0);
-                    } else {
-                        try self.emitWriteForTypeRef(m.type_ref, access, "        ");
-                    }
-                    try self.ind();
-                    try self.print("        writer.patchEmheader(_em{d});\n", .{idx});
-                }
-            }
-            try self.ind();
-            try self.write("        writer.patchDheader(_dh);\n");
+            try self.emitMutableStructWrite(s, false);
         } else {
             if (appendable) {
                 try self.ind();
@@ -3724,7 +3835,7 @@ const Generator = struct {
             }
             if (appendable) {
                 try self.ind();
-                try self.write("        writer.patchDheaderMaybe(_dh);\n");
+                try self.write("        try writer.patchDheaderMaybeChecked(_dh);\n");
             }
         }
         try self.ind();
@@ -3741,7 +3852,7 @@ const Generator = struct {
             // (if present) still fires harmlessly afterward.
             try self.ind();
             try self.write("        errdefer out.deinit(allocator);\n");
-        } else if (!needs_alloc) {
+        } else if (!needs_alloc and s.base == null) {
             try self.ind();
             try self.write("        _ = allocator;\n");
         }
@@ -3750,10 +3861,12 @@ const Generator = struct {
             // @mutable: read DHEADER for end pos, loop on EMHEADER-framed members.
             try self.ind();
             try self.write("        const _em_end = try reader.readMutableDheader();\n");
+            try self.emitReaderWindow("        ", "@as(?usize, _em_end)");
             try self.ind();
             try self.write("        while (reader.mutableHasMore(_em_end)) {\n");
             try self.ind();
             try self.write("            const _emh = try reader.readEmheader();\n");
+            try self.emitReaderWindow("            ", "@as(?usize, try reader.emheaderEnd(_emh))");
             try self.ind();
             try self.write("            switch (_emh.member_id) {\n");
             for (s.members, 0..) |m, idx| {
@@ -3789,8 +3902,7 @@ const Generator = struct {
             try self.write("        }\n");
         } else {
             if (appendable) {
-                try self.ind();
-                try self.write("        try reader.skipDheaderIfXcdr2();\n");
+                try self.emitReaderWindow("        ", "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
             }
             if (s.base) |base| {
                 const base_zig = try self.qualNameToZig(ir.typeDeclQualifiedName(base));
@@ -3860,34 +3972,42 @@ const Generator = struct {
 
         // serializeKey (only if has_key)
         if (has_key) {
+            const previous_wire_key = self.wire_key;
+            self.wire_key = true;
+            defer self.wire_key = previous_wire_key;
+
             try self.write("\n");
             try self.ind();
             try self.write("    pub fn serializeKey(writer: anytype, value: @This()) !void {\n");
-            if (appendable) {
-                try self.ind();
-                try self.write("        const _dh = try writer.reserveDheaderMaybe();\n");
-            }
-            if (s.base) |base| {
-                if (typeDeclHasKey(base)) {
-                    const base_zig = try self.qualNameToZig(ir.typeDeclQualifiedName(base));
-                    defer self.alloc.free(base_zig);
+            if (mutable) {
+                try self.emitMutableStructWrite(s, true);
+            } else {
+                if (appendable) {
                     try self.ind();
-                    try self.print("        try {s}.serializeKey(writer, value._base);\n", .{base_zig});
+                    try self.write("        const _dh = try writer.reserveDheaderMaybe();\n");
                 }
-            }
-            for (s.members) |m| {
-                if (!m.annotations.is_key) continue;
-                const access = try std.fmt.allocPrint(self.alloc, "value.{s}", .{m.name});
-                defer self.alloc.free(access);
-                if (m.dimensions.len > 0) {
-                    try self.emitWriteArray(m.type_ref, access, m.dimensions, "        ", 0);
-                } else {
-                    try self.emitWriteForTypeRef(m.type_ref, access, "        ");
+                if (s.base) |base| {
+                    if (typeDeclHasKey(base)) {
+                        const base_zig = try self.qualNameToZig(ir.typeDeclQualifiedName(base));
+                        defer self.alloc.free(base_zig);
+                        try self.ind();
+                        try self.print("        try {s}.serializeKey(writer, value._base);\n", .{base_zig});
+                    }
                 }
-            }
-            if (appendable) {
-                try self.ind();
-                try self.write("        writer.patchDheaderMaybe(_dh);\n");
+                for (s.members) |m| {
+                    if (!m.annotations.is_key) continue;
+                    const access = try std.fmt.allocPrint(self.alloc, "value.{s}", .{m.name});
+                    defer self.alloc.free(access);
+                    if (m.dimensions.len > 0) {
+                        try self.emitWriteArray(m.type_ref, access, m.dimensions, "        ", 0);
+                    } else {
+                        try self.emitWriteForTypeRef(m.type_ref, access, "        ");
+                    }
+                }
+                if (appendable) {
+                    try self.ind();
+                    try self.write("        try writer.patchDheaderMaybeChecked(_dh);\n");
+                }
             }
             try self.ind();
             try self.write("    }\n");
@@ -3901,11 +4021,15 @@ const Generator = struct {
             }
             if (mutable) {
                 try self.ind();
+                try self.write("        if (reader.xcdr_version != .xcdr2) return error.UnsupportedKeyEncoding;\n");
+                try self.ind();
                 try self.write("        const _em_end = try reader.readMutableDheader();\n");
+                try self.emitReaderWindow("        ", "@as(?usize, _em_end)");
                 try self.ind();
                 try self.write("        while (reader.mutableHasMore(_em_end)) {\n");
                 try self.ind();
                 try self.write("            const _emh = try reader.readEmheader();\n");
+                try self.emitReaderWindow("            ", "@as(?usize, try reader.emheaderEnd(_emh))");
                 try self.ind();
                 try self.write("            switch (_emh.member_id) {\n");
                 for (s.members, 0..) |m, idx| {
@@ -3934,13 +4058,8 @@ const Generator = struct {
             } else {
                 if (appendable) {
                     try self.ind();
-                    try self.write("        const _key_end: ?usize = if (reader.xcdr_version == .xcdr2) blk: {\n");
-                    try self.ind();
-                    try self.write("            const _size = try reader.readDheader();\n");
-                    try self.ind();
-                    try self.write("            break :blk reader.pos + _size;\n");
-                    try self.ind();
-                    try self.write("        } else null;\n");
+                    try self.write("        const _key_end: ?usize = if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null;\n");
+                    try self.emitReaderWindow("        ", "_key_end");
                 }
                 if (s.base) |base| {
                     const base_zig = try self.qualNameToZig(ir.typeDeclQualifiedName(base));
@@ -3984,14 +4103,21 @@ const Generator = struct {
             try self.ind();
             try self.write("    pub fn computeKeyHash(value: *const @This()) [16]u8 {\n");
             try self.ind();
+            try self.write("        return @This().computeKeyHashChecked(value) catch unreachable;\n");
+            try self.ind();
+            try self.write("    }\n\n");
+            try self.ind();
+            try self.write("    pub fn computeKeyHashChecked(value: *const @This()) ![16]u8 {\n");
+            try self.ind();
             try self.write("        var _khw = zidl_rt.KeyHashWriter.init();\n");
             try self.ind();
-            try self.write("        @This().serializeKey(&_khw, value.*) catch unreachable;\n");
+            try self.write("        try @This().serializeKeyHolder(&_khw, value.*);\n");
             try self.ind();
-            try self.write("        return _khw.final();\n");
+            try self.write("        return _khw.finalForType(KEY_HASH_FORCE_MD5);\n");
             try self.ind();
             try self.write("    }\n");
 
+            self.wire_key = previous_wire_key;
             if (self.opts.generate_zzdds_wrappers and isZzddsTopicStruct(s)) {
                 try self.emitComputeKeyHashFromCdr(s);
                 try self.emitComputeKeyHashFromCdrKeyOnly(s);
@@ -4020,7 +4146,7 @@ const Generator = struct {
                 try self.ind();
                 try self.write("        const _dh = try writer.reserveDheaderMaybe();\n");
                 try self.ind();
-                try self.write("        writer.patchDheaderMaybe(_dh);\n");
+                try self.write("        try writer.patchDheaderMaybeChecked(_dh);\n");
             } else {
                 // Non-appendable keyless struct: no DHEADER, so `writer` is
                 // genuinely unreferenced -- same "conditionally discard,
@@ -4043,8 +4169,7 @@ const Generator = struct {
             try self.ind();
             try self.write("        _ = allocator;\n");
             if (appendable) {
-                try self.ind();
-                try self.write("        try reader.skipDheaderIfXcdr2();\n");
+                try self.emitReaderWindow("        ", "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
             } else {
                 // See serializeKey's matching comment above.
                 try self.ind();
@@ -4604,8 +4729,7 @@ const Generator = struct {
             try self.ind();
             try self.write("        out.* = .{};\n");
             if (appendable) {
-                try self.ind();
-                try self.write("        try reader.skipDheaderIfXcdr2();\n");
+                try self.emitReaderWindow("        ", "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
             }
             for (s.members, 0..) |m, idx| {
                 const out_expr = try std.fmt.allocPrint(self.alloc, "out.{s}", .{m.name});
@@ -6247,6 +6371,7 @@ const Generator = struct {
     /// that XCDR2 prefixes with a DHEADER; returns the DHEADER local's name
     /// (caller frees) or null when no DHEADER applies.
     fn openCollectionDheader(self: *Generator, needed: bool, extra: []const u8) !?[]u8 {
+        if (self.canonical_key) return null;
         if (!needed) return null;
         const name = try self.collName("_cdh");
         try self.ind();
@@ -6260,7 +6385,7 @@ const Generator = struct {
         const n = name orelse return;
         defer self.alloc.free(n);
         try self.ind();
-        try self.print("{s}    writer.patchDheaderMaybe({s});\n", .{ extra, n });
+        try self.print("{s}    try writer.patchDheaderMaybeChecked({s});\n", .{ extra, n });
         try self.ind();
         try self.print("{s}}}\n", .{extra});
     }
@@ -6327,12 +6452,18 @@ const Generator = struct {
             .wstring => |bound| {
                 try self.ind();
                 if (bound != null) {
-                    try self.print("{s}try writer.writeWstring({s}.slice());\n", .{ extra, access });
+                    try self.print("{s}try writer.{s}({s}.slice());\n", .{ extra, if (self.canonical_key) "writeKeyWstring" else "writeWstring", access });
                 } else {
-                    try self.print("{s}try writer.writeWstring({s});\n", .{ extra, access });
+                    try self.print("{s}try writer.{s}({s});\n", .{ extra, if (self.canonical_key) "writeKeyWstring" else "writeWstring", access });
                 }
             },
             .sequence => |seq| {
+                if (self.canonical_key) {
+                    try self.ind();
+                    if (seq.bound) |n| {
+                        try self.print("{s}if ({s}.len > {d}) return error.SequenceTooLong;\n", .{ extra, access, n });
+                    } else try self.print("{s}if ({s}._length != 0 and {s}._buffer == null) return error.InvalidSequence;\n", .{ extra, access, access });
+                }
                 // XCDR2 prefixes a collection of non-primitive elements with a
                 // DHEADER (a no-op for XCDR1 and key-hash writers).
                 const cdh = try self.openCollectionDheader(!isPrimitiveElement(seq.element.*), extra);
@@ -6428,7 +6559,7 @@ const Generator = struct {
                     const zig_type = try self.typeRefToZig(tr);
                     defer self.alloc.free(zig_type);
                     try self.ind();
-                    try self.print("{s}try {s}.serialize(writer, {s});\n", .{ extra, zig_type, access });
+                    try self.print("{s}try {s}.{s}(writer, {s});\n", .{ extra, zig_type, if (self.canonical_key) "serializeKeyHolder" else if (self.wire_key and typeDeclHasKey(td)) "serializeKey" else "serialize", access });
                 },
                 .bitset => {
                     const zig_type = try self.typeRefToZig(tr);
@@ -6440,7 +6571,7 @@ const Generator = struct {
                     const zig_type = try self.typeRefToZig(tr);
                     defer self.alloc.free(zig_type);
                     try self.ind();
-                    try self.print("{s}try {s}.serialize(writer, {s});\n", .{ extra, zig_type, access });
+                    try self.print("{s}try {s}.{s}(writer, {s});\n", .{ extra, zig_type, if (self.canonical_key) "serializeKeyHolder" else if (self.wire_key and typeDeclHasKey(td)) "serializeKey" else "serialize", access });
                 },
             },
             .map => |m| {
@@ -6535,8 +6666,7 @@ const Generator = struct {
                 const se = try self.collName("_se");
                 defer self.alloc.free(se);
                 if (!isPrimitiveElement(seq.element.*)) {
-                    try self.ind();
-                    try self.print("{s}try reader.skipDheaderIfXcdr2();\n", .{ii});
+                    try self.emitReaderWindow(ii, "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
                 }
                 try self.ind();
                 try self.print("{s}const {s} = try reader.readU32();\n", .{ ii, n });
@@ -6644,8 +6774,7 @@ const Generator = struct {
                 const mv = try self.collName("_mv");
                 defer self.alloc.free(mv);
                 if (!(isPrimitiveElement(m.key.*) and isPrimitiveElement(m.value.*))) {
-                    try self.ind();
-                    try self.print("{s}try reader.skipDheaderIfXcdr2();\n", .{ii});
+                    try self.emitReaderWindow(ii, "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
                 }
                 try self.ind();
                 try self.print("{s}const {s} = try reader.readU32();\n", .{ ii, mn });
@@ -6722,19 +6851,19 @@ const Generator = struct {
                     const zig_type = try self.typeRefToZig(tr);
                     defer self.alloc.free(zig_type);
                     try self.ind();
-                    try self.print("{s}try {s}.deserializeInto(&{s}, reader, allocator);\n", .{ extra, zig_type, out_expr });
+                    try self.print("{s}try {s}.{s}(&{s}, reader, allocator);\n", .{ extra, zig_type, if (self.wire_key and typeDeclHasKey(td)) "deserializeKeyInto" else "deserializeInto", out_expr });
                 },
                 .bitset => {
                     const zig_type = try self.typeRefToZig(tr);
                     defer self.alloc.free(zig_type);
                     try self.ind();
-                    try self.print("{s}try {s}.deserializeInto(&{s}, reader, allocator);\n", .{ extra, zig_type, out_expr });
+                    try self.print("{s}try {s}.{s}(&{s}, reader, allocator);\n", .{ extra, zig_type, if (self.wire_key and typeDeclHasKey(td)) "deserializeKeyInto" else "deserializeInto", out_expr });
                 },
                 else => {
                     const zig_type = try self.typeRefToZig(tr);
                     defer self.alloc.free(zig_type);
                     try self.ind();
-                    try self.print("{s}try {s}.deserializeInto(&{s}, reader, allocator);\n", .{ extra, zig_type, out_expr });
+                    try self.print("{s}try {s}.{s}(&{s}, reader, allocator);\n", .{ extra, zig_type, if (self.wire_key and typeDeclHasKey(td)) "deserializeKeyInto" else "deserializeInto", out_expr });
                 },
             },
             .fixed_pt => |fp| {
@@ -6806,7 +6935,7 @@ const Generator = struct {
                     try self.ind();
                     try self.print("{s}var {s}: {s} = .{{}};\n", .{ extra, elem, zig_type });
                     try self.ind();
-                    try self.print("{s}try {s}.deserializeInto(&{s}, reader, allocator);\n", .{ extra, zig_type, elem });
+                    try self.print("{s}try {s}.{s}(&{s}, reader, allocator);\n", .{ extra, zig_type, if (self.wire_key and typeDeclHasKey(td)) "deserializeKeyInto" else "deserializeInto", elem });
                     try self.ind();
                     try self.print("{s}{s}.appendAssumeCapacity({s});\n", .{ extra, seq_expr, elem });
                 },
@@ -6818,7 +6947,7 @@ const Generator = struct {
                     try self.ind();
                     try self.print("{s}var {s}: {s} = .{{}};\n", .{ extra, elem, zig_type });
                     try self.ind();
-                    try self.print("{s}try {s}.deserializeInto(&{s}, reader, allocator);\n", .{ extra, zig_type, elem });
+                    try self.print("{s}try {s}.{s}(&{s}, reader, allocator);\n", .{ extra, zig_type, if (self.wire_key and typeDeclHasKey(td)) "deserializeKeyInto" else "deserializeInto", elem });
                     try self.ind();
                     try self.print("{s}{s}.appendAssumeCapacity({s});\n", .{ extra, seq_expr, elem });
                 },
@@ -6830,7 +6959,7 @@ const Generator = struct {
                     try self.ind();
                     try self.print("{s}var {s}: {s} = .{{}};\n", .{ extra, elem, zig_type });
                     try self.ind();
-                    try self.print("{s}try {s}.deserializeInto(&{s}, reader, allocator);\n", .{ extra, zig_type, elem });
+                    try self.print("{s}try {s}.{s}(&{s}, reader, allocator);\n", .{ extra, zig_type, if (self.wire_key and typeDeclHasKey(td)) "deserializeKeyInto" else "deserializeInto", elem });
                     try self.ind();
                     try self.print("{s}{s}.appendAssumeCapacity({s});\n", .{ extra, seq_expr, elem });
                 },
@@ -6943,13 +7072,32 @@ const Generator = struct {
         try self.print("{s}}}\n", .{extra});
     }
 
+    /// end_expr produces an optional absolute end. Stack windows preserve the
+    /// alignment origin and restore the enclosing limit on every error path.
+    fn emitReaderWindow(self: *Generator, extra: []const u8, end_expr: []const u8) !void {
+        const id = self.reader_window_id;
+        self.reader_window_id += 1;
+        try self.ind();
+        try self.print("{s}var _read_window_{d} = if ({s}) |_limit| try reader.window(_limit) else null;\n", .{ extra, id, end_expr });
+        try self.ind();
+        try self.print("{s}defer if (_read_window_{d}) |*_window| _window.close();\n", .{ extra, id });
+        try self.ind();
+        try self.print("{s}errdefer if (_read_window_{d}) |*_window| _window.cancel();\n", .{ extra, id });
+    }
+
     /// Emit index-based read loops for an IDL array (see `emitWriteArray`).
     fn emitReadArray(self: *Generator, elem_tr: ir.TypeRef, base_access: []const u8, dims: []const u64, extra: []const u8, depth: usize) anyerror!void {
-        if (depth == 0 and !isPrimitiveElement(arrayInnermost(elem_tr))) {
+        const framed = depth == 0 and !isPrimitiveElement(arrayInnermost(elem_tr));
+        if (framed) {
             try self.ind();
-            try self.print("{s}try reader.skipDheaderIfXcdr2();\n", .{extra});
+            try self.print("{s}{{\n", .{extra});
+            try self.emitReaderWindow(extra, "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
         }
         try self.emitReadArrayDims(elem_tr, base_access, dims, extra, depth);
+        if (framed) {
+            try self.ind();
+            try self.print("{s}}}\n", .{extra});
+        }
     }
 
     fn emitReadArrayDims(self: *Generator, elem_tr: ir.TypeRef, base_access: []const u8, dims: []const u64, extra: []const u8, depth: usize) anyerror!void {
@@ -7074,11 +7222,17 @@ const Generator = struct {
     }
 
     fn emitSkipArray(self: *Generator, elem_tr: ir.TypeRef, dims: []const u64, extra: []const u8, depth: usize) anyerror!void {
-        if (depth == 0 and !isPrimitiveElement(arrayInnermost(elem_tr))) {
+        const framed = depth == 0 and !isPrimitiveElement(arrayInnermost(elem_tr));
+        if (framed) {
             try self.ind();
-            try self.print("{s}try reader.skipDheaderIfXcdr2();\n", .{extra});
+            try self.print("{s}{{\n", .{extra});
+            try self.emitReaderWindow(extra, "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
         }
         try self.emitSkipArrayDims(elem_tr, dims, extra, depth);
+        if (framed) {
+            try self.ind();
+            try self.print("{s}}}\n", .{extra});
+        }
     }
 
     fn emitSkipArrayDims(self: *Generator, elem_tr: ir.TypeRef, dims: []const u64, extra: []const u8, depth: usize) anyerror!void {
@@ -7133,8 +7287,7 @@ const Generator = struct {
                 const n = try self.collName("_n");
                 defer self.alloc.free(n);
                 if (!isPrimitiveElement(seq.element.*)) {
-                    try self.ind();
-                    try self.print("{s}try reader.skipDheaderIfXcdr2();\n", .{inner});
+                    try self.emitReaderWindow(inner, "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
                 }
                 try self.ind();
                 try self.print("{s}const {s} = try reader.readU32();\n", .{ inner, n });
@@ -7164,8 +7317,7 @@ const Generator = struct {
                 const mn = try self.collName("_mn");
                 defer self.alloc.free(mn);
                 if (!(isPrimitiveElement(m.key.*) and isPrimitiveElement(m.value.*))) {
-                    try self.ind();
-                    try self.print("{s}try reader.skipDheaderIfXcdr2();\n", .{inner});
+                    try self.emitReaderWindow(inner, "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
                 }
                 try self.ind();
                 try self.print("{s}const {s} = try reader.readU32();\n", .{ inner, mn });
@@ -7668,8 +7820,7 @@ fn lcForTypeRef(type_ref: ir.TypeRef, dimensions: []const u64) ?u2 {
             else => null,
         },
         .named => |td| switch (td) {
-            // Enums serialize as uint32_t (4 bytes) → LC=2.
-            .enum_ => 2,
+            .enum_ => |e| cdr_skip.enumLengthCode(e.annotations.bit_bound),
             // Everything else (struct, union, bitmask, bitset, typedef, …) → LC=4.
             else => null,
         },
@@ -7707,9 +7858,11 @@ fn typeRefNeedsAllocator(tr: ir.TypeRef) bool {
 
 fn sequenceElementUsesAllocator(tr: ir.TypeRef) bool {
     return switch (tr) {
+        .wstring => true, // Even bounded wide values use a temporary read buffer.
+        .sequence => |seq| seq.bound == null or sequenceElementUsesAllocator(seq.element.*),
         .named => |td| switch (td) {
             .enum_, .bitmask => false,
-            .typedef => |t| t.dimensions.len == 0 and sequenceElementUsesAllocator(t.type_ref),
+            .typedef => |t| if (t.dimensions.len == 0) sequenceElementUsesAllocator(t.type_ref) else typeRefNeedsAllocator(t.type_ref),
             else => true,
         },
         else => false,
@@ -8437,7 +8590,7 @@ test "zig_backend: union CDR appendable adds DHEADER" {
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "const _dh = try writer.reserveDheaderMaybe();"));
-    try testing.expect(has(s, "try reader.skipDheaderIfXcdr2();"));
+    try testing.expect(has(s, "try reader.readMutableDheader()"));
 }
 
 test "zig_backend: union with a non-trivial case gets deinit/clone, every case gets its own arm" {
@@ -8677,7 +8830,7 @@ test "zig_backend: serialize @final struct primitives" {
     // No value-returning deserialize convenience wrapper -- out-param only.
     try testing.expect(!has(s, "pub fn deserialize(reader"));
     // No serializeKey (no @key)
-    try testing.expect(!has(s, "serializeKey"));
+    try testing.expect(!has(s, "pub fn serializeKey("));
 }
 
 test "zig_backend: serialize @appendable struct has DHEADER" {
@@ -8685,8 +8838,8 @@ test "zig_backend: serialize @appendable struct has DHEADER" {
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "const _dh = try writer.reserveDheaderMaybe();"));
-    try testing.expect(has(s, "writer.patchDheaderMaybe(_dh);"));
-    try testing.expect(has(s, "try reader.skipDheaderIfXcdr2();"));
+    try testing.expect(has(s, "try writer.patchDheaderMaybeChecked(_dh);"));
+    try testing.expect(has(s, "try reader.readMutableDheader()"));
 }
 
 test "zig_backend: serialize @key member emits serializeKey" {
@@ -8709,7 +8862,7 @@ test "zig_backend: @appendable keyed struct emits DHEADER in serializeKey" {
     // @appendable: serializeKey must bracket key fields with DHEADER so XCDR2
     // key-only wire payloads are symmetric with deserializeKeyInto.
     try testing.expect(has(s, "const _dh = try writer.reserveDheaderMaybe();"));
-    try testing.expect(has(s, "writer.patchDheaderMaybe(_dh);"));
+    try testing.expect(has(s, "try writer.patchDheaderMaybeChecked(_dh);"));
 }
 
 test "zig_backend: keyed struct emits deserializeKeyInto and computeKeyHash" {
@@ -8745,7 +8898,7 @@ test "zig_backend: keyless struct does not emit key helpers" {
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "pub const has_key = false;"));
-    try testing.expect(!has(s, "serializeKey"));
+    try testing.expect(!has(s, "pub fn serializeKey("));
     try testing.expect(!has(s, "deserializeKey"));
     try testing.expect(!has(s, "computeKeyHash"));
 }
@@ -10525,7 +10678,7 @@ test "zig_backend: keyless struct without --generate-zzdds-wrappers still emits 
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(!has(s, "computeKeyHash"));
-    try testing.expect(!has(s, "serializeKey"));
+    try testing.expect(!has(s, "pub fn serializeKey("));
     try testing.expect(!has(s, "deserializeKey"));
 }
 
@@ -11573,7 +11726,7 @@ test "zig_backend: nested collections, array typedefs and bounded-sequence eleme
     try testing.expect(has(s, "?[*]zidl_rt.BoundedArray(u8, 5)"));
     // Collection DHEADERs: strings in arrays / sequences of structs, never for Triple arrays.
     try testing.expect(has(s, "const _cdh = try writer.reserveDheaderMaybe();"));
-    try testing.expect(has(s, "try reader.skipDheaderIfXcdr2();"));
+    try testing.expect(has(s, "try reader.readMutableDheader()"));
     // Generic ownership for nested / array members, including optional and union cases.
     try testing.expect(has(s, "zidl_rt.deinitOwned(&self.n, alloc);"));
     try testing.expect(has(s, "zidl_rt.deinitOwned(&self._u.rows, alloc);"));

@@ -389,8 +389,8 @@ public class Test {
         check(!buf.hasRemaining(), "beacon key (xcdr1) payload fully consumed");
 
         // computeKeyHash is representation-independent by spec (always
-        // computed as if XCDR1, regardless of the xcdrVersion the actual
-        // wire payload was written with) -- same expected hash as the
+        // computed from a canonical PLAIN_CDR2 key holder, regardless of
+        // the xcdrVersion the actual wire payload was written with) -- same expected hash as the
         // XCDR2 case in testWireBytesBeaconKey.
         byte[] hash = b.computeKeyHash();
         byte[] expectedHash = new byte[] {

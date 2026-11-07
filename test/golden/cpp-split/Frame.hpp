@@ -19,6 +19,7 @@ struct Frame {
 
 #define Frame_has_key 0
 int Frame_serialize(ZidlCdrWriter *_w, const ::Frame *_v);
+int Frame_serialize_key_holder(ZidlCdrWriter *_w, const ::Frame *_v);
 int Frame_deserialize(ZidlCdrReader *_r, ::Frame *_v);
 int Frame_skip(ZidlCdrReader *_r);
 

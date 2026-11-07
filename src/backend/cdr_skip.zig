@@ -54,6 +54,11 @@ pub fn typeRefPrimWireSize(tr: ir.TypeRef) ?usize {
     };
 }
 
+pub fn enumLengthCode(bound: ?u16) u2 {
+    const b = bound orelse 32;
+    return if (b <= 8) 0 else if (b <= 16) 1 else if (b <= 32) 2 else 3;
+}
+
 fn bitBoundWidth(bound: ?u16) usize {
     const b = bound orelse 32;
     return if (b <= 8) 1 else if (b <= 16) 2 else if (b <= 32) 4 else 8;
@@ -162,9 +167,6 @@ pub fn emitSkipMember(self: anytype, m: ir.StructMember) anyerror!void {
 pub fn emitSkipArray(self: anytype, elem_tr: ir.TypeRef, dims: []const u64, dim_idx: usize) anyerror!void {
     if (dim_idx == 0) {
         // XCDR2: one DHEADER covers the whole (flattened) array.
-        if (!isPrimitiveElement(arrayInnermost(elem_tr))) {
-            try self.writeI("_rc = zidl_cdr_skip_dheader_if_xcdr2(_r); if (_rc) return _rc;\n");
-        }
         // Fixed-size primitive element with all dims known → one bulk advance.
         if (typeRefPrimWireSize(elem_tr)) |sz| {
             var total: u64 = 1;
@@ -173,7 +175,9 @@ pub fn emitSkipArray(self: anytype, elem_tr: ir.TypeRef, dims: []const u64, dim_
             return;
         }
     }
+    const window = try openReadWindow(self, dim_idx == 0 and !isPrimitiveElement(arrayInnermost(elem_tr)));
     try emitSkipArrayDims(self, elem_tr, dims, dim_idx);
+    try closeReadWindow(self, window);
 }
 
 fn emitSkipArrayDims(self: anytype, elem_tr: ir.TypeRef, dims: []const u64, dim_idx: usize) anyerror!void {
@@ -211,19 +215,16 @@ pub fn emitSkipForTypeRef(self: anytype, tr: ir.TypeRef) anyerror!void {
             try self.writeI("{ const char *_sp; uint32_t _sl; _rc = zidl_cdr_read_string_zerocopy(_r, &_sp, &_sl); if (_rc) return _rc; }\n");
         },
         .wstring => {
-            try self.writeI("{ uint32_t _wl; _rc = zidl_cdr_read_u32(_r, &_wl); if (_rc) return _rc; for (uint32_t _wi = 0; _wi < _wl; _wi++) { uint16_t _wc; _rc = zidl_cdr_read_u16(_r, &_wc); if (_rc) return _rc; } }\n");
+            try self.writeI("_rc = zidl_cdr_skip_wstring(_r); if (_rc) return _rc;\n");
         },
         .sequence => |seq| {
+            const window = try openReadWindow(self, !isPrimitiveElement(seq.element.*));
             const sl = try collName(self.alloc, "_sl", self.coll_depth);
             defer self.alloc.free(sl);
             const si = try collName(self.alloc, "_si", self.coll_depth);
             defer self.alloc.free(si);
             try self.printI("{{ uint32_t {s};\n", .{sl});
             self.indent_depth += 1;
-            if (!isPrimitiveElement(seq.element.*)) {
-                try self.writeI("_rc = zidl_cdr_skip_dheader_if_xcdr2(_r);\n");
-                try self.writeI("if (_rc) return _rc;\n");
-            }
             try self.printI("_rc = zidl_cdr_read_u32(_r, &{s});\n", .{sl});
             try self.writeI("if (_rc) return _rc;\n");
             if (typeRefPrimWireSize(seq.element.*)) |sz| {
@@ -239,18 +240,16 @@ pub fn emitSkipForTypeRef(self: anytype, tr: ir.TypeRef) anyerror!void {
             }
             self.indent_depth -= 1;
             try self.writeI("}\n");
+            try closeReadWindow(self, window);
         },
         .map => |m| {
+            const window = try openReadWindow(self, !(isPrimitiveElement(m.key.*) and isPrimitiveElement(m.value.*)));
             const ml = try collName(self.alloc, "_ml", self.coll_depth);
             defer self.alloc.free(ml);
             const mi = try collName(self.alloc, "_mi", self.coll_depth);
             defer self.alloc.free(mi);
             try self.printI("{{ uint32_t {s};\n", .{ml});
             self.indent_depth += 1;
-            if (!(isPrimitiveElement(m.key.*) and isPrimitiveElement(m.value.*))) {
-                try self.writeI("_rc = zidl_cdr_skip_dheader_if_xcdr2(_r);\n");
-                try self.writeI("if (_rc) return _rc;\n");
-            }
             try self.printI("_rc = zidl_cdr_read_u32(_r, &{s});\n", .{ml});
             try self.writeI("if (_rc) return _rc;\n");
             try self.printI("for (uint32_t {s} = 0; {s} < {s}; {s}++) {{\n", .{ mi, mi, ml, mi });
@@ -263,6 +262,7 @@ pub fn emitSkipForTypeRef(self: anytype, tr: ir.TypeRef) anyerror!void {
             try self.writeI("}\n");
             self.indent_depth -= 1;
             try self.writeI("}\n");
+            try closeReadWindow(self, window);
         },
         .named => |td| switch (td) {
             .enum_ => |e| {
@@ -353,4 +353,70 @@ fn enumCdrSuffix(bit_bound: ?u16) []const u8 {
 fn enumCdrType(bit_bound: ?u16) []const u8 {
     const b = bit_bound orelse 32;
     return if (b <= 8) "uint8_t" else if (b <= 16) "uint16_t" else if (b <= 32) "uint32_t" else "uint64_t";
+}
+
+/// Every public traversal receives a stack reader. Its private body can narrow
+/// data_len without leaking a limit through early returns or cleanup gotos.
+pub fn emitReadFunction(self: anytype, name: []const u8, value_type: ?[]const u8, selected: bool, complete_frame: []const u8) !void {
+    const args = if (value_type) |t| try std.fmt.allocPrint(self.alloc, "{s}, {s} *_v", .{ if (selected) "ZidlCdrReader *_r, uint64_t _want" else "ZidlCdrReader *_r", t }) else try self.alloc.dupe(u8, "ZidlCdrReader *_r");
+    defer self.alloc.free(args);
+    const call_args = if (value_type != null) (if (selected) "&_local, _want, _v" else "&_local, _v") else "&_local";
+    try self.print("static int {s}_bounded_impl({s});\n", .{ name, args });
+    try self.print("int {s}({s}) {{\n", .{ name, args });
+    try self.writeI("ZidlCdrReader _local = *_r;\n");
+    try self.printI("int _rc = {s}_bounded_impl({s});\n", .{ name, call_args });
+    try self.printI("_r->pos = !_rc && ({s}) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);\n", .{complete_frame});
+    try self.writeI("return _rc;\n");
+    try self.write("}\n\n");
+    try self.print("static int {s}_bounded_impl({s}) {{\n", .{ name, args });
+}
+
+pub fn readRcCheck(self: anytype) !void {
+    if (comptime @hasField(@TypeOf(self.*), "goto_label")) {
+        if (self.goto_label) |label| {
+            try self.printI("if (_rc) goto {s};\n", .{label});
+            return;
+        }
+    }
+    try self.writeI("if (_rc) return _rc;\n");
+}
+
+pub fn limitReader(self: anytype, end: []const u8) !void {
+    try self.printI("_rc = zidl_cdr_reader_limit(_r, {s}, _r);\n", .{end});
+    try readRcCheck(self);
+}
+
+pub fn memberWindow(self: anytype) !void {
+    try self.writeI("_rc = zidl_cdr_emheader_end(_r, &_emh, &_member_end);\n");
+    try readRcCheck(self);
+    try limitReader(self, "_member_end");
+}
+
+/// A lexical collection window, closed before later fields are read. On error
+/// the public traversal's stack reader keeps the caller's enclosing limit intact.
+pub fn openReadWindow(self: anytype, needed: bool) !?usize {
+    if (!needed) return null;
+    const id = self.reader_window_id;
+    self.reader_window_id += 1;
+    try self.writeI("{\n");
+    self.indent_depth += 1;
+    try self.printI("size_t _read_end_{d} = (size_t)-1, _read_limit_{d} = _r->data_len;\n", .{ id, id });
+    try self.writeI("if (_r->xcdr_version == ZIDL_XCDR2) {\n");
+    self.indent_depth += 1;
+    try self.printI("_rc = zidl_cdr_read_mutable_dheader(_r, &_read_end_{d});\n", .{id});
+    try readRcCheck(self);
+    const end = try std.fmt.allocPrint(self.alloc, "_read_end_{d}", .{id});
+    defer self.alloc.free(end);
+    try limitReader(self, end);
+    self.indent_depth -= 1;
+    try self.writeI("}\n");
+    return id;
+}
+
+pub fn closeReadWindow(self: anytype, window: ?usize) !void {
+    const id = window orelse return;
+    try self.printI("if (_read_end_{d} != (size_t)-1) _r->pos = _read_end_{d};\n", .{ id, id });
+    try self.printI("_r->data_len = _read_limit_{d};\n", .{id});
+    self.indent_depth -= 1;
+    try self.writeI("}\n");
 }

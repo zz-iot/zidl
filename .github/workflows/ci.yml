@@ -73,6 +73,22 @@ jobs:
         run: zig build test -Dsanitize-thread
         working-directory: packages/zidl-cdr
 
+      - name: Test (zidl-cdr shared)
+        run: zig build test -Dshared-primitives=true
+        working-directory: packages/zidl-cdr
+
+      - name: Test (zidl-cdr shared TSan)
+        if: matrix.os == 'ubuntu-latest'
+        run: zig build test -Dshared-primitives=true -Dsanitize-thread
+        working-directory: packages/zidl-cdr
+
+      - name: Test shared archive with system C compiler
+        if: runner.os != 'Windows'
+        run: |
+          zig build test-external-c -Dshared-primitives=true
+          zig build test-external-c -Dshared-primitives=true -Doptimize=ReleaseSafe
+        working-directory: packages/zidl-cdr
+
       # ── Integration tests ─────────────────────────────────────────────────
       # C and C++ use Zig's bundled clang/clang++; no external compiler needed.
       # Java requires javac/java; GitHub-hosted runners include a JDK on all

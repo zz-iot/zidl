@@ -228,9 +228,10 @@ public class Sample implements java.io.Serializable {
         while (true) {
             java.nio.ByteBuffer _buf = java.nio.ByteBuffer.allocate(_cap).order(java.nio.ByteOrder.BIG_ENDIAN);
             try {
-                serializeKeyFields(_buf, 0, 1);
-                return _cdrComputeKeyHash(_buf);
+                serializeKeyHolder(_buf, 0);
+                return _cdrComputeKeyHash(_buf, KEY_HASH_FORCE_MD5);
             } catch (java.nio.BufferOverflowException _e) {
+                if (_cap > Integer.MAX_VALUE / 2) throw new IllegalArgumentException("canonical key exceeds Java buffer capacity", _e);
                 _cap *= 2;
             }
         }
@@ -402,6 +403,10 @@ public class Sample implements java.io.Serializable {
             Point.skip(_buf, _cdrBase, _xcdrVersion);
         }
         return _out;
+    }
+    public static final boolean KEY_HASH_FORCE_MD5 = false;
+    public void serializeKeyHolder(java.nio.ByteBuffer _buf, int _cdrBase) {
+        _cdrAlignKey(_buf, _cdrBase, 4); _buf.putInt(this.get_id());
     }
 } // Sample
 

@@ -37,17 +37,17 @@
 //! Every read validates bounds; returns `error.EndOfStream` on truncation.
 
 const std = @import("std");
+const primitives = @import("cdr_primitives.zig");
+const cursor = @import("cdr_cursor.zig");
+const strings = @import("cdr_strings.zig");
+const keys = @import("cdr_keys.zig");
+const framing = @import("cdr_framing.zig");
 
 // ── Encoding version and byte order ──────────────────────────────────────────
 
-pub const XcdrVersion = enum {
-    /// XCDR version 1 — CDR v1, used with RTPS 2.x and legacy DDS.
-    xcdr1,
-    /// XCDR version 2 — CDR v2, used with DDS-XTYPES (XCDR2_DATA_REPRESENTATION).
-    xcdr2,
-};
+pub const XcdrVersion = framing.Version;
 
-pub const ByteOrder = enum { little, big };
+pub const ByteOrder = primitives.ByteOrder;
 
 // ── Encapsulation identifier constants (written as big-endian u16) ────────────
 
@@ -155,25 +155,20 @@ pub fn CdrWriter(comptime xcdr_version: XcdrVersion) type {
 
         // ── Internal helpers ──────────────────────────────────────────────
 
-        fn writeBytes(self: *Self, bytes: []const u8) !void {
+        /// Raw storage sink used by the shared primitive encoder.
+        pub fn writeBytes(self: *Self, bytes: []const u8) !void {
             try self.buf.appendSlice(self.alloc, bytes);
             self.pos += bytes.len;
         }
 
-        /// Emit zero-padding to reach the given alignment boundary.
-        fn writePad(self: *Self, boundary: usize) !void {
-            const rem = self.pos % boundary;
-            if (rem == 0) return;
-            const pad = boundary - rem;
-            const z: [8]u8 = @splat(0);
-            try self.writeBytes(z[0..pad]);
+        pub fn payloadPosition(self: *const Self) usize {
+            return self.pos;
         }
-
-        /// CDR alignment for a primitive of the given wire size (bytes).
-        /// XCDR1: min(size, 8).  XCDR2: min(size, 4).
-        inline fn align_(wire_size: usize) usize {
-            const cap: usize = if (xcdr_version == .xcdr1) 8 else 4;
-            return @min(wire_size, cap);
+        pub fn byteLen(self: *const Self) usize {
+            return self.buf.items.len;
+        }
+        pub fn resetPayload(self: *Self) void {
+            self.pos = 0;
         }
 
         // ── Encapsulation header ──────────────────────────────────────────
@@ -185,55 +180,27 @@ pub fn CdrWriter(comptime xcdr_version: XcdrVersion) type {
         /// The representation identifier is written big-endian (per RTPS spec),
         /// followed by two zero option bytes.
         pub fn writeEncapHeader(self: *Self) !void {
-            const id: u16 = switch (xcdr_version) {
-                .xcdr1 => ENCAP_CDR1_LE,
-                .xcdr2 => ENCAP_CDR2_LE,
-            };
-            try self.writeBytes(&[_]u8{
-                @truncate(id >> 8), // high byte first (big-endian representation ID)
-                @truncate(id),
-                0x00, // options (unused)
-                0x00,
-            });
-            // Reset pos to 0: CDR alignment is from the start of the CDR payload
-            // (after the 4-byte encap header), not from the start of the buffer.
-            // Without this, 8-byte XCDR1 alignment calculations would be off by 4.
-            self.pos = 0;
+            try framing.writeEncapsulation(self, framing.encapsulationId(xcdr_version, .little, .final, false));
         }
 
         /// Like writeEncapHeader but uses ENCAP_PL_CDR2_LE (0x000b) for XCDR2, as
         /// required for @mutable top-level types. XCDR1 is unchanged (a
         /// ParameterList XCDR1 encoding is not generated).
         pub fn writeEncapHeaderMutable(self: *Self) !void {
-            const id: u16 = switch (xcdr_version) {
-                .xcdr1 => ENCAP_CDR1_LE,
-                .xcdr2 => ENCAP_PL_CDR2_LE,
-            };
-            try self.writeBytes(&[_]u8{ @truncate(id >> 8), @truncate(id), 0x00, 0x00 });
-            self.pos = 0;
+            try framing.writeEncapsulation(self, framing.encapsulationId(xcdr_version, .little, .mutable, false));
         }
 
         /// Like writeEncapHeader but uses ENCAP_DELIMITED_CDR2_LE (0x0009) for XCDR2.
         /// Required for @appendable top-level types: signals that a DHEADER is present.
         /// XCDR1 behaviour is identical to writeEncapHeader.
         pub fn writeEncapHeaderDelimited(self: *Self) !void {
-            const id: u16 = switch (xcdr_version) {
-                .xcdr1 => ENCAP_CDR1_LE,
-                .xcdr2 => ENCAP_DELIMITED_CDR2_LE,
-            };
-            try self.writeBytes(&[_]u8{
-                @truncate(id >> 8),
-                @truncate(id),
-                0x00,
-                0x00,
-            });
-            self.pos = 0;
+            try framing.writeEncapsulation(self, framing.encapsulationId(xcdr_version, .little, .appendable, false));
         }
 
         // ── Primitive writes ──────────────────────────────────────────────
 
         pub fn writeU8(self: *Self, v: u8) !void {
-            try self.writeBytes(&[_]u8{v});
+            try primitives.writeUnsigned(self, u8, v, self.pos, if (xcdr_version == .xcdr1) 8 else 4, .little);
         }
 
         pub fn writeI8(self: *Self, v: i8) !void {
@@ -255,8 +222,7 @@ pub fn CdrWriter(comptime xcdr_version: XcdrVersion) type {
         }
 
         pub fn writeU16(self: *Self, v: u16) !void {
-            try self.writePad(align_(2));
-            try self.writeBytes(&[_]u8{ @truncate(v), @truncate(v >> 8) });
+            try primitives.writeUnsigned(self, u16, v, self.pos, if (xcdr_version == .xcdr1) 8 else 4, .little);
         }
 
         pub fn writeI16(self: *Self, v: i16) !void {
@@ -264,13 +230,7 @@ pub fn CdrWriter(comptime xcdr_version: XcdrVersion) type {
         }
 
         pub fn writeU32(self: *Self, v: u32) !void {
-            try self.writePad(align_(4));
-            try self.writeBytes(&[_]u8{
-                @truncate(v),
-                @truncate(v >> 8),
-                @truncate(v >> 16),
-                @truncate(v >> 24),
-            });
+            try primitives.writeUnsigned(self, u32, v, self.pos, if (xcdr_version == .xcdr1) 8 else 4, .little);
         }
 
         pub fn writeI32(self: *Self, v: i32) !void {
@@ -282,17 +242,7 @@ pub fn CdrWriter(comptime xcdr_version: XcdrVersion) type {
         }
 
         pub fn writeU64(self: *Self, v: u64) !void {
-            try self.writePad(align_(8));
-            try self.writeBytes(&[_]u8{
-                @truncate(v),
-                @truncate(v >> 8),
-                @truncate(v >> 16),
-                @truncate(v >> 24),
-                @truncate(v >> 32),
-                @truncate(v >> 40),
-                @truncate(v >> 48),
-                @truncate(v >> 56),
-            });
+            try primitives.writeUnsigned(self, u64, v, self.pos, if (xcdr_version == .xcdr1) 8 else 4, .little);
         }
 
         pub fn writeI64(self: *Self, v: i64) !void {
@@ -359,17 +309,17 @@ pub fn CdrWriter(comptime xcdr_version: XcdrVersion) type {
         /// CDR string: u32 length (byte count including NUL), then the chars,
         /// then a NUL byte.
         pub fn writeString(self: *Self, v: []const u8) !void {
-            try self.writeU32(@intCast(v.len + 1));
-            try self.writeBytes(v);
-            try self.writeBytes(&[_]u8{0});
+            try strings.writeString(self, v);
         }
 
-        /// CDR wstring: u32 length (wchar count including the NUL wchar),
-        /// then the wchars as u16 LE, then a u16 NUL.
+        /// The same UTF-16 byte representation used by canonical key holders.
+        pub fn writeKeyWstring(self: *Self, v: []const u16) !void {
+            try keys.writeWstring(self, v);
+        }
+
+        /// CDR wstring: u32 byte count, then UTF-16 units; no NUL/BOM.
         pub fn writeWstring(self: *Self, v: []const u16) !void {
-            try self.writeU32(@intCast(v.len + 1));
-            for (v) |wc| try self.writeU16(wc);
-            try self.writeU16(0);
+            try strings.writeWstring(self, v);
         }
 
         // ── XCDR2 framing ─────────────────────────────────────────────────
@@ -393,23 +343,19 @@ pub fn CdrWriter(comptime xcdr_version: XcdrVersion) type {
         ///   w.patchDheader(dh);
         ///   ```
         pub fn reserveDheader(self: *Self) !usize {
-            // Align first: the DHEADER is a 4-byte-aligned u32, and the offset
-            // must name the placeholder itself, not any padding before it.
-            try self.writePad(align_(4));
-            const off = self.buf.items.len;
-            try self.writeU32(0);
-            return off;
+            var offset: usize = undefined;
+            try framing.reserveDheader(self, &offset);
+            return offset;
         }
 
         /// Patch a previously reserved DHEADER with the byte count of everything
         /// written after the 4-byte DHEADER field at `dheader_offset`.
         pub fn patchDheader(self: *Self, dheader_offset: usize) void {
-            const payload: u32 = @intCast(self.buf.items.len - dheader_offset - 4);
-            const p = self.buf.items[dheader_offset..][0..4];
-            p[0] = @truncate(payload);
-            p[1] = @truncate(payload >> 8);
-            p[2] = @truncate(payload >> 16);
-            p[3] = @truncate(payload >> 24);
+            self.patchDheaderChecked(dheader_offset) catch {};
+        }
+
+        pub fn patchDheaderChecked(self: *Self, offset: usize) !void {
+            try framing.patchDheader(self.buf.items, self.buf.items.len, offset, .little);
         }
 
         /// For generated @appendable/@mutable types: reserve a DHEADER on XCDR2,
@@ -420,6 +366,10 @@ pub fn CdrWriter(comptime xcdr_version: XcdrVersion) type {
         }
 
         /// Patch a DHEADER reserved by reserveDheaderMaybe.  No-op when null.
+        pub fn patchDheaderMaybeChecked(self: *Self, offset: ?usize) !void {
+            if (offset) |off| try self.patchDheaderChecked(off);
+        }
+
         pub fn patchDheaderMaybe(self: *Self, offset: ?usize) void {
             if (offset) |off| self.patchDheader(off);
         }
@@ -439,31 +389,24 @@ pub fn CdrWriter(comptime xcdr_version: XcdrVersion) type {
         ///
         /// LC values: 0 → 1 byte, 1 → 2 bytes, 2 → 4 bytes, 3 → 8 bytes.
         pub fn writeEmheaderFixed(self: *Self, member_id: u28, must_understand: bool, lc: u2) !void {
-            const mu_bit: u32 = if (must_understand) 0x8000_0000 else 0;
-            const word: u32 = mu_bit | (@as(u32, lc) << 28) | @as(u32, member_id);
-            try self.writeU32(word);
+            try framing.writeEmheader(self, member_id, must_understand, lc);
         }
 
         /// Reserve an EMHEADER + NEXTINT placeholder for a variable-length member
         /// (LC=4: NEXTINT = byte count).  Call patchEmheader after writing the payload.
         pub fn reserveEmheader(self: *Self, member_id: u28, must_understand: bool) !EmheaderPlaceholder {
-            const mu_bit: u32 = if (must_understand) 0x8000_0000 else 0;
-            // LC=4: NEXTINT present, encodes payload byte count directly.
-            const word: u32 = mu_bit | (4 << 28) | @as(u32, member_id);
-            try self.writeU32(word);
-            const nextint_offset = self.buf.items.len;
-            try self.writeU32(0); // placeholder NEXTINT
-            return .{ .nextint_offset = nextint_offset, .payload_start = self.buf.items.len };
+            var offset: usize = undefined;
+            try framing.reserveEmheader(self, member_id, must_understand, &offset);
+            return .{ .nextint_offset = offset, .payload_start = self.byteLen() };
         }
 
         /// Patch the NEXTINT of a reserved EMHEADER with the actual payload byte count.
         pub fn patchEmheader(self: *Self, ph: EmheaderPlaceholder) void {
-            const payload: u32 = @intCast(self.buf.items.len - ph.payload_start);
-            const p = self.buf.items[ph.nextint_offset..][0..4];
-            p[0] = @truncate(payload);
-            p[1] = @truncate(payload >> 8);
-            p[2] = @truncate(payload >> 16);
-            p[3] = @truncate(payload >> 24);
+            self.patchEmheaderChecked(ph) catch {};
+        }
+
+        pub fn patchEmheaderChecked(self: *Self, ph: EmheaderPlaceholder) !void {
+            try framing.patchEmheader(self.buf.items, self.buf.items.len, ph.nextint_offset, ph.payload_start, .little);
         }
     };
 }
@@ -486,7 +429,8 @@ pub const KeyHashWriter = struct {
         return .{};
     }
 
-    fn writeBytes(self: *KeyHashWriter, bytes: []const u8) !void {
+    pub fn writeBytes(self: *KeyHashWriter, bytes: []const u8) !void {
+        if (bytes.len > std.math.maxInt(usize) - self.len or bytes.len > std.math.maxInt(usize) - self.pos) return error.Overflow;
         const dst_start = @min(self.len, self.first16.len);
         const dst_avail = self.first16.len - dst_start;
         const copy_len = @min(dst_avail, bytes.len);
@@ -625,15 +569,15 @@ pub const KeyHashWriter = struct {
     }
 
     pub fn writeString(self: *KeyHashWriter, v: []const u8) !void {
-        try self.writeU32(@intCast(v.len + 1));
-        try self.writeBytes(v);
-        try self.writeBytes(&[_]u8{0});
+        try strings.writeString(self, v);
     }
 
     pub fn writeWstring(self: *KeyHashWriter, v: []const u16) !void {
-        try self.writeU32(@intCast(v.len + 1));
-        for (v) |wc| try self.writeU16(wc);
-        try self.writeU16(0);
+        try keys.writeWstring(self, v);
+    }
+
+    pub fn writeKeyWstring(self: *KeyHashWriter, v: []const u16) !void {
+        try keys.writeWstring(self, v);
     }
 
     /// No-op: key hash spec (RTPS §9.6.4.8) excludes the DHEADER from the
@@ -644,13 +588,21 @@ pub const KeyHashWriter = struct {
     }
 
     /// No-op counterpart to reserveDheaderMaybe.
+    pub fn patchDheaderMaybeChecked(self: *KeyHashWriter, offset: ?usize) !void {
+        self.patchDheaderMaybe(offset);
+    }
+
     pub fn patchDheaderMaybe(self: *KeyHashWriter, offset: ?usize) void {
         _ = self;
         _ = offset;
     }
 
     pub fn final(self: *KeyHashWriter) [16]u8 {
-        if (self.len <= self.first16.len) return self.first16;
+        return self.finalForType(false);
+    }
+
+    pub fn finalForType(self: *KeyHashWriter, force_md5: bool) [16]u8 {
+        if (!keys.useMd5(force_md5, self.len)) return self.first16;
         var digest: [16]u8 = undefined;
         self.md5.final(&digest);
         return digest;
@@ -677,8 +629,7 @@ pub const PlCdrWriter = struct {
     /// Write the 4-byte PL_CDR_LE encapsulation header.
     /// Must be the first call; resets CDR position to 0.
     pub fn writeEncapHeader(self: *PlCdrWriter) !void {
-        try self.inner.buf.appendSlice(self.inner.alloc, &[_]u8{ 0x00, 0x03, 0x00, 0x00 });
-        self.inner.pos = 0;
+        try framing.writeEncapsulation(&self.inner, ENCAP_PL_CDR_LE);
     }
 
     /// Handle returned by `reservePlParam`; pass to `patchPlParam` after writing value.
@@ -692,26 +643,19 @@ pub const PlCdrWriter = struct {
     /// Write the `(pid, 0)` header placeholder and return a handle.
     /// Write the member value after this call, then call `patchPlParam`.
     pub fn reservePlParam(self: *PlCdrWriter, pid: u16) !PlParamHandle {
-        // pid and length fields are raw LE u16; we're always at a 4-byte CDR boundary
-        // so writeU16 will add no padding.
-        try self.inner.writeU16(pid);
-        const len_offset = self.inner.buf.items.len;
-        try self.inner.writeU16(0); // placeholder length
-        return .{ .len_offset = len_offset, .buf_value_start = self.inner.buf.items.len };
+        var handle: PlParamHandle = undefined;
+        try framing.reserveParameter(&self.inner, pid, &handle.len_offset, &handle.buf_value_start);
+        return handle;
     }
 
     /// Pad the current value to a 4-byte boundary and patch the length field.
     pub fn patchPlParam(self: *PlCdrWriter, h: PlParamHandle) !void {
-        const raw_bytes = self.inner.buf.items.len - h.buf_value_start;
-        const pad: usize = (4 - raw_bytes % 4) % 4;
-        if (pad > 0) {
-            const zeros = [4]u8{ 0, 0, 0, 0 };
-            try self.inner.buf.appendSlice(self.inner.alloc, zeros[0..pad]);
-            self.inner.pos += pad;
-        }
-        const padded: u16 = @intCast(raw_bytes + pad);
-        self.inner.buf.items[h.len_offset] = @truncate(padded);
-        self.inner.buf.items[h.len_offset + 1] = @truncate(padded >> 8);
+        try framing.validateParameter(self.inner.byteLen(), h.len_offset, h.buf_value_start);
+        const raw = self.inner.byteLen() - h.buf_value_start;
+        const padded = try framing.parameterSize(raw);
+        const zeros: [4]u8 = @splat(0);
+        if (padded > raw) try self.inner.writeBytes(zeros[0 .. padded - raw]);
+        try framing.patchParameter(self.inner.buf.items, self.inner.byteLen(), h.len_offset, h.buf_value_start);
     }
 
     /// Write the PID_SENTINEL (0x0001, 0) to terminate the parameter list.
@@ -723,14 +667,17 @@ pub const PlCdrWriter = struct {
     }
 
     /// No-op counterpart to reserveDheaderMaybe.
+    pub fn patchDheaderMaybeChecked(self: *PlCdrWriter, offset: ?usize) !void {
+        self.patchDheaderMaybe(offset);
+    }
+
     pub fn patchDheaderMaybe(self: *PlCdrWriter, offset: ?usize) void {
         _ = self;
         _ = offset;
     }
 
     pub fn writePlSentinel(self: *PlCdrWriter) !void {
-        try self.inner.buf.appendSlice(self.inner.alloc, &[_]u8{ 0x01, 0x00, 0x00, 0x00 });
-        self.inner.pos += 4;
+        try framing.writeSentinel(&self.inner);
     }
 
     /// Re-emit a parameter retained verbatim (`zidl_rt.RawParam`): the raw `pid`
@@ -838,58 +785,49 @@ pub const CdrReader = struct {
     ///   0x000a → XCDR2 ParameterList CDR big-endian  (@mutable, same as 0x0006 here)
     ///   0x000b → XCDR2 ParameterList CDR little-endian (@mutable, same as 0x0007 here)
     pub fn init(data: []const u8) !CdrReader {
-        if (data.len < 4) return error.InvalidEncapsulation;
-        const id: u16 = (@as(u16, data[0]) << 8) | @as(u16, data[1]);
-        const byte_order: ByteOrder = switch (id) {
-            ENCAP_CDR1_LE, ENCAP_CDR2_LE, ENCAP_DELIMITED_CDR2_LE, ENCAP_PL_CDR2_LE, ENCAP_PL_CDR_LE => .little,
-            ENCAP_CDR1_BE, ENCAP_CDR2_BE, ENCAP_DELIMITED_CDR2_BE, ENCAP_PL_CDR2_BE, ENCAP_PL_CDR_BE => .big,
-            else => return error.InvalidEncapsulation,
-        };
-        const xcdr_version: XcdrVersion = switch (id) {
-            ENCAP_CDR1_LE, ENCAP_CDR1_BE, ENCAP_PL_CDR_LE, ENCAP_PL_CDR_BE => .xcdr1,
-            ENCAP_CDR2_LE, ENCAP_CDR2_BE, ENCAP_DELIMITED_CDR2_LE, ENCAP_DELIMITED_CDR2_BE, ENCAP_PL_CDR2_LE, ENCAP_PL_CDR2_BE => .xcdr2,
-            else => unreachable,
-        };
-        const is_pl_cdr = (id == ENCAP_PL_CDR_LE or id == ENCAP_PL_CDR_BE);
-        return .{
-            .data = data,
-            .pos = 4,
-            .byte_order = byte_order,
-            .xcdr_version = xcdr_version,
-            .is_pl_cdr = is_pl_cdr,
-        };
+        const encap = try framing.parseEncapsulation(data);
+        return .{ .data = data, .pos = 4, .byte_order = encap.order, .xcdr_version = encap.version, .is_pl_cdr = encap.is_pl_cdr };
+    }
+
+    /// Stack-copy a reader with an explicit absolute end; alignment origin stays 4.
+    pub fn limited(self: *const CdrReader, end: usize) !CdrReader {
+        try framing.validateLimit(self.pos, self.data.len, end);
+        var out = self.*;
+        out.data = self.data[0..end];
+        return out;
+    }
+
+    /// A caller-owned stack window. Close after cancel's errdefer: errors keep
+    /// the consumed cursor, while success skips the remainder of this frame.
+    pub const Window = struct {
+        reader: *CdrReader,
+        saved_data: []const u8,
+        end: usize,
+        complete: bool = true,
+
+        pub fn cancel(self: *Window) void {
+            self.complete = false;
+        }
+
+        pub fn close(self: *Window) void {
+            self.reader.data = self.saved_data;
+            if (self.complete) self.reader.pos = self.end;
+        }
+    };
+
+    /// Usage: defer window.close(); errdefer window.cancel();
+    /// No hidden nesting state is added to the reader itself.
+    pub fn window(self: *CdrReader, end: usize) !Window {
+        const bounded = try self.limited(end);
+        const scope = Window{ .reader = self, .saved_data = self.data, .end = end };
+        self.* = bounded;
+        return scope;
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────
 
-    fn alignCap(self: *const CdrReader, wire_size: usize) usize {
-        const cap: usize = if (self.xcdr_version == .xcdr1) 8 else 4;
-        return @min(wire_size, cap);
-    }
-
-    fn alignPos(self: *CdrReader, boundary: usize) void {
-        // CDR alignment is from the start of the CDR payload, which starts after
-        // the 4-byte encap header (self.pos == 4 at the start of payload reads).
-        const cdr_pos = self.pos - 4;
-        const rem = cdr_pos % boundary;
-        if (rem != 0) self.pos += boundary - rem;
-    }
-
     fn readSlice(self: *CdrReader, n: usize) ![]const u8 {
-        if (self.pos + n > self.data.len) return error.EndOfStream;
-        const s = self.data[self.pos .. self.pos + n];
-        self.pos += n;
-        return s;
-    }
-
-    inline fn maybeSwap16(self: *const CdrReader, raw: u16) u16 {
-        return if (self.byte_order == .little) raw else @byteSwap(raw);
-    }
-    inline fn maybeSwap32(self: *const CdrReader, raw: u32) u32 {
-        return if (self.byte_order == .little) raw else @byteSwap(raw);
-    }
-    inline fn maybeSwap64(self: *const CdrReader, raw: u64) u64 {
-        return if (self.byte_order == .little) raw else @byteSwap(raw);
+        return cursor.readSlice(self.data, &self.pos, n);
     }
 
     // ── Status ────────────────────────────────────────────────────────────
@@ -899,8 +837,7 @@ pub const CdrReader = struct {
     }
 
     pub fn skip(self: *CdrReader, n: usize) !void {
-        if (self.pos + n > self.data.len) return error.EndOfStream;
-        self.pos += n;
+        _ = try cursor.advance(&self.pos, self.data.len, n);
     }
 
     /// Skip a run of `count` fixed-size primitive elements of `elem_wire_size`
@@ -909,20 +846,13 @@ pub const CdrReader = struct {
     /// cursor by `count * elem_wire_size` in one step. `elem_wire_size` must be
     /// 1/2/4/8. The caller has already consumed any length prefix.
     pub fn skipPrimitives(self: *CdrReader, count: usize, elem_wire_size: usize) !void {
-        // An empty sequence emits no elements and no leading element alignment
-        // padding, only the (already-consumed) length prefix -- aligning here
-        // would consume bytes belonging to the next member. Fixed arrays always
-        // have count >= 1, so this only affects sequences.
-        if (count == 0) return;
-        if (elem_wire_size > 1) self.alignPos(self.alignCap(elem_wire_size));
-        const total = std.math.mul(usize, count, elem_wire_size) catch return error.EndOfStream;
-        try self.skip(total);
+        try cursor.skipPrimitives(&self.pos, self.data.len, 4, count, elem_wire_size, if (self.xcdr_version == .xcdr1) 8 else 4);
     }
 
     // ── Primitive reads ───────────────────────────────────────────────────
 
     pub fn readU8(self: *CdrReader) !u8 {
-        return (try self.readSlice(1))[0];
+        return primitives.readUnsigned(u8, self.data, &self.pos, 4, if (self.xcdr_version == .xcdr1) 8 else 4, self.byte_order);
     }
 
     pub fn readI8(self: *CdrReader) !i8 {
@@ -930,9 +860,7 @@ pub const CdrReader = struct {
     }
 
     pub fn readBool(self: *CdrReader) !bool {
-        const v = try self.readU8();
-        if (v > 1) return error.InvalidBool;
-        return v == 1;
+        return primitives.readBool(self.data, &self.pos);
     }
 
     pub fn readChar(self: *CdrReader) !u8 {
@@ -944,10 +872,7 @@ pub const CdrReader = struct {
     }
 
     pub fn readU16(self: *CdrReader) !u16 {
-        self.alignPos(self.alignCap(2));
-        const b = try self.readSlice(2);
-        const raw: u16 = @as(u16, b[0]) | (@as(u16, b[1]) << 8);
-        return self.maybeSwap16(raw);
+        return primitives.readUnsigned(u16, self.data, &self.pos, 4, if (self.xcdr_version == .xcdr1) 8 else 4, self.byte_order);
     }
 
     pub fn readI16(self: *CdrReader) !i16 {
@@ -955,13 +880,7 @@ pub const CdrReader = struct {
     }
 
     pub fn readU32(self: *CdrReader) !u32 {
-        self.alignPos(self.alignCap(4));
-        const b = try self.readSlice(4);
-        const raw: u32 = @as(u32, b[0]) |
-            (@as(u32, b[1]) << 8) |
-            (@as(u32, b[2]) << 16) |
-            (@as(u32, b[3]) << 24);
-        return self.maybeSwap32(raw);
+        return primitives.readUnsigned(u32, self.data, &self.pos, 4, if (self.xcdr_version == .xcdr1) 8 else 4, self.byte_order);
     }
 
     pub fn readI32(self: *CdrReader) !i32 {
@@ -973,17 +892,7 @@ pub const CdrReader = struct {
     }
 
     pub fn readU64(self: *CdrReader) !u64 {
-        self.alignPos(self.alignCap(8));
-        const b = try self.readSlice(8);
-        const raw: u64 = @as(u64, b[0]) |
-            (@as(u64, b[1]) << 8) |
-            (@as(u64, b[2]) << 16) |
-            (@as(u64, b[3]) << 24) |
-            (@as(u64, b[4]) << 32) |
-            (@as(u64, b[5]) << 40) |
-            (@as(u64, b[6]) << 48) |
-            (@as(u64, b[7]) << 56);
-        return self.maybeSwap64(raw);
+        return primitives.readUnsigned(u64, self.data, &self.pos, 4, if (self.xcdr_version == .xcdr1) 8 else 4, self.byte_order);
     }
 
     pub fn readI64(self: *CdrReader) !i64 {
@@ -1039,39 +948,29 @@ pub const CdrReader = struct {
     /// The slice is valid as long as the buffer passed to `init` stays alive.
     /// Suitable for the DataReader loan pattern (no per-message allocation).
     pub fn readStringZeroCopy(self: *CdrReader) ![]const u8 {
-        const len = try self.readU32(); // byte count including NUL
-        if (len == 0) return error.InvalidString;
-        const bytes = try self.readSlice(len);
-        return bytes[0 .. len - 1]; // strip NUL
+        return strings.readString(self.data, &self.pos, if (self.xcdr_version == .xcdr1) 8 else 4, self.byte_order);
     }
 
     pub fn skipString(self: *CdrReader) !void {
         _ = try self.readStringZeroCopy();
     }
 
-    /// Allocating string read; caller owns the returned slice.
+    /// Owned content excludes the terminator; free with the supplied allocator.
     pub fn readString(self: *CdrReader, allocator: std.mem.Allocator) ![]u8 {
         return allocator.dupe(u8, try self.readStringZeroCopy());
     }
 
-    /// Allocating wstring read; caller owns the returned slice.
-    ///
-    /// CDR wstring length field includes the trailing NUL wchar.
+    /// Validate the entire wire span before allocating owned host-order units.
+    /// The returned slice excludes the terminator and can contain embedded NULs.
     pub fn readWstring(self: *CdrReader, allocator: std.mem.Allocator) ![]u16 {
-        const len = try self.readU32(); // wchar count including NUL
-        if (len == 0) return error.InvalidString;
-        const char_count = len - 1;
-        const buf = try allocator.alloc(u16, char_count);
-        errdefer allocator.free(buf);
-        for (buf) |*wc| wc.* = try self.readU16();
-        _ = try self.readU16(); // discard NUL wchar
-        return buf;
+        const view = try strings.readWstring(self.data, &self.pos, if (self.xcdr_version == .xcdr1) 8 else 4, self.byte_order);
+        const out = try allocator.alloc(u16, view.len());
+        for (out, 0..) |*wc, i| wc.* = view.codeUnit(i);
+        return out;
     }
 
     pub fn skipWstring(self: *CdrReader) !void {
-        const len = try self.readU32(); // wchar count including NUL
-        if (len == 0) return error.InvalidString;
-        for (0..len) |_| _ = try self.readU16();
+        _ = try strings.readWstring(self.data, &self.pos, if (self.xcdr_version == .xcdr1) 8 else 4, self.byte_order);
     }
 
     // ── XCDR2 framing ─────────────────────────────────────────────────────
@@ -1084,22 +983,11 @@ pub const CdrReader = struct {
     /// For generated @appendable/@mutable types: skip the DHEADER on XCDR2,
     /// no-op on XCDR1 (no DHEADER in XCDR1).
     pub fn skipDheaderIfXcdr2(self: *CdrReader) !void {
-        if (self.xcdr_version == .xcdr2) _ = try self.readDheader();
+        if (self.xcdr_version == .xcdr2) _ = try self.readMutableDheader();
     }
 
     /// Decoded EMHEADER for a @mutable type member.
-    pub const EmHeader = struct {
-        member_id: u28,
-        must_understand: bool,
-        /// Raw length code (0–7). 0=1B, 1=2B, 2=4B, 3=8B, 4–7=NEXTINT-encoded.
-        lc: u3,
-        /// Byte count of this member's payload, counted from the reader
-        /// position `readEmheader` leaves (the start of the member value).
-        /// Always set: LC=0 → 1, LC=1 → 2, LC=2 → 4, LC=3 → 8,
-        /// LC=4 → NEXTINT, LC=5 → 4 + NEXTINT, LC=6 → 4 + 4×NEXTINT,
-        /// LC=7 → 4 + 8×NEXTINT.
-        payload_bytes: u32,
-    };
+    pub const EmHeader = framing.EmHeader;
 
     /// Read an EMHEADER (+ optional NEXTINT) for a @mutable type member.
     ///
@@ -1117,64 +1005,23 @@ pub const CdrReader = struct {
     ///   4 + 4×NEXTINT or 4 + 8×NEXTINT (XTypes 1.3 §7.4.3.4.8). Other
     ///   implementations write these for string and collection members.
     pub fn readEmheader(self: *CdrReader) !EmHeader {
-        const word = try self.readU32();
-        const must_understand = (word & 0x8000_0000) != 0;
-        const lc: u3 = @truncate((word >> 28) & 0x7);
-        const member_id: u28 = @truncate(word & 0x0FFF_FFFF);
-
-        const payload_bytes: u32 = switch (lc) {
-            0 => 1,
-            1 => 2,
-            2 => 4,
-            3 => 8,
-            4 => try self.readU32(),
-            5, 6, 7 => blk: {
-                const start = self.pos;
-                const n = try self.readU32();
-                self.pos = start;
-                const shift: u6 = switch (lc) {
-                    5 => 0,
-                    6 => 2,
-                    else => 3,
-                };
-                const bytes = (@as(u64, n) << shift) + 4;
-                if (bytes > std.math.maxInt(u32)) return error.InvalidEmheader;
-                break :blk @intCast(bytes);
-            },
-        };
-
-        return .{
-            .member_id = member_id,
-            .must_understand = must_understand,
-            .lc = lc,
-            .payload_bytes = payload_bytes,
-        };
+        return framing.readEmheader(self.data, &self.pos, if (self.xcdr_version == .xcdr1) 8 else 4, self.byte_order);
     }
 
-    /// For @mutable types: read the DHEADER and return the absolute reader
-    /// position of the first byte *after* the mutable payload.
-    ///
-    /// Generated deserializers loop `while (reader.mutableHasMore(end))`.
     pub fn readMutableDheader(self: *CdrReader) !usize {
-        const size = try self.readDheader();
-        return self.pos + size;
+        return framing.readDheaderEnd(self.data, &self.pos, if (self.xcdr_version == .xcdr1) 8 else 4, self.byte_order);
     }
 
-    /// True while there are more EMHEADER-framed members to consume.
     pub fn mutableHasMore(self: *const CdrReader, end_pos: usize) bool {
-        return self.pos < end_pos;
+        return end_pos <= self.data.len and self.pos < end_pos;
     }
 
-    /// Skip the payload of an EMHEADER whose member_id is not recognized.
-    ///
-    /// For LC < 4 the payload is a fixed-size primitive: align then skip.
-    /// For LC >= 4 payload_bytes was read from NEXTINT; skip those bytes directly.
+    pub fn emheaderEnd(self: *const CdrReader, emh: EmHeader) !usize {
+        return framing.memberEnd(self.pos, self.data.len, if (self.xcdr_version == .xcdr1) 8 else 4, emh.lc, emh.payload_bytes);
+    }
+
     pub fn skipEmheaderPayload(self: *CdrReader, emh: EmHeader) !void {
-        if (emh.lc < 4) {
-            // Align to the primitive's natural size before skipping it.
-            self.alignPos(self.alignCap(emh.payload_bytes));
-        }
-        try self.skip(emh.payload_bytes);
+        try framing.skipMember(&self.pos, self.data.len, if (self.xcdr_version == .xcdr1) 8 else 4, emh.lc, emh.payload_bytes);
     }
 
     // ── PL_CDR (ParameterList) framing ────────────────────────────────────
@@ -1225,7 +1072,7 @@ pub const CdrReader = struct {
     /// caller reads the value and then calls `seekTo(p.end_pos)` to advance past
     /// any trailing padding.
     pub fn readPlParam(self: *CdrReader, mode: PlMode) !?PlParam {
-        if (self.pos + 4 > self.data.len) {
+        if (self.pos > self.data.len or self.data.len - self.pos < 4) {
             return switch (mode) {
                 .lenient => null,
                 .strict => error.MissingSentinel,
@@ -1235,14 +1082,12 @@ pub const CdrReader = struct {
         const len = try self.readU16();
         if (pid == 0x0001) return null; // PID_SENTINEL
         if (mode == .strict and len % 4 != 0) return error.MisalignedParameter;
-        const padded = ((@as(usize, len) + 3) / 4) * 4;
-        const end_pos = self.pos + padded;
-        if (end_pos > self.data.len) {
+        const end_pos = framing.parameterEnd(self.pos, len, self.data.len) catch {
             return switch (mode) {
                 .lenient => null,
                 .strict => error.TruncatedParameter,
             };
-        }
+        };
         return PlParam{
             .pid = pid,
             .byte_len = len,
@@ -1256,8 +1101,7 @@ pub const CdrReader = struct {
     /// Used by generated deserializers to advance to `p.end_pos` after
     /// processing (or skipping) a PL_CDR parameter value.
     pub fn seekTo(self: *CdrReader, abs_pos: usize) !void {
-        if (abs_pos > self.data.len) return error.EndOfStream;
-        self.pos = abs_pos;
+        try cursor.seek(&self.pos, self.data.len, abs_pos);
     }
 };
 
@@ -2412,4 +2256,14 @@ test "pl_cdr: @pl_repeated round-trip: mixed PID types" {
 
     try testing.expectEqualSlices(i32, &[_]i32{ 1, 2, 3 }, list_a.items);
     try testing.expectEqualSlices(i32, &[_]i32{ 100, 200 }, list_b.items);
+}
+
+test "key hash writer counters reject overflow before updating the digest" {
+    var writer = KeyHashWriter.init();
+    writer.len = std.math.maxInt(usize);
+    writer.pos = std.math.maxInt(usize);
+    try std.testing.expectError(error.Overflow, writer.writeBytes(&.{1}));
+    try std.testing.expectEqual(std.math.maxInt(usize), writer.len);
+    try std.testing.expectEqual(std.math.maxInt(usize), writer.pos);
+    try std.testing.expectEqualSlices(u8, &(@as([16]u8, @splat(0))), &writer.first16);
 }

@@ -4,6 +4,31 @@ import java.util.List;
 import java.util.ArrayList;
 
 public class Types {
+    private static void _cdrAlignKey(java.nio.ByteBuffer _buf, int _cdrBase, int _align) {
+        int _padding = (_align - (_buf.position() - _cdrBase) % _align) % _align;
+        for (int _i = 0; _i < _padding; _i++) _buf.put((byte)0);
+    }
+    private static void _cdrWriteWstring(java.nio.ByteBuffer _buf, int _cdrBase, String _s) {
+        if (_s.length() > Integer.MAX_VALUE / 2) throw new IllegalArgumentException("wide string length overflow");
+        _cdrAlignKey(_buf, _cdrBase, 4); _buf.putInt(_s.length() * 2);
+        for (int _i = 0; _i < _s.length(); _i++) _buf.putChar(_s.charAt(_i));
+    }
+    private static int _cdrWstringBytes(java.nio.ByteBuffer _buf, int _cdrBase) {
+        int _pad = (4 - (_buf.position() - _cdrBase) % 4) % 4;
+        if (_pad > _buf.remaining()) throw new java.nio.BufferUnderflowException();
+        _buf.position(_buf.position() + _pad); int _bytes = _buf.getInt();
+        if ((_bytes & 1) != 0) throw new IllegalArgumentException("odd wide string byte count");
+        if (_bytes < 0 || _bytes > _buf.remaining()) throw new java.nio.BufferUnderflowException();
+        return _bytes;
+    }
+    private static String _cdrReadWstring(java.nio.ByteBuffer _buf, int _cdrBase) {
+        int _bytes = _cdrWstringBytes(_buf, _cdrBase); char[] _units = new char[_bytes / 2];
+        for (int _i = 0; _i < _units.length; _i++) _units[_i] = _buf.getChar();
+        return new String(_units);
+    }
+    private static void _cdrSkipWstring(java.nio.ByteBuffer _buf, int _cdrBase) {
+        int _bytes = _cdrWstringBytes(_buf, _cdrBase); _buf.position(_buf.position() + _bytes);
+    }
     private static void _cdrAlign(java.nio.ByteBuffer _buf, int _cdrBase, int _align) {
         if (_align <= 1) return;
         int _p = (_buf.position() - _cdrBase) % _align;
@@ -43,11 +68,12 @@ public class Types {
         double _r = (double)_iv / Math.pow(10, _s); return _neg ? -_r : _r;
     }
 
-    private static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf) {
+    private static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf) { return _cdrComputeKeyHash(_buf, false); }
+    private static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf, boolean _forceMd5) {
         int _len = _buf.position();
         byte[] _key = new byte[_len];
         _buf.position(0); _buf.get(_key);
-        if (_len <= 16) {
+        if (!_forceMd5 && _len <= 16) {
             byte[] _out = new byte[16];
             System.arraycopy(_key, 0, _out, 0, _len);
             return _out;
@@ -124,6 +150,10 @@ public class Types {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
             _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
             _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
+        }
+        public void serializeKeyHolder(java.nio.ByteBuffer _buf, int _cdrBase) {
+            _cdrAlignKey(_buf, _cdrBase, 4); _buf.putInt(this.get_x());
+            _cdrAlignKey(_buf, _cdrBase, 4); _buf.putInt(this.get_y());
         }
     } // Point
 
@@ -351,9 +381,10 @@ public class Types {
             while (true) {
                 java.nio.ByteBuffer _buf = java.nio.ByteBuffer.allocate(_cap).order(java.nio.ByteOrder.BIG_ENDIAN);
                 try {
-                    serializeKeyFields(_buf, 0, 1);
-                    return _cdrComputeKeyHash(_buf);
+                    serializeKeyHolder(_buf, 0);
+                    return _cdrComputeKeyHash(_buf, KEY_HASH_FORCE_MD5);
                 } catch (java.nio.BufferOverflowException _e) {
+                    if (_cap > Integer.MAX_VALUE / 2) throw new IllegalArgumentException("canonical key exceeds Java buffer capacity", _e);
                     _cap *= 2;
                 }
             }
@@ -526,6 +557,10 @@ public class Types {
             }
             return _out;
         }
+        public static final boolean KEY_HASH_FORCE_MD5 = false;
+        public void serializeKeyHolder(java.nio.ByteBuffer _buf, int _cdrBase) {
+            _cdrAlignKey(_buf, _cdrBase, 4); _buf.putInt(this.get_id());
+        }
     } // Sample
 
     public static class Frame implements java.io.Serializable {
@@ -581,6 +616,14 @@ public class Types {
             } else {
                 _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
                 _cdrReadString(_buf, _cdrBase);
+            }
+        }
+        public void serializeKeyHolder(java.nio.ByteBuffer _buf, int _cdrBase) {
+            _cdrAlignKey(_buf, _cdrBase, 4); _buf.putInt(this.get_seq_num());
+            { String _keyString = this.get_topic();
+              byte[] _keyBytes = _keyString.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+              if (_keyBytes.length == Integer.MAX_VALUE) throw new IllegalArgumentException("string key length overflow");
+              _cdrAlignKey(_buf, _cdrBase, 4); _buf.putInt(_keyBytes.length + 1); _buf.put(_keyBytes); _buf.put((byte)0);
             }
         }
     } // Frame
@@ -672,9 +715,10 @@ public class Types {
             while (true) {
                 java.nio.ByteBuffer _buf = java.nio.ByteBuffer.allocate(_cap).order(java.nio.ByteOrder.BIG_ENDIAN);
                 try {
-                    serializeKeyFields(_buf, 0, 1);
-                    return _cdrComputeKeyHash(_buf);
+                    serializeKeyHolder(_buf, 0);
+                    return _cdrComputeKeyHash(_buf, KEY_HASH_FORCE_MD5);
                 } catch (java.nio.BufferOverflowException _e) {
+                    if (_cap > Integer.MAX_VALUE / 2) throw new IllegalArgumentException("canonical key exceeds Java buffer capacity", _e);
                     _cap *= 2;
                 }
             }
@@ -733,6 +777,10 @@ public class Types {
                 _cdrReadString(_buf, _cdrBase);
             }
             return _out;
+        }
+        public static final boolean KEY_HASH_FORCE_MD5 = false;
+        public void serializeKeyHolder(java.nio.ByteBuffer _buf, int _cdrBase) {
+            _cdrAlignKey(_buf, _cdrBase, 4); _buf.putInt(this.get_id());
         }
     } // Beacon
 

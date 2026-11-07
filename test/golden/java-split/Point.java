@@ -50,5 +50,9 @@ public class Point implements java.io.Serializable {
         _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
         _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
     }
+    public void serializeKeyHolder(java.nio.ByteBuffer _buf, int _cdrBase) {
+        _cdrAlignKey(_buf, _cdrBase, 4); _buf.putInt(this.get_x());
+        _cdrAlignKey(_buf, _cdrBase, 4); _buf.putInt(this.get_y());
+    }
 } // Point
 

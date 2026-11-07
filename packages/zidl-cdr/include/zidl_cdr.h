@@ -169,10 +169,8 @@ int zidl_cdr_write_fixed(ZidlCdrWriter *w, uint8_t digits, uint8_t scale, double
  * len = strlen(s); does not count the NUL terminator.
  */
 int zidl_cdr_write_string (ZidlCdrWriter *w, const char     *s, uint32_t len);
-/**
- * CDR wstring: writes u32 count (wchar count + 1 for NUL wchar), wchars, NUL wchar.
- * len = wchar count; does not count the NUL wchar.
- */
+/* Write len UTF-16 units as a byte-counted span, without NUL/BOM.
+ * Zero length is valid; input need not be terminated. */
 int zidl_cdr_write_wstring(ZidlCdrWriter *w, const uint16_t *s, uint32_t len);
 
 /* XCDR2 DHEADER framing */
@@ -183,6 +181,9 @@ int  zidl_cdr_write_dheader       (ZidlCdrWriter *w, uint32_t payload_size);
 int  zidl_cdr_reserve_dheader     (ZidlCdrWriter *w, size_t *out_offset);
 /** Patch a DHEADER reserved with zidl_cdr_reserve_dheader(). */
 void zidl_cdr_patch_dheader       (ZidlCdrWriter *w, size_t dheader_offset);
+/** Checked patch: INVALID for bad offsets, OVERFLOW for payload > UINT32_MAX.
+ * No bytes/counters change on failure; counting writers are checked too. */
+int zidl_cdr_patch_dheader_checked(ZidlCdrWriter *w, size_t dheader_offset);
 
 /**
  * On XCDR2: reserves a DHEADER and stores offset in *out_offset.
@@ -215,6 +216,9 @@ typedef struct ZidlCdrReader {
  * than 4 bytes.
  */
 int zidl_cdr_reader_init(ZidlCdrReader *r, const uint8_t *data, size_t data_len);
+/* Bound a stack copy at absolute end, retaining alignment origin 4.
+ * TRUNCATED on invalid bounds; out is unchanged on failure. */
+int zidl_cdr_reader_limit(const ZidlCdrReader *r, size_t end_pos, ZidlCdrReader *out);
 
 /* Primitives */
 int zidl_cdr_read_u8  (ZidlCdrReader *r, uint8_t   *out);
@@ -343,15 +347,12 @@ int zidl_cdr_read_string_zerocopy(ZidlCdrReader *r, const char **out, uint32_t *
  */
 int zidl_cdr_read_string (ZidlCdrReader *r, char     **out);
 
-/**
- * Allocating wstring read. Caller must free(*out) via zidl_cdr_free_wstr(),
- * not free() directly (see zidl_cdr_read_string's note).
- * *out is NUL-terminated (a trailing uint16_t 0 is appended after the chars).
- * *out_len = wchar count excluding the trailing NUL wchar.
- *
- * Returns ZIDL_CDR_INVALID if the decoded content contains a NUL wchar
- * before the final one — same reasoning as zidl_cdr_read_string.
- */
+/* Validate/skip an even UTF-16 byte span; interior NUL units are allowed.
+ * Truncation consumes only the length prefix. */
+int zidl_cdr_skip_wstring(ZidlCdrReader *r);
+
+/* Read UTF-16 with a local NUL sentinel; out_len excludes that sentinel.
+ * Rejects interior NUL; release with zidl_cdr_free_wstr, never free. */
 int zidl_cdr_read_wstring(ZidlCdrReader *r, uint16_t **out, uint32_t *out_len);
 
 /* XCDR2 framing */
@@ -376,6 +377,9 @@ typedef struct ZidlEmHeader {
 } ZidlEmHeader;
 
 int zidl_cdr_read_emheader(ZidlCdrReader *r, ZidlEmHeader *out);
+/* Return the aligned absolute member end, validating this reader's bound.
+ * Does not advance or confine values; use reader_limit for member windows. */
+int zidl_cdr_emheader_end(const ZidlCdrReader *r, const ZidlEmHeader *emh, size_t *out_end_pos);
 
 /* XCDR2 EMHEADER write support (for @mutable types) */
 
@@ -401,6 +405,8 @@ int zidl_cdr_reserve_emheader(ZidlCdrWriter *w, uint32_t member_id,
  */
 void zidl_cdr_patch_emheader(ZidlCdrWriter *w, size_t nextint_offset,
                               size_t payload_start);
+/** Checked EMHEADER patch; payload_start must immediately follow NEXTINT. */
+int zidl_cdr_patch_emheader_checked(ZidlCdrWriter *w, size_t nextint_offset, size_t payload_start);
 
 /* XCDR2 @mutable reader helpers */
 
@@ -447,10 +453,16 @@ int zidl_cdr_seek_to(ZidlCdrReader *r, size_t abs_pos);
 /** MD5 digest helper used for RTPS key hashes. */
 void zidl_md5(const uint8_t *data, size_t len, uint8_t out[16]);
 
-/**
- * RTPS key hash rule: serialized key <= 16 bytes is zero-padded, otherwise
- * MD5(serialized key) is returned.
- */
+/** Type-aware canonical hash: force_md5 is true when the key-holder type's
+ * maximum encoded size exceeds 16 bytes (including unbounded types). */
+void zidl_cdr_compute_key_hash_for_type(const uint8_t *key, size_t len, bool force_md5, uint8_t out[16]);
+/** Canonical UTF-16 value: byte length, no terminator. Writer order applies. */
+int zidl_cdr_write_key_wstring(ZidlCdrWriter *w, const uint16_t *value, uint32_t len);
+/** Begin the same value when a language adapter writes code units itself. */
+int zidl_cdr_write_key_wstring_length(ZidlCdrWriter *w, uint32_t len);
+
+/** Compatibility helper: chooses from the current byte length, without schema
+ * information. Regenerated codecs use the type-aware helper above. */
 void zidl_cdr_compute_key_hash(const uint8_t *serialized_key, size_t len, uint8_t out[16]);
 
 /* ── PL_CDR (ParameterList CDR) writer ──────────────────────────────────── */

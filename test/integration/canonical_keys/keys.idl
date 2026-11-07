@@ -1,0 +1,48 @@
+module Canonical {
+    struct Align { @key octet a; @key unsigned long long b; };
+    @mutable struct Nested { @key long m_long; long u; long w; };
+    @mutable struct Example {
+        @id(40) @key string<12> label;
+        @id(30) @key Nested m_nested;
+        @id(20) long x;
+        @id(10) long y;
+    };
+    @appendable struct Bounded16 { @key string<11> text; };
+    struct Bounded17 { @key string<12> text; };
+    struct Unbounded { @key string text; };
+    struct Seq16 { @key sequence<octet,12> values; };
+    struct Seq17 { @key sequence<octet,13> values; };
+    struct InnerNoKeys { @id(8) octet hi; @id(3) unsigned short lo; };
+    struct UnkeyedNested { @key InnerNoKeys inner; };
+    struct ArrayKey { @key Nested values[2]; };
+    struct SeqAgg { @key sequence<Nested,2> values; };
+    @mutable union Choice switch (long) { case 0: octet small; case 1: string<20> big; };
+    struct UnionKey { @key Choice selection; };
+    struct Wide16 { @key wstring<6> text; };
+    struct Wide17 { @key wstring<7> text; };
+    struct Base { @id(20) @key long base_value; };
+    struct Derived : Base { @id(10) @key octet value; };
+};
+
+module Canonical {
+    @mutable struct Sequential {
+        @id(8) @key octet a;
+        @key long b;
+        @id(2) @key octet c;
+        @key long d;
+    };
+    @autoid(HASH) @mutable struct Hashed {
+        @key octet color;
+        @hashid("shapesize") @key long size;
+    };
+    struct AutoBase { @id(9) @key long base_value; @id(3) @key octet tail; };
+    struct AutoDerived : AutoBase { @key long value; };
+    @mutable union IdChoice switch (long) { @id(10) case 1: long first; default: long other; };
+    struct UnionDefault { @key IdChoice selection; };
+};
+module Canonical { struct WideSeq { @key sequence<wstring<8>,2> values; }; };
+
+module Canonical {
+    struct SelectedInner { long ignored; @key long id; };
+    struct SelectedOuter { @key SelectedInner inner; @key long tail; };
+};

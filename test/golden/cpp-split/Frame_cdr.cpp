@@ -4,6 +4,17 @@
 #include "zidl_cdr.h"
 #include <cstring>
 
+int Frame_serialize_key_holder(ZidlCdrWriter *_w, const ::Frame *_v) {
+    (void)_w; (void)_v;
+    int _rc = ZIDL_CDR_OK;
+    _rc = zidl_cdr_write_u32(_w, _v->seq_num);
+    if (_rc) return _rc;
+    if (_v->topic.size() >= UINT32_MAX) return ZIDL_CDR_OVERFLOW;
+    _rc = zidl_cdr_write_string(_w, _v->topic.c_str(), (uint32_t)_v->topic.size());
+    if (_rc) return _rc;
+    return _rc;
+}
+
 int Frame_serialize(ZidlCdrWriter *_w, const ::Frame *_v) {
     int _rc;
     size_t _dh;
@@ -13,14 +24,27 @@ int Frame_serialize(ZidlCdrWriter *_w, const ::Frame *_v) {
     if (_rc) return _rc;
     _rc = zidl_cdr_write_string(_w, _v->topic.c_str(), (uint32_t)_v->topic.size());
     if (_rc) return _rc;
-    zidl_cdr_patch_dheader_maybe(_w, _dh);
+    if (_dh != (size_t)-1) { _rc = zidl_cdr_patch_dheader_checked(_w, _dh); if (_rc) return _rc; }
     return ZIDL_CDR_OK;
 }
 
+static int Frame_deserialize_bounded_impl(ZidlCdrReader *_r, ::Frame *_v);
 int Frame_deserialize(ZidlCdrReader *_r, ::Frame *_v) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Frame_deserialize_bounded_impl(&_local, _v);
+    _r->pos = !_rc && (_r->xcdr_version == ZIDL_XCDR2) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Frame_deserialize_bounded_impl(ZidlCdrReader *_r, ::Frame *_v) {
     int _rc;
-    _rc = zidl_cdr_skip_dheader_if_xcdr2(_r);
-    if (_rc) return _rc;
+    if (_r->xcdr_version == ZIDL_XCDR2) {
+        size_t _body_end;
+        _rc = zidl_cdr_read_mutable_dheader(_r, &_body_end);
+        if (_rc) return _rc;
+        _rc = zidl_cdr_reader_limit(_r, _body_end, _r);
+        if (_rc) return _rc;
+    }
     _rc = zidl_cdr_read_u32(_r, &_v->seq_num);
     if (_rc) return _rc;
     { const char *_sp; uint32_t _sl;
@@ -31,7 +55,15 @@ int Frame_deserialize(ZidlCdrReader *_r, ::Frame *_v) {
     return ZIDL_CDR_OK;
 }
 
+static int Frame_skip_bounded_impl(ZidlCdrReader *_r);
 int Frame_skip(ZidlCdrReader *_r) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Frame_skip_bounded_impl(&_local);
+    _r->pos = !_rc && (0) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Frame_skip_bounded_impl(ZidlCdrReader *_r) {
     int _rc;
     if (_r->xcdr_version == ZIDL_XCDR2) {
         uint32_t _size;
