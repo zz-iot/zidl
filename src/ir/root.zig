@@ -19,6 +19,7 @@ pub const TypeDecl = types.TypeDecl;
 pub const TypeRef = types.TypeRef;
 pub const Extensibility = types.Extensibility;
 pub const TypeAnnotations = types.TypeAnnotations;
+pub const AutoId = types.AutoId;
 pub const MemberAnnotations = types.MemberAnnotations;
 pub const EnumAnnotations = types.EnumAnnotations;
 pub const RawAnnotation = types.RawAnnotation;

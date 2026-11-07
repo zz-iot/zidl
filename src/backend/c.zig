@@ -1478,9 +1478,9 @@ fn lcForCTypeRef(type_ref: ir.TypeRef, dimensions: []const u64) ?u2 {
     };
 }
 
-/// XTYPES member ID for a struct member (from @id annotation or declaration index).
+/// Resolved XTypes ID; index supports manually constructed IR.
 fn memberIdAtC(m: ir.StructMember, idx: usize) u32 {
-    return if (m.annotations.id) |id| id else @intCast(idx);
+    return m.annotations.memberId(@intCast(idx));
 }
 
 /// Returns the sequential index of `s.members[target_idx]` among optional
@@ -3354,7 +3354,7 @@ const CdrGenerator = struct {
                     has_default_m = true;
                     continue;
                 }
-                const case_member_id: u32 = if (cas.annotations.id) |id| id else @intCast(cas_idx + 1);
+                const case_member_id: u32 = cas.annotations.memberId(@intCast(cas_idx + 1));
                 try self.emitUnionCaseLabelLinesC(u.discriminant, cas);
                 self.indent_depth += 1;
                 const access = try std.fmt.allocPrint(self.alloc, "_v->_u.{s}", .{cas.name});

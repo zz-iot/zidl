@@ -669,7 +669,7 @@ const Generator = struct {
             self.depth += 1;
             for (u.cases, 0..) |cas, cas_idx| {
                 if (isDefaultUnionCase(cas)) continue;
-                const case_mid: u32 = if (cas.annotations.id) |id| id else @intCast(cas_idx + 1);
+                const case_mid: u32 = cas.annotations.memberId(@intCast(cas_idx + 1));
                 const case_lc = lcForJavaTypeRef(cas.type_ref, cas.dimensions);
                 const case_vword: u32 = 0x4000_0000 | case_mid; // LC=4
                 const case_fword: u32 = if (case_lc) |lc| (@as(u32, lc) << 28) | case_mid else case_vword;
@@ -702,7 +702,7 @@ const Generator = struct {
                 break :blk null;
             };
             if (default_case_mu) |dc| {
-                const dc_mid: u32 = if (dc.annotations.id) |id| id else 0xFFFF_FFFF;
+                const dc_mid: u32 = dc.annotations.memberId(0xFFFF_FFFF);
                 const dc_lc = lcForJavaTypeRef(dc.type_ref, dc.dimensions);
                 const dc_vword: u32 = 0x4000_0000 | dc_mid;
                 const dc_fword: u32 = if (dc_lc) |lc| (@as(u32, lc) << 28) | dc_mid else dc_vword;
@@ -3362,7 +3362,7 @@ fn lcForJavaTypeRef(type_ref: ir.TypeRef, dimensions: []const u64) ?u2 {
 /// Return the XTYPES member ID for a struct member.
 /// Uses the `@id` annotation if present; otherwise the declaration index.
 fn memberIdAtJava(m: ir.StructMember, idx: usize) u32 {
-    return if (m.annotations.id) |id| id else @intCast(idx);
+    return m.annotations.memberId(@intCast(idx));
 }
 
 fn typeDeclHasKeyJava(td: ir.TypeDecl) bool {
