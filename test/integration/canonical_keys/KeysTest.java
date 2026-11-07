@@ -79,8 +79,36 @@ public final class KeysTest {
         } catch(InvocationTargetException e) { check(!ok && e.getCause() instanceof RuntimeException,"key frame failure"); }
         check(buf.limit()==limit,"key frame restores parent limit");
     }
+    static void selectedNestedKeys() throws Exception {
+        Object inner=value("SelectedInner"); set(inner,"ignored",99); set(inner,"id",42);
+        Object outer=value("SelectedOuter"); set(outer,"inner",inner); set(outer,"tail",7);
+        byte[] expected=hex("0000002a000000070000000000000000");
+        for (int version=1;version<=2;version++) {
+            ByteBuffer buf=ByteBuffer.allocate(64).order(ByteOrder.LITTLE_ENDIAN);
+            buf.put(new byte[]{0,(byte)(version==1 ? 1 : 7),0,0});
+            outer.getClass().getMethod("serialize",ByteBuffer.class,int.class,int.class).invoke(outer,buf,4,version);
+            byte[] full=Arrays.copyOf(buf.array(),buf.position());
+            buf.flip(); buf.position(4);
+            Object selected=type("SelectedOuter").getMethod("deserializeSelected",ByteBuffer.class,int.class,int.class,long.class).invoke(null,buf,4,version,3L);
+            Object nested=selected.getClass().getMethod("get_inner").invoke(selected);
+            check(nested.getClass().getMethod("get_id").invoke(nested).equals(42),"selected nested key");
+            check(selected.getClass().getMethod("get_tail").invoke(selected).equals(7),"selected trailing key");
+            check(buf.position()==buf.limit() && Arrays.equals(hash(selected),expected),"selected full-sample extent/hash");
+            byte[] fromFull=(byte[])type("SelectedOuter").getMethod("computeKeyHashFromCdr",byte[].class).invoke(null,(Object)full);
+            check(Arrays.equals(fromFull,expected),"nested full-sample hash");
+
+            buf.clear(); buf.put(new byte[]{0,(byte)(version==1 ? 1 : 7),0,0});
+            outer.getClass().getMethod("serializeKey",ByteBuffer.class,int.class,int.class).invoke(outer,buf,4,version);
+            buf.flip(); buf.position(4);
+            Object key=type("SelectedOuter").getMethod("deserializeKey",ByteBuffer.class,int.class,int.class).invoke(null,buf,4,version);
+            nested=key.getClass().getMethod("get_inner").invoke(key);
+            check(nested.getClass().getMethod("get_ignored").invoke(nested).equals(0),"nested key-only projection");
+            check(buf.position()==buf.limit() && Arrays.equals(hash(key),expected),"nested key-only extent/hash");
+        }
+    }
     public static void main(String[] args) throws Exception {
         prefix = args[1];
+        selectedNestedKeys();
         for (String line : Files.readAllLines(Paths.get(args[0]))) {
             String[] parts = line.trim().split(" +");
             if (parts.length == 4) vectors.put(parts[0], parts);

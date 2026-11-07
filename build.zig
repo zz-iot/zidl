@@ -592,7 +592,7 @@ pub fn build(b: *std.Build) void {
                 const compile_java = b.addSystemCommand(&.{ maybe_javac.?, "-Xlint:unchecked", "-Werror", "-d" });
                 const classes = compile_java.addOutputDirectoryArg(if (split) "canonical-keys-java-split-classes" else "canonical-keys-java-classes");
                 if (split) {
-                    for ([_][]const u8{ "KeysCdrUtils", "Align", "Nested", "Example", "Bounded16", "Bounded17", "Unbounded", "Seq16", "Seq17", "InnerNoKeys", "UnkeyedNested", "ArrayKey", "SeqAgg", "Choice", "UnionKey", "Wide16", "Wide17", "Base", "Derived", "Sequential", "Hashed", "AutoBase", "AutoDerived", "IdChoice", "UnionDefault", "WideSeq" }) |name| {
+                    for ([_][]const u8{ "KeysCdrUtils", "Align", "Nested", "Example", "Bounded16", "Bounded17", "Unbounded", "Seq16", "Seq17", "InnerNoKeys", "UnkeyedNested", "ArrayKey", "SeqAgg", "Choice", "UnionKey", "Wide16", "Wide17", "Base", "Derived", "Sequential", "Hashed", "AutoBase", "AutoDerived", "IdChoice", "UnionDefault", "WideSeq", "SelectedInner", "SelectedOuter" }) |name| {
                         compile_java.addFileArg(generated.path(b, b.fmt("{s}.java", .{name})));
                     }
                 } else compile_java.addFileArg(generated.path(b, "Keys.java"));

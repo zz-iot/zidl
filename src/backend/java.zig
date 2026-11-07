@@ -2273,6 +2273,7 @@ const Generator = struct {
             try self.ind();
             try self.write("}\n");
 
+            self.wire_key = previous_wire_key;
             try self.emitGetFieldFromCdr(s);
             try self.emitSelectiveFnsJava(s, appendable);
         } else if (self.opts.generate_zzdds_wrappers and isZzddsTopicStructJava(s)) {
