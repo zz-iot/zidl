@@ -171,3 +171,35 @@ test "selected readers preserve enclosing limits and skip future appendable fiel
     try testing.expect(reader.pos <= 10);
     try testing.expectEqual(bytes.len, reader.data.len);
 }
+
+test "selected nested keys read full samples while key-only reads retain projection" {
+    const value: fixture.KeyOuter = .{ .inner = .{ .ignored = 99, .id = 42 }, .tail = 7 };
+    const allocator = testing.allocator;
+    const expected = try fixture.KeyOuter.computeKeyHashChecked(&value);
+    inline for (.{ .xcdr1, .xcdr2 }) |version| {
+        var bytes = std.ArrayListUnmanaged(u8).empty;
+        defer bytes.deinit(allocator);
+        var writer = zidl_rt.CdrWriter(version).init(&bytes, allocator);
+        try writer.writeEncapHeader();
+        try fixture.KeyOuter.serialize(&writer, value);
+        var reader = try zidl_rt.CdrReader.init(bytes.items);
+        var selected: fixture.KeyOuter = .{};
+        try fixture.KeyOuter.deserializeSelected(&reader, fixture.KeyOuter.KEY_FIELD_MASK, &selected, allocator);
+        try testing.expectEqual(@as(i32, 42), selected.inner.id);
+        try testing.expectEqual(@as(i32, 7), selected.tail);
+        try testing.expectEqual(bytes.items.len, reader.pos);
+        try testing.expectEqual(expected, fixture.KeyOuter.computeKeyHashFromCdr(@ptrCast(@constCast(&allocator)), bytes.items));
+
+        bytes.clearRetainingCapacity();
+        writer = zidl_rt.CdrWriter(version).init(&bytes, allocator);
+        try writer.writeEncapHeader();
+        try fixture.KeyOuter.serializeKey(&writer, value);
+        reader = try zidl_rt.CdrReader.init(bytes.items);
+        var key: fixture.KeyOuter = .{};
+        try fixture.KeyOuter.deserializeKeyInto(&key, &reader, allocator);
+        try testing.expectEqual(@as(i32, 0), key.inner.ignored);
+        try testing.expectEqual(@as(i32, 42), key.inner.id);
+        try testing.expectEqual(@as(i32, 7), key.tail);
+        try testing.expectEqual(bytes.items.len, reader.pos);
+    }
+}

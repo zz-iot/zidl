@@ -12,3 +12,10 @@ module Validation {
     @mutable union MutUnion switch (long) { case 0: long value; };
     struct UnionParent { MutUnion inner; long tail; };
 };
+
+module Validation {
+    @bit_bound(8) enum Small { S0, S1 };
+    @bit_bound(16) enum Medium { M0, M1 };
+    @mutable struct Narrow { Small first; Medium second; long tail; };
+    @mutable struct NarrowLast { Small only; };
+};

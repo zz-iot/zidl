@@ -73,13 +73,23 @@ static void load(const char *path) {
     } \
 } while (0)
 
+static FILE *open_sibling(const char *path, const char *name) {
+    char sibling[4096];
+    const char *slash=strrchr(path,'/');
+#ifdef _WIN32
+    const char *backslash=strrchr(path,'\\');
+    if (backslash && (!slash || backslash>slash)) slash=backslash;
+#endif
+    size_t prefix=slash ? (size_t)(slash-path+1) : 0;
+    assert(prefix+strlen(name)+1 <= sizeof sibling);
+    memcpy(sibling,path,prefix); strcpy(sibling+prefix,name);
+    FILE *file=fopen(sibling,"r"); assert(file);
+    return file;
+}
+
 static Vector wire_vectors[3];
 static void load_wire(const char *path) {
-    char sibling[4096]; const char *slash=strrchr(path,'/');
-    size_t prefix=slash ? (size_t)(slash-path+1) : 0;
-    assert(prefix+sizeof "wire_ids.txt" < sizeof sibling);
-    memcpy(sibling,path,prefix); strcpy(sibling+prefix,"wire_ids.txt");
-    FILE *file=fopen(sibling,"r"); assert(file);
+    FILE *file=open_sibling(path,"wire_ids.txt");
     for (size_t i=0;i<3;i++) {
         char bytes[1025]; assert(fscanf(file,"%63s %1024s",wire_vectors[i].name,bytes)==2);
         wire_vectors[i].len=hex_bytes(bytes,wire_vectors[i].bytes);
@@ -95,11 +105,7 @@ static void load_wire(const char *path) {
 } while(0)
 
 static void wide_wire(const char *path) {
-    char sibling[4096]; const char *slash=strrchr(path,'/');
-    size_t prefix=slash ? (size_t)(slash-path+1) : 0;
-    assert(prefix+sizeof "wide_wire.txt" < sizeof sibling);
-    memcpy(sibling,path,prefix); strcpy(sibling+prefix,"wide_wire.txt");
-    FILE *file=fopen(sibling,"r"); assert(file);
+    FILE *file=open_sibling(path,"wide_wire.txt");
     char name[16],hex[1025]; int version,order;
     while (fscanf(file,"%15s %d %d %1024s",name,&version,&order,hex)==4) {
         uint8_t expected[512],hash[16]; size_t len=hex_bytes(hex,expected);
@@ -149,11 +155,7 @@ typedef struct { char name[64]; unsigned order; uint8_t bytes[512],hash[16]; siz
 static KeyVector key_vectors[16];
 static size_t key_vector_count;
 static void load_key(const char *path) {
-    char sibling[4096]; const char *slash=strrchr(path,'/');
-    size_t prefix=slash ? (size_t)(slash-path+1) : 0;
-    assert(prefix+sizeof "key_wire.txt" < sizeof sibling);
-    memcpy(sibling,path,prefix); strcpy(sibling+prefix,"key_wire.txt");
-    FILE *file=fopen(sibling,"r"); assert(file);
+    FILE *file=open_sibling(path,"key_wire.txt");
     char name[64],hex[1025],hash[33]; unsigned order;
     while(fscanf(file,"%63s %u %1024s %32s",name,&order,hex,hash)==4) {
         assert(key_vector_count<16); KeyVector *v=&key_vectors[key_vector_count++];

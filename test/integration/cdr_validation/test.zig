@@ -148,3 +148,43 @@ test "mutable union windows bound both discriminant and active case" {
     bytes[11] = 0; // LC0 declares one byte for a 4-byte discriminant.
     try truncated(V.UnionParent, &bytes, 13);
 }
+
+test "mutable narrow enum windows match emitted widths in either byte order" {
+    for ([_]rt.ByteOrder{ .little, .big }) |order| {
+        var bytes = std.ArrayListUnmanaged(u8).empty;
+        defer bytes.deinit(std.testing.allocator);
+        var writer = rt.PrimitiveWriter.initDynamic(&bytes, std.testing.allocator, .four, order);
+        try writer.writeBytes(&.{ 0, if (order == .little) 11 else 10, 0, 0 });
+        writer.resetPayload();
+        try V.NarrowLast.serialize(&writer, .{ .only = .S1 });
+        const expected = if (order == .little)
+            &[_]u8{ 0, 11, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 1 }
+        else
+            &[_]u8{ 0, 10, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 1 };
+        try std.testing.expectEqualSlices(u8, expected, bytes.items);
+        var reader = try rt.CdrReader.init(bytes.items);
+        var last: V.NarrowLast = .{};
+        try V.NarrowLast.deserializeInto(&last, &reader, std.testing.allocator);
+        try std.testing.expectEqual(V.Small.S1, last.only);
+        try std.testing.expectEqual(bytes.items.len, reader.pos);
+        reader = try rt.CdrReader.init(bytes.items);
+        try V.NarrowLast.skip(&reader);
+        try std.testing.expectEqual(bytes.items.len, reader.pos);
+
+        bytes.clearRetainingCapacity();
+        writer = rt.PrimitiveWriter.initDynamic(&bytes, std.testing.allocator, .four, order);
+        try writer.writeBytes(&.{ 0, if (order == .little) 11 else 10, 0, 0 });
+        writer.resetPayload();
+        try V.Narrow.serialize(&writer, .{ .first = .S1, .second = .M1, .tail = 7 });
+        reader = try rt.CdrReader.init(bytes.items);
+        var out: V.Narrow = .{};
+        try V.Narrow.deserializeInto(&out, &reader, std.testing.allocator);
+        try std.testing.expectEqual(V.Small.S1, out.first);
+        try std.testing.expectEqual(V.Medium.M1, out.second);
+        try std.testing.expectEqual(@as(i32, 7), out.tail);
+        try std.testing.expectEqual(bytes.items.len, reader.pos);
+        reader = try rt.CdrReader.init(bytes.items);
+        try V.Narrow.skip(&reader);
+        try std.testing.expectEqual(bytes.items.len, reader.pos);
+    }
+}

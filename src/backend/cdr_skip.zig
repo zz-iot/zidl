@@ -54,6 +54,11 @@ pub fn typeRefPrimWireSize(tr: ir.TypeRef) ?usize {
     };
 }
 
+pub fn enumLengthCode(bound: ?u16) u2 {
+    const b = bound orelse 32;
+    return if (b <= 8) 0 else if (b <= 16) 1 else if (b <= 32) 2 else 3;
+}
+
 fn bitBoundWidth(bound: ?u16) usize {
     const b = bound orelse 32;
     return if (b <= 8) 1 else if (b <= 16) 2 else if (b <= 32) 4 else 8;

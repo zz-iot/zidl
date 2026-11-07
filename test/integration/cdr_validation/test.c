@@ -239,7 +239,55 @@ static void frame_boundaries(void) {
     zidl_cdr_set_allocator(NULL);
 }
 
+#ifdef __cplusplus
+typedef Validation::Small Small;
+typedef Validation::Medium Medium;
+typedef Validation::Narrow Narrow;
+typedef Validation::NarrowLast NarrowLast;
+#else
+typedef Validation_Small Small;
+typedef Validation_Medium Medium;
+typedef Validation_Narrow Narrow;
+typedef Validation_NarrowLast NarrowLast;
+#endif
+
+static void narrow_enums(void) {
+    for (int order=ZIDL_CDR_LE; order<=ZIDL_CDR_BE; order++) {
+        uint8_t bytes[64], expected[]={0,11,0,0,5,0,0,0,0,0,0,0,1};
+        expected[1]=(order==ZIDL_CDR_LE ? 11 : 10);
+        expected[4]=(order==ZIDL_CDR_LE ? 5 : 0);
+        expected[7]=(order==ZIDL_CDR_LE ? 0 : 5);
+        NarrowLast last=INIT, decoded_last=INIT;
+        last.only=(Small)1;
+        ZidlCdrWriter w;
+        zidl_cdr_writer_init_fixed(&w,bytes,sizeof bytes,ZIDL_XCDR2);
+        zidl_cdr_writer_set_byte_order(&w,order);
+        assert(zidl_cdr_write_encap_kind(&w,ZIDL_EXT_MUTABLE)==0);
+        assert(Validation_NarrowLast_serialize(&w,&last)==0);
+        assert(w.len==sizeof expected && !memcmp(bytes,expected,sizeof expected));
+        ZidlCdrReader r;
+        assert(zidl_cdr_reader_init(&r,bytes,w.len)==0);
+        assert(Validation_NarrowLast_deserialize(&r,&decoded_last)==0);
+        assert(decoded_last.only==last.only && r.pos==w.len);
+        assert(zidl_cdr_reader_init(&r,bytes,w.len)==0);
+        assert(Validation_NarrowLast_skip(&r)==0 && r.pos==w.len);
+
+        Narrow value=INIT, decoded=INIT;
+        value.first=(Small)1; value.second=(Medium)1; value.tail=7;
+        zidl_cdr_writer_init_fixed(&w,bytes,sizeof bytes,ZIDL_XCDR2);
+        zidl_cdr_writer_set_byte_order(&w,order);
+        assert(zidl_cdr_write_encap_kind(&w,ZIDL_EXT_MUTABLE)==0);
+        assert(Validation_Narrow_serialize(&w,&value)==0);
+        assert(zidl_cdr_reader_init(&r,bytes,w.len)==0);
+        assert(Validation_Narrow_deserialize(&r,&decoded)==0);
+        assert(decoded.first==value.first && decoded.second==value.second && decoded.tail==7 && r.pos==w.len);
+        assert(zidl_cdr_reader_init(&r,bytes,w.len)==0);
+        assert(Validation_Narrow_skip(&r)==0 && r.pos==w.len);
+    }
+}
+
 int main(void) {
+    narrow_enums();
     patches();
     wide_strings();
     frame_boundaries();

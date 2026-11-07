@@ -39,6 +39,7 @@ const ir = @import("../ir/root.zig");
 const interface = @import("interface.zig");
 const zig_to = @import("zig_typeobject.zig");
 const canonical = @import("canonical_key.zig");
+const cdr_skip = @import("cdr_skip.zig");
 
 // ── Public backend struct ─────────────────────────────────────────────────────
 
@@ -4116,6 +4117,7 @@ const Generator = struct {
             try self.ind();
             try self.write("    }\n");
 
+            self.wire_key = previous_wire_key;
             if (self.opts.generate_zzdds_wrappers and isZzddsTopicStruct(s)) {
                 try self.emitComputeKeyHashFromCdr(s);
                 try self.emitComputeKeyHashFromCdrKeyOnly(s);
@@ -7818,8 +7820,7 @@ fn lcForTypeRef(type_ref: ir.TypeRef, dimensions: []const u64) ?u2 {
             else => null,
         },
         .named => |td| switch (td) {
-            // Enums serialize as uint32_t (4 bytes) → LC=2.
-            .enum_ => 2,
+            .enum_ => |e| cdr_skip.enumLengthCode(e.annotations.bit_bound),
             // Everything else (struct, union, bitmask, bitset, typedef, …) → LC=4.
             else => null,
         },

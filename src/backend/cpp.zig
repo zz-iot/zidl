@@ -7218,7 +7218,7 @@ fn lcForCppTypeRef(type_ref: ir.TypeRef, dimensions: []const u64) ?u2 {
             else => null,
         },
         .named => |td| switch (td) {
-            .enum_ => 2,
+            .enum_ => |e| cdr_skip.enumLengthCode(e.annotations.bit_bound),
             else => null,
         },
         else => null,
