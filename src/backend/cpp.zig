@@ -5119,13 +5119,13 @@ const ConcreteImplGenerator = struct {
                             else => {},
                         }
                     }
-                    // A set_listener that fails installs no listener, so the
-                    // core never releases the registration built for it. Only
-                    // set_listener has a known zero-means-success contract:
-                    // another op's nonzero return may well mean success, and
-                    // releasing then would free a listener the core still
-                    // holds.
-                    if (isListenerSetterOp(op) and op.return_type != null) for (op.params) |p| {
+                    // A listener setter that fails installs no listener, so
+                    // the core never releases the registration built for it.
+                    // Only listener setters have a known zero-means-success
+                    // contract (`interface.isListenerSetterOp`): another op's
+                    // nonzero return may well mean success, and releasing
+                    // then would free a listener the core still holds.
+                    if (interface.isListenerSetterOp(op)) for (op.params) |p| {
                         if (paramAdaptKind(p) != .listener_in) continue;
                         const bridge_name = try self.listenerBridgeName(p.type_ref);
                         defer self.alloc.free(bridge_name);
@@ -6479,21 +6479,6 @@ fn listenerTypeOf(ops: []const OwnedOperation) ?ir.TypeRef {
         }
     }
     return null;
-}
-
-/// True when `op` is a `set_listener` whose first parameter is an `in`
-/// callback interface, whether or not the interface has a `get_listener`.
-fn isListenerSetterOp(op: *const ir.Operation) bool {
-    if (!std.mem.eql(u8, op.name, "set_listener") or op.params.len == 0) return false;
-    const p0 = op.params[0];
-    if (p0.mode != .in_) return false;
-    return switch (p0.type_ref) {
-        .named => |td| switch (td) {
-            .interface => |iface| isCallbackIface(iface),
-            else => false,
-        },
-        else => false,
-    };
 }
 
 fn cNameOf(alloc: std.mem.Allocator, qname: []const u8) ![]u8 {
@@ -10123,6 +10108,24 @@ test "cpp_backend: a rejected set_listener releases its listener without a get_l
     const src = res.src.items;
     try testing.expect(has(src, "if (_rc != 0 && _lp_a_listener) ::DDS::FooListenerBase::release_c_listener(_l_a_listener.listener_data);"));
     try testing.expect(!has(src, "listener_ = a_listener;"));
+}
+
+test "cpp_backend: a rejected set_listener_<suffix> releases its listener" {
+    var res = try testGenConcreteImpl(
+        \\module DDS {
+        \\    @callback interface FooListener { void on_foo(); };
+        \\    @callback interface FooListenerEx : FooListener { void on_foo_ex(); };
+        \\    interface Foo {
+        \\        long set_listener_ex(in FooListenerEx a_listener, in long mask);
+        \\        long set_listeners(in FooListener a_listener);
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "if (_rc != 0 && _lp_a_listener) ::DDS::FooListenerExBase::release_c_listener(_l_a_listener.listener_data);"));
+    // Only `set_listener` and `set_listener_<suffix>` are setters.
+    try testing.expect(!has(src, "::DDS::FooListenerBase::release_c_listener(_l_a_listener.listener_data)"));
 }
 
 test "cpp_backend: only set_listener releases its listener on a nonzero return" {

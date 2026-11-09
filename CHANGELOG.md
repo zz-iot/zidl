@@ -18,6 +18,11 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- C++ and Java: a listener setter that fails, `set_listener` or a `set_listener_<suffix>`
+  variant such as zzdds's `set_listener_ex`, releases the listener registration it built.
+  C++ already did this for `set_listener` alone; Java did it for neither, so a rejected
+  call kept its Java listener alive.
+
 - Add optional `--handle-retire-query` support for C++ and Java bindings so late
   callbacks cannot recreate wrappers after logical deletion. Add runtime box
   retirement state and idempotent notification, separate from memory cleanup.

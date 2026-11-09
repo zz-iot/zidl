@@ -541,6 +541,26 @@ pub fn isCallbackInterface(iface: *const ir.Interface) bool {
     return ir.isCallbackInterface(iface);
 }
 
+/// True when `op` is a listener setter with a return code: `set_listener`, or
+/// one of its `set_listener_<suffix>` variants (zzdds's `set_listener_ex`),
+/// whose first parameter is an `in` callback interface. Its zero return means
+/// it installed the listener; any other means it installed nothing, so the
+/// caller still owns the registration it built. No other op's return code
+/// has a known meaning.
+pub fn isListenerSetterOp(op: *const ir.Operation) bool {
+    if (op.return_type == null or op.params.len == 0) return false;
+    if (!std.mem.eql(u8, op.name, "set_listener") and !std.mem.startsWith(u8, op.name, "set_listener_")) return false;
+    const p0 = op.params[0];
+    if (p0.mode != .in_) return false;
+    return switch (p0.type_ref) {
+        .named => |td| switch (td) {
+            .interface => |iface| isCallbackInterface(iface),
+            else => false,
+        },
+        else => false,
+    };
+}
+
 /// Thin re-export of the canonical `ir.hasSharedCAbiBox`, for the same reason
 /// as `isCallbackInterface` above.
 pub fn hasSharedCAbiBox(iface: *const ir.Interface) bool {
