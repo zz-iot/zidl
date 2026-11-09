@@ -241,24 +241,21 @@ test blocks are discovered by `zig build test`.
 
 ---
 
-## packages/zidl-rt/
+## Native runtime packages
 
-Zig CDR runtime. `src/cdr.zig` — see `docs/runtime_libraries.md`.
-`src/root.zig` — re-exports `CdrWriter`, `CdrReader`, `BoundedArray`, constants.
-Includes `KeyHashWriter`, a canonical RTPS key-hash writer that emits PLAIN_CDR2
-big-endian bytes, keeps the first 16 bytes, and streams the full key into MD5.
+- `packages/zidl-cdr/` owns the Zig codec and builds the stable C ABI archive.
+  Generated C/C++ code links that archive; building it from source requires Zig.
+- `packages/zidl-bindings/` owns allocators, owned values, authoring support and
+  entity handles, with a one-way dependency on the codec.
+- `packages/zidl-rt/` is a temporary root façade pending zzdds migration.
 
-**Tests:** 61 (comprehensive CDR round-trip tests, including PL_CDR and key-hash tests).
+Generated Zig code imports `zidl_cdr` and `zidl_bindings` directly. Native suites
+cover 87 codec, 15 binding and three alias/registry tests. C ABI tests and the
+independent C reference live in `packages/zidl-cdr/c-api/` and cover 103 contracts.
+Agreement between adapters alone is not independent wire-format validation;
+known-answer vectors and the separate C reference remain in use.
 
----
-
-## packages/zidl-cdr/
-
-Standalone C99 CDR library. `include/zidl_cdr.h` + `src/zidl_cdr.c`.
-See `docs/runtime_libraries.md` and `docs/xcdr_encoding.md` for API reference.
-Includes `zidl_md5` and `zidl_cdr_compute_key_hash` for generated C/C++ key hashes.
-
-Cross-validated byte-for-byte against `zidl-rt` (44 tests, including PL_CDR and key-hash cross-validation).
+See `docs/runtime_libraries.md` and `docs/xcdr_encoding.md` for the APIs.
 
 ---
 

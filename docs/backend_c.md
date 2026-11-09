@@ -163,8 +163,21 @@ The generated `.c` file includes `zidl_cdr.h` and uses the following from `zidl-
 | `zidl_cdr_compute_key_hash` | RTPS key-hash rule implementation |
 | `zidl_md5` | MD5 for keys > 16 bytes |
 
-Compile the generated `.c` file together with `packages/zidl-cdr/src/zidl_cdr.c`.
-Add `packages/zidl-cdr/include` to your include paths.
+Build the native archive once from the repository root. Building it from source
+requires Zig; your application can use its normal C compiler:
+
+```sh
+(cd packages/zidl-cdr && zig build -Doptimize=ReleaseSafe)
+cc -std=c99 -Igenerated -Ipackages/zidl-cdr/zig-out/include \
+  main.c generated/types_cdr.c packages/zidl-cdr/zig-out/lib/libzidl_cdr.a -o app
+```
+
+This Unix example assumes output named `generated/types.h` and
+`generated/types_cdr.c`; adjust those paths for your application, and compile all
+CDR units when using split files. On Windows, use the installed platform archive
+name. `src/zidl_cdr.c` now contains storage/allocator support only; the archive
+also includes the native Zig wire codec. Compiling that C file alone does not
+provide the wire functions.
 
 ---
 

@@ -86,8 +86,8 @@ zig build integration-test
 
 Compiles and runs the generated C, C++, and Java code against the committed golden files:
 
-- **C**: links `test/golden/c/types_cdr.c` + `packages/zidl-cdr/src/zidl_cdr.c`, compiles with `-std=c99 -Wall -Werror` using Zig's bundled clang. No external toolchain needed.
-- **C++**: links `test/golden/cpp/types_cdr.cpp` + `zidl_cdr.c`, compiles with `-std=c++17` using Zig's bundled clang++. No external toolchain needed.
+- **C**: links `test/golden/c/types_cdr.c` with the shared native `libzidl_cdr.a`, compiles with `-std=c99 -Wall -Werror` using Zig's bundled clang. No external toolchain needed.
+- **C++**: links `test/golden/cpp/types_cdr.cpp` with the shared native `libzidl_cdr.a`, compiles with `-std=c++17` using Zig's bundled clang++. No external toolchain needed.
 - **Java**: compiles `test/golden/java/Types.java` + `test/integration/java/Test.java` with `javac`, then runs with `java`. Recorded as a skip step if `javac`/`java` is not on `PATH`.
 
 ### CDR interop tests
