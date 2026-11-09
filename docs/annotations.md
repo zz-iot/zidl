@@ -75,6 +75,15 @@ dp.create_writer(&default_qos, &my_listener, DDS.CHANGE_STATUS);
 Only the annotation makes an interface a callback: its name does not, so
 `interface WriterListener` without `@callback` is an ordinary interface.
 
+An operation that takes no arguments and returns a `@callback` interface is
+that callback's getter, whatever it is called: the C++ and Java bindings hand
+back the application's own listener object from the registration it returns.
+After a call that creates an entity and passes it a callback, they read the
+callback back through the new entity's getter, to release the registration
+when the entity did not keep it. They use the getter whose type is the
+callback's or one of its bases, only when there is exactly one: with several,
+they could read a different callback, so they read none.
+
 ### `@retired_result`
 
 **Target:** `typedef` of an integer type.

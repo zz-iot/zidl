@@ -30,6 +30,12 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   `set_listener` no longer releases its listener on a nonzero return. Annotate listener
   interfaces `@callback`, and return-code typedefs `@success_result`.
 
+- C++ and Java find a callback's getter by its shape, not the name `get_listener`: an
+  operation with no arguments returning a `@callback` interface. A `create_*` call's
+  read-back uses the created interface's one getter for the callback's type or a base
+  of it, and skips the read-back when there are several. The generated calls now use
+  the getter's own name.
+
 - Add optional `--handle-retire-query` support for C++ and Java bindings so late
   callbacks cannot recreate wrappers after logical deletion. Add runtime box
   retirement state and idempotent notification, separate from memory cleanup.

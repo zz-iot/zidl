@@ -4780,13 +4780,12 @@ const ConcreteImplGenerator = struct {
             );
         }
 
-        const listener_tr = listenerTypeOf(ops.items);
         for (ops.items) |op| {
             if (Generator.isRawLoanOp(op.owner.qualified_name, op.op.name)) {
                 try self.emitRawLoanImplOp(op.owner, iface.name, op.op);
                 continue;
             }
-            try self.emitEntityMethod(iface, op.owner, iface.name, op.op, listener_tr);
+            try self.emitEntityMethod(iface, op.owner, iface.name, op.op);
         }
         for (attrs.items) |attr| {
             try self.emitEntityAttr(iface, attr.owner, iface.name, attr.attr);
@@ -4949,7 +4948,6 @@ const ConcreteImplGenerator = struct {
         owner: *const ir.Interface,
         class_name: []const u8,
         op: *const ir.Operation,
-        listener_tr: ?ir.TypeRef,
     ) !void {
         const owner_c_name = try cNameOf(self.alloc, owner.qualified_name);
         defer self.alloc.free(owner_c_name);
@@ -4977,23 +4975,26 @@ const ConcreteImplGenerator = struct {
         // of any binding. The core retained the registration before handing
         // it out (retain_listener_data), so it cannot be released under us;
         // this drops that reference once the listener is copied out. A
-        // registration another binding made holds no listener of ours.
-        if (listener_tr) |ltr| if (op.params.len == 0 and std.mem.eql(u8, op.name, "get_listener")) {
+        // registration another binding made holds no listener of ours. A
+        // callback getter is known by its shape, not its name
+        // (`interface.callbackGetterType`).
+        if (interface.callbackGetterType(op) != null) {
+            const ltr = op.return_type.?;
             const lc = try self.listenerCType(ltr);
             defer self.alloc.free(lc);
             const bridge_name = try self.listenerBridgeName(ltr);
             defer self.alloc.free(bridge_name);
             try self.srcPrint(
-                "    {[lc]s} _l = {[c]s}_get_listener({[h]s});\n" ++
+                "    {[lc]s} _l = {[c]s}_{[op]s}({[h]s});\n" ++
                     "    {[r]s} _r;\n" ++
                     "    if (_l.listener_data && _l.release_listener_data == &{[b]s}::release_c_listener)\n" ++
                     "        _r = static_cast<{[b]s}::_Reg*>(_l.listener_data)->owner;\n" ++
                     "    if (_l.listener_data && _l.retain_listener_data && _l.release_listener_data) _l.release_listener_data(_l.listener_data);\n" ++
                     "    return _r;\n}}\n\n",
-                .{ .lc = lc, .c = owner_c_name, .h = handle_expr, .r = ret_cpp, .b = bridge_name },
+                .{ .lc = lc, .c = owner_c_name, .op = op.name, .h = handle_expr, .r = ret_cpp, .b = bridge_name },
             );
             return;
-        };
+        }
 
         if (!self.opIsAdaptable(op)) {
             try self.srcWrite("    /* TODO: adapt parameters/return (sequence or complex QoS) */\n");
@@ -5171,24 +5172,31 @@ const ConcreteImplGenerator = struct {
         var attrs = std.ArrayListUnmanaged(ir.Attribute).empty;
         defer attrs.deinit(self.alloc);
         try collectIfaceMembers(self.alloc, created, &ops, &attrs);
-        const has_get_listener = for (ops.items) |o| {
-            if (std.mem.eql(u8, o.name, "get_listener")) break true;
-        } else false;
-        if (!has_get_listener) return;
         for (op.params) |p| {
             if (paramAdaptKind(p) != .listener_in) continue;
+            const cb = switch (p.type_ref) {
+                .named => |td| switch (td) {
+                    .interface => |i| i,
+                    else => continue,
+                },
+                else => continue,
+            };
+            // Without exactly one getter for this callback there is nothing
+            // safe to read back, so a failed create leaks the registration
+            // rather than risk freeing one the entity holds.
+            const getter = interface.callbackGetterFor(ops.items, cb) orelse continue;
             const bridge_name = try self.listenerBridgeName(p.type_ref);
             defer self.alloc.free(bridge_name);
             // The read-back is retained by the core (retain_listener_data),
             // so it is released whether or not it is ours.
             try self.srcPrint(
                 "    if (_lp_{[n]s}) {{\n" ++
-                    "        auto _gl = {[c]s}_get_listener(_h);\n" ++
+                    "        auto _gl = {[c]s}_{[g]s}(_h);\n" ++
                     "        const bool _installed = _gl.listener_data == _l_{[n]s}.listener_data;\n" ++
                     "        if (_gl.listener_data && _gl.retain_listener_data && _gl.release_listener_data) _gl.release_listener_data(_gl.listener_data);\n" ++
                     "        if (!_installed) {[b]s}::release_c_listener(_l_{[n]s}.listener_data);\n" ++
                     "    }}\n",
-                .{ .n = p.name, .c = ret_c, .b = bridge_name },
+                .{ .n = p.name, .c = ret_c, .g = getter.name, .b = bridge_name },
             );
         }
     }
@@ -6458,25 +6466,6 @@ fn sharedBaseOf(iface: *const ir.Interface) ?*const ir.Interface {
     for (iface.bases) |base| {
         if (base != .interface) continue;
         if (sharedBaseOf(base.interface)) |found| return found;
-    }
-    return null;
-}
-
-/// If `ops` contains a zero-param `get_listener` operation returning a `@callback`
-/// interface, return that return type, so the caller can read the listener back
-/// out of the core's registration (emitEntityMethod).
-fn listenerTypeOf(ops: []const OwnedOperation) ?ir.TypeRef {
-    for (ops) |o| {
-        if (o.op.params.len != 0) continue;
-        if (!std.mem.eql(u8, o.op.name, "get_listener")) continue;
-        const rt = o.op.return_type orelse continue;
-        switch (rt) {
-            .named => |td| switch (td) {
-                .interface => |iface| if (isCallbackIface(iface)) return rt,
-                else => {},
-            },
-            else => {},
-        }
     }
     return null;
 }
@@ -10183,6 +10172,40 @@ test "cpp_backend: @shared_base on an interface with operations is rejected" {
         "dcps",
         .{ .generate_interfaces = true },
     ));
+}
+
+test "cpp_backend: a callback getter is known by its shape; the create_* read-back needs exactly one" {
+    var res = try testGenConcreteImpl(
+        \\module M {
+        \\    @callback interface FooListener { void on_event(); };
+        \\    @callback interface FooListenerEx : FooListener { void on_event_ex(); };
+        \\    @callback interface BarListener { void on_bar(); };
+        \\    interface Child {
+        \\        FooListener current_listener();
+        \\        BarListener bar_listener();
+        \\    };
+        \\    interface Twin {
+        \\        FooListener first_listener();
+        \\        FooListener second_listener();
+        \\    };
+        \\    interface Parent {
+        \\        Child create_child(in FooListenerEx a_l);
+        \\        Child create_bar_child(in BarListener a_b);
+        \\        Twin create_twin(in FooListener a_t);
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    // Whatever its name, a no-argument op returning a callback is a getter.
+    try testing.expect(has(src, "M_FooListener _l = M_Child_current_listener(ptr_);"));
+    try testing.expect(has(src, "M_FooListener _l = M_Twin_second_listener(ptr_);"));
+    // The getter of a base type reads back a FooListenerEx registration.
+    try testing.expect(has(src, "    if (_lp_a_l) {\n        auto _gl = M_Child_current_listener(_h);\n"));
+    try testing.expect(has(src, "    if (_lp_a_b) {\n        auto _gl = M_Child_bar_listener(_h);\n"));
+    // Two getters could each be the one: no read-back, rather than a guess.
+    try testing.expect(!has(src, "if (_lp_a_t) {"));
+    try testing.expect(!has(src, "get_listener"));
 }
 
 test "cpp_backend: a void set_listener just forwards" {

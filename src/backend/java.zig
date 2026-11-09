@@ -5393,18 +5393,6 @@ fn paramIsSupportedValueStruct(tr: ir.TypeRef) bool {
     };
 }
 
-/// True when `op` is shaped like a `get_listener()` accessor: zero params,
-/// named exactly `get_listener`, returning a `@callback` interface. Matched
-/// by name (not just shape) for the same robustness reason as cpp.zig's own
-/// `listenerTypeOf` (~4908 in cpp.zig) — guards against a hypothetical
-/// unrelated zero-param op that happens to return a callback-shaped type.
-fn isGetListenerOp(op: *const ir.Operation) bool {
-    if (op.params.len != 0) return false;
-    if (!std.mem.eql(u8, op.name, "get_listener")) return false;
-    const rt = op.return_type orelse return false;
-    return classifyTypeRef(rt) == .callback;
-}
-
 /// `DDS::DataWriter`'s `loan_raw`/`publish_loan_raw`/`return_loan_raw` --
 /// unlike every other `inout OctetSeq` param in this project's IDL (which
 /// maps generically to `List<Byte>`, a fresh copy on every JNI call
@@ -5433,12 +5421,13 @@ fn isWriteLoanBufferOp(iface_name: []const u8, op_name: []const u8) bool {
 fn opIsJniSupported(op: *const ir.Operation) bool {
     if (op.return_type) |rt| {
         switch (classifyTypeRef(rt)) {
-            // `get_listener()` is a real, supported round-trip (see
-            // `emitJniBridgeOp`'s `ret_is_callback` branch) — every OTHER
-            // `.callback`-returning shape stays unsupported (none occur in
-            // dcps.idl/zzdds.idl today, but the general case still needs
+            // A callback getter (`interface.callbackGetterType`: no
+            // arguments, whatever its name) is a real, supported round-trip
+            // (see `emitJniBridgeOp`'s `ret_is_callback` branch) — every
+            // OTHER `.callback`-returning shape stays unsupported (none occur
+            // in dcps.idl/zzdds.idl today, but the general case still needs
             // real marshaling this generator doesn't have).
-            .callback => if (!isGetListenerOp(op)) return false,
+            .callback => if (interface.callbackGetterType(op) == null) return false,
             .value_struct => return false,
             else => {},
         }
@@ -7227,12 +7216,13 @@ const JniBridgeGenerator = struct {
         // in this ABI convention (a "nil" sentinel entity, not literal NULL
         // — see zzdds's `nil.zig`), so checking `_h == NULL` would never
         // catch it.
-        const ListenerParam = struct { name: []const u8, listener_c: []const u8 };
+        const ListenerParam = struct { name: []const u8, listener_c: []const u8, getter: []const u8 };
         var created_listener_params = std.ArrayListUnmanaged(ListenerParam).empty;
         defer {
             for (created_listener_params.items) |lp| {
                 self.alloc.free(lp.name);
                 self.alloc.free(lp.listener_c);
+                self.alloc.free(lp.getter);
             }
             created_listener_params.deinit(self.alloc);
         }
@@ -7262,16 +7252,17 @@ const JniBridgeGenerator = struct {
                         var t_attrs = std.ArrayListUnmanaged(ir.Attribute).empty;
                         defer t_attrs.deinit(self.alloc);
                         try self.collectMembers(target, &t_ops, &t_attrs);
-                        const get_listener_op = for (t_ops.items) |o| {
-                            if (std.mem.eql(u8, o.name, "get_listener")) break o;
-                        } else null;
-                        if (get_listener_op) |glo| {
-                            if (glo.return_type) |lrt| {
-                                try created_listener_params.append(self.alloc, .{
-                                    .name = try self.alloc.dupe(u8, p.name),
-                                    .listener_c = try self.typeRefToC(lrt),
-                                });
-                            }
+                        // Without exactly one getter for this callback there
+                        // is nothing safe to read back, so a failed create
+                        // leaks the registration rather than risk freeing one
+                        // the entity holds (`interface.callbackGetterFor`).
+                        const cb = resolveToNamedDecl(p.type_ref).interface;
+                        if (interface.callbackGetterFor(t_ops.items, cb)) |glo| {
+                            try created_listener_params.append(self.alloc, .{
+                                .name = try self.alloc.dupe(u8, p.name),
+                                .listener_c = try self.typeRefToC(glo.return_type.?),
+                                .getter = try self.alloc.dupe(u8, glo.name),
+                            });
                         }
                     }
                     try self.emitListenerParamPrep(&p);
@@ -7388,12 +7379,12 @@ const JniBridgeGenerator = struct {
         for (created_listener_params.items) |lp| {
             try self.print(
                 "    if (_p_{[name]s} != NULL) {{\n" ++
-                    "        {[lc]s} _now_{[name]s} = {[rc]s}_get_listener(_h);\n" ++
+                    "        {[lc]s} _now_{[name]s} = {[rc]s}_{[g]s}(_h);\n" ++
                     "        int _installed_{[name]s} = _now_{[name]s}.listener_data == _c_{[name]s}.listener_data;\n" ++
                     "        if (_now_{[name]s}.listener_data != NULL && _now_{[name]s}.retain_listener_data != NULL && _now_{[name]s}.release_listener_data != NULL) _now_{[name]s}.release_listener_data(_now_{[name]s}.listener_data);\n" ++
                     "        if (!_installed_{[name]s}) zidl_java_release_listener_ctx(env, _c_{[name]s}.listener_data);\n" ++
                     "    }}\n",
-                .{ .lc = lp.listener_c, .name = lp.name, .rc = ret_c_name.? },
+                .{ .lc = lp.listener_c, .name = lp.name, .rc = ret_c_name.?, .g = lp.getter },
             );
         }
 
@@ -10483,6 +10474,43 @@ test "java: create_* listener param has no old-listener capture, but does verify
     // forever.
     try testing.expect(std.mem.indexOf(u8, s, "Child_get_listener(_h)") != null);
     try testing.expect(std.mem.indexOf(u8, s, "zidl_java_release_listener_ctx(env, _c_l.listener_data)") != null);
+}
+
+test "java: a callback getter is known by its shape; the create_* read-back needs exactly one" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc,
+        \\@callback interface FooListener { void on_event(); };
+        \\@callback interface FooListenerEx : FooListener { void on_event_ex(); };
+        \\@callback interface BarListener { void on_bar(); };
+        \\interface Child {
+        \\    FooListener current_listener();
+        \\    BarListener bar_listener();
+        \\};
+        \\interface Twin {
+        \\    FooListener first_listener();
+        \\    FooListener second_listener();
+        \\};
+        \\interface Parent {
+        \\    Child create_child(in FooListenerEx l);
+        \\    Child create_bar_child(in BarListener b);
+        \\    Twin create_twin(in FooListener t);
+        \\};
+    );
+    defer ir_spec.deinit();
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    const opts = interface.Options{ .input_stem = "parent" };
+    try generateJniSource(alloc, &ir_spec, opts, &out);
+    const s = out.items;
+
+    // Whatever its name, a no-argument op returning a callback is a getter.
+    try testing.expect(std.mem.indexOf(u8, s, "Java_ChildImpl_n_1current_1listener") != null);
+    // The getter of a base type reads back a FooListenerEx registration.
+    try testing.expect(std.mem.indexOf(u8, s, "FooListener _now_l = Child_current_listener(_h);") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "_now_b = Child_bar_listener(_h);") != null);
+    // Two getters could each be the one: no read-back, rather than a guess.
+    try testing.expect(std.mem.indexOf(u8, s, "_now_t") == null);
 }
 
 test "java: delete_<entity> emits no listener bookkeeping of its own anymore" {
