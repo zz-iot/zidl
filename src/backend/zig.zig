@@ -3046,8 +3046,6 @@ const Generator = struct {
     /// Used to detect listener parameters that need CXxxListenerAdapter treatment.
     /// Returns true when the interface bears `@callback`, meaning the generator should
     /// produce a C callback struct instead of a fat-pointer vtable entity.
-    /// Falls back to the "Listener" name suffix heuristic for IDL files that have not
-    /// yet been annotated — this fallback is deprecated and will be removed.
     fn isCallbackInterface(iface: *const ir.Interface) bool {
         return interface.isCallbackInterface(iface);
     }
@@ -9534,7 +9532,7 @@ test "zig_backend: --zig-generate-c-api emits C_XxxListener and adapter for list
     var out = try testGenOpts(
         \\struct Status { long count; };
         \\interface Source { long enable(); };
-        \\interface SourceListener { void on_change(in Source src, in Status st); };
+        \\@callback interface SourceListener { void on_change(in Source src, in Status st); };
     , "sl", .{
         .generate_interfaces = true,
         .no_typesupport = true,
@@ -9560,7 +9558,7 @@ test "zig_backend: @callback interface emits Zig listener helpers" {
     var out = try testGenOpts(
         \\struct OfferedStatus { long count; };
         \\interface DataWriter { long write(); };
-        \\interface WriterListener {
+        \\@callback interface WriterListener {
         \\    void on_offered(in DataWriter dw, in OfferedStatus status);
         \\    void on_alive(in DataWriter dw);
         \\};
@@ -9595,7 +9593,7 @@ test "zig_backend: @callback interface emits Zig listener helpers" {
 
 test "zig_backend: @callback thunk wraps string params with std.mem.span" {
     var out = try testGenOpts(
-        \\interface LogListener {
+        \\@callback interface LogListener {
         \\    void on_message(in string msg, in long level);
         \\};
     , "ll", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true });
@@ -9611,7 +9609,7 @@ test "zig_backend: @callback thunk wraps string params with std.mem.span" {
 
 test "zig_backend: --zig-generate-c-api entity wrappers use C_XxxListener and adapter" {
     var out = try testGenOpts(
-        \\interface WriterListener { void on_miss(); };
+        \\@callback interface WriterListener { void on_miss(); };
         \\interface Pub {
         \\    long create_writer(in long qos, in WriterListener a_listener);
         \\    long set_listener(in WriterListener a_listener, in long mask);
@@ -9705,7 +9703,7 @@ test "zig_backend: --zig-generate-c-api in-StringSeq allocates span conversion" 
 test "zig_backend: --zig-generate-c-api emits noop vtable for listener interfaces" {
     var out = try testGenOpts(
         \\interface Writer { long write_val(in long x); };
-        \\interface WriterListener { void on_change(in Writer w); };
+        \\@callback interface WriterListener { void on_change(in Writer w); };
     , "wl", .{
         .generate_interfaces = true,
         .no_typesupport = true,
@@ -9724,7 +9722,7 @@ test "zig_backend: --zig-generate-c-api emits noop vtable for listener interface
 test "zig_backend: @callback thunk unwraps ?*const T params (seq typedef and callback struct)" {
     var out = try testGenOpts(
         \\typedef sequence<long> NumSeq;
-        \\interface StatusListener {
+        \\@callback interface StatusListener {
         \\    void on_missed(in NumSeq missed);
         \\};
     , "sl", .{ .generate_interfaces = true, .no_typesupport = true, .no_typeobject_support = true });

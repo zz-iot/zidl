@@ -530,8 +530,6 @@ pub fn prefixedCNameFromQualified(
 
 /// True for `@callback`-annotated interfaces (listener interfaces), which get a
 /// plain C callback struct instead of an entity opaque handle / vtable.
-/// Falls back to the "Listener" name-suffix heuristic for IDL that predates the
-/// `@callback` annotation — deprecated, kept for backwards compatibility.
 ///
 /// Thin re-export of the canonical `ir.isCallbackInterface`: kept as a
 /// function here (rather than deleting it and updating every call site to say
@@ -541,24 +539,25 @@ pub fn isCallbackInterface(iface: *const ir.Interface) bool {
     return ir.isCallbackInterface(iface);
 }
 
-/// True when `op` is a listener setter with a return code: `set_listener`, or
-/// one of its `set_listener_<suffix>` variants (zzdds's `set_listener_ex`),
-/// whose first parameter is an `in` callback interface. Its zero return means
-/// it installed the listener; any other means it installed nothing, so the
-/// caller still owns the registration it built. No other op's return code
-/// has a known meaning.
-pub fn isListenerSetterOp(op: *const ir.Operation) bool {
-    if (op.return_type == null or op.params.len == 0) return false;
-    if (!std.mem.eql(u8, op.name, "set_listener") and !std.mem.startsWith(u8, op.name, "set_listener_")) return false;
-    const p0 = op.params[0];
-    if (p0.mode != .in_) return false;
-    return switch (p0.type_ref) {
-        .named => |td| switch (td) {
-            .interface => |iface| isCallbackInterface(iface),
-            else => false,
-        },
-        else => false,
-    };
+/// For an operation taking an `in` `@callback` argument, the value it returns
+/// on success, from `@success_result` on its return type. Any other value
+/// means it registered none of its callback arguments, so the caller still
+/// owns the registrations it built for them. Null when `op` takes no callback
+/// or its return type has no `@success_result`: its return value then says
+/// nothing about whether it kept them.
+pub fn callbackSuccessResult(op: *const ir.Operation) ?i64 {
+    const ok = ir.successResult(op.return_type orelse return null) orelse return null;
+    for (op.params) |p| {
+        if (p.mode != .in_) continue;
+        switch (p.type_ref) {
+            .named => |td| switch (td) {
+                .interface => |iface| if (isCallbackInterface(iface)) return ok,
+                else => {},
+            },
+            else => {},
+        }
+    }
+    return null;
 }
 
 /// Thin re-export of the canonical `ir.hasSharedCAbiBox`, for the same reason

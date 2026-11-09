@@ -583,7 +583,7 @@ const Builder = struct {
             .typedef => |*td| {
                 const type_ref = try self.resolveTypeRef(&td.declarator.type_spec, module_qpath, scope);
                 const raw = try self.extractRaw(annotations);
-                try self.resolveRetiredResult(raw, annotations, scope);
+                try self.resolveResultAnnotations(raw, annotations, scope);
                 for (td.declarator.declarators) |*decl| {
                     const name = declaratorName(decl);
                     const qname = try qualifyName(self.alloc, module_qpath, name);
@@ -1306,28 +1306,34 @@ const Builder = struct {
 
     /// Convert ALL annotations to raw (for types that have no pre-interpreted fields:
     /// typedef, native, exception, const, operation, parameter, attribute, bitset).
-    /// `@retired_result(expr)` on a typedef: evaluates `expr` in the typedef's
-    /// own scope, so a scoped or imported constant names exactly the constant
-    /// IDL scoping rules give it, and stores the result as the annotation's
-    /// integer parameter (`ir.retiredResult` reads it). A non-integer value
-    /// is an error.
-    fn resolveRetiredResult(
+    /// `@retired_result(expr)` and `@success_result(expr)` on a typedef:
+    /// evaluates `expr` in the typedef's own scope, so a scoped or imported
+    /// constant names exactly the constant IDL scoping rules give it, and
+    /// stores the result as the annotation's integer parameter
+    /// (`ir.retiredResult` and `ir.successResult` read it). A non-integer
+    /// value is an error.
+    fn resolveResultAnnotations(
         self: *Builder,
         raw: []const ir.RawAnnotation,
         annotations: []const ast.AnnotationAppl,
         scope: *const Scope,
     ) !void {
         for (raw, annotations) |*r, *a| {
-            if (!std.mem.eql(u8, r.name, "retired_result")) continue;
+            const invalid: anyerror = if (std.mem.eql(u8, r.name, "retired_result"))
+                error.InvalidRetiredResult
+            else if (std.mem.eql(u8, r.name, "success_result"))
+                error.InvalidSuccessResult
+            else
+                continue;
             const expr: *const ast.ConstExpr = switch (a.params) {
                 .positional => |*e| e,
-                else => return error.InvalidRetiredResult,
+                else => return invalid,
             };
             var tmp: std.ArrayListUnmanaged(error_mod.Diagnostic) = .empty;
             const cv = try const_eval.evaluate(expr, scope, self.alloc, &tmp);
             const v = switch (cv) {
                 .integer => |i| i,
-                else => return error.InvalidRetiredResult,
+                else => return invalid,
             };
             const params = try self.alloc.alloc(ir.AnnotationParam, 1);
             params[0] = .{ .name = null, .value = .{ .integer = v } };
@@ -1742,6 +1748,26 @@ test "builder: @retired_result resolves its constant by IDL scoping, through typ
     try testing.expectEqual(@as(?i64, 4), ir.retiredResult(findTypedef(ir_spec.items, "Literal").?));
     try testing.expectEqual(@as(?i64, null), ir.retiredResult(findTypedef(ir_spec.items, "Plain").?));
     try testing.expectEqual(@as(?i64, null), ir.retiredResult(.{ .base = .long }));
+}
+
+test "builder: @success_result resolves its constant like @retired_result" {
+    var ir_spec = try testBuild(
+        \\module A {
+        \\    const long OK = 0;
+        \\    const long DELETED = 9;
+        \\    @retired_result(DELETED) @success_result(OK) typedef long Code;
+        \\    typedef Code Alias;
+        \\    @success_result(1) typedef long Literal;
+        \\    @retired_result(DELETED) typedef long RetiredOnly;
+        \\};
+    );
+    defer ir_spec.deinit();
+    try testing.expectEqual(@as(?i64, 0), ir.successResult(findTypedef(ir_spec.items, "Code").?));
+    try testing.expectEqual(@as(?i64, 9), ir.retiredResult(findTypedef(ir_spec.items, "Code").?));
+    try testing.expectEqual(@as(?i64, 0), ir.successResult(findTypedef(ir_spec.items, "Alias").?));
+    try testing.expectEqual(@as(?i64, 1), ir.successResult(findTypedef(ir_spec.items, "Literal").?));
+    try testing.expectEqual(@as(?i64, null), ir.successResult(findTypedef(ir_spec.items, "RetiredOnly").?));
+    try testing.expectEqual(@as(?i64, null), ir.successResult(.{ .base = .long }));
 }
 
 test "builder: @retired_result on an imported typedef keeps its value" {

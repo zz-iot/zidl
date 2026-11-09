@@ -4,7 +4,10 @@ Source: OMG DDS v1.4 (formal/15-04-10) §2.3.3.
 This is the complete `module DDS { ... }` block, faithfully transcribed.
 Also includes the "implied IDL" example (§2.2.2.3.9) for a user type `Foo`.
 
-Implementation reference for `--generate-interfaces`.
+Implementation reference for `--generate-interfaces`. As transcribed, it carries none
+of zidl's annotations: to generate bindings from it, mark each listener interface
+`@callback` and `ReturnCode_t` `@success_result(RETCODE_OK)` (see
+[`annotations.md`](annotations.md)).
 
 ---
 

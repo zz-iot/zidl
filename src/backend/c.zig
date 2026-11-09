@@ -1885,16 +1885,11 @@ fn bitmaskStorageType(annotations: ir.EnumAnnotations) []const u8 {
 
 /// Return `""` when `c_type` ends with `'*'` (pointer type), otherwise `" "`.
 /// Used to produce idiomatic C declarations: `char *name` not `char * name`.
-/// Interfaces whose names end with "Listener" are user-implemented callbacks
-/// (DataReaderListener, DataWriterListener, etc.).  All others are DDS entity
-/// interfaces implemented by the runtime (DataWriter, DataReader, etc.).
-/// The canonical gate is the `@callback` IDL annotation; the name-suffix heuristic
-/// is a deprecated fallback for IDL files that haven't been annotated yet.
+/// `@callback` interfaces are user-implemented callbacks (DataReaderListener,
+/// DataWriterListener, etc.). All others are entity interfaces implemented by
+/// the provider (DataWriter, DataReader, etc.).
 fn isListenerInterface(iface: *const ir.Interface) bool {
-    for (iface.raw) |ann| {
-        if (std.mem.eql(u8, ann.name, "callback")) return true;
-    }
-    return std.mem.endsWith(u8, iface.name, "Listener");
+    return ir.isCallbackInterface(iface);
 }
 
 fn ptrSep(c_type: []const u8) []const u8 {
@@ -5534,7 +5529,7 @@ test "c_backend: mixed entity/listener inheritance is rejected" {
 test "c_backend: listener interface emits callback struct not free functions" {
     var out = try testGenIfaceHeader(
         \\interface Entity { long enable(); };
-        \\interface EntityListener { void on_change(in Entity e); };
+        \\@callback interface EntityListener { void on_change(in Entity e); };
     , "ev");
     defer out.deinit(testing.allocator);
     const s = out.items;
@@ -5571,7 +5566,7 @@ test "c_backend: listener callback struct references entity types declared above
     // Listener struct uses Entity opaque handle in callback param — the pre-scan
     // ensures entity typedefs appear before listener structs regardless of IDL order.
     var out = try testGenIfaceHeader(
-        \\interface DataListener { void on_data(in long value); };
+        \\@callback interface DataListener { void on_data(in long value); };
         \\interface Writer { long write(in long x); };
     , "dl");
     defer out.deinit(testing.allocator);

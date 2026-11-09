@@ -72,11 +72,8 @@ const my_listener = DDS.WriterListener{
 dp.create_writer(&default_qos, &my_listener, DDS.CHANGE_STATUS);
 ```
 
-**Deprecated fallback:** If an interface's name ends in `"Listener"` and does
-not carry `@callback`, the backends apply the callback treatment automatically.
-This heuristic exists for backwards compatibility with IDL files that predate
-the `@callback` annotation.  Annotate your IDL files explicitly to suppress
-the deprecation warning when it is added.
+Only the annotation makes an interface a callback: its name does not, so
+`interface WriterListener` without `@callback` is an ordinary interface.
 
 ### `@retired_result`
 
@@ -91,6 +88,25 @@ handle has been freed returns this value, without calling the provider, when its
 return type is this typedef or a typedef aliasing it. The parameter is an integer
 constant expression, evaluated in the typedef's scope by IDL scoping rules. See
 [`design/handle-lifetime.md`](design/handle-lifetime.md).
+
+### `@success_result`
+
+**Target:** `typedef` of an integer type.
+
+```idl
+const long RETCODE_OK = 0;
+@success_result(RETCODE_OK) typedef long ReturnCode_t;
+```
+
+An operation returning this typedef, or a typedef aliasing it, returns this
+value when it succeeds. Any other value means it failed and kept nothing it
+was given. So the C++ and Java bindings release the registration they built
+for each `in` `@callback` argument when such an operation returns anything
+else: no provider will release a callback it never registered. Without the
+annotation, a return value says nothing about whether the callback was kept,
+and the bindings never release it after the call. The parameter is an integer
+constant expression, evaluated in the typedef's scope as for
+`@retired_result`, and the two may annotate the same typedef.
 
 ### `@pl_repeated`
 

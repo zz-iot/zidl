@@ -5119,19 +5119,19 @@ const ConcreteImplGenerator = struct {
                             else => {},
                         }
                     }
-                    // A listener setter that fails installs no listener, so
-                    // the core never releases the registration built for it.
-                    // Only listener setters have a known zero-means-success
-                    // contract (`interface.isListenerSetterOp`): another op's
-                    // nonzero return may well mean success, and releasing
-                    // then would free a listener the core still holds.
-                    if (interface.isListenerSetterOp(op)) for (op.params) |p| {
+                    // A call that fails registers none of its callbacks, so
+                    // the provider never releases the registrations built for
+                    // them. Only `@success_result` on the return type says
+                    // which value is success (`interface.callbackSuccessResult`):
+                    // without it, releasing on any value could free a callback
+                    // the provider still holds.
+                    if (interface.callbackSuccessResult(op)) |ok| for (op.params) |p| {
                         if (paramAdaptKind(p) != .listener_in) continue;
                         const bridge_name = try self.listenerBridgeName(p.type_ref);
                         defer self.alloc.free(bridge_name);
                         try self.srcPrint(
-                            "    if (_rc != 0 && _lp_{[n]s}) {[b]s}::release_c_listener(_l_{[n]s}.listener_data);\n",
-                            .{ .n = p.name, .b = bridge_name },
+                            "    if (_rc != {[ok]d} && _lp_{[n]s}) {[b]s}::release_c_listener(_l_{[n]s}.listener_data);\n",
+                            .{ .ok = ok, .n = p.name, .b = bridge_name },
                         );
                     };
                     if (op.return_type != null) try self.srcWrite("    return _rc;\n");
@@ -7702,7 +7702,7 @@ test "cpp_backend: interface generation includes memory" {
 
     var interface_ref = try testGenOpts(
         \\interface DataWriter {};
-        \\interface Listener { void on_data(in DataWriter writer); };
+        \\@callback interface Listener { void on_data(in DataWriter writer); };
     , "listener", .{ .generate_interfaces = true });
     defer interface_ref.deinit(testing.allocator);
     try testing.expect(has(interface_ref.items, "#include <memory>"));
@@ -9239,7 +9239,7 @@ test "cpp_backend: impl void op with string param forwards via c_str" {
 test "cpp_backend: impl interface parameter uses shared_ptr signature" {
     var out = try testGenImpl(
         \\interface DataWriter {};
-        \\interface Listener { void on_data(in DataWriter writer); };
+        \\@callback interface Listener { void on_data(in DataWriter writer); };
     , "listener");
     defer out.deinit(testing.allocator);
     const s = out.items;
@@ -10070,9 +10070,11 @@ test "cpp_backend: get_listener reads the core's registration back, retained" {
 test "cpp_backend: listener registrations own the listener; a call that installs none releases it" {
     var res = try testGenConcreteImpl(
         \\module DDS {
+        \\    const long RETCODE_OK = 0;
+        \\    @success_result(RETCODE_OK) typedef long ReturnCode_t;
         \\    @callback interface FooListener { void on_foo(); };
         \\    interface Foo {
-        \\        long set_listener(in FooListener a_listener, in long mask);
+        \\        ReturnCode_t set_listener(in FooListener a_listener, in long mask);
         \\        FooListener get_listener();
         \\    };
         \\    interface Factory {
@@ -10095,54 +10097,45 @@ test "cpp_backend: listener registrations own the listener; a call that installs
     try testing.expect(!has(src, "TODO"));
 }
 
-test "cpp_backend: a rejected set_listener releases its listener without a get_listener" {
+test "cpp_backend: a failed callback registration releases its listener, whatever the op's name" {
+    var res = try testGenConcreteImpl(
+        \\module M {
+        \\    const long DONE = 3;
+        \\    @success_result(DONE) typedef long Result;
+        \\    typedef Result Alias;
+        \\    @callback interface Sink { void on_item(); };
+        \\    @callback interface SinkEx : Sink { void on_batch(); };
+        \\    interface Source {
+        \\        Alias attach(in long mask, in SinkEx a_sink);
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    // The success value comes from the typedef, through an alias.
+    try testing.expect(has(src, "if (_rc != 3 && _lp_a_sink) ::M::SinkExBase::release_c_listener(_l_a_sink.listener_data);"));
+    try testing.expect(!has(src, "listener_ = a_sink;"));
+}
+
+test "cpp_backend: without @success_result a callback op never releases its listener" {
     var res = try testGenConcreteImpl(
         \\module DDS {
         \\    @callback interface FooListener { void on_foo(); };
         \\    interface Foo {
         \\        long set_listener(in FooListener a_listener, in long mask);
+        \\        boolean register_listener(in FooListener b_listener);
         \\    };
         \\};
     );
     defer res.deinit();
     const src = res.src.items;
-    try testing.expect(has(src, "if (_rc != 0 && _lp_a_listener) ::DDS::FooListenerBase::release_c_listener(_l_a_listener.listener_data);"));
-    try testing.expect(!has(src, "listener_ = a_listener;"));
-}
-
-test "cpp_backend: a rejected set_listener_<suffix> releases its listener" {
-    var res = try testGenConcreteImpl(
-        \\module DDS {
-        \\    @callback interface FooListener { void on_foo(); };
-        \\    @callback interface FooListenerEx : FooListener { void on_foo_ex(); };
-        \\    interface Foo {
-        \\        long set_listener_ex(in FooListenerEx a_listener, in long mask);
-        \\        long set_listeners(in FooListener a_listener);
-        \\    };
-        \\};
-    );
-    defer res.deinit();
-    const src = res.src.items;
-    try testing.expect(has(src, "if (_rc != 0 && _lp_a_listener) ::DDS::FooListenerExBase::release_c_listener(_l_a_listener.listener_data);"));
-    // Only `set_listener` and `set_listener_<suffix>` are setters.
-    try testing.expect(!has(src, "::DDS::FooListenerBase::release_c_listener(_l_a_listener.listener_data)"));
-}
-
-test "cpp_backend: only set_listener releases its listener on a nonzero return" {
-    var res = try testGenConcreteImpl(
-        \\module DDS {
-        \\    @callback interface FooListener { void on_foo(); };
-        \\    interface Foo {
-        \\        boolean register_listener(in FooListener a_listener);
-        \\    };
-        \\};
-    );
-    defer res.deinit();
-    const src = res.src.items;
-    // `true` may well mean the listener was installed: releasing it then
-    // would free a listener the core still holds.
+    // Neither return value says whether the listener was installed, so
+    // releasing on one could free a listener the provider still holds.
+    // An op's name is no evidence either.
     try testing.expect(has(src, "_lp_a_listener = &_l_a_listener;"));
+    try testing.expect(has(src, "_lp_b_listener = &_l_b_listener;"));
     try testing.expect(!has(src, "release_c_listener(_l_a_listener.listener_data)"));
+    try testing.expect(!has(src, "release_c_listener(_l_b_listener.listener_data)"));
 }
 
 test "cpp_backend: @shared_base is a virtual base and the listener identity" {

@@ -326,9 +326,8 @@ pub const Interface = struct {
 };
 
 /// True for `@callback`-annotated interfaces (listener interfaces), which get a
-/// plain C callback struct instead of an entity opaque handle / vtable. Falls
-/// back to the "Listener" name-suffix heuristic for IDL that predates the
-/// `@callback` annotation — deprecated, kept for backwards compatibility.
+/// plain C callback struct instead of an entity opaque handle / vtable. Only
+/// the annotation counts: an interface's name says nothing about it.
 ///
 /// Single canonical copy: both the IR builder (deciding whether to preserve an
 /// imported interface's fill pass) and the backends (deciding whether to emit
@@ -337,7 +336,7 @@ pub fn isCallbackInterface(iface: *const Interface) bool {
     for (iface.raw) |ann| {
         if (std.mem.eql(u8, ann.name, "callback")) return true;
     }
-    return std.mem.endsWith(u8, iface.name, "Listener");
+    return false;
 }
 
 /// True for `@shared_base`-annotated interfaces: an object implementing any
@@ -387,6 +386,22 @@ pub fn hasSharedCAbiBox(iface: *const Interface) bool {
 /// evaluated `value` in the typedef's scope into an integer parameter. Null
 /// when no typedef in the chain carries the annotation.
 pub fn retiredResult(type_ref: TypeRef) ?i64 {
+    return typedefResult(type_ref, "retired_result");
+}
+
+/// The value an operation returning `type_ref` gives when it succeeds, from
+/// `@success_result(value)` on `type_ref`'s typedef or any typedef it
+/// aliases. Any other value means the operation failed and took nothing it
+/// was given: a `@callback` argument it was passed is not registered (see
+/// docs/annotations.md). Null when no typedef in the chain carries the
+/// annotation.
+pub fn successResult(type_ref: TypeRef) ?i64 {
+    return typedefResult(type_ref, "success_result");
+}
+
+/// The integer parameter of `@<name>(value)` on `type_ref`'s typedef or the
+/// nearest typedef it aliases that carries it.
+fn typedefResult(type_ref: TypeRef, name: []const u8) ?i64 {
     var tr = type_ref;
     while (true) {
         const td = switch (tr) {
@@ -397,7 +412,7 @@ pub fn retiredResult(type_ref: TypeRef) ?i64 {
             else => return null,
         };
         for (td.raw) |ann| {
-            if (!std.mem.eql(u8, ann.name, "retired_result") or ann.params.len != 1) continue;
+            if (!std.mem.eql(u8, ann.name, name) or ann.params.len != 1) continue;
             switch (ann.params[0].value) {
                 .integer => |v| return v,
                 else => return null,
