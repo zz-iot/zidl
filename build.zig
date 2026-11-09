@@ -306,7 +306,7 @@ pub fn build(b: *std.Build) void {
                 .file = topic_dir.path(b, "topic_cdr.cpp"),
                 .flags = variant.flags,
             });
-            conditions_mod.linkLibrary(cdr_library);
+            linkCdr(conditions_mod, cdr_library);
             conditions_mod.addIncludePath(topic_dir);
             conditions_mod.addIncludePath(cpp_dir);
             conditions_mod.addIncludePath(c_dir);
@@ -447,7 +447,7 @@ pub fn build(b: *std.Build) void {
             .file = c_dir.path(b, "fixture_cdr.c"),
             .flags = &.{ "-std=c99", "-Wall", "-Werror" },
         });
-        c_mod.linkLibrary(cdr_library);
+        linkCdr(c_mod, cdr_library);
         c_mod.addIncludePath(c_dir);
         c_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
         const c_test = b.addExecutable(.{ .name = "zidl-sequence-elements-c", .root_module = c_mod });
@@ -493,7 +493,7 @@ pub fn build(b: *std.Build) void {
                 .flags = &.{ "-std=c99", "-Wall", "-Werror" },
             });
         }
-        c_split_mod.linkLibrary(cdr_library);
+        linkCdr(c_split_mod, cdr_library);
         c_split_mod.addIncludePath(c_split_shim.dirname());
         c_split_mod.addIncludePath(c_split_dir);
         c_split_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
@@ -522,7 +522,7 @@ pub fn build(b: *std.Build) void {
             .file = cpp_dir.path(b, "fixture_cdr.cpp"),
             .flags = &.{ "-std=c++17", "-Wall", "-Werror" },
         });
-        cpp_mod.linkLibrary(cdr_library);
+        linkCdr(cpp_mod, cdr_library);
         cpp_mod.addIncludePath(cpp_dir);
         cpp_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
         const cpp_test = b.addExecutable(.{ .name = "zidl-sequence-elements-cpp", .root_module = cpp_mod });
@@ -563,7 +563,7 @@ pub fn build(b: *std.Build) void {
             const flags: []const []const u8 = if (cpp) &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" } else &.{ "-std=c99", "-Wall", "-Werror" };
             m.addCSourceFile(.{ .file = b.path(if (cpp) dir ++ "test.cpp" else dir ++ "test.c"), .flags = flags });
             m.addCSourceFile(.{ .file = generated.path(b, if (cpp) "keys_cdr.cpp" else "keys_cdr.c"), .flags = flags });
-            m.linkLibrary(cdr_library);
+            linkCdr(m, cdr_library);
             m.addIncludePath(generated);
             m.addIncludePath(b.path("packages/zidl-cdr/include"));
             const app = b.addExecutable(.{ .name = b.fmt("zidl-canonical-keys-{s}", .{lang}), .root_module = m });
@@ -655,7 +655,7 @@ pub fn build(b: *std.Build) void {
                 .file = dir.path(b, if (cpp) "validation_cdr.cpp" else "validation_cdr.c"),
                 .flags = generated_flags,
             });
-            validation_mod.linkLibrary(cdr_library);
+            linkCdr(validation_mod, cdr_library);
             validation_mod.addIncludePath(dir);
             validation_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
             const validation_exe = b.addExecutable(.{ .name = b.fmt("zidl-cdr-validation-{s}", .{lang}), .root_module = validation_mod });
@@ -694,7 +694,7 @@ pub fn build(b: *std.Build) void {
             const flags: []const []const u8 = if (cpp) &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" } else &.{ "-std=c99", "-Wall", "-Werror" };
             m.addCSourceFile(.{ .file = b.path(if (cpp) dir ++ "test.cpp" else dir ++ "test.c"), .flags = flags });
             m.addCSourceFile(.{ .file = generated.path(b, if (cpp) "shapes_cdr.cpp" else "shapes_cdr.c"), .flags = flags });
-            m.linkLibrary(cdr_library);
+            linkCdr(m, cdr_library);
             m.addIncludePath(generated);
             m.addIncludePath(b.path("packages/zidl-cdr/include"));
             const app = b.addExecutable(.{ .name = b.fmt("zidl-key-projection-{s}", .{lang}), .root_module = m });
@@ -762,7 +762,7 @@ pub fn build(b: *std.Build) void {
             const flags: []const []const u8 = if (cpp) &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" } else &.{ "-std=c99", "-Wall", "-Werror" };
             m.addCSourceFile(.{ .file = b.path(if (cpp) dir ++ "test.cpp" else dir ++ "test.c"), .flags = flags });
             m.addCSourceFile(.{ .file = generated.path(b, if (cpp) "shapes_cdr.cpp" else "shapes_cdr.c"), .flags = flags });
-            m.linkLibrary(cdr_library);
+            linkCdr(m, cdr_library);
             m.addIncludePath(generated);
             m.addIncludePath(b.path("packages/zidl-cdr/include"));
             const app = b.addExecutable(.{ .name = b.fmt("zidl-optional-wire-{s}", .{lang}), .root_module = m });
@@ -858,7 +858,7 @@ pub fn build(b: *std.Build) void {
             .file = c_dir.path(b, "ka_cdr.c"),
             .flags = &.{ "-std=c99", "-Wall", "-Werror" },
         });
-        c_mod.linkLibrary(cdr_library);
+        linkCdr(c_mod, cdr_library);
         c_mod.addIncludePath(c_dir);
         c_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
         const c_test = b.addExecutable(.{ .name = "zidl-xcdr-known-answer-c", .root_module = c_mod });
@@ -888,7 +888,7 @@ pub fn build(b: *std.Build) void {
             .file = cpp_dir.path(b, "ka_cdr.cpp"),
             .flags = &.{ "-std=c++17", "-Wall", "-Werror" },
         });
-        cpp_mod.linkLibrary(cdr_library);
+        linkCdr(cpp_mod, cdr_library);
         cpp_mod.addIncludePath(cpp_dir);
         cpp_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
         const cpp_test = b.addExecutable(.{ .name = "zidl-xcdr-known-answer-cpp", .root_module = cpp_mod });
@@ -1000,7 +1000,7 @@ pub fn build(b: *std.Build) void {
             },
             .flags = &.{ "-std=c99", "-Wall", "-Werror" },
         });
-        c_mod.linkLibrary(cdr_library);
+        linkCdr(c_mod, cdr_library);
         c_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
         c_mod.addIncludePath(b.path("test/golden/c"));
         const c_exe = b.addExecutable(.{ .name = "test_c", .root_module = c_mod });
@@ -1023,7 +1023,7 @@ pub fn build(b: *std.Build) void {
             },
             .flags = &.{ "-std=c++17", "-Wall" },
         });
-        cpp_mod.linkLibrary(cdr_library);
+        linkCdr(cpp_mod, cdr_library);
         cpp_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
         cpp_mod.addIncludePath(b.path("test/golden/cpp"));
         const cpp_exe = b.addExecutable(.{ .name = "test_cpp", .root_module = cpp_mod });
@@ -1346,4 +1346,10 @@ pub fn build(b: *std.Build) void {
     emit_tests_step.dependOn(&b.addInstallArtifact(zig_integration_tests, .{ .dest_dir = .{ .override = .{ .custom = "tests" } } }).step);
     emit_tests_step.dependOn(&b.addInstallArtifact(authoring_test, .{ .dest_dir = .{ .override = .{ .custom = "tests" } } }).step);
     emit_tests_step.dependOn(&b.addInstallArtifact(interop_tests, .{ .dest_dir = .{ .override = .{ .custom = "tests" } } }).step);
+}
+
+// Instrumented archives require the final executable to link the same runtime.
+fn linkCdr(module: *std.Build.Module, library: *std.Build.Step.Compile) void {
+    module.sanitize_thread = library.root_module.sanitize_thread;
+    module.linkLibrary(library);
 }
