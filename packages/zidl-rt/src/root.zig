@@ -1,102 +1,84 @@
-//! zidl-rt — Zig CDR runtime for zidl-generated code.
-//!
-//! This package provides the CDR serialisation primitives that generated Zig
-//! code depends on.  It is an independent Zig package; add it as a dependency
-//! in `build.zig.zon` of any package that imports generated IDL bindings.
-//!
-//! ## Quick start
-//!
-//!   ```zig
-//!   const zidl_rt = @import("zidl-rt");
-//!
-//!   // Writing:
-//!   var buf = std.ArrayList(u8).init(alloc);
-//!   var w = zidl_rt.CdrWriter(std.ArrayList(u8).Writer, .xcdr2).init(buf.writer());
-//!   try w.writeEncapHeader();
-//!   try w.writeI32(42);
-//!
-//!   // Reading:
-//!   var r = try zidl_rt.CdrReader.init(buf.items);
-//!   const v = try r.readI32();  // v == 42
-//!   ```
-//!
-//! ## Sequence types (in generated structs)
-//!
-//! Generated code uses standard library types for sequences and strings:
-//!   - Unbounded `sequence<T>`  → `std.ArrayListUnmanaged(T)`
-//!   - Bounded  `sequence<T,N>` → `std.BoundedArray(T, N)`
-//!   - Unbounded `string`        → `[]const u8` (zero-copy reads) / `[]u8` (owned)
-//!   - Bounded  `string<N>`     → `std.BoundedArray(u8, N)`
-//!
-//! ## High-throughput DataReader pattern
-//!
-//! To avoid per-message allocation for DataReaders:
-//!   1. Pre-allocate samples: `var sample: MyType = undefined;`
-//!   2. Call `MyType.deserializeInto(&sample, &reader, alloc)` — no struct alloc.
-//!   3. For unbounded sequences inside the struct, pre-grow once with
-//!      `seq.ensureTotalCapacityPrecise(alloc, N)`, then reuse with
-//!      `seq.clearRetainingCapacity()` before each `deserializeInto` call.
-
+//! Compatibility umbrella for zidl-cdr and zidl-bindings.
 const std = @import("std");
-const cdr = @import("cdr.zig");
-const entity_box = @import("entity_box.zig");
-const allocator_mod = @import("allocator.zig");
-
-pub const EntityBox = entity_box.EntityBox;
-pub const boxEntity = entity_box.boxEntity;
-pub const unboxEntity = entity_box.unboxEntity;
-pub const unboxAs = entity_box.unboxAs;
-pub const unboxAsView = entity_box.unboxAsView;
-pub const retireEntityBox = entity_box.retireEntityBox;
-pub const isEntityBoxRetired = entity_box.isEntityBoxRetired;
-pub const freeEntityBox = entity_box.freeEntityBox;
-pub const HandleRetiredFn = entity_box.HandleRetiredFn;
-pub const observeHandleRetire = entity_box.observeHandleRetire;
-pub const unobserveHandleRetire = entity_box.unobserveHandleRetire;
-pub const notifyHandleRetired = entity_box.notifyHandleRetired;
-pub const exportHandleRetireHook = entity_box.exportHandleRetireHook;
-pub const NIL_PTR = entity_box.NIL_PTR;
-
-pub const ZidlAllocator = allocator_mod.ZidlAllocator;
-pub const toAllocator = allocator_mod.toAllocator;
-
-pub const XcdrVersion = cdr.XcdrVersion;
-pub const ByteOrder = cdr.ByteOrder;
-/// Staging APIs for the shared native CDR core.
-pub const cdr_primitives = @import("cdr_primitives.zig");
-pub const cdr_cursor = @import("cdr_cursor.zig");
-pub const cdr_strings = @import("cdr_strings.zig");
-pub const cdr_framing = @import("cdr_framing.zig");
-pub const PrimitiveWriter = @import("primitive_writer.zig").PrimitiveWriter;
-pub const CdrWriter = cdr.CdrWriter;
-pub const CdrReader = cdr.CdrReader;
-pub const BoundedArray = cdr.BoundedArray;
-
-pub const authoring = @import("authoring.zig");
-const owned = @import("owned.zig");
-pub const SeqElem = owned.SeqElem;
-pub const deinitOwned = owned.deinitOwned;
-pub const cloneOwned = owned.cloneOwned;
-pub const KeyHashWriter = cdr.KeyHashWriter;
-
-pub const PlCdrWriter = cdr.PlCdrWriter;
-pub const PlMode = cdr.CdrReader.PlMode;
-pub const PlParam = cdr.CdrReader.PlParam;
-pub const RawParam = cdr.CdrReader.RawParam;
-
-pub const ENCAP_CDR1_LE = cdr.ENCAP_CDR1_LE;
-pub const ENCAP_CDR1_BE = cdr.ENCAP_CDR1_BE;
-pub const ENCAP_CDR2_LE = cdr.ENCAP_CDR2_LE;
-pub const ENCAP_CDR2_BE = cdr.ENCAP_CDR2_BE;
-pub const ENCAP_PL_CDR_LE = cdr.ENCAP_PL_CDR_LE;
-pub const ENCAP_PL_CDR_BE = cdr.ENCAP_PL_CDR_BE;
+pub const EntityBox = @import("zidl_bindings").EntityBox;
+pub const boxEntity = @import("zidl_bindings").boxEntity;
+pub const unboxEntity = @import("zidl_bindings").unboxEntity;
+pub const unboxAs = @import("zidl_bindings").unboxAs;
+pub const unboxAsView = @import("zidl_bindings").unboxAsView;
+pub const retireEntityBox = @import("zidl_bindings").retireEntityBox;
+pub const isEntityBoxRetired = @import("zidl_bindings").isEntityBoxRetired;
+pub const freeEntityBox = @import("zidl_bindings").freeEntityBox;
+pub const HandleRetiredFn = @import("zidl_bindings").HandleRetiredFn;
+pub const observeHandleRetire = @import("zidl_bindings").observeHandleRetire;
+pub const unobserveHandleRetire = @import("zidl_bindings").unobserveHandleRetire;
+pub const notifyHandleRetired = @import("zidl_bindings").notifyHandleRetired;
+pub const exportHandleRetireHook = @import("zidl_bindings").exportHandleRetireHook;
+pub const NIL_PTR = @import("zidl_bindings").NIL_PTR;
+pub const ZidlAllocator = @import("zidl_bindings").ZidlAllocator;
+pub const toAllocator = @import("zidl_bindings").toAllocator;
+pub const XcdrVersion = @import("zidl_cdr").XcdrVersion;
+pub const ByteOrder = @import("zidl_cdr").ByteOrder;
+pub const cdr_primitives = @import("zidl_cdr").cdr_primitives;
+pub const cdr_cursor = @import("zidl_cdr").cdr_cursor;
+pub const cdr_strings = @import("zidl_cdr").cdr_strings;
+pub const cdr_framing = @import("zidl_cdr").cdr_framing;
+pub const PrimitiveWriter = @import("zidl_cdr").PrimitiveWriter;
+pub const CdrWriter = @import("zidl_cdr").CdrWriter;
+pub const CdrReader = @import("zidl_cdr").CdrReader;
+pub const BoundedArray = @import("zidl_cdr").BoundedArray;
+pub const authoring = @import("zidl_bindings").authoring;
+pub const SeqElem = @import("zidl_bindings").SeqElem;
+pub const deinitOwned = @import("zidl_bindings").deinitOwned;
+pub const cloneOwned = @import("zidl_bindings").cloneOwned;
+pub const KeyHashWriter = @import("zidl_cdr").KeyHashWriter;
+pub const PlCdrWriter = @import("zidl_cdr").PlCdrWriter;
+pub const PlMode = @import("zidl_cdr").PlMode;
+pub const PlParam = @import("zidl_cdr").PlParam;
+pub const RawParam = @import("zidl_cdr").RawParam;
+pub const ENCAP_CDR1_LE = @import("zidl_cdr").ENCAP_CDR1_LE;
+pub const ENCAP_CDR1_BE = @import("zidl_cdr").ENCAP_CDR1_BE;
+pub const ENCAP_CDR2_LE = @import("zidl_cdr").ENCAP_CDR2_LE;
+pub const ENCAP_CDR2_BE = @import("zidl_cdr").ENCAP_CDR2_BE;
+pub const ENCAP_PL_CDR_LE = @import("zidl_cdr").ENCAP_PL_CDR_LE;
+pub const ENCAP_PL_CDR_BE = @import("zidl_cdr").ENCAP_PL_CDR_BE;
+pub const cdr_keys = @import("zidl_cdr").cdr_keys;
+pub const cdr_fixed = @import("zidl_cdr").cdr_fixed;
 
 test {
-    _ = @import("cdr_optional_test.zig");
-    _ = @import("cdr_fixed_test.zig");
     std.testing.refAllDecls(@This());
 }
 
-pub const cdr_keys = @import("cdr_keys.zig");
+test "compatibility aliases preserve canonical types" {
+    const codec = @import("zidl_cdr");
+    const bindings = @import("zidl_bindings");
+    inline for (.{ "CdrReader", "PrimitiveWriter", "KeyHashWriter", "PlCdrWriter", "RawParam", "ByteOrder", "XcdrVersion" }) |name| {
+        try std.testing.expect(@field(@This(), name) == @field(codec, name));
+    }
+    try std.testing.expect(CdrWriter(.xcdr1) == codec.CdrWriter(.xcdr1));
+    try std.testing.expect(CdrWriter(.xcdr2) == codec.CdrWriter(.xcdr2));
+    try std.testing.expect(BoundedArray(u8, 7) == codec.BoundedArray(u8, 7));
+    try std.testing.expect(NIL_PTR == bindings.NIL_PTR);
+    try std.testing.expect(EntityBox == bindings.EntityBox);
+    try std.testing.expect(ZidlAllocator == bindings.ZidlAllocator);
+    try std.testing.expect(authoring.Spec == bindings.authoring.Spec);
+}
 
-pub const cdr_fixed = @import("cdr_fixed.zig");
+test "compatibility aliases share the canonical handle registry" {
+    const bindings = @import("zidl_bindings");
+    const Observer = struct {
+        fn notify(ctx: ?*anyopaque, _: *anyopaque) callconv(.c) void {
+            const count: *usize = @ptrCast(@alignCast(ctx.?));
+            count.* += 1;
+        }
+    };
+    var count: usize = 0;
+    var object: u8 = 0;
+    const handle = try boxEntity(std.testing.allocator, @ptrCast(&object), @ptrCast(&object));
+    defer freeEntityBox(std.testing.allocator, handle);
+    try std.testing.expect(observeHandleRetire(Observer.notify, &count));
+    defer _ = bindings.unobserveHandleRetire(Observer.notify, &count);
+    bindings.retireEntityBox(handle);
+    try std.testing.expect(isEntityBoxRetired(handle));
+    retireEntityBox(handle);
+    try std.testing.expectEqual(@as(usize, 1), count);
+}

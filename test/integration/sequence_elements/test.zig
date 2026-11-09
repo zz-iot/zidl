@@ -14,20 +14,20 @@
 
 const std = @import("std");
 const testing = std.testing;
-const zidl_rt = @import("zidl_rt");
+const zidl_cdr = @import("zidl_cdr");
 const fixture = @import("fixture");
 
 fn encode(comptime T: type, value: T) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(testing.allocator);
-    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
     try writer.writeEncapHeader();
     try T.serialize(&writer, value);
     return buf.toOwnedSlice(testing.allocator);
 }
 
 fn decodeWith(comptime T: type, bytes: []const u8, allocator: std.mem.Allocator) !T {
-    var reader = try zidl_rt.CdrReader.init(bytes);
+    var reader = try zidl_cdr.CdrReader.init(bytes);
     var out: T = .{};
     try T.deserializeInto(&out, &reader, allocator);
     return out;
@@ -74,7 +74,7 @@ test "typedef'd struct elements round-trip through a bounded sequence" {
 
 test "enum elements still compile and round-trip without allocator use" {
     const colors = [_]fixture.Color{ .BLUE, .RED, .GREEN };
-    const value = fixture.ColorHolder{ .colors = try zidl_rt.BoundedArray(fixture.Color, 4).fromSlice(&colors) };
+    const value = fixture.ColorHolder{ .colors = try zidl_cdr.BoundedArray(fixture.Color, 4).fromSlice(&colors) };
     const bytes = try encode(fixture.ColorHolder, value);
     defer testing.allocator.free(bytes);
 
@@ -85,7 +85,7 @@ test "enum elements still compile and round-trip without allocator use" {
 test "appendable and mutable holders forward the allocator" {
     const two = points[0..2];
     {
-        const value = fixture.AppendableHolder{ .points = try zidl_rt.BoundedArray(fixture.Point, 2).fromSlice(two) };
+        const value = fixture.AppendableHolder{ .points = try zidl_cdr.BoundedArray(fixture.Point, 2).fromSlice(two) };
         const bytes = try encode(fixture.AppendableHolder, value);
         defer testing.allocator.free(bytes);
         const out = try decode(fixture.AppendableHolder, bytes);
@@ -93,7 +93,7 @@ test "appendable and mutable holders forward the allocator" {
     }
     {
         const value = fixture.MutableHolder{
-            .points = try zidl_rt.BoundedArray(fixture.Point, 2).fromSlice(two),
+            .points = try zidl_cdr.BoundedArray(fixture.Point, 2).fromSlice(two),
             .tail = -9,
         };
         const bytes = try encode(fixture.MutableHolder, value);
@@ -106,7 +106,7 @@ test "appendable and mutable holders forward the allocator" {
 
 test "union case holding a bounded struct sequence round-trips" {
     const two = points[0..2];
-    const value = fixture.SeqCase{ ._d = 1, ._u = .{ .points = try zidl_rt.BoundedArray(fixture.Point, 2).fromSlice(two) } };
+    const value = fixture.SeqCase{ ._d = 1, ._u = .{ .points = try zidl_cdr.BoundedArray(fixture.Point, 2).fromSlice(two) } };
     const bytes = try encode(fixture.SeqCase, value);
     defer testing.allocator.free(bytes);
 
@@ -123,7 +123,7 @@ test "an element count above the bound is rejected" {
     // XCDR2: after the 4-byte encapsulation header comes the collection's
     // DHEADER (its elements are structs), then the element count.
     std.mem.writeInt(u32, bytes[8..12], 5, .little);
-    var reader = try zidl_rt.CdrReader.init(bytes);
+    var reader = try zidl_cdr.CdrReader.init(bytes);
     var out: fixture.AliasHolder = .{};
     try testing.expectError(error.SequenceTooLong, fixture.AliasHolder.deserializeInto(&out, &reader, testing.allocator));
 }
@@ -131,7 +131,7 @@ test "an element count above the bound is rejected" {
 // ── Element ownership: deinit ───────────────────────────────────────────────
 
 test "bounded holder deinit releases decoded element strings" {
-    const value = fixture.NamedHolder{ .items = try zidl_rt.BoundedArray(fixture.Named, 3).fromSlice(&names), .tail = 42 };
+    const value = fixture.NamedHolder{ .items = try zidl_cdr.BoundedArray(fixture.Named, 3).fromSlice(&names), .tail = 42 };
     const bytes = try encode(fixture.NamedHolder, value);
     defer testing.allocator.free(bytes);
 
@@ -143,7 +143,7 @@ test "bounded holder deinit releases decoded element strings" {
 
 test "bounded union elements are released by the holder" {
     const choices = [_]fixture.Choice{ .{ ._d = 0, ._u = .{ .i = 7 } }, .{ ._d = 1, ._u = .{ .s = "text" } } };
-    const value = fixture.ChoiceHolder{ .choices = try zidl_rt.BoundedArray(fixture.Choice, 3).fromSlice(&choices) };
+    const value = fixture.ChoiceHolder{ .choices = try zidl_cdr.BoundedArray(fixture.Choice, 3).fromSlice(&choices) };
     const bytes = try encode(fixture.ChoiceHolder, value);
     defer testing.allocator.free(bytes);
 
@@ -181,7 +181,7 @@ test "unbounded and typedef'd holders release element strings" {
 test "nested, optional and union-case bounded members are released" {
     {
         const value = fixture.Outer{
-            .inner = .{ .items = try zidl_rt.BoundedArray(fixture.Named, 3).fromSlice(&names), .tail = 1 },
+            .inner = .{ .items = try zidl_cdr.BoundedArray(fixture.Named, 3).fromSlice(&names), .tail = 1 },
             .x = 3,
         };
         const bytes = try encode(fixture.Outer, value);
@@ -191,7 +191,7 @@ test "nested, optional and union-case bounded members are released" {
         try expectNames(&names, out.inner.items.slice());
     }
     {
-        const value = fixture.OptionalHolder{ .maybe = try zidl_rt.BoundedArray(fixture.Named, 2).fromSlice(&names) };
+        const value = fixture.OptionalHolder{ .maybe = try zidl_cdr.BoundedArray(fixture.Named, 2).fromSlice(&names) };
         const bytes = try encode(fixture.OptionalHolder, value);
         defer testing.allocator.free(bytes);
         var out = try decode(fixture.OptionalHolder, bytes);
@@ -206,7 +206,7 @@ test "nested, optional and union-case bounded members are released" {
         try testing.expect(out.maybe == null);
     }
     {
-        const value = fixture.PeopleCase{ ._d = 1, ._u = .{ .people = try zidl_rt.BoundedArray(fixture.Named, 2).fromSlice(&names) } };
+        const value = fixture.PeopleCase{ ._d = 1, ._u = .{ .people = try zidl_cdr.BoundedArray(fixture.Named, 2).fromSlice(&names) } };
         const bytes = try encode(fixture.PeopleCase, value);
         defer testing.allocator.free(bytes);
         var out = try decode(fixture.PeopleCase, bytes);
@@ -219,7 +219,7 @@ test "nested, optional and union-case bounded members are released" {
 
 test "clones own independent element storage" {
     {
-        const value = fixture.NamedHolder{ .items = try zidl_rt.BoundedArray(fixture.Named, 3).fromSlice(&names), .tail = 0 };
+        const value = fixture.NamedHolder{ .items = try zidl_cdr.BoundedArray(fixture.Named, 3).fromSlice(&names), .tail = 0 };
         const bytes = try encode(fixture.NamedHolder, value);
         defer testing.allocator.free(bytes);
         var original = try decode(fixture.NamedHolder, bytes);
@@ -261,7 +261,7 @@ test "clone releases partial copies on every allocation failure" {
     var source = try decode(fixture.UnboundedHolder, u_bytes);
     defer source.deinit(testing.allocator);
 
-    const b_value = fixture.NamedHolder{ .items = try zidl_rt.BoundedArray(fixture.Named, 3).fromSlice(&names), .tail = 0 };
+    const b_value = fixture.NamedHolder{ .items = try zidl_cdr.BoundedArray(fixture.Named, 3).fromSlice(&names), .tail = 0 };
     const b_bytes = try encode(fixture.NamedHolder, b_value);
     defer testing.allocator.free(b_bytes);
     var bounded = try decode(fixture.NamedHolder, b_bytes);
@@ -282,7 +282,7 @@ fn decodeUnderFailure(allocator: std.mem.Allocator, u_bytes: []const u8, b_bytes
 test "decode releases partially decoded elements on every allocation failure" {
     const u_bytes = try encode(fixture.UnboundedHolder, .{ .items = namesView(@FieldType(fixture.UnboundedHolder, "items")) });
     defer testing.allocator.free(u_bytes);
-    const b_value = fixture.NamedHolder{ .items = try zidl_rt.BoundedArray(fixture.Named, 3).fromSlice(&names), .tail = 0 };
+    const b_value = fixture.NamedHolder{ .items = try zidl_cdr.BoundedArray(fixture.Named, 3).fromSlice(&names), .tail = 0 };
     const b_bytes = try encode(fixture.NamedHolder, b_value);
     defer testing.allocator.free(b_bytes);
 
@@ -297,7 +297,7 @@ test "truncated input part-way through an element leaks nothing" {
         try testing.expectError(error.EndOfStream, decode(fixture.UnboundedHolder, bytes[0 .. bytes.len - 6]));
     }
     {
-        const value = fixture.NamedHolder{ .items = try zidl_rt.BoundedArray(fixture.Named, 3).fromSlice(&names), .tail = 5 };
+        const value = fixture.NamedHolder{ .items = try zidl_cdr.BoundedArray(fixture.Named, 3).fromSlice(&names), .tail = 5 };
         const bytes = try encode(fixture.NamedHolder, value);
         defer testing.allocator.free(bytes);
         // Cut inside the second element's label (the trailing long is 4 bytes).

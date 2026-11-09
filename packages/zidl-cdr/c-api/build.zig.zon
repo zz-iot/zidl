@@ -1,0 +1,16 @@
+.{
+    .name = .zidl_cdr_c,
+    .version = "0.3.27-zig.0.17.0-dev",
+    .minimum_zig_version = "0.17.0",
+    .fingerprint = 0xc375d8a4f3800943,
+    .dependencies = .{
+        .translate_c = .{
+            .url = "git+https://codeberg.org/ziglang/translate-c?ref=zig-0.17.x#02ff0c523fb92a38939b04d0145c4a9602a74d56",
+            .hash = "translate_c-2.0.0-Q_BUWltOBwBYABF84EUL208pIFeUIwbBs29FmVBaafN5",
+        },
+        .zidl_cdr = .{
+            .path = "..",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon" },
+}

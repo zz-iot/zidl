@@ -19,7 +19,7 @@ for all supported targets.
 - Generate optional typed zzdds topic wrappers for DDS topic structs (`--generate-zzdds-wrappers`)
 - Extensible backend interface so new mappings can be added cleanly
 - Hand-written recursive descent parser (no parser generator, no combinator library)
-- Ship companion runtime packages (`zidl-rt`, `zidl-xtypes`, `zidl-cdr`)
+- Ship companion runtime packages (`zidl-cdr`, `zidl-bindings`, `zidl-xtypes`)
 
 ## Build
 

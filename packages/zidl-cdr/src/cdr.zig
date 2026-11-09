@@ -1,4 +1,4 @@
-//! CDR (Common Data Representation) writer and reader for zidl-rt.
+//! CDR (Common Data Representation) writer and reader for zidl-cdr.
 //!
 //! Implements OMG XCDR1 and XCDR2 encoding, little-endian output, per:
 //!   - DDS-XTYPES spec formal-20-02-04 §7.3

@@ -1,5 +1,5 @@
 const std = @import("std");
-const rt = @import("zidl_rt");
+const rt = @import("zidl_cdr_native");
 const adapter = @import("adapter");
 const testing = std.testing;
 const Reader = adapter.Reader;
@@ -20,7 +20,7 @@ extern fn zidl_cdr_read_string(*Reader, *?[*]u8) c_int;
 extern fn zidl_cdr_read_wstring(*Reader, *?[*]u16, *u32) c_int;
 extern fn zidl_cdr_free_str(?[*]u8) void;
 extern fn zidl_cdr_free_wstr(?[*]u16) void;
-extern fn zidl_cdr_set_allocator(?*const rt.ZidlAllocator) void;
+extern fn zidl_cdr_set_allocator(?*const @import("c_header").ZidlAllocator) void;
 
 // Hand-written payloads: marker, "hi", [0x1234,'Z'], empty string/wstring.
 const little = "a500000003000000686900000400000034125a00010000000000000000000000";
@@ -107,7 +107,7 @@ const Stats = struct {
     alignment: usize = 0,
     fail: bool = false,
 
-    fn alloc(ctx: ?*anyopaque, size: usize, alignment: usize) callconv(.c) ?[*]u8 {
+    fn alloc(ctx: ?*anyopaque, size: usize, alignment: usize) callconv(.c) ?*anyopaque {
         const self: *Stats = @ptrCast(@alignCast(ctx.?));
         self.calls += 1;
         self.size = size;
@@ -115,16 +115,16 @@ const Stats = struct {
         if (self.fail) return null;
         return @ptrCast(std.c.malloc(size));
     }
-    fn resize(_: ?*anyopaque, _: ?[*]u8, _: usize, _: usize, _: usize) callconv(.c) bool {
+    fn resize(_: ?*anyopaque, _: ?*anyopaque, _: usize, _: usize, _: usize) callconv(.c) bool {
         return false;
     }
-    fn free(ctx: ?*anyopaque, ptr: ?[*]u8, size: usize, alignment: usize) callconv(.c) void {
+    fn free(ctx: ?*anyopaque, ptr: ?*anyopaque, size: usize, alignment: usize) callconv(.c) void {
         const self: *Stats = @ptrCast(@alignCast(ctx.?));
         std.debug.assert(size == self.size and alignment == self.alignment);
         self.frees += 1;
         std.c.free(@ptrCast(ptr));
     }
-    fn allocator(self: *Stats) rt.ZidlAllocator {
+    fn allocator(self: *Stats) @import("c_header").ZidlAllocator {
         return .{ .ctx = self, .alloc = alloc, .resize = resize, .free = free };
     }
 };

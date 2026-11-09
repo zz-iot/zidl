@@ -1,6 +1,6 @@
-//! Incremental C ABI adapter: primitives, strings, framing, keys and cursors.
-//! Allocator registration and remaining codec operations stay in C.
-const rt = @import("zidl_rt");
+//! Stable C ABI adapter over the native codec.
+//! Storage growth and allocator registration use the C support layer.
+const rt = @import("zidl_cdr");
 const std = @import("std");
 
 pub const Writer = extern struct {
@@ -532,4 +532,9 @@ export fn zidl_cdr_read_fixed(r: *Reader, digits: u8, scale: u8, out: *f64) c_in
     };
     out.* = result;
     return 0;
+}
+
+export fn zidl_md5(data: ?[*]const u8, len: usize, out: *[16]u8) void {
+    const bytes = if (len == 0) &.{} else data.?[0..len];
+    std.crypto.hash.Md5.hash(bytes, out, .{});
 }

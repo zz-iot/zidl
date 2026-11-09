@@ -262,7 +262,7 @@ pub const Options = struct {
     ///     generation for the struct containing it, exactly as a direct `SomeStruct` field would.
     zig_generate_toml_config: bool = false,
     /// Zig backend opt-in: emit strict `decodeToml`, `toml_fields` and `tomlSpec`
-    /// metadata backed by zidl_rt.authoring. Independent of legacy applyToml;
+    /// metadata backed by zidl_bindings.authoring. Independent of legacy applyToml;
     /// no extra data fields or CDR methods are required. Results own an arena
     /// plus presence/source paths and reject unknown fields. Supports bounded
     /// strings, optional scalars, records, arrays and nested sequences. Named

@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const types = @import("types");
-const zidl_rt = @import("zidl_rt");
+const zidl_bindings = @import("zidl_bindings");
 
 pub const GreeterStub = struct {
     count: i32 = 0,
@@ -46,13 +46,13 @@ pub const GreeterStub = struct {
 
     fn deinit(ptr: *anyopaque) void {
         const self: *GreeterStub = @ptrCast(@alignCast(ptr));
-        if (self.c_abi_handle) |h| zidl_rt.freeEntityBox(std.testing.allocator, h);
+        if (self.c_abi_handle) |h| zidl_bindings.freeEntityBox(std.testing.allocator, h);
     }
 
     fn get_c_abi_handle(ptr: *anyopaque) *anyopaque {
         const self: *GreeterStub = @ptrCast(@alignCast(ptr));
         if (self.c_abi_handle == null) {
-            self.c_abi_handle = zidl_rt.boxEntity(std.testing.allocator, ptr, &vtable) catch @panic("oom");
+            self.c_abi_handle = zidl_bindings.boxEntity(std.testing.allocator, ptr, &vtable) catch @panic("oom");
         }
         return self.c_abi_handle.?;
     }

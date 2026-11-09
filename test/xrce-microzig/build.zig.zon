@@ -4,8 +4,8 @@
     .fingerprint = 0xa39e00e911377888,
     .minimum_zig_version = "0.15.1",
     .dependencies = .{
-        .zidl_rt = .{
-            .path = "../../packages/zidl-rt",
+        .zidl_bindings = .{
+            .path = "../../packages/zidl-bindings",
         },
     },
     .paths = .{

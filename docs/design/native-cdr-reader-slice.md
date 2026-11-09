@@ -1,5 +1,9 @@
 # Shared native CDR: reader and cursor checkpoint
 
+Subsequent [package placement](native-cdr-package-slice.md) moves native codec
+source to `zidl-cdr/src` and C ABI test commands to `zidl-cdr/c-api`. Direct
+`zidl-rt` source imports now require the codec and bindings module imports.
+
 Date: 2026-11-04. Extends the [primitive writer checkpoint](native-cdr-primitive-slice.md).
 
 The subsequent [string checkpoint](native-cdr-string-slice.md) extends this

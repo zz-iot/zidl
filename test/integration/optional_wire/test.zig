@@ -1,5 +1,5 @@
 const std = @import("std");
-const rt = @import("zidl_rt");
+const zidl_cdr = @import("zidl_cdr");
 const P = @import("fixture").OptionalWire;
 const testing = std.testing;
 
@@ -20,7 +20,7 @@ fn value(comptime T: type, present: bool) T {
     return v;
 }
 fn decode(comptime T: type, bytes: []const u8, allocator: std.mem.Allocator, key: bool, present: bool) !void {
-    var r = try rt.CdrReader.init(bytes);
+    var r = try zidl_cdr.CdrReader.init(bytes);
     var out: T = .{};
     defer out.deinit(allocator);
     if (key) try T.deserializeKeyValueInto(&out, &r, allocator) else try T.deserializeInto(&out, &r, allocator);
@@ -57,7 +57,7 @@ fn check(comptime T: type, present: bool, version: u8, order: u8, full: []const 
         defer dynamic.deinit(testing.allocator);
         var actual: [1024]u8 = undefined;
         for (4..full.len) |cap| {
-            var failed = rt.PrimitiveWriter.initFixed(actual[0..cap], if (version == 1) .eight else .four, if (order == 0) .little else .big);
+            var failed = zidl_cdr.PrimitiveWriter.initFixed(actual[0..cap], if (version == 1) .eight else .four, if (order == 0) .little else .big);
             try failed.writeBytes(full[0..4]);
             failed.resetPayload();
             if (key == 1) try testing.expectError(error.Overflow, T.serializeKeyValue(&failed, v)) else try testing.expectError(error.Overflow, T.serialize(&failed, v));
@@ -66,9 +66,9 @@ fn check(comptime T: type, present: bool, version: u8, order: u8, full: []const 
         }
         for (0..3) |mode| {
             var w = switch (mode) {
-                0 => rt.PrimitiveWriter.initFixed(&actual, if (version == 1) .eight else .four, if (order == 0) .little else .big),
-                1 => rt.PrimitiveWriter.initCounting(if (version == 1) .eight else .four, if (order == 0) .little else .big),
-                else => rt.PrimitiveWriter.initDynamic(&dynamic, testing.allocator, if (version == 1) .eight else .four, if (order == 0) .little else .big),
+                0 => zidl_cdr.PrimitiveWriter.initFixed(&actual, if (version == 1) .eight else .four, if (order == 0) .little else .big),
+                1 => zidl_cdr.PrimitiveWriter.initCounting(if (version == 1) .eight else .four, if (order == 0) .little else .big),
+                else => zidl_cdr.PrimitiveWriter.initDynamic(&dynamic, testing.allocator, if (version == 1) .eight else .four, if (order == 0) .little else .big),
             };
             try w.writeBytes(full[0..4]);
             w.resetPayload();
@@ -82,18 +82,18 @@ fn check(comptime T: type, present: bool, version: u8, order: u8, full: []const 
             const Runner = struct {
                 fn run(allocator: std.mem.Allocator, input: []const u8, projected: bool, exists: bool) !void {
                     try decode(T, input, allocator, projected, exists);
-                    var reader = try rt.CdrReader.init(input);
+                    var reader = try zidl_cdr.CdrReader.init(input);
                     var selected: T = .{};
                     defer selected.deinit(allocator);
                     try T.deserializeSelected(&reader, 0xffff, &selected, allocator);
                 }
             };
             try testing.checkAllAllocationFailures(testing.allocator, Runner.run, .{ bytes, key == 1, present });
-            var r = try rt.CdrReader.init(bytes);
+            var r = try zidl_cdr.CdrReader.init(bytes);
             try T.skip(&r);
             try testing.expectEqual(bytes.len, r.pos);
             for ([_]u64{ 0, 0xffff, if (T == P.Values) 16 else 2 }) |mask| {
-                r = try rt.CdrReader.init(bytes);
+                r = try zidl_cdr.CdrReader.init(bytes);
                 var selected: T = .{};
                 defer selected.deinit(testing.allocator);
                 try T.deserializeSelected(&r, mask, &selected, testing.allocator);
@@ -111,7 +111,7 @@ fn check(comptime T: type, present: bool, version: u8, order: u8, full: []const 
                 if (present) try testing.expectEqualSlices(u8, "", text.?.string) else try testing.expect(text == null);
             }
             for (4..bytes.len) |n| {
-                r = try rt.CdrReader.init(bytes[0..n]);
+                r = try zidl_cdr.CdrReader.init(bytes[0..n]);
                 var partial: T = .{};
                 defer partial.deinit(testing.allocator);
                 const result = if (key == 1) T.deserializeKeyValueInto(&partial, &r, testing.allocator) else T.deserializeInto(&partial, &r, testing.allocator);

@@ -458,3 +458,9 @@ flags (see `decisions.md`).
   preclude it.
 - **Non-CDR wire encodings** (XCDR↔JSON, XCDR↔XML, MQTT bridge) and DynamicType /
   DynamicData / TypeObjectFactory — belong in a DDS runtime, not zidl.
+
+### Retire the transitional Zig runtime umbrella
+
+The package split migrates generated code and zidl's consumers to `zidl_cdr` and
+`zidl_bindings`. Next migrate zzdds and its dependency pin, then remove `zidl-rt`
+as soon as both repositories pass. No extended deprecation period is required.

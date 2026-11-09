@@ -108,6 +108,15 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: zig build test -Dsanitize-thread
 
+      - name: Test (zidl-bindings)
+        run: zig build test
+        working-directory: packages/zidl-bindings
+
+      - name: Test (zidl-bindings TSan)
+        if: matrix.os == 'ubuntu-latest'
+        run: zig build test -Dsanitize-thread
+        working-directory: packages/zidl-bindings
+
       - name: Test (zidl-rt)
         run: zig build test
         working-directory: packages/zidl-rt
@@ -118,13 +127,33 @@ jobs:
         working-directory: packages/zidl-rt
 
       - name: Test (zidl-cdr)
-        run: zig build test
+        run: zig build test install
         working-directory: packages/zidl-cdr
 
       - name: Test (zidl-cdr TSan)
         if: matrix.os == 'ubuntu-latest'
         run: zig build test -Dsanitize-thread
         working-directory: packages/zidl-cdr
+
+      - name: Test (C ABI shared)
+        run: zig build test
+        working-directory: packages/zidl-cdr/c-api
+
+      - name: Test shared archive with system C compiler
+        if: runner.os != 'Windows'
+        run: |
+          zig build test-external-c -Dshared-primitives=true
+          zig build test-external-c -Dshared-primitives=true -Doptimize=ReleaseSafe
+        working-directory: packages/zidl-cdr/c-api
+
+      - name: Test (C ABI reference)
+        run: zig build test -Dshared-primitives=false
+        working-directory: packages/zidl-cdr/c-api
+
+      - name: Test (C ABI reference TSan)
+        if: matrix.os == 'ubuntu-latest'
+        run: zig build test -Dshared-primitives=false -Dsanitize-thread
+        working-directory: packages/zidl-cdr/c-api
 
       - name: Integration tests
         run: zig build integration-test
@@ -187,7 +216,9 @@ jobs:
           for zon in \
             build.zig.zon \
             packages/zidl-rt/build.zig.zon \
+            packages/zidl-bindings/build.zig.zon \
             packages/zidl-cdr/build.zig.zon \
+            packages/zidl-cdr/c-api/build.zig.zon \
             packages/zidl-xtypes/build.zig.zon
           do
             sed -i 's/\.version = "[^"]*"/.version = "'"${FULL_VERSION}"'"/' "$zon"
@@ -216,10 +247,15 @@ jobs:
         run: |
           tar czf "dist/zidl-cdr-${TAG}.tar.gz" \
             --transform "s|^packages/zidl-cdr|zidl-cdr-${TAG}|" \
+            packages/zidl-cdr/README.md \
             packages/zidl-cdr/include \
             packages/zidl-cdr/src \
+            packages/zidl-cdr/test \
             packages/zidl-cdr/build.zig \
-            packages/zidl-cdr/build.zig.zon
+            packages/zidl-cdr/c_api_build.zig \
+            packages/zidl-cdr/build.zig.zon \
+            packages/zidl-cdr/c-api/build.zig \
+            packages/zidl-cdr/c-api/build.zig.zon
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -255,7 +291,9 @@ jobs:
           for zon in \
             build.zig.zon \
             packages/zidl-rt/build.zig.zon \
+            packages/zidl-bindings/build.zig.zon \
             packages/zidl-cdr/build.zig.zon \
+            packages/zidl-cdr/c-api/build.zig.zon \
             packages/zidl-xtypes/build.zig.zon
           do
             sed -i 's/\.version = "[^"]*"/.version = "'"${FULL_VERSION}"'"/' "$zon"
@@ -270,7 +308,9 @@ jobs:
           git add \
             build.zig.zon \
             packages/zidl-rt/build.zig.zon \
+            packages/zidl-bindings/build.zig.zon \
             packages/zidl-cdr/build.zig.zon \
+            packages/zidl-cdr/c-api/build.zig.zon \
             packages/zidl-xtypes/build.zig.zon
           git commit -m "release: ${TAG}"
           git push
@@ -328,7 +368,9 @@ jobs:
           for zon in \
             build.zig.zon \
             packages/zidl-rt/build.zig.zon \
+            packages/zidl-bindings/build.zig.zon \
             packages/zidl-cdr/build.zig.zon \
+            packages/zidl-cdr/c-api/build.zig.zon \
             packages/zidl-xtypes/build.zig.zon
           do
             sed -i 's/\.version = "[^"]*"/.version = "'"${FULL_VERSION}-dev"'"/' "$zon"
@@ -336,7 +378,9 @@ jobs:
           git add \
             build.zig.zon \
             packages/zidl-rt/build.zig.zon \
+            packages/zidl-bindings/build.zig.zon \
             packages/zidl-cdr/build.zig.zon \
+            packages/zidl-cdr/c-api/build.zig.zon \
             packages/zidl-xtypes/build.zig.zon
           git commit -m "chore: begin post-${{ needs.prepare.outputs.tag }} development"
           git push

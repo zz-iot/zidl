@@ -7,9 +7,10 @@ pub fn build(b: *std.Build) void {
 }
 
 pub fn addTests(b: *std.Build, base: std.Build.LazyPath, zidl: std.Build.LazyPath, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, verbose_tests: bool, coverage: bool) struct { tests: *std.Build.Step, emit: *std.Build.Step } {
-    const rt = b.createModule(.{ .root_source_file = base.path(b, "../../../packages/zidl-rt/src/root.zig"), .target = target, .optimize = optimize });
+    const codec = b.createModule(.{ .root_source_file = base.path(b, "../../../packages/zidl-cdr/src/root.zig"), .target = target, .optimize = optimize });
+    const bindings = b.createModule(.{ .root_source_file = base.path(b, "../../../packages/zidl-bindings/src/root.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "zidl_cdr", .module = codec }} });
     const header = b.addTranslateC(.{ .root_source_file = base.path(b, "../../../packages/zidl-typesupport/include/zidl_typesupport.h"), .target = target, .optimize = optimize, .link_libc = false });
-    const ts = b.createModule(.{ .root_source_file = base.path(b, "../../../packages/zidl-typesupport/src/root.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "zidl_rt", .module = rt }, .{ .name = "zidl_typesupport_c", .module = header.createModule() } } });
+    const ts = b.createModule(.{ .root_source_file = base.path(b, "../../../packages/zidl-typesupport/src/root.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "zidl_cdr", .module = codec }, .{ .name = "zidl_bindings", .module = bindings }, .{ .name = "zidl_typesupport_c", .module = header.createModule() } } });
     ts.addIncludePath(base.path(b, "../../../packages/zidl-typesupport/include"));
     var libs: [3]*std.Build.Step.Compile = undefined;
     for ([_][]const u8{ "a", "b", "conflict" }, 0..) |stem, i| {
@@ -18,11 +19,11 @@ pub fn addTests(b: *std.Build, base: std.Build.LazyPath, zidl: std.Build.LazyPat
         gen.addArgs(&.{ "-b", "zig", "--experimental-typesupport-library", "-o" });
         const output = gen.addOutputDirectoryArg(stem);
         gen.addFileArg(base.path(b, b.fmt("{s}.idl", .{stem})));
-        const types = b.createModule(.{ .root_source_file = output.path(b, b.fmt("{s}.zig", .{stem})), .target = target, .optimize = optimize, .imports = &.{.{ .name = "zidl_rt", .module = rt }} });
-        const provider = b.createModule(.{ .root_source_file = output.path(b, b.fmt("{s}_typesupport.zig", .{stem})), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "types", .module = types }, .{ .name = "zidl_rt", .module = rt }, .{ .name = "zidl_typesupport", .module = ts } } });
+        const types = b.createModule(.{ .root_source_file = output.path(b, b.fmt("{s}.zig", .{stem})), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "zidl_cdr", .module = codec }, .{ .name = "zidl_bindings", .module = bindings } } });
+        const provider = b.createModule(.{ .root_source_file = output.path(b, b.fmt("{s}_typesupport.zig", .{stem})), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "types", .module = types }, .{ .name = "zidl_cdr", .module = codec }, .{ .name = "zidl_bindings", .module = bindings }, .{ .name = "zidl_typesupport", .module = ts } } });
         libs[i] = b.addLibrary(.{ .name = stem, .linkage = .dynamic, .root_module = provider });
     }
-    const host = b.addExecutable(.{ .name = "ts-host", .root_module = b.createModule(.{ .root_source_file = base.path(b, "host.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "zidl_typesupport", .module = ts }, .{ .name = "zidl_rt", .module = rt } } }) });
+    const host = b.addExecutable(.{ .name = "ts-host", .root_module = b.createModule(.{ .root_source_file = base.path(b, "host.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "zidl_typesupport", .module = ts }, .{ .name = "zidl_cdr", .module = codec }, .{ .name = "zidl_bindings", .module = bindings } } }) });
     const run = b.addRunArtifact(host);
     if (!verbose_tests) {
         run.expectStdErrEqual("Zig host: metadata integrity/closure, duplicate exports, collisions and bounded wire validation passed\n");
@@ -44,8 +45,8 @@ pub fn addTests(b: *std.Build, base: std.Build.LazyPath, zidl: std.Build.LazyPat
     static_gen.addArgs(&.{ "-b", "zig", "--experimental-typesupport-library", "-o" });
     const static_out = static_gen.addOutputDirectoryArg("static-types");
     static_gen.addFileArg(base.path(b, "b.idl"));
-    const static_types = b.createModule(.{ .root_source_file = static_out.path(b, "b.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "zidl_rt", .module = rt }} });
-    const static_provider = b.createModule(.{ .root_source_file = static_out.path(b, "b_typesupport.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "types", .module = static_types }, .{ .name = "zidl_rt", .module = rt }, .{ .name = "zidl_typesupport", .module = ts } } });
+    const static_types = b.createModule(.{ .root_source_file = static_out.path(b, "b.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "zidl_cdr", .module = codec }, .{ .name = "zidl_bindings", .module = bindings } } });
+    const static_provider = b.createModule(.{ .root_source_file = static_out.path(b, "b_typesupport.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "types", .module = static_types }, .{ .name = "zidl_cdr", .module = codec }, .{ .name = "zidl_bindings", .module = bindings }, .{ .name = "zidl_typesupport", .module = ts } } });
     const static_test = b.addTest(.{ .name = "zidl-typesupport-static", .root_module = b.createModule(.{ .root_source_file = base.path(b, "static.zig"), .target = target, .optimize = optimize, .imports = &.{ .{ .name = "provider", .module = static_provider }, .{ .name = "zidl_typesupport", .module = ts } } }) });
     tests.dependOn(&b.addRunArtifact(static_test).step);
     // Keep loadable providers beside the hosts, separate from argument-free tests.

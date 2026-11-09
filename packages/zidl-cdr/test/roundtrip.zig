@@ -12,7 +12,7 @@
 //!   - Reader round-trips for all types
 
 const std = @import("std");
-const zidl_rt = @import("zidl_rt");
+const native = @import("zidl_cdr_native");
 const testing = std.testing;
 
 const c = @import("zidl_cdr");
@@ -23,13 +23,13 @@ const c = @import("zidl_cdr");
 fn crossVal2(
     comptime T: type,
     value: T,
-    comptime rt_write_fn: fn (*zidl_rt.CdrWriter(.xcdr2), T) anyerror!void,
+    comptime rt_write_fn: fn (*native.CdrWriter(.xcdr2), T) anyerror!void,
     c_write_fn: *const fn (*c.ZidlCdrWriter, T) callconv(.c) c_int,
 ) !void {
     // zidl-rt side
     var rt_buf = std.ArrayListUnmanaged(u8).empty;
     defer rt_buf.deinit(testing.allocator);
-    var rt_w = zidl_rt.CdrWriter(.xcdr2).init(&rt_buf, testing.allocator);
+    var rt_w = native.CdrWriter(.xcdr2).init(&rt_buf, testing.allocator);
     try rt_w.writeEncapHeader();
     try rt_write_fn(&rt_w, value);
 
@@ -47,12 +47,12 @@ fn crossVal2(
 fn crossVal1(
     comptime T: type,
     value: T,
-    comptime rt_write_fn: fn (*zidl_rt.CdrWriter(.xcdr1), T) anyerror!void,
+    comptime rt_write_fn: fn (*native.CdrWriter(.xcdr1), T) anyerror!void,
     c_write_fn: *const fn (*c.ZidlCdrWriter, T) callconv(.c) c_int,
 ) !void {
     var rt_buf = std.ArrayListUnmanaged(u8).empty;
     defer rt_buf.deinit(testing.allocator);
-    var rt_w = zidl_rt.CdrWriter(.xcdr1).init(&rt_buf, testing.allocator);
+    var rt_w = native.CdrWriter(.xcdr1).init(&rt_buf, testing.allocator);
     try rt_w.writeEncapHeader();
     try rt_write_fn(&rt_w, value);
 
@@ -138,84 +138,84 @@ test "md5: known abc digest" {
 
 test "crossval xcdr2: u8" {
     try crossVal2(u8, 0xAB, struct {
-        fn f(w: *zidl_rt.CdrWriter(.xcdr2), v: u8) !void {
+        fn f(w: *native.CdrWriter(.xcdr2), v: u8) !void {
             try w.writeU8(v);
         }
     }.f, &c.zidl_cdr_write_u8);
 }
 test "crossval xcdr2: i8" {
     try crossVal2(i8, -42, struct {
-        fn f(w: *zidl_rt.CdrWriter(.xcdr2), v: i8) !void {
+        fn f(w: *native.CdrWriter(.xcdr2), v: i8) !void {
             try w.writeI8(v);
         }
     }.f, &c.zidl_cdr_write_i8);
 }
 test "crossval xcdr2: bool true" {
     try crossVal2(bool, true, struct {
-        fn f(w: *zidl_rt.CdrWriter(.xcdr2), v: bool) !void {
+        fn f(w: *native.CdrWriter(.xcdr2), v: bool) !void {
             try w.writeBool(v);
         }
     }.f, &c.zidl_cdr_write_bool);
 }
 test "crossval xcdr2: bool false" {
     try crossVal2(bool, false, struct {
-        fn f(w: *zidl_rt.CdrWriter(.xcdr2), v: bool) !void {
+        fn f(w: *native.CdrWriter(.xcdr2), v: bool) !void {
             try w.writeBool(v);
         }
     }.f, &c.zidl_cdr_write_bool);
 }
 test "crossval xcdr2: u16" {
     try crossVal2(u16, 0x1234, struct {
-        fn f(w: *zidl_rt.CdrWriter(.xcdr2), v: u16) !void {
+        fn f(w: *native.CdrWriter(.xcdr2), v: u16) !void {
             try w.writeU16(v);
         }
     }.f, &c.zidl_cdr_write_u16);
 }
 test "crossval xcdr2: i16" {
     try crossVal2(i16, -1000, struct {
-        fn f(w: *zidl_rt.CdrWriter(.xcdr2), v: i16) !void {
+        fn f(w: *native.CdrWriter(.xcdr2), v: i16) !void {
             try w.writeI16(v);
         }
     }.f, &c.zidl_cdr_write_i16);
 }
 test "crossval xcdr2: u32" {
     try crossVal2(u32, 0xDEADBEEF, struct {
-        fn f(w: *zidl_rt.CdrWriter(.xcdr2), v: u32) !void {
+        fn f(w: *native.CdrWriter(.xcdr2), v: u32) !void {
             try w.writeU32(v);
         }
     }.f, &c.zidl_cdr_write_u32);
 }
 test "crossval xcdr2: i32" {
     try crossVal2(i32, -123456, struct {
-        fn f(w: *zidl_rt.CdrWriter(.xcdr2), v: i32) !void {
+        fn f(w: *native.CdrWriter(.xcdr2), v: i32) !void {
             try w.writeI32(v);
         }
     }.f, &c.zidl_cdr_write_i32);
 }
 test "crossval xcdr2: f32" {
     try crossVal2(f32, 3.14159, struct {
-        fn f(w: *zidl_rt.CdrWriter(.xcdr2), v: f32) !void {
+        fn f(w: *native.CdrWriter(.xcdr2), v: f32) !void {
             try w.writeF32(v);
         }
     }.f, &c.zidl_cdr_write_f32);
 }
 test "crossval xcdr2: u64" {
     try crossVal2(u64, 0xCAFEBABE_DEADBEEF, struct {
-        fn f(w: *zidl_rt.CdrWriter(.xcdr2), v: u64) !void {
+        fn f(w: *native.CdrWriter(.xcdr2), v: u64) !void {
             try w.writeU64(v);
         }
     }.f, &c.zidl_cdr_write_u64);
 }
 test "crossval xcdr2: i64" {
     try crossVal2(i64, -9876543210, struct {
-        fn f(w: *zidl_rt.CdrWriter(.xcdr2), v: i64) !void {
+        fn f(w: *native.CdrWriter(.xcdr2), v: i64) !void {
             try w.writeI64(v);
         }
     }.f, &c.zidl_cdr_write_i64);
 }
 test "crossval xcdr2: f64" {
     try crossVal2(f64, 2.71828182845, struct {
-        fn f(w: *zidl_rt.CdrWriter(.xcdr2), v: f64) !void {
+        fn f(w: *native.CdrWriter(.xcdr2), v: f64) !void {
             try w.writeF64(v);
         }
     }.f, &c.zidl_cdr_write_f64);
@@ -225,14 +225,14 @@ test "crossval xcdr2: f64" {
 
 test "crossval xcdr1: u64 (8-byte alignment)" {
     try crossVal1(u64, 0x0102030405060708, struct {
-        fn f(w: *zidl_rt.CdrWriter(.xcdr1), v: u64) !void {
+        fn f(w: *native.CdrWriter(.xcdr1), v: u64) !void {
             try w.writeU64(v);
         }
     }.f, &c.zidl_cdr_write_u64);
 }
 test "crossval xcdr1: f64" {
     try crossVal1(f64, 1.0, struct {
-        fn f(w: *zidl_rt.CdrWriter(.xcdr1), v: f64) !void {
+        fn f(w: *native.CdrWriter(.xcdr1), v: f64) !void {
             try w.writeF64(v);
         }
     }.f, &c.zidl_cdr_write_f64);
@@ -243,7 +243,7 @@ test "crossval xcdr1: f64" {
 test "crossval xcdr2: u8 then u32 alignment" {
     var rt_buf = std.ArrayListUnmanaged(u8).empty;
     defer rt_buf.deinit(testing.allocator);
-    var rt_w = zidl_rt.CdrWriter(.xcdr2).init(&rt_buf, testing.allocator);
+    var rt_w = native.CdrWriter(.xcdr2).init(&rt_buf, testing.allocator);
     try rt_w.writeEncapHeader();
     try rt_w.writeU8(0x11);
     try rt_w.writeU32(0x22334455);
@@ -264,7 +264,7 @@ test "crossval xcdr2: string" {
     const s: []const u8 = "hello";
     var rt_buf = std.ArrayListUnmanaged(u8).empty;
     defer rt_buf.deinit(testing.allocator);
-    var rt_w = zidl_rt.CdrWriter(.xcdr2).init(&rt_buf, testing.allocator);
+    var rt_w = native.CdrWriter(.xcdr2).init(&rt_buf, testing.allocator);
     try rt_w.writeEncapHeader();
     try rt_w.writeString(s);
 
@@ -281,7 +281,7 @@ test "crossval xcdr2: empty string" {
     const s: []const u8 = "";
     var rt_buf = std.ArrayListUnmanaged(u8).empty;
     defer rt_buf.deinit(testing.allocator);
-    var rt_w = zidl_rt.CdrWriter(.xcdr2).init(&rt_buf, testing.allocator);
+    var rt_w = native.CdrWriter(.xcdr2).init(&rt_buf, testing.allocator);
     try rt_w.writeEncapHeader();
     try rt_w.writeString(s);
 
@@ -299,7 +299,7 @@ test "crossval xcdr2: empty string" {
 test "crossval xcdr2: reserve+patch dheader" {
     var rt_buf = std.ArrayListUnmanaged(u8).empty;
     defer rt_buf.deinit(testing.allocator);
-    var rt_w = zidl_rt.CdrWriter(.xcdr2).init(&rt_buf, testing.allocator);
+    var rt_w = native.CdrWriter(.xcdr2).init(&rt_buf, testing.allocator);
     try rt_w.writeEncapHeader();
     const rt_dh = try rt_w.reserveDheader();
     try rt_w.writeI32(42);
@@ -552,7 +552,7 @@ test "crossval: fixed<5,2> positive value" {
     // Zig: write fixed<5,2> = 123.45 → bytes [0x12, 0x34, 0x5C]
     var rt_buf = std.ArrayListUnmanaged(u8).empty;
     defer rt_buf.deinit(testing.allocator);
-    var rt_w = zidl_rt.CdrWriter(.xcdr1).init(&rt_buf, testing.allocator);
+    var rt_w = native.CdrWriter(.xcdr1).init(&rt_buf, testing.allocator);
     try rt_w.writeEncapHeader();
     try rt_w.writeFixed(5, 2, 123.45);
 
@@ -575,7 +575,7 @@ test "crossval: fixed<5,2> positive value" {
 test "crossval: fixed<5,2> negative value" {
     var rt_buf = std.ArrayListUnmanaged(u8).empty;
     defer rt_buf.deinit(testing.allocator);
-    var rt_w = zidl_rt.CdrWriter(.xcdr1).init(&rt_buf, testing.allocator);
+    var rt_w = native.CdrWriter(.xcdr1).init(&rt_buf, testing.allocator);
     try rt_w.writeEncapHeader();
     try rt_w.writeFixed(5, 2, -123.45);
 
@@ -591,7 +591,7 @@ test "crossval: fixed<5,2> negative value" {
 test "crossval: fixed<4,2> even-digit padding" {
     var rt_buf = std.ArrayListUnmanaged(u8).empty;
     defer rt_buf.deinit(testing.allocator);
-    var rt_w = zidl_rt.CdrWriter(.xcdr1).init(&rt_buf, testing.allocator);
+    var rt_w = native.CdrWriter(.xcdr1).init(&rt_buf, testing.allocator);
     try rt_w.writeEncapHeader();
     try rt_w.writeFixed(4, 2, 12.34);
 
@@ -622,7 +622,7 @@ test "pl_cdr: C encap header matches zidl-rt PlCdrWriter" {
     // Zig writer
     var rt_buf = std.ArrayListUnmanaged(u8).empty;
     defer rt_buf.deinit(testing.allocator);
-    var rt_w = zidl_rt.PlCdrWriter.init(&rt_buf, testing.allocator);
+    var rt_w = native.PlCdrWriter.init(&rt_buf, testing.allocator);
     try rt_w.writeEncapHeader();
 
     try testing.expectEqualSlices(u8, rt_buf.items, cw.buf[0..cw.len]);
@@ -653,7 +653,7 @@ test "pl_cdr: C single i32 param roundtrip matches Zig" {
     // Zig side: encode same
     var rt_buf = std.ArrayListUnmanaged(u8).empty;
     defer rt_buf.deinit(testing.allocator);
-    var rt_w = zidl_rt.PlCdrWriter.init(&rt_buf, testing.allocator);
+    var rt_w = native.PlCdrWriter.init(&rt_buf, testing.allocator);
     try rt_w.writeEncapHeader();
     const h = try rt_w.reservePlParam(5);
     try rt_w.writeI32(42);

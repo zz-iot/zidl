@@ -1,4 +1,4 @@
-// Interop tests: cross-validate zidl-rt CdrReader/CdrWriter against
+// Interop tests: cross-validate zidl-cdr CdrReader/CdrWriter against
 // Cyclone DDS 11.0.1 byte-level CDR output.
 //
 // Each test pair:
@@ -11,12 +11,12 @@
 //
 // Run from the project root:
 //   zig test interop/zig_interop_test.zig \
-//       --dep zidl_rt -Mzidl_rt=packages/zidl-rt/src/root.zig
+//       --dep zidl_cdr -Mzidl_cdr=packages/zidl-cdr/src/root.zig
 
 const std = @import("std");
-const rt = @import("zidl_rt");
-const CdrReader = rt.CdrReader;
-const CdrWriter = rt.CdrWriter;
+const zidl_cdr = @import("zidl_cdr");
+const CdrReader = zidl_cdr.CdrReader;
+const CdrWriter = zidl_cdr.CdrWriter;
 
 const testing = std.testing;
 const alloc = testing.allocator;
@@ -92,7 +92,7 @@ const POINT_XCDR2 = [_]u8{
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-fn mkWriter(comptime xver: rt.XcdrVersion, buf: *std.ArrayListUnmanaged(u8)) CdrWriter(xver) {
+fn mkWriter(comptime xver: zidl_cdr.XcdrVersion, buf: *std.ArrayListUnmanaged(u8)) CdrWriter(xver) {
     return CdrWriter(xver).init(buf, alloc);
 }
 
@@ -100,8 +100,8 @@ fn mkWriter(comptime xver: rt.XcdrVersion, buf: *std.ArrayListUnmanaged(u8)) Cdr
 
 test "cyclone→zig: primitives xcdr2 le" {
     var r = try CdrReader.init(&PRIMITIVES_XCDR2);
-    try testing.expectEqual(rt.XcdrVersion.xcdr2, r.xcdr_version);
-    try testing.expectEqual(rt.ByteOrder.little, r.byte_order);
+    try testing.expectEqual(zidl_cdr.XcdrVersion.xcdr2, r.xcdr_version);
+    try testing.expectEqual(zidl_cdr.ByteOrder.little, r.byte_order);
     try testing.expectEqual(@as(i32, 42), try r.readI32());
     try testing.expectEqual(@as(f32, 1.5), try r.readF32());
     try testing.expectEqual(true, try r.readBool());
@@ -113,8 +113,8 @@ test "cyclone→zig: primitives xcdr2 le" {
 
 test "cyclone→zig: primitives xcdr1 le" {
     var r = try CdrReader.init(&PRIMITIVES_XCDR1);
-    try testing.expectEqual(rt.XcdrVersion.xcdr1, r.xcdr_version);
-    try testing.expectEqual(rt.ByteOrder.little, r.byte_order);
+    try testing.expectEqual(zidl_cdr.XcdrVersion.xcdr1, r.xcdr_version);
+    try testing.expectEqual(zidl_cdr.ByteOrder.little, r.byte_order);
     try testing.expectEqual(@as(i32, 42), try r.readI32());
     try testing.expectEqual(@as(f32, 1.5), try r.readF32());
     try testing.expectEqual(true, try r.readBool());

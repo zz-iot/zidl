@@ -1,5 +1,5 @@
 const std = @import("std");
-const rt = @import("zidl_rt");
+const rt = @import("zidl_cdr_native");
 const adapter = @import("adapter");
 const Writer = adapter.Writer;
 const testing = std.testing;
@@ -168,31 +168,31 @@ test "C adapter preserves custom grow status and caller ownership" {
     try testing.expect(w.grow_fn == failGrow);
 }
 
-extern fn zidl_cdr_set_allocator(?*const rt.ZidlAllocator) void;
+extern fn zidl_cdr_set_allocator(?*const @import("c_header").ZidlAllocator) void;
 
 const FailAlloc = struct {
     calls: usize = 0,
     alignment: usize = 0,
 
-    fn alloc(ctx: ?*anyopaque, _: usize, alignment: usize) callconv(.c) ?[*]u8 {
+    fn alloc(ctx: ?*anyopaque, _: usize, alignment: usize) callconv(.c) ?*anyopaque {
         const self: *FailAlloc = @ptrCast(@alignCast(ctx.?));
         self.calls += 1;
         self.alignment = alignment;
         return null;
     }
 
-    fn resize(_: ?*anyopaque, _: ?[*]u8, _: usize, _: usize, _: usize) callconv(.c) bool {
+    fn resize(_: ?*anyopaque, _: ?*anyopaque, _: usize, _: usize, _: usize) callconv(.c) bool {
         return false;
     }
 
-    fn free(_: ?*anyopaque, _: ?[*]u8, _: usize, _: usize) callconv(.c) void {
+    fn free(_: ?*anyopaque, _: ?*anyopaque, _: usize, _: usize) callconv(.c) void {
         unreachable; // No successful allocation in this test.
     }
 };
 
 test "C dynamic OOM keeps the registered allocator and status contract" {
     var tracker = FailAlloc{};
-    const allocator = rt.ZidlAllocator{ .ctx = &tracker, .alloc = FailAlloc.alloc, .resize = FailAlloc.resize, .free = FailAlloc.free };
+    const allocator = @import("c_header").ZidlAllocator{ .ctx = &tracker, .alloc = FailAlloc.alloc, .resize = FailAlloc.resize, .free = FailAlloc.free };
     zidl_cdr_set_allocator(&allocator);
     defer zidl_cdr_set_allocator(null);
     var w: Writer = undefined;

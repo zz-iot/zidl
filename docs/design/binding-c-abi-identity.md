@@ -7,7 +7,7 @@ Status: Phase 1 shipped in `v0.3.5-zig.0.16.0` (2026-08-13). Phases 2+ open — 
 ## The problem
 
 A C-ABI handle *is* the address of a heap-allocated `EntityBox{ptr, vtable}`
-(`packages/zidl-rt/src/entity_box.zig`). `unboxAs(T, handle)` does a **blind, unchecked
+(`packages/zidl-bindings/src/entity_box.zig`). `unboxAs(T, handle)` does a **blind, unchecked
 reinterpret** of `box.vtable` as `*const T.Vtable` — there is no runtime type tag anywhere
 in the box. This is safe only because every `get_c_abi_handle` call site boxes using a
 vtable instance whose static shape already matches the interface it was asked for.

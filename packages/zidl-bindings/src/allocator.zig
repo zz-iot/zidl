@@ -6,7 +6,7 @@
 //!
 //! `ZidlAllocator` is mirrored here as an `extern struct` rather than pulled
 //! in via a C header/translate-c step — the shape is small and stable, and
-//! this keeps zidl-rt a pure-Zig package with no C build dependency.
+//! this keeps binding support a pure-Zig package with no C build dependency.
 //!
 //! Critical property: `toAllocator` allocates nothing. The returned
 //! `std.mem.Allocator.ptr` points directly at the caller's own

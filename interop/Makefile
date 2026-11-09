@@ -42,9 +42,9 @@ all: zig-test
 ## Run only the Zig interop tests (CI-safe; expected bytes are hardcoded in source)
 zig-test:
 	cd .. && $(ZIG) test \
-	    --dep zidl_rt \
+	    --dep zidl_cdr \
 	    -Mroot=interop/zig_interop_test.zig \
-	    -Mzidl_rt=packages/zidl-rt/src/root.zig
+	    -Mzidl_cdr=packages/zidl-cdr/src/root.zig
 
 ## Generate C type support from IDL (requires CYCLONE)
 gen/types.h gen/types.c: types.idl

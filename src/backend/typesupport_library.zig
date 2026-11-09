@@ -175,7 +175,7 @@ pub fn generate(alloc: std.mem.Allocator, spec: *const ir.Spec, out: *std.ArrayL
     defer g.visiting.deinit(alloc);
     if (spec.imports.len != 0 or spec.warnings.len != 0) return error.TypesupportLibraryImportsOrDroppedDeclarationsUnsupported;
     try g.items(spec.items);
-    try g.print("// Experimental generated wire typesupport library.\nconst ts = @import(\"zidl_typesupport\");\nconst rt = @import(\"zidl_rt\");\nconst types = @import(\"types\");\n", .{});
+    try g.print("// Experimental generated wire typesupport library.\nconst ts = @import(\"zidl_typesupport\");\nconst rt = @import(\"zidl_cdr\");\nconst types = @import(\"types\");\n", .{});
     for (g.declarations.items, 0..) |td, i| {
         const object = try to.encodeMinimalTypeDecl(alloc, td);
         defer alloc.free(object);

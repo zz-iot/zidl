@@ -22,11 +22,11 @@
 //!   IDL boolean / octet                → bool / u8
 //!   IDL int8 … uint64                  → i8 … u64
 //!   IDL string                         → []const u8
-//!   IDL string<N>                      → zidl_rt.BoundedArray(u8, N)
+//!   IDL string<N>                      → zidl_cdr.BoundedArray(u8, N)
 //!   IDL wstring                        → []const u16
-//!   IDL wstring<N>                     → zidl_rt.BoundedArray(u16, N)
+//!   IDL wstring<N>                     → zidl_cdr.BoundedArray(u16, N)
 //!   IDL sequence<T>                    → std.ArrayListUnmanaged(T)
-//!   IDL sequence<T, N>                 → zidl_rt.BoundedArray(T, N)
+//!   IDL sequence<T, N>                 → zidl_cdr.BoundedArray(T, N)
 //!   IDL T[N1][N2]                      → [N1][N2]T
 //!   IDL @optional T                    → ?T  (null default)
 //!   IDL any / object / value_base      → *anyopaque
@@ -185,7 +185,7 @@ pub fn generateSplitFiles(
         );
         try gen.write("const std = @import(\"std\");\n");
         if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_authoring or opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(m.items)) {
-            try gen.write("const zidl_rt = @import(\"zidl_rt\");\n");
+            try gen.write("const zidl_cdr = @import(\"zidl_cdr\");\nconst zidl_bindings = @import(\"zidl_bindings\");\n");
         }
         if (opts.generate_zzdds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(m.items)) {
             try gen.write("const _zzdds = @import(\"zzdds\");\n");
@@ -241,7 +241,7 @@ pub fn generateSplitFiles(
         if (module_names.items.len > 0) try gen.write("\n");
         try gen.write("const std = @import(\"std\");\n");
         if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_authoring or opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(non_module.items)) {
-            try gen.write("const zidl_rt = @import(\"zidl_rt\");\n");
+            try gen.write("const zidl_cdr = @import(\"zidl_cdr\");\nconst zidl_bindings = @import(\"zidl_bindings\");\n");
         }
         if (opts.generate_zzdds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(non_module.items)) {
             try gen.write("const _zzdds = @import(\"zzdds\");\n");
@@ -255,7 +255,7 @@ pub fn generateSplitFiles(
         // No modules and no items: emit standard header anyway.
         try gen.write("const std = @import(\"std\");\n");
         if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_authoring) {
-            try gen.write("const zidl_rt = @import(\"zidl_rt\");\n");
+            try gen.write("const zidl_cdr = @import(\"zidl_cdr\");\nconst zidl_bindings = @import(\"zidl_bindings\");\n");
         }
         try gen.write("\n");
     }
@@ -330,7 +330,7 @@ const Generator = struct {
         }
         try self.write("const std = @import(\"std\");\n");
         if (!self.opts.no_typesupport or self.opts.pl_cdr or self.opts.zig_generate_authoring or self.opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(spec.items)) {
-            try self.write("const zidl_rt = @import(\"zidl_rt\");\n");
+            try self.write("const zidl_cdr = @import(\"zidl_cdr\");\nconst zidl_bindings = @import(\"zidl_bindings\");\n");
         }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveTopicTypes(spec.items)) {
             try self.write("const _zzdds = @import(\"zzdds\");\n");
@@ -380,37 +380,13 @@ const Generator = struct {
             \\}
             \\
         );
-        // A generated release export (see emitStructCApiFree/emitTypedef) has no
-        // owning-entity parameter, so it cannot ask "which allocator produced
-        // this buffer" the way an entity-scoped op (e.g. return_loan_raw) can.
-        // Ideally it would route through the same process-wide allocator
-        // zidl_cdr_set_allocator() lets an application register (already the
-        // source of truth for zidl-cdr's own decode-side allocations) instead
-        // of hardcoding a fixed choice here -- see
-        // zzdds/docs/design/generated-class-lifecycle-design.md for the bug class
-        // this closes.
-        //
-        // That requires calling zidl_cdr_get_allocator(), an extern fn
-        // implemented in libzidl_cdr -- a real, new native-library link
-        // requirement for *any* consumer of --zig-generate-c-api, not just
-        // one that already needs zidl-cdr for other reasons. Confirmed via a
-        // real link failure (Greptile review, zidl PR #45): a consumer
-        // linking only zidl_rt (a previously fully valid --zig-generate-c-api
-        // configuration -- zidl_rt itself has zero dependencies) gets
-        // "undefined symbol: zidl_cdr_get_allocator" the moment it calls any
-        // generated free function, since this preamble is gated only on
-        // zig_generate_c_api, unconditionally. So this routing is opt-in via
-        // --zig-generate-c-api-cdr-allocator (mirrors --cpp-pmr-containers'
-        // reasoning: a real dependency/compatibility cost, must not be forced
-        // on a consumer that didn't ask for it) -- a consumer that already
-        // links libzidl_cdr for its own reasons (e.g. zzdds, which needs it
-        // regardless for C/C++ CDR decode) should pass both flags together to
-        // get allocator-correct generated frees.
+        // CDR-backed frees share its registered allocator and require libzidl_cdr.
+        // Keep that native link dependency opt-in for generated C API consumers.
         if (self.opts.zig_generate_c_api_cdr_allocator) {
             try self.write(
-                \\extern fn zidl_cdr_get_allocator() callconv(.c) ?*const zidl_rt.ZidlAllocator;
+                \\extern fn zidl_cdr_get_allocator() callconv(.c) ?*const zidl_bindings.ZidlAllocator;
                 \\fn zidlCAbiFreeAllocator() std.mem.Allocator {
-                \\    if (zidl_cdr_get_allocator()) |za| return zidl_rt.toAllocator(za);
+                \\    if (zidl_cdr_get_allocator()) |za| return zidl_bindings.toAllocator(za);
                 \\    return std.heap.c_allocator;
                 \\}
                 \\
@@ -520,7 +496,7 @@ const Generator = struct {
             try self.ind();
             try self.write("    /// Owned; freed by `deinit`.\n");
             try self.ind();
-            try self.write("    unknown_params: []zidl_rt.RawParam = &.{},\n");
+            try self.write("    unknown_params: []zidl_cdr.RawParam = &.{},\n");
         }
         // default() is always emitted; it relies only on field defaults, not CDR support.
         try self.ind();
@@ -826,7 +802,7 @@ const Generator = struct {
         const union_has_deinit = self.unionNeedsCleanup(u);
         try self.write("\n");
         try self.ind();
-        try self.write("    pub fn deserializeInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {\n");
+        try self.write("    pub fn deserializeInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {\n");
         if (union_has_deinit) {
             // A plain unconditional `errdefer out.deinit(allocator)` (as the
             // struct backend uses) is unsafe here in TWO ways specific to
@@ -1011,7 +987,7 @@ const Generator = struct {
         // ── skip ──────────────────────────────────────────────────────────────
         try self.write("\n");
         try self.ind();
-        try self.write("    pub fn skip(reader: *zidl_rt.CdrReader) !void {\n");
+        try self.write("    pub fn skip(reader: *zidl_cdr.CdrReader) !void {\n");
         if (mutable) {
             try self.ind();
             try self.write("        const _end = try reader.readMutableDheader();\n");
@@ -1440,14 +1416,14 @@ const Generator = struct {
                 try self.write("    }\n");
                 try self.write("\n");
                 try self.ind();
-                try self.write("    pub fn deserializeInto(out: *@This(), reader: *zidl_rt.CdrReader, _: std.mem.Allocator) !void {\n");
+                try self.write("    pub fn deserializeInto(out: *@This(), reader: *zidl_cdr.CdrReader, _: std.mem.Allocator) !void {\n");
                 try self.ind();
                 try self.print("        out.* = @bitCast(@as(u{d}, @truncate(try reader.{s}())));\n", .{ total, read_m });
                 try self.ind();
                 try self.write("    }\n");
                 try self.write("\n");
                 try self.ind();
-                try self.write("    pub fn skip(reader: *zidl_rt.CdrReader) !void {\n");
+                try self.write("    pub fn skip(reader: *zidl_cdr.CdrReader) !void {\n");
                 try self.ind();
                 try self.print("        _ = try reader.{s}();\n", .{read_m});
                 try self.ind();
@@ -1477,7 +1453,7 @@ const Generator = struct {
             defer self.alloc.free(buf_elem);
             // Nested sequence elements are anonymous `extern struct`s that
             // can't be spelled a second time; clone derives the element type.
-            const elem_ty: []const u8 = if (std.mem.indexOf(u8, buf_elem, "extern struct") != null) "zidl_rt.SeqElem(@This())" else buf_elem;
+            const elem_ty: []const u8 = if (std.mem.indexOf(u8, buf_elem, "extern struct") != null) "zidl_bindings.SeqElem(@This())" else buf_elem;
             const generic = self.elemUsesGenericOwnership(seq.element.*, false);
             try self.ind();
             try self.print("pub const {s}{s} = extern struct {{\n", .{ pfx, t.name });
@@ -1499,7 +1475,7 @@ const Generator = struct {
             // An owned buffer also owns its heap-owning elements' contents.
             if (generic) {
                 try self.ind();
-                try self.write("            for (_buf[0..self._length]) |*_e| zidl_rt.deinitOwned(_e, alloc);\n");
+                try self.write("            for (_buf[0..self._length]) |*_e| zidl_bindings.deinitOwned(_e, alloc);\n");
             } else if (self.aggregateNeedsCleanup(seq.element.*)) {
                 try self.ind();
                 try self.write("            for (_buf[0..self._length]) |*_e| _e.deinit(alloc);\n");
@@ -1537,7 +1513,7 @@ const Generator = struct {
                 try self.ind();
                 try self.write("        errdefer {\n");
                 try self.ind();
-                try self.write("            for (_buf[0.._n]) |*_e| zidl_rt.deinitOwned(_e, alloc);\n");
+                try self.write("            for (_buf[0.._n]) |*_e| zidl_bindings.deinitOwned(_e, alloc);\n");
                 try self.ind();
                 try self.write("            alloc.free(_buf);\n");
                 try self.ind();
@@ -1547,7 +1523,7 @@ const Generator = struct {
                 try self.ind();
                 try self.write("            for (_sb[0..self._length]) |_src| {\n");
                 try self.ind();
-                try self.write("                _buf[_n] = try zidl_rt.cloneOwned(_src, alloc);\n");
+                try self.write("                _buf[_n] = try zidl_bindings.cloneOwned(_src, alloc);\n");
                 try self.ind();
                 try self.write("                _n += 1;\n");
                 try self.ind();
@@ -1772,7 +1748,7 @@ const Generator = struct {
         // nil-object sentinels and test doubles) get real dispatch, and it
         // never changes. --zig-generate-c-api never passes this fat struct
         // across callconv(.c) directly: every entity crossing that boundary
-        // is boxed into a single opaque pointer (see `zidl_rt.boxEntity` /
+        // is boxed into a single opaque pointer (see `zidl_bindings.boxEntity` /
         // `unboxAs`), matching the C backend's single-pointer opaque handle
         // uniformly for every non-listener interface, leaf or base alike.
         try self.ind();
@@ -1823,7 +1799,7 @@ const Generator = struct {
         try self.ind();
         // Synthetic, like `deinit` above — not sourced from IDL-declared ops.
         // Returns an already-prepared opaque C-ABI handle for this value (see
-        // `zidl_rt.EntityBox`) — the generic --zig-generate-c-api export layer
+        // `zidl_bindings.EntityBox`) — the generic --zig-generate-c-api export layer
         // never allocates or looks up an allocator itself; it just calls this.
         // How the handle is produced (a fresh box vs. one cached and reused
         // across calls) is entirely the concrete implementation's own choice,
@@ -2437,7 +2413,7 @@ const Generator = struct {
         const qual_c_name = try self.cApiQualName(iface.qualified_name, pfx);
         defer self.alloc.free(qual_c_name);
 
-        // Which zidl_rt function reconstructs `self` from a boxed handle —
+        // Which zidl_bindings function reconstructs `self` from a boxed handle —
         // same for every export below, computed once here since it only
         // depends on `iface` itself, not on any one operation/attribute/base.
         const self_unbox_fn = cAbiUnboxFnName(iface);
@@ -2490,7 +2466,7 @@ const Generator = struct {
 
     /// True when `tr` names a non-callback (entity) interface — these cross
     /// the `--zig-generate-c-api` boundary as a single boxed opaque pointer
-    /// (see `zidl_rt.boxEntity`/`unboxAs`), uniformly, regardless of whether
+    /// (see `zidl_bindings.boxEntity`/`unboxAs`), uniformly, regardless of whether
     /// the interface has one real implementation or several.
     fn typeRefIsEntityInterface(tr: ir.TypeRef) bool {
         return switch (tr) {
@@ -2695,7 +2671,7 @@ const Generator = struct {
     /// interface operation. Every entity value crossing this boundary —
     /// `self`, entity-typed params, entity-typed returns — is a single boxed
     /// opaque pointer, uniformly, leaf or base interface alike (see
-    /// `zidl_rt.EntityBox`). Params unbox via `zidl_rt.unboxAs` before
+    /// `zidl_bindings.EntityBox`). Params unbox via `zidl_bindings.unboxAs` before
     /// dispatching to the reconstructed native vtable call; entity returns
     /// are obtained via `_r.vtable.get_c_abi_handle(_r.ptr)` — no allocation
     /// in generated code, except for `sequence<EntityInterface>`-typed
@@ -2880,11 +2856,11 @@ const Generator = struct {
                     // a nil-sentinel native value instead of unboxing a null
                     // handle. `.vtable = undefined`: any well-behaved native
                     // callee taking an optional entity param must check
-                    // `.ptr == zidl_rt.NIL_PTR` (zzdds's `nil.isNil` does)
+                    // `.ptr == zidl_bindings.NIL_PTR` (zzdds's `nil.isNil` does)
                     // before ever touching `.vtable` on a value that might be
                     // nil, the same discipline already required for a nil
                     // entity returned by a failed create_*.
-                    try self.print(", if ({s}) |_h| {s}({s}, _h) else .{{ .ptr = zidl_rt.NIL_PTR, .vtable = undefined }}", .{ p.name, p_unbox_fn, pzig });
+                    try self.print(", if ({s}) |_h| {s}({s}, _h) else .{{ .ptr = zidl_bindings.NIL_PTR, .vtable = undefined }}", .{ p.name, p_unbox_fn, pzig });
                 } else {
                     try self.print(", {s}({s}, {s})", .{ p_unbox_fn, pzig, p.name });
                 }
@@ -3098,13 +3074,13 @@ const Generator = struct {
         };
     }
 
-    /// Which `zidl_rt` function generated code should call to reconstruct a
+    /// Which `zidl_bindings` function generated code should call to reconstruct a
     /// native fat-pointer value of type `iface` from a boxed C-ABI handle:
     /// the plain per-view `unboxAs` normally, or `unboxAsView` for
     /// `@shared_c_abi_box` interfaces (see `ir.hasSharedCAbiBox`), whose
     /// boxes hold a `CAbiViews` pointer instead of a bare `Vtable` pointer.
     fn cAbiUnboxFnName(iface: *const ir.Interface) []const u8 {
-        return if (hasSharedCAbiBox(iface)) "zidl_rt.unboxAsView" else "zidl_rt.unboxAs";
+        return if (hasSharedCAbiBox(iface)) "zidl_bindings.unboxAsView" else "zidl_bindings.unboxAs";
     }
 
     /// If `tr` is a named typedef whose underlying type is a sequence, return that typedef.
@@ -3159,7 +3135,7 @@ const Generator = struct {
     // Anything that actually crosses `callconv(.c)` — a `pub export fn`'s own
     // signature, or a `@callback` thunk's signature — narrows entity
     // interfaces down to a single boxed `*anyopaque` instead (see
-    // `zidl_rt.EntityBox`, `typeRefIsEntityInterface`). These wrappers apply
+    // `zidl_bindings.EntityBox`, `typeRefIsEntityInterface`). These wrappers apply
     // that narrowing on top of the native functions above.
 
     fn cApiExportTypeRef(self: *Generator, tr: ir.TypeRef, mode: ir.ParamMode) ![]u8 {
@@ -3549,7 +3525,7 @@ const Generator = struct {
         try self.print("{s}var {s}: {s} = std.mem.zeroes({s});\n", .{ indent, opt_var, child_ty, child_ty });
         if (self.typeOwnsHeap(m.type_ref)) {
             try self.ind();
-            try self.print("{s}errdefer zidl_rt.deinitOwned(&{s}, allocator);\n", .{ indent, opt_var });
+            try self.print("{s}errdefer zidl_bindings.deinitOwned(&{s}, allocator);\n", .{ indent, opt_var });
         }
         if (m.dimensions.len > 0) {
             try self.emitReadArray(m.type_ref, opt_var, m.dimensions, indent, 0);
@@ -3847,7 +3823,7 @@ const Generator = struct {
         // ── deserializeInto ──────────────────────────────────────────────────
         const struct_has_deinit = self.structNeedsCleanup(s);
         try self.ind();
-        try self.print("    pub fn {s}(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {{\n", .{if (projection) "deserializeKeyValueInto" else "deserializeInto"});
+        try self.print("    pub fn {s}(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {{\n", .{if (projection) "deserializeKeyValueInto" else "deserializeInto"});
         if (struct_has_deinit and !projection) {
             // A mid-decode error leaves `out` self-cleaning instead of relying
             // on the caller's `defer out.deinit(alloc)` idiom — safe because
@@ -3974,7 +3950,7 @@ const Generator = struct {
 
         // skip (allocation-free fast-forward over one full serialized sample)
         try self.ind();
-        try self.write("    pub fn skip(reader: *zidl_rt.CdrReader) !void {\n");
+        try self.write("    pub fn skip(reader: *zidl_cdr.CdrReader) !void {\n");
         if (mutable) {
             try self.ind();
             try self.write("        const _end = try reader.readMutableDheader();\n");
@@ -4020,7 +3996,7 @@ const Generator = struct {
             try self.ind();
             try self.write("    }\n\n");
             try self.ind();
-            try self.write("    pub fn deserializeKeyInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {\n");
+            try self.write("    pub fn deserializeKeyInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {\n");
             try self.ind();
             try self.write("        try @This().deserializeKeyValueInto(out, reader, allocator);\n");
             try self.ind();
@@ -4036,7 +4012,7 @@ const Generator = struct {
             try self.ind();
             try self.write("    pub fn computeKeyHashChecked(value: *const @This()) ![16]u8 {\n");
             try self.ind();
-            try self.write("        var _khw = zidl_rt.KeyHashWriter.init();\n");
+            try self.write("        var _khw = zidl_cdr.KeyHashWriter.init();\n");
             try self.ind();
             try self.write("        try @This().serializeKeyHolder(&_khw, value.*);\n");
             try self.ind();
@@ -4090,7 +4066,7 @@ const Generator = struct {
 
             try self.write("\n");
             try self.ind();
-            try self.write("    pub fn deserializeKeyInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {\n");
+            try self.write("    pub fn deserializeKeyInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {\n");
             try self.ind();
             try self.write("        _ = out;\n");
             try self.ind();
@@ -4125,7 +4101,7 @@ const Generator = struct {
         if (mutable and self.opts.pl_cdr) {
             try self.write("\n");
             try self.ind();
-            try self.write("    pub fn serializePlCdr(writer: *zidl_rt.PlCdrWriter, value: @This()) !void {\n");
+            try self.write("    pub fn serializePlCdr(writer: *zidl_cdr.PlCdrWriter, value: @This()) !void {\n");
             for (s.members, 0..) |m, idx| {
                 const pid: u32 = memberIdAt(m, idx);
                 if (m.annotations.is_pl_repeated) {
@@ -4232,7 +4208,7 @@ const Generator = struct {
             try self.ind();
             try self.write("    /// `var v: @This() = .{}; defer v.deinit(a); try deserializeFromPlCdr(&v, ...);`.\n");
             try self.ind();
-            try self.write("    pub fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator, mode: zidl_rt.PlMode) !void {\n");
+            try self.write("    pub fn deserializeFromPlCdr(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator, mode: zidl_cdr.PlMode) !void {\n");
             if (!needs_alloc and !pl_retain and !struct_has_deinit) {
                 try self.ind();
                 try self.write("        _ = allocator;\n");
@@ -4256,7 +4232,7 @@ const Generator = struct {
             }
             if (pl_retain) {
                 try self.ind();
-                try self.write("        var _unknown: std.ArrayListUnmanaged(zidl_rt.RawParam) = .empty;\n");
+                try self.write("        var _unknown: std.ArrayListUnmanaged(zidl_cdr.RawParam) = .empty;\n");
                 try self.ind();
                 try self.write("        errdefer {\n");
                 try self.ind();
@@ -4416,7 +4392,7 @@ const Generator = struct {
         try self.ind();
         try self.write("        const allocator: *const std.mem.Allocator = @ptrCast(@alignCast(ctx));\n");
         try self.ind();
-        try self.write("        var _reader = zidl_rt.CdrReader.init(payload) catch return std.mem.zeroes([16]u8);\n");
+        try self.write("        var _reader = zidl_cdr.CdrReader.init(payload) catch return std.mem.zeroes([16]u8);\n");
         try self.ind();
         try self.write("        var _key_value: @This() = .{};\n");
         try self.ind();
@@ -4446,7 +4422,7 @@ const Generator = struct {
         try self.ind();
         try self.write("        const allocator: *const std.mem.Allocator = @ptrCast(@alignCast(ctx));\n");
         try self.ind();
-        try self.write("        var _reader = zidl_rt.CdrReader.init(payload) catch return std.mem.zeroes([16]u8);\n");
+        try self.write("        var _reader = zidl_cdr.CdrReader.init(payload) catch return std.mem.zeroes([16]u8);\n");
         try self.ind();
         try self.write("        var _key_value: @This() = .{};\n");
         if (needs_cleanup) {
@@ -4511,7 +4487,7 @@ const Generator = struct {
         try self.ind();
         try self.write("        const allocator: *const std.mem.Allocator = @ptrCast(@alignCast(ctx));\n");
         try self.ind();
-        try self.write("        var _reader = zidl_rt.CdrReader.init(payload) catch return null;\n");
+        try self.write("        var _reader = zidl_cdr.CdrReader.init(payload) catch return null;\n");
         // Decode only the referenced field, skipping every other member (a
         // filter never needs more than one field per getFieldFromCdr call).
         try self.ind();
@@ -4644,7 +4620,7 @@ const Generator = struct {
 
         // deserializeSelected
         try self.ind();
-        try self.write("    pub fn deserializeSelected(reader: *zidl_rt.CdrReader, want: FieldMask, out: *@This(), allocator: std.mem.Allocator) !void {\n");
+        try self.write("    pub fn deserializeSelected(reader: *zidl_cdr.CdrReader, want: FieldMask, out: *@This(), allocator: std.mem.Allocator) !void {\n");
         if (fallback) {
             try self.ind();
             try self.write("        _ = want;\n");
@@ -4702,7 +4678,7 @@ const Generator = struct {
                 try self.print("        if (want & (1 << {d}) != 0) {{\n", .{idx});
                 if (m.annotations.is_optional) {
                     try self.ind();
-                    try self.print("            zidl_rt.deinitOwned(&self.{s}, alloc);\n", .{m.name});
+                    try self.print("            zidl_bindings.deinitOwned(&self.{s}, alloc);\n", .{m.name});
                 } else try self.emitFieldSeqDeinit(m.name, m.type_ref, m.dimensions, "            ");
                 try self.ind();
                 try self.write("        }\n");
@@ -4790,7 +4766,7 @@ const Generator = struct {
         try self.ind();
         try self.write("        const _raw = _zzdds.getKeyValueRawWriter(self._dw, handle) orelse return error.BadParameter;\n");
         try self.ind();
-        try self.write("        var _r = try zidl_rt.CdrReader.init(_raw);\n");
+        try self.write("        var _r = try zidl_cdr.CdrReader.init(_raw);\n");
         // The stored blob is the whole last-alive sample keyed by instance
         // handle (src/dcps/writer.zig `key_registry`). `deserializeSelected`
         // skips every non-@key member instead of decoding it; the non-key
@@ -4899,7 +4875,7 @@ const Generator = struct {
         try self.ind();
         try self.write("        const _raw = _zzdds.getKeyValueRawReader(self._dr, handle) orelse return error.BadParameter;\n");
         try self.ind();
-        try self.write("        var _r = try zidl_rt.CdrReader.init(_raw);\n");
+        try self.write("        var _r = try zidl_cdr.CdrReader.init(_raw);\n");
         // See the DataWriter `get_key_value` above: the reader also stores the
         // whole first-alive sample (src/dcps/reader.zig `key_cdr`);
         // `deserializeSelected` skips the non-@key members.
@@ -4954,7 +4930,7 @@ const Generator = struct {
         try self.ind();
         try self.write("        sample_info.* = _raw.info;\n");
         try self.ind();
-        try self.write("        var _r = try zidl_rt.CdrReader.init(_raw.data);\n");
+        try self.write("        var _r = try zidl_cdr.CdrReader.init(_raw.data);\n");
         try self.ind();
         try self.write("        if (_raw.info.valid_data) {\n");
         try self.ind();
@@ -5099,7 +5075,7 @@ const Generator = struct {
         try self.ind();
         try self.write("        for (_tmp.items) |_s| {\n");
         try self.ind();
-        try self.write("            var _r = try zidl_rt.CdrReader.init(_s.data);\n");
+        try self.write("            var _r = try zidl_cdr.CdrReader.init(_s.data);\n");
         try self.ind();
         try self.print("            var _v: {s} = .{{}};\n", .{type_name});
         try self.ind();
@@ -5149,7 +5125,7 @@ const Generator = struct {
         try self.ind();
         try self.write("        if (self._xcdr2) {\n");
         try self.ind();
-        try self.write("            var _w = zidl_rt.CdrWriter(.xcdr2).init(&_buf, self._alloc);\n");
+        try self.write("            var _w = zidl_cdr.CdrWriter(.xcdr2).init(&_buf, self._alloc);\n");
         try self.ind();
         // XCDR2 representation id follows the top-level extensibility
         // (CDR2 / D_CDR2 / PL_CDR2); peers reject a mismatched one.
@@ -5167,7 +5143,7 @@ const Generator = struct {
         try self.ind();
         try self.write("        } else {\n");
         try self.ind();
-        try self.write("            var _w = zidl_rt.CdrWriter(.xcdr1).init(&_buf, self._alloc);\n");
+        try self.write("            var _w = zidl_cdr.CdrWriter(.xcdr1).init(&_buf, self._alloc);\n");
         try self.ind();
         try self.write("            try _w.writeEncapHeader();\n");
         try self.ind();
@@ -5226,7 +5202,7 @@ const Generator = struct {
         return true;
     }
 
-    /// True when `s` gets a generated `unknown_params: []zidl_rt.RawParam` field
+    /// True when `s` gets a generated `unknown_params: []zidl_cdr.RawParam` field
     /// and the matching retain/replay/free code: `@pl_retain_unknown` on a
     /// `@mutable` struct, with `--zig-pl-cdr` in effect.
     fn plRetainsUnknown(self: *const Generator, s: *const ir.Struct) bool {
@@ -5381,7 +5357,7 @@ const Generator = struct {
     fn emitFieldSeqDeinit(self: *Generator, field_name: []const u8, tr: ir.TypeRef, dims: []const u64, indent: []const u8) !void {
         if (self.usesGenericOwnership(tr, dims)) {
             try self.ind();
-            try self.print("{s}zidl_rt.deinitOwned(&self.{s}, alloc);\n", .{ indent, field_name });
+            try self.print("{s}zidl_bindings.deinitOwned(&self.{s}, alloc);\n", .{ indent, field_name });
             return;
         }
         // A bounded sequence (direct or typedef'd) is an inline BoundedArray
@@ -5520,7 +5496,7 @@ const Generator = struct {
             try self.ind();
             try self.write("        if (self.unknown_params.len != 0) {\n");
             try self.ind();
-            try self.write("            const _up = try alloc.alloc(zidl_rt.RawParam, self.unknown_params.len);\n");
+            try self.write("            const _up = try alloc.alloc(zidl_cdr.RawParam, self.unknown_params.len);\n");
             try self.ind();
             try self.write("            errdefer alloc.free(_up);\n");
             try self.ind();
@@ -5548,7 +5524,7 @@ const Generator = struct {
     fn emitFieldSeqCloneStmt(self: *Generator, field_name: []const u8, tr: ir.TypeRef, dims: []const u64, indent: []const u8) !void {
         if (self.usesGenericOwnership(tr, dims)) {
             try self.ind();
-            try self.print("{s}result.{s} = try zidl_rt.cloneOwned(self.{s}, alloc);\n", .{ indent, field_name, field_name });
+            try self.print("{s}result.{s} = try zidl_bindings.cloneOwned(self.{s}, alloc);\n", .{ indent, field_name, field_name });
             return;
         }
         // Bounded sequence (direct or typedef'd): `var result = self;` copied
@@ -5694,7 +5670,7 @@ const Generator = struct {
     fn emitFieldSeqCloneErrdefer(self: *Generator, field_name: []const u8, tr: ir.TypeRef, dims: []const u64, indent: []const u8) !void {
         if (self.usesGenericOwnership(tr, dims)) {
             try self.ind();
-            try self.print("{s}errdefer zidl_rt.deinitOwned(&result.{s}, alloc);\n", .{ indent, field_name });
+            try self.print("{s}errdefer zidl_bindings.deinitOwned(&result.{s}, alloc);\n", .{ indent, field_name });
             return;
         }
         // Simple single-statement forms stay `errdefer <stmt>;`; the sequence
@@ -5742,7 +5718,7 @@ const Generator = struct {
     fn emitFieldSeqCloneErrdeferBody(self: *Generator, field_name: []const u8, tr: ir.TypeRef, dims: []const u64, indent: []const u8) !void {
         if (self.usesGenericOwnership(tr, dims)) {
             if (indent.len != 0) try self.ind();
-            try self.print("{s}zidl_rt.deinitOwned(&result.{s}, alloc);\n", .{ indent, field_name });
+            try self.print("{s}zidl_bindings.deinitOwned(&result.{s}, alloc);\n", .{ indent, field_name });
             return;
         }
         // The single-statement forms are emitted inline after `errdefer ` when
@@ -5910,7 +5886,7 @@ const Generator = struct {
         for (s.members) |m| try self.print("\"{s}\",", .{m.name});
         try self.write("};\n");
         try self.ind();
-        try self.write("    pub fn tomlSpec(comptime field: []const u8) zidl_rt.authoring.Spec {\n");
+        try self.write("    pub fn tomlSpec(comptime field: []const u8) zidl_bindings.authoring.Spec {\n");
         if (s.members.len == 0) {
             try self.ind();
             try self.write("        _ = field;\n");
@@ -5925,9 +5901,9 @@ const Generator = struct {
         try self.ind();
         try self.write("        @compileError(\"unknown generated authoring field\");\n    }\n");
         try self.ind();
-        try self.write("    pub fn decodeToml(alloc: std.mem.Allocator, table: anytype, options: zidl_rt.authoring.Options, diagnostic: *zidl_rt.authoring.Diagnostic) !zidl_rt.authoring.Decoded(@This()) {\n        return zidl_rt.authoring.decode(@This(), alloc, table, options, diagnostic);\n    }\n");
+        try self.write("    pub fn decodeToml(alloc: std.mem.Allocator, table: anytype, options: zidl_bindings.authoring.Options, diagnostic: *zidl_bindings.authoring.Diagnostic) !zidl_bindings.authoring.Decoded(@This()) {\n        return zidl_bindings.authoring.decode(@This(), alloc, table, options, diagnostic);\n    }\n");
         try self.ind();
-        try self.write("    pub fn decodeTomlFrom(alloc: std.mem.Allocator, base: @This(), table: anytype, options: zidl_rt.authoring.Options, diagnostic: *zidl_rt.authoring.Diagnostic) !zidl_rt.authoring.Decoded(@This()) {\n        return zidl_rt.authoring.decodeFrom(@This(), alloc, base, table, options, diagnostic);\n    }\n");
+        try self.write("    pub fn decodeTomlFrom(alloc: std.mem.Allocator, base: @This(), table: anytype, options: zidl_bindings.authoring.Options, diagnostic: *zidl_bindings.authoring.Diagnostic) !zidl_bindings.authoring.Decoded(@This()) {\n        return zidl_bindings.authoring.decodeFrom(@This(), alloc, base, table, options, diagnostic);\n    }\n");
     }
     fn emitStrictTomlSpec(self: *Generator, tr_in: ir.TypeRef, dimensions: []const u64) anyerror!void {
         if (dimensions.len != 0) {
@@ -6348,7 +6324,7 @@ const Generator = struct {
     /// Sequence elements the per-shape field code doesn't release or copy
     /// itself: nested sequences, array typedefs, aliases of strings, and
     /// strings held inline by a bounded sequence. These go through
-    /// `zidl_rt.deinitOwned` / `zidl_rt.cloneOwned`.
+    /// `zidl_bindings.deinitOwned` / `zidl_bindings.cloneOwned`.
     fn elemUsesGenericOwnership(self: *Generator, elem: ir.TypeRef, bounded: bool) bool {
         if (!self.typeOwnsHeap(elem)) return false;
         const r = resolveAlias(elem);
@@ -6560,7 +6536,7 @@ const Generator = struct {
                     try self.ind();
                     try self.print("{s}if (_s.len > {d}) return error.StringTooLong;\n", .{ ii, n });
                     try self.ind();
-                    try self.print("{s}{s} = zidl_rt.BoundedArray(u8, {d}).fromSlice(_s) catch unreachable;\n", .{ ii, out_expr, n });
+                    try self.print("{s}{s} = zidl_cdr.BoundedArray(u8, {d}).fromSlice(_s) catch unreachable;\n", .{ ii, out_expr, n });
                     try self.ind();
                     try self.print("{s}}}\n", .{extra});
                 } else {
@@ -6582,7 +6558,7 @@ const Generator = struct {
                     try self.ind();
                     try self.print("{s}if (_ws.len > {d}) return error.StringTooLong;\n", .{ ii, n });
                     try self.ind();
-                    try self.print("{s}{s} = zidl_rt.BoundedArray(u16, {d}).fromSlice(_ws) catch unreachable;\n", .{ ii, out_expr, n });
+                    try self.print("{s}{s} = zidl_cdr.BoundedArray(u16, {d}).fromSlice(_ws) catch unreachable;\n", .{ ii, out_expr, n });
                     try self.ind();
                     try self.print("{s}}}\n", .{extra});
                 } else {
@@ -6631,7 +6607,7 @@ const Generator = struct {
                     // can't be spelled again (each `extern struct {...}` is a new
                     // type), so derive it from the field.
                     const buf_elem = if (std.mem.indexOf(u8, buf_elem_raw, "extern struct") != null)
-                        try std.fmt.allocPrint(self.alloc, "zidl_rt.SeqElem(@TypeOf({s}))", .{out_expr})
+                        try std.fmt.allocPrint(self.alloc, "zidl_bindings.SeqElem(@TypeOf({s}))", .{out_expr})
                     else
                         try self.alloc.dupe(u8, buf_elem_raw);
                     defer self.alloc.free(buf_elem);
@@ -6664,7 +6640,7 @@ const Generator = struct {
                     }
                     if (generic or (self.wire_key and self.aggregateNeedsCleanup(seq.element.*))) {
                         try self.ind();
-                        try self.print("{s}errdefer zidl_rt.deinitOwned({s}, allocator);\n", .{ iv, se });
+                        try self.print("{s}errdefer zidl_bindings.deinitOwned({s}, allocator);\n", .{ iv, se });
                     }
                     // String elements in C-ABI buffers are [*:0]const u8; use zero-copy
                     // read + dupeZ to produce a null-terminated allocation.
@@ -6917,10 +6893,10 @@ const Generator = struct {
         const dflt = try self.defaultForTypeRef(elem_tr);
         defer self.alloc.free(dflt);
         try self.ind();
-        try self.print("{s}var {s}: zidl_rt.SeqElem(@TypeOf({s})) = {s};\n", .{ extra, ev, seq_expr, dflt });
+        try self.print("{s}var {s}: zidl_bindings.SeqElem(@TypeOf({s})) = {s};\n", .{ extra, ev, seq_expr, dflt });
         if (self.typeOwnsHeap(elem_tr)) {
             try self.ind();
-            try self.print("{s}errdefer zidl_rt.deinitOwned(&{s}, allocator);\n", .{ extra, ev });
+            try self.print("{s}errdefer zidl_bindings.deinitOwned(&{s}, allocator);\n", .{ extra, ev });
         }
         try self.emitReadForTypeRef(elem_tr, ev, extra);
         try self.ind();
@@ -7117,7 +7093,7 @@ const Generator = struct {
             try self.print("{s}var {s}: {s} = {s};\n", .{ inner, opt_var, decl_type, default_val });
             if (self.typeOwnsHeap(m.type_ref)) {
                 try self.ind();
-                try self.print("{s}errdefer zidl_rt.deinitOwned(&{s}, allocator);\n", .{ inner, opt_var });
+                try self.print("{s}errdefer zidl_bindings.deinitOwned(&{s}, allocator);\n", .{ inner, opt_var });
             }
             if (m.dimensions.len > 0) {
                 try self.emitReadArray(m.type_ref, opt_var, m.dimensions, inner, 0);
@@ -7139,7 +7115,7 @@ const Generator = struct {
         try self.print("{s}var {s}: {s} = {s};\n", .{ extra, opt_var, decl_type, default_val });
         if (self.typeOwnsHeap(m.type_ref)) {
             try self.ind();
-            try self.print("{s}errdefer zidl_rt.deinitOwned(&{s}, allocator);\n", .{ extra, opt_var });
+            try self.print("{s}errdefer zidl_bindings.deinitOwned(&{s}, allocator);\n", .{ extra, opt_var });
         }
         if (m.dimensions.len > 0) {
             try self.emitReadArray(m.type_ref, opt_var, m.dimensions, extra, 0);
@@ -7359,7 +7335,7 @@ const Generator = struct {
                 if (seq.bound) |n| {
                     const elem = try self.typeRefToZig(seq.element.*);
                     defer self.alloc.free(elem);
-                    break :blk std.fmt.allocPrint(self.alloc, "zidl_rt.BoundedArray({s}, {d})", .{ elem, n });
+                    break :blk std.fmt.allocPrint(self.alloc, "zidl_cdr.BoundedArray({s}, {d})", .{ elem, n });
                 }
                 // Unbounded sequences use a C-compatible extern struct matching the C PSM layout.
                 const buf_elem = try self.seqBufElemZig(seq.element.*);
@@ -7367,11 +7343,11 @@ const Generator = struct {
                 break :blk std.fmt.allocPrint(self.alloc, "extern struct {{ _maximum: u32 = 0, _length: u32 = 0, _buffer: ?[*]{s} = null, _release: bool = false }}", .{buf_elem});
             },
             .string => |bound| if (bound) |n|
-                std.fmt.allocPrint(self.alloc, "zidl_rt.BoundedArray(u8, {d})", .{n})
+                std.fmt.allocPrint(self.alloc, "zidl_cdr.BoundedArray(u8, {d})", .{n})
             else
                 self.alloc.dupe(u8, "[]const u8"),
             .wstring => |bound| if (bound) |n|
-                std.fmt.allocPrint(self.alloc, "zidl_rt.BoundedArray(u16, {d})", .{n})
+                std.fmt.allocPrint(self.alloc, "zidl_cdr.BoundedArray(u16, {d})", .{n})
             else
                 self.alloc.dupe(u8, "[]const u16"),
             .fixed_pt => self.alloc.dupe(u8, "f64"),
@@ -7830,9 +7806,9 @@ fn sequenceElementUsesAllocator(tr: ir.TypeRef) bool {
 ///
 /// The key cases:
 ///   - Unbounded sequence → anonymous `extern struct { _maximum, _length, _buffer, _release }` — yes.
-///   - Bounded sequence   → `zidl_rt.BoundedArray(T, N)` — no (Zig runtime type).
+///   - Bounded sequence   → `zidl_cdr.BoundedArray(T, N)` — no (Zig runtime type).
 ///   - Unbounded string   → `[]const u8` (fat slice) — no.
-///   - Bounded string     → `zidl_rt.BoundedArray(u8, N)` — no.
+///   - Bounded string     → `zidl_cdr.BoundedArray(u8, N)` — no.
 ///   - Named struct       → yes iff `structIsCExternCompatible`.
 fn typeRefIsCExternCompatible(tr: ir.TypeRef) bool {
     return switch (tr) {
@@ -8136,12 +8112,12 @@ fn callbackInterfaceHasOperations(iface: *const ir.Interface) bool {
 /// True if `items` contains a `@callback interface` with at least one
 /// (possibly inherited) operation. `emitInterface` only emits
 /// `emitZigListenerHelpers` — the idiomatic Zig helper pair, whose thunks call
-/// `zidl_rt.unboxAs`/`zidl_rt.boxEntity` for any entity-interface-typed
+/// `zidl_bindings.unboxAs`/`zidl_bindings.boxEntity` for any entity-interface-typed
 /// parameter — in that same case, so this is the matching condition for
-/// whether the generated file needs a `zidl_rt` import. Without this, a file
+/// whether the generated file needs the binding-support imports. Without this, a file
 /// whose only callback interface happens to be the first one generated for
 /// that module (no prior typesupport/pl_cdr/c-api need to trigger the import
-/// some other way) silently emits code referencing an unimported `zidl_rt`.
+/// some other way) otherwise lacks the binding support module.
 fn itemsHaveCallbackInterfaceOperations(items: []const ir.ModuleItem) bool {
     for (items) |item| {
         switch (item) {
@@ -8332,7 +8308,7 @@ test "zig_backend: string types" {
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "s: []const u8 = \"\","));
-    try testing.expect(has(s, "bs: zidl_rt.BoundedArray(u8, 32) = .{},"));
+    try testing.expect(has(s, "bs: zidl_cdr.BoundedArray(u8, 32) = .{},"));
     try testing.expect(has(s, "ws: []const u16 = &.{},"));
 }
 
@@ -8343,7 +8319,7 @@ test "zig_backend: sequence types" {
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "unbounded: extern struct { _maximum: u32 = 0, _length: u32 = 0, _buffer: ?[*]i32 = null, _release: bool = false } = .{},"));
-    try testing.expect(has(s, "bounded: zidl_rt.BoundedArray(i32, 10) = .{},"));
+    try testing.expect(has(s, "bounded: zidl_cdr.BoundedArray(i32, 10) = .{},"));
 }
 
 test "zig_backend: map type integer key" {
@@ -8530,7 +8506,7 @@ test "zig_backend: union CDR serialize/deserialize" {
     const s = out.items;
     try testing.expect(has(s, "pub const has_key = false;"));
     try testing.expect(has(s, "pub fn serialize(writer: anytype, value: @This()) !void {"));
-    try testing.expect(has(s, "pub fn deserializeInto(out: *@This(), reader: *zidl_rt.CdrReader"));
+    try testing.expect(has(s, "pub fn deserializeInto(out: *@This(), reader: *zidl_cdr.CdrReader"));
     try testing.expect(has(s, "try writer.writeI32(value._d);"));
     try testing.expect(has(s, "_d = try reader.readI32();"));
     try testing.expect(has(s, "out._d = _d;"));
@@ -8756,7 +8732,8 @@ test "zig_backend: no_typesupport suppresses serialize" {
     var out = try testGenOpts("struct Point { long x; long y; };", "p", .{ .no_typesupport = true });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(!has(s, "zidl_rt"));
+    try testing.expect(!has(s, "zidl_cdr"));
+    try testing.expect(!has(s, "zidl_bindings"));
     try testing.expect(!has(s, "serialize"));
     try testing.expect(!has(s, "has_key"));
 }
@@ -8766,7 +8743,7 @@ test "zig_backend: serialize @final struct primitives" {
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Import present
-    try testing.expect(has(s, "const zidl_rt = @import(\"zidl_rt\");"));
+    try testing.expect(has(s, "const zidl_cdr = @import(\"zidl_cdr\");\nconst zidl_bindings = @import(\"zidl_bindings\");"));
     // has_key = false (no @key members)
     try testing.expect(has(s, "pub const has_key = false;"));
     // serialize function present with correct write calls
@@ -8777,7 +8754,7 @@ test "zig_backend: serialize @final struct primitives" {
     // No DHEADER for @final
     try testing.expect(!has(s, "reserveDheaderMaybe"));
     // deserializeInto present
-    try testing.expect(has(s, "pub fn deserializeInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {"));
+    try testing.expect(has(s, "pub fn deserializeInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {"));
     try testing.expect(has(s, "out.x = try reader.readI32();"));
     try testing.expect(has(s, "out.y = try reader.readF32();"));
     try testing.expect(has(s, "out.flag = try reader.readBool();"));
@@ -8827,10 +8804,10 @@ test "zig_backend: keyed struct emits deserializeKeyInto and computeKeyHash" {
     const s = out.items;
     // Out-param only -- no value-returning deserializeKey.
     try testing.expect(!has(s, "pub fn deserializeKey(reader"));
-    try testing.expect(has(s, "pub fn deserializeKeyInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {"));
+    try testing.expect(has(s, "pub fn deserializeKeyInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {"));
     try testing.expect(has(s, "out.id = try reader.readI32();"));
     try testing.expect(has(s, "pub fn computeKeyHash(value: *const @This()) [16]u8 {"));
-    try testing.expect(has(s, "var _khw = zidl_rt.KeyHashWriter.init();"));
+    try testing.expect(has(s, "var _khw = zidl_cdr.KeyHashWriter.init();"));
 }
 
 test "zig_backend: @final struct with non-leading key compiles cleanly (no compileError)" {
@@ -9073,7 +9050,7 @@ test "zig_backend: serialize bitset member" {
     try testing.expect(has(s, "pub fn serialize(writer: anytype, value: @This()) !void {"));
     try testing.expect(has(s, "const _bs: u4 = @bitCast(value);"));
     try testing.expect(has(s, "try writer.writeU8(@intCast(_bs));"));
-    try testing.expect(has(s, "pub fn deserializeInto(out: *@This(), reader: *zidl_rt.CdrReader, _: std.mem.Allocator) !void {"));
+    try testing.expect(has(s, "pub fn deserializeInto(out: *@This(), reader: *zidl_cdr.CdrReader, _: std.mem.Allocator) !void {"));
     try testing.expect(has(s, "out.* = @bitCast(@as(u4, @truncate(try reader.readU8())));"));
     // struct member dispatch calls .serialize / .deserializeInto
     try testing.expect(has(s, "try BS.serialize(writer, value.bs);"));
@@ -9152,7 +9129,7 @@ test "zig_backend: serialize bounded wstring member" {
     try testing.expect(has(s, "const _ws = try reader.readWstring(allocator);"));
     try testing.expect(has(s, "defer allocator.free(_ws);"));
     try testing.expect(has(s, "if (_ws.len > 16) return error.StringTooLong;"));
-    try testing.expect(has(s, "zidl_rt.BoundedArray(u16, 16).fromSlice(_ws) catch unreachable;"));
+    try testing.expect(has(s, "zidl_cdr.BoundedArray(u16, 16).fromSlice(_ws) catch unreachable;"));
     // Bounded wstring needs allocator (readWstring always allocates)
     try testing.expect(!has(s, "_ = allocator;"));
 }
@@ -9441,7 +9418,7 @@ test "zig_backend: --zig-generate-c-api emits callconv(.c) wrappers for entity i
     // Every entity crosses the C-ABI as a single boxed opaque pointer,
     // unboxed at the top of the export function before dispatch.
     try testing.expect(has(s, "pub export fn Writer_write_val(self: *anyopaque, x: i32, label: [*:0]const u8) callconv(.c) i32"));
-    try testing.expect(has(s, "const _self: Writer = zidl_rt.unboxAs(Writer, self);"));
+    try testing.expect(has(s, "const _self: Writer = zidl_bindings.unboxAs(Writer, self);"));
     try testing.expect(has(s, "return _self.vtable.write_val(_self.ptr, x, label);"));
     // No span conversion — vtable already uses C types
     try testing.expect(!has(s, "std.mem.span(label)"));
@@ -9467,10 +9444,10 @@ test "zig_backend: --zig-generate-c-api entity-returning op boxes the result via
     // never a hardcoded/assumed vtable, and no allocation call in generated
     // code at all (that's the concrete impl's own responsibility).
     try testing.expect(has(s, "pub export fn Factory_create_writer(self: *anyopaque, qos: i32) callconv(.c) *anyopaque {"));
-    try testing.expect(has(s, "const _self: Factory = zidl_rt.unboxAs(Factory, self);"));
+    try testing.expect(has(s, "const _self: Factory = zidl_bindings.unboxAs(Factory, self);"));
     try testing.expect(has(s, "const _r = _self.vtable.create_writer(_self.ptr, qos);"));
     try testing.expect(has(s, "return _r.vtable.get_c_abi_handle(_r.ptr);"));
-    try testing.expect(!has(s, "zidl_rt.boxEntity"));
+    try testing.expect(!has(s, "zidl_bindings.boxEntity"));
     // The *native* vtable slot (used for internal Zig-to-Zig dispatch, e.g. a
     // concrete FactoryImpl's own implementation) must keep the real
     // fat-pointer Writer return type — only the export function's own
@@ -9502,7 +9479,7 @@ test "zig_backend: --zig-generate-c-api entity-typed param unboxes before dispat
     // implementation or several. A null incoming pointer reconstructs as a
     // nil-sentinel native value instead of dereferencing a null box.
     try testing.expect(has(s, "pub export fn Publisher_create_writer(self: *anyopaque, a_topic: ?*anyopaque) callconv(.c) i32 {"));
-    try testing.expect(has(s, "return _self.vtable.create_writer(_self.ptr, if (a_topic) |_h| zidl_rt.unboxAs(Topic, _h) else .{ .ptr = zidl_rt.NIL_PTR, .vtable = undefined });"));
+    try testing.expect(has(s, "return _self.vtable.create_writer(_self.ptr, if (a_topic) |_h| zidl_bindings.unboxAs(Topic, _h) else .{ .ptr = zidl_bindings.NIL_PTR, .vtable = undefined });"));
     // Native vtable slot keeps the real Topic fat-pointer param type.
     try testing.expect(has(s, "create_writer: *const fn (*anyopaque, a_topic: Topic) i32,"));
     try testing.expect(!has(s, "create_writer: *const fn (*anyopaque, a_topic: *anyopaque) i32,"));
@@ -9610,10 +9587,10 @@ test "zig_backend: @callback interface emits Zig listener helpers" {
     // body reconstructs the fat-pointer handle before calling the idiomatic
     // Zig handler.
     try testing.expect(has(s, "fn _w(_dw: *anyopaque, _status: *const OfferedStatus, _ld: ?*anyopaque) callconv(.c) void {"));
-    try testing.expect(has(s, "_h(@ptrCast(@alignCast(_ld)), zidl_rt.unboxAs(DataWriter, _dw), _status.*);"));
+    try testing.expect(has(s, "_h(@ptrCast(@alignCast(_ld)), zidl_bindings.unboxAs(DataWriter, _dw), _status.*);"));
     // on_alive has no status — no dereference
     try testing.expect(has(s, "fn _w(_dw: *anyopaque, _ld: ?*anyopaque) callconv(.c) void {"));
-    try testing.expect(has(s, "_h(@ptrCast(@alignCast(_ld)), zidl_rt.unboxAs(DataWriter, _dw));"));
+    try testing.expect(has(s, "_h(@ptrCast(@alignCast(_ld)), zidl_bindings.unboxAs(DataWriter, _dw));"));
 }
 
 test "zig_backend: @callback thunk wraps string params with std.mem.span" {
@@ -10096,7 +10073,7 @@ test "zig_backend pl_cdr: serializePlCdr emitted for @mutable struct" {
     });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "pub fn serializePlCdr(writer: *zidl_rt.PlCdrWriter, value: @This()) !void {"));
+    try testing.expect(has(s, "pub fn serializePlCdr(writer: *zidl_cdr.PlCdrWriter, value: @This()) !void {"));
     try testing.expect(has(s, "reservePlParam(0)"));
     try testing.expect(has(s, "reservePlParam(1)"));
     try testing.expect(has(s, "patchPlParam(_ph0)"));
@@ -10111,7 +10088,7 @@ test "zig_backend pl_cdr: deserializeFromPlCdr emitted for @mutable struct" {
     });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "pub fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator, mode: zidl_rt.PlMode) !void {"));
+    try testing.expect(has(s, "pub fn deserializeFromPlCdr(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator, mode: zidl_cdr.PlMode) !void {"));
     try testing.expect(has(s, "readPlParam(mode)"));
     // Vendor-specific PIDs (bit 0x8000, RTPS 2.5 §9.6.4.2.1) must never alias a
     // standard @id: the switch discriminant routes them to `else` up front.
@@ -10168,7 +10145,7 @@ test "zig_backend pl_cdr: @pl_retain_unknown emits unknown_params field + retain
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "unknown_params: []zidl_rt.RawParam = &.{},"));
+    try testing.expect(has(s, "unknown_params: []zidl_cdr.RawParam = &.{},"));
     // serialize replays before the sentinel
     try testing.expect(has(s, "for (value.unknown_params) |_rp| try writer.writeRawParam(_rp.pid, _rp.bytes);"));
     // deserialize retains in the else arm and publishes the owned slice
@@ -10477,7 +10454,7 @@ test "zig_backend: keyless struct gets trivial key helpers under --generate-zzdd
     try testing.expect(has(s, "pub fn serializeKey(writer: anytype, value: @This()) !void {"));
     // Out-param only -- no value-returning deserializeKey.
     try testing.expect(!has(s, "pub fn deserializeKey(reader"));
-    try testing.expect(has(s, "pub fn deserializeKeyInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {"));
+    try testing.expect(has(s, "pub fn deserializeKeyInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {"));
 }
 
 test "zig_backend: get_key_value / selective parse for a non-leading key" {
@@ -10499,10 +10476,10 @@ test "zig_backend: get_key_value / selective parse for a non-leading key" {
     try testing.expect(has(s, "pub const KEY_FIELD_MASK: FieldMask = (1 << 1);"));
     try testing.expect(has(s, "pub fn fieldIndex(name: []const u8) ?u6 {"));
     try testing.expect(has(s, "if (std.mem.eql(u8, name, \"payload\")) return 2;"));
-    try testing.expect(has(s, "pub fn deserializeSelected(reader: *zidl_rt.CdrReader, want: FieldMask, out: *@This(), allocator: std.mem.Allocator) !void {"));
+    try testing.expect(has(s, "pub fn deserializeSelected(reader: *zidl_cdr.CdrReader, want: FieldMask, out: *@This(), allocator: std.mem.Allocator) !void {"));
     try testing.expect(has(s, "if (want & (1 << 0) != 0) {"));
     // key-only helpers still emitted (the disposed-sample take path needs them)
-    try testing.expect(has(s, "pub fn deserializeKeyInto(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator) !void {"));
+    try testing.expect(has(s, "pub fn deserializeKeyInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {"));
     // get_key_value on both sides drives deserializeSelected with the key mask
     const gkv_w = std.mem.indexOf(u8, s, "getKeyValueRawWriter(self._dw, handle)").?;
     const gkv_w_end = std.mem.indexOfPos(u8, s, gkv_w, "\n    }\n").?;
@@ -10532,7 +10509,7 @@ test "zig_backend: getFieldFromCdr matches int/string members, skips complex one
     const s = out.items;
     try testing.expect(has(s, "pub fn getFieldFromCdr(ctx: *anyopaque, payload: []const u8, field: []const u8, scratch: []u8) ?_zzdds.dcps.filter.FilterValue {"));
     try testing.expect(has(s, "const allocator: *const std.mem.Allocator = @ptrCast(@alignCast(ctx));"));
-    try testing.expect(has(s, "var _reader = zidl_rt.CdrReader.init(payload) catch return null;"));
+    try testing.expect(has(s, "var _reader = zidl_cdr.CdrReader.init(payload) catch return null;"));
     try testing.expect(has(s, "const _mask: FieldMask = if (@This().fieldIndex(field)) |_i| (@as(FieldMask, 1) << _i) else 0;"));
     try testing.expect(has(s, "@This().deserializeSelected(&_reader, _mask, &_v, allocator.*) catch return null;"));
     try testing.expect(!has(s, "@This().deserialize(&_reader"));
@@ -10929,26 +10906,8 @@ test "zig_backend: entity-sequence typedef _free routes through the registered a
 }
 
 test "zig_backend: --zig-generate-c-api-cdr-allocator opt-in flag gates zidl_cdr_get_allocator dependency" {
-    // Regression guard for a real link failure (Greptile review, zidl PR
-    // #45): --zig-generate-c-api's generated zidlCAbiFreeAllocator()
-    // unconditionally referenced zidl_cdr_get_allocator() (an extern fn
-    // implemented only in libzidl_cdr), making libzidl_cdr a new, previously
-    // nonexistent, undocumented link requirement for *any* consumer of
-    // --zig-generate-c-api -- including ones that only ever linked zidl_rt
-    // (a valid, dependency-free configuration before this). Confirmed via a
-    // real standalone repro: `zig build-exe` against generated output
-    // importing only zidl_rt failed with "error: undefined symbol:
-    // zidl_cdr_get_allocator" the moment a generated _free() was called.
-    //
-    // Fixed by making the zidl_cdr-routed behavior opt-in (this flag) rather
-    // than the zig_generate_c_api default -- mirrors --cpp-pmr-containers'
-    // reasoning (a real dependency/compatibility cost must not be forced on
-    // a consumer that didn't ask for it). Default (flag absent): identical
-    // to every consumer's pre-this-session behavior, zero new dependency.
-    // Opt-in (flag present): the allocator-correctness fix this whole
-    // session was about, for a consumer (e.g. zzdds) that already links
-    // libzidl_cdr for other reasons and wants generated frees to route
-    // through the same registered allocator.
+    // The default generated free path must work without linking libzidl_cdr.
+    // Opting in routes frees through its registered allocator instead.
     var without_flag = try testGenOpts(
         \\interface Foo { void noop(); };
         \\typedef sequence<Foo> FooSeq;
@@ -10964,8 +10923,8 @@ test "zig_backend: --zig-generate-c-api-cdr-allocator opt-in flag gates zidl_cdr
     , "t", .{ .zig_generate_c_api = true, .zig_generate_c_api_cdr_allocator = true, .no_typesupport = true, .no_typeobject_support = true });
     defer with_flag.deinit(testing.allocator);
     const s_on = with_flag.items;
-    try testing.expect(has(s_on, "extern fn zidl_cdr_get_allocator() callconv(.c) ?*const zidl_rt.ZidlAllocator;"));
-    try testing.expect(has(s_on, "if (zidl_cdr_get_allocator()) |za| return zidl_rt.toAllocator(za);"));
+    try testing.expect(has(s_on, "extern fn zidl_cdr_get_allocator() callconv(.c) ?*const zidl_bindings.ZidlAllocator;"));
+    try testing.expect(has(s_on, "if (zidl_cdr_get_allocator()) |za| return zidl_bindings.toAllocator(za);"));
 
     // Both configurations still route generated free call *sites* through
     // the same-named wrapper -- only zidlCAbiFreeAllocator()'s own
@@ -11105,7 +11064,7 @@ test "zig_backend: --zig-generate-c-api generates an as_Base export per direct b
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "pub export fn Topic_as_Entity(self: *anyopaque) callconv(.c) *anyopaque {"));
-    try testing.expect(has(s, "const _self: Topic = zidl_rt.unboxAs(Topic, self);"));
+    try testing.expect(has(s, "const _self: Topic = zidl_bindings.unboxAs(Topic, self);"));
     try testing.expect(has(s, "const _r = _self.vtable.as_Entity(_self.ptr);"));
     // Two separate export functions share the unbox line pattern; check both
     // bodies dispatch through their own `as_*` slot and box via the result's
@@ -11671,24 +11630,24 @@ test "zig_backend: nested collections, array typedefs and bounded-sequence eleme
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Unbounded nested: element type derived from the field; partial elements released.
-    try testing.expect(has(s, "zidl_rt.SeqElem(@TypeOf(out.n))"));
-    try testing.expect(has(s, "errdefer zidl_rt.deinitOwned(_se, allocator);"));
+    try testing.expect(has(s, "zidl_bindings.SeqElem(@TypeOf(out.n))"));
+    try testing.expect(has(s, "errdefer zidl_bindings.deinitOwned(_se, allocator);"));
     // Inner loops are depth-qualified.
     try testing.expect(has(s, "const _n1 = try reader.readU32();"));
     // Bounded elements of any kind decode through a temporary.
-    try testing.expect(has(s, "var _ev1: zidl_rt.SeqElem(@TypeOf(out.bta)) ="));
+    try testing.expect(has(s, "var _ev1: zidl_bindings.SeqElem(@TypeOf(out.bta)) ="));
     // Unbounded sequences of bounded strings keep inline elements.
-    try testing.expect(has(s, "?[*]zidl_rt.BoundedArray(u8, 5)"));
+    try testing.expect(has(s, "?[*]zidl_cdr.BoundedArray(u8, 5)"));
     // Collection DHEADERs: strings in arrays / sequences of structs, never for Triple arrays.
     try testing.expect(has(s, "const _cdh = try writer.reserveDheaderMaybe();"));
     try testing.expect(has(s, "try reader.readMutableDheader()"));
     // Generic ownership for nested / array members, including optional and union cases.
-    try testing.expect(has(s, "zidl_rt.deinitOwned(&self.n, alloc);"));
-    try testing.expect(has(s, "zidl_rt.deinitOwned(&self._u.rows, alloc);"));
-    try testing.expect(has(s, "zidl_rt.deinitOwned(&result.on.?, alloc);"));
+    try testing.expect(has(s, "zidl_bindings.deinitOwned(&self.n, alloc);"));
+    try testing.expect(has(s, "zidl_bindings.deinitOwned(&self._u.rows, alloc);"));
+    try testing.expect(has(s, "zidl_bindings.deinitOwned(&result.on.?, alloc);"));
     // Typedef'd sequence of nested elements releases / clones them generically.
-    try testing.expect(has(s, "for (_buf[0..self._length]) |*_e| zidl_rt.deinitOwned(_e, alloc);"));
-    try testing.expect(has(s, "_buf[_n] = try zidl_rt.cloneOwned(_src, alloc);"));
+    try testing.expect(has(s, "for (_buf[0..self._length]) |*_e| zidl_bindings.deinitOwned(_e, alloc);"));
+    try testing.expect(has(s, "_buf[_n] = try zidl_bindings.cloneOwned(_src, alloc);"));
 }
 
 test "zig_backend: legacy enum conversion spellings" {
@@ -11717,14 +11676,15 @@ test "strict authoring is opt-in without changing legacy TOML dependency behavio
     });
     defer legacy.deinit(testing.allocator);
     try testing.expect(!has(legacy.items, "toml_fields"));
-    try testing.expect(!has(legacy.items, "const zidl_rt"));
+    try testing.expect(!has(legacy.items, "const zidl_cdr"));
+    try testing.expect(!has(legacy.items, "const zidl_bindings"));
     var strict = try testGenOpts("struct Cfg { long count; };", "t", .{
         .zig_generate_authoring = true,
         .no_typesupport = true,
         .no_typeobject_support = true,
     });
     defer strict.deinit(testing.allocator);
-    try testing.expect(has(strict.items, "const zidl_rt"));
+    try testing.expect(has(strict.items, "const zidl_bindings"));
     try testing.expect(has(strict.items, "pub fn decodeToml"));
     try testing.expect(!has(strict.items, "_toml_applied"));
 }

@@ -1,7 +1,9 @@
 # XCDR Encoding Reference
 
 Extracted from OMG RTPS 2.3 (formal/22-04-01) and DDS-XTYPES v1.3 (formal/20-02-04).
-Implementation: `packages/zidl-rt/src/cdr.zig`, `packages/zidl-cdr/src/zidl_cdr.c`.
+Implementation: `packages/zidl-cdr/src/cdr.zig`, with the C ABI adapter in
+`packages/zidl-cdr/src/shared_primitives.zig`. The independent C reference lives
+under `packages/zidl-cdr/test/reference/`.
 
 Cross-validated byte-for-byte between the two implementations (41 tests).
 
@@ -234,7 +236,7 @@ members with a `uint64_t _present` bitmask (max 64 optional members per struct);
 
 ## zidl-rt (Zig) API Summary
 
-`packages/zidl-rt/src/cdr.zig`:
+`packages/zidl-cdr/src/cdr.zig`:
 
 ```zig
 // Writer
@@ -268,7 +270,7 @@ try r.skipDheaderIfXcdr2(); // no-op on XCDR1
 
 ---
 
-## zidl-cdr (C99) API Summary
+## zidl-cdr C ABI Summary
 
 `packages/zidl-cdr/include/zidl_cdr.h`:
 

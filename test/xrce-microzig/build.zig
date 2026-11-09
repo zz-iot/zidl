@@ -4,7 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const zidl_rt_dep = b.dependency("zidl_rt", .{
+    const runtime = b.dependency("zidl_bindings", .{
         .target = target,
         .optimize = optimize,
     });
@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "zidl_rt", .module = zidl_rt_dep.module("zidl-rt") },
+            .{ .name = "zidl_cdr", .module = runtime.module("zidl_cdr") }, .{ .name = "zidl_bindings", .module = runtime.module("zidl-bindings") },
         },
     });
 
@@ -22,7 +22,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("generated/allocations.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "zidl_rt", .module = zidl_rt_dep.module("zidl-rt") }},
+        .imports = &.{ .{ .name = "zidl_cdr", .module = runtime.module("zidl_cdr") }, .{ .name = "zidl_bindings", .module = runtime.module("zidl-bindings") } },
     });
 
     const tests = b.addTest(.{
@@ -31,9 +31,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "zidl_rt", .module = zidl_rt_dep.module("zidl-rt") },
-                .{ .name = "types", .module = types_mod },
-                .{ .name = "allocations", .module = allocations_mod },
+                .{ .name = "zidl_cdr", .module = runtime.module("zidl_cdr") }, .{ .name = "zidl_bindings", .module = runtime.module("zidl-bindings") },
+                .{ .name = "types", .module = types_mod },                     .{ .name = "allocations", .module = allocations_mod },
             },
         }),
     });

@@ -14,7 +14,8 @@
 
 const std = @import("std");
 const testing = std.testing;
-const zidl_rt = @import("zidl_rt");
+const zidl_cdr = @import("zidl_cdr");
+const zidl_bindings = @import("zidl_bindings");
 const KA = @import("fixture").KA;
 
 const vectors_txt = @embedFile("vectors.txt");
@@ -39,18 +40,18 @@ fn vector(kind: []const u8, name: []const u8, enc: []const u8) ![]u8 {
 // Samples borrow their storage from `&.{ ... }` literals, so the tests build
 // them at comptime (`comptime nested()`): that makes every literal static.
 
-fn borrow(comptime S: type, items: []const zidl_rt.SeqElem(S)) S {
+fn borrow(comptime S: type, items: []const zidl_bindings.SeqElem(S)) S {
     return .{ ._maximum = @intCast(items.len), ._length = @intCast(items.len), ._buffer = @constCast(items.ptr), ._release = false };
 }
 
-fn bounded(comptime S: type, items: []const zidl_rt.SeqElem(S)) S {
+fn bounded(comptime S: type, items: []const zidl_bindings.SeqElem(S)) S {
     var b: S = .{};
     for (items) |e| b.appendAssumeCapacity(e);
     return b;
 }
 
-fn bstr(comptime N: usize, s: []const u8) zidl_rt.BoundedArray(u8, N) {
-    return zidl_rt.BoundedArray(u8, N).fromSlice(s) catch unreachable;
+fn bstr(comptime N: usize, s: []const u8) zidl_cdr.BoundedArray(u8, N) {
+    return zidl_cdr.BoundedArray(u8, N).fromSlice(s) catch unreachable;
 }
 
 fn F(comptime T: type, comptime field: []const u8) type {
@@ -89,10 +90,10 @@ const SSeqStruct = F(KA.Nested, "s_seq_struct");
 
 fn nested() KA.Nested {
     return .{
-        .s_seq = borrow(SSeq, &.{ borrow(zidl_rt.SeqElem(SSeq), &.{ 1, 2 }), borrow(zidl_rt.SeqElem(SSeq), &.{3}) }),
+        .s_seq = borrow(SSeq, &.{ borrow(zidl_bindings.SeqElem(SSeq), &.{ 1, 2 }), borrow(zidl_bindings.SeqElem(SSeq), &.{3}) }),
         .s_tseq = bounded(F(KA.Nested, "s_tseq"), &.{ borrow(KA.LongSeq, &.{4}), .{} }),
-        .s_seq_str = borrow(SSeqStr, &.{ borrow(zidl_rt.SeqElem(SSeqStr), &.{"a"}), borrow(zidl_rt.SeqElem(SSeqStr), &.{ "b", "c" }) }),
-        .s_seq_struct = borrow(SSeqStruct, &.{borrow(zidl_rt.SeqElem(SSeqStruct), &.{.{ .label = "q", .id = 1 }})}),
+        .s_seq_str = borrow(SSeqStr, &.{ borrow(zidl_bindings.SeqElem(SSeqStr), &.{"a"}), borrow(zidl_bindings.SeqElem(SSeqStr), &.{ "b", "c" }) }),
+        .s_seq_struct = borrow(SSeqStruct, &.{borrow(zidl_bindings.SeqElem(SSeqStruct), &.{.{ .label = "q", .id = 1 }})}),
         .s_arr = borrow(F(KA.Nested, "s_arr"), &.{ .{ 1, 2, 3 }, .{ 4, 5, 6 } }),
         .s_barr = bounded(F(KA.Nested, "s_barr"), &.{.{ 7, 8, 9 }}),
     };
@@ -175,10 +176,10 @@ fn eql(a: anytype, b: @TypeOf(a)) bool {
 /// representation id (CDR2 / D_CDR2 / PL_CDR2).
 const Ext = enum { final, appendable, mutable };
 
-fn encode(comptime T: type, comptime v: zidl_rt.XcdrVersion, comptime ext: Ext, value: T) ![]u8 {
+fn encode(comptime T: type, comptime v: zidl_cdr.XcdrVersion, comptime ext: Ext, value: T) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(testing.allocator);
-    var w = zidl_rt.CdrWriter(v).init(&buf, testing.allocator);
+    var w = zidl_cdr.CdrWriter(v).init(&buf, testing.allocator);
     switch (ext) {
         .final => try w.writeEncapHeader(),
         .appendable => try w.writeEncapHeaderDelimited(),
@@ -202,7 +203,7 @@ fn referenceSample(name: []const u8, tag: []const u8) ![]u8 {
 }
 
 fn decodeWith(comptime T: type, bytes: []const u8, alloc: std.mem.Allocator) !T {
-    var r = try zidl_rt.CdrReader.init(bytes);
+    var r = try zidl_cdr.CdrReader.init(bytes);
     var out: T = .{};
     try T.deserializeInto(&out, &r, alloc);
     if (r.pos != bytes.len) {
@@ -219,7 +220,7 @@ fn decodeAndRelease(alloc: std.mem.Allocator, comptime T: type, bytes: []const u
     c.deinit(alloc);
 }
 
-fn check(comptime T: type, comptime name: []const u8, comptime ext: Ext, sample: T, comptime compare_bytes: bool, comptime encodings: []const zidl_rt.XcdrVersion) !void {
+fn check(comptime T: type, comptime name: []const u8, comptime ext: Ext, sample: T, comptime compare_bytes: bool, comptime encodings: []const zidl_cdr.XcdrVersion) !void {
     inline for (encodings) |v| {
         const tag = if (v == .xcdr1) "xcdr1" else "xcdr2";
         const reference = try referenceSample(name, tag);
@@ -264,7 +265,7 @@ fn check(comptime T: type, comptime name: []const u8, comptime ext: Ext, sample:
     try testing.expectEqualSlices(u8, hash, &T.equivalence_hash);
 }
 
-const both = &[_]zidl_rt.XcdrVersion{ .xcdr1, .xcdr2 };
+const both = &[_]zidl_cdr.XcdrVersion{ .xcdr1, .xcdr2 };
 
 test "Prims (primitive elements: no collection DHEADER)" {
     try check(KA.Prims, "Prims", .final, comptime prims(), true, both);
