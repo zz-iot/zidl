@@ -4979,7 +4979,9 @@ const ConcreteImplGenerator = struct {
         // callback getter is known by its shape, not its name
         // (`interface.callbackGetterType`).
         if (interface.callbackGetterType(op) != null) {
-            const ltr = op.return_type.?;
+            // The callback itself, through any alias the op returns.
+            var ltr = op.return_type.?;
+            while (ltr == .named and ltr.named == .typedef) ltr = ltr.named.typedef.type_ref;
             const lc = try self.listenerCType(ltr);
             defer self.alloc.free(lc);
             const bridge_name = try self.listenerBridgeName(ltr);
@@ -5174,13 +5176,7 @@ const ConcreteImplGenerator = struct {
         try collectIfaceMembers(self.alloc, created, &ops, &attrs);
         for (op.params) |p| {
             if (paramAdaptKind(p) != .listener_in) continue;
-            const cb = switch (p.type_ref) {
-                .named => |td| switch (td) {
-                    .interface => |i| i,
-                    else => continue,
-                },
-                else => continue,
-            };
+            const cb = interface.callbackInterfaceOf(p.type_ref) orelse continue;
             // Without exactly one getter for this callback there is nothing
             // safe to read back, so a failed create leaks the registration
             // rather than risk freeing one the entity holds.
@@ -6030,15 +6026,11 @@ const ConcreteImplGenerator = struct {
         };
     }
 
-    /// Base class name for a listener, e.g. DataWriterListenerBase
+    /// Base class name for a listener, e.g. DataWriterListenerBase, through
+    /// any alias of it.
     fn listenerBridgeName(self: *ConcreteImplGenerator, tr: ir.TypeRef) ![]u8 {
-        return switch (tr) {
-            .named => |td| switch (td) {
-                .interface => |iface| std.fmt.allocPrint(self.alloc, "::{s}Base", .{iface.qualified_name}),
-                else => self.alloc.dupe(u8, "Base"),
-            },
-            else => self.alloc.dupe(u8, "Base"),
-        };
+        const iface = interface.callbackInterfaceOf(tr) orelse return self.alloc.dupe(u8, "Base");
+        return std.fmt.allocPrint(self.alloc, "::{s}Base", .{iface.qualified_name});
     }
 
     /// Impl class name for an entity, e.g. PublisherImpl
@@ -10206,6 +10198,32 @@ test "cpp_backend: a callback getter is known by its shape; the create_* read-ba
     // Two getters could each be the one: no read-back, rather than a guess.
     try testing.expect(!has(src, "if (_lp_a_t) {"));
     try testing.expect(!has(src, "get_listener"));
+}
+
+test "cpp_backend: callback aliases are callbacks to getters, read-backs and @success_result" {
+    var res = try testGenConcreteImpl(
+        \\module M {
+        \\    const long OK = 0;
+        \\    @success_result(OK) typedef long Result;
+        \\    @callback interface FooListener { void on_event(); };
+        \\    typedef FooListener FooAlias;
+        \\    interface Child {
+        \\        FooAlias get_listener();
+        \\        Result set_listener(in FooAlias a_l);
+        \\    };
+        \\    interface Parent {
+        \\        Child create_child(in FooAlias a_c);
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "M_FooListener _l = M_Child_get_listener(ptr_);"));
+    try testing.expect(has(src, "    if (_lp_a_c) {\n        auto _gl = M_Child_get_listener(_h);\n"));
+    try testing.expect(has(src, "if (_rc != 0 && _lp_a_l) ::M::FooListenerBase::release_c_listener(_l_a_l.listener_data);"));
+    // An aliased argument registers through the aliased callback's bridge.
+    try testing.expect(has(src, "_l_a_l = ::M::FooListenerBase::c_listener(a_l);"));
+    try testing.expect(!has(src, " Base::"));
 }
 
 test "cpp_backend: a void set_listener just forwards" {

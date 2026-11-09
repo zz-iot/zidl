@@ -7256,8 +7256,8 @@ const JniBridgeGenerator = struct {
                         // is nothing safe to read back, so a failed create
                         // leaks the registration rather than risk freeing one
                         // the entity holds (`interface.callbackGetterFor`).
-                        const cb = resolveToNamedDecl(p.type_ref).interface;
-                        if (interface.callbackGetterFor(t_ops.items, cb)) |glo| {
+                        const cb = interface.callbackInterfaceOf(p.type_ref);
+                        if (if (cb) |c| interface.callbackGetterFor(t_ops.items, c) else null) |glo| {
                             try created_listener_params.append(self.alloc, .{
                                 .name = try self.alloc.dupe(u8, p.name),
                                 .listener_c = try self.typeRefToC(glo.return_type.?),
@@ -10348,6 +10348,35 @@ test "java: a failed callback registration drops its context reference only with
     // listener was installed, whatever the op's name.
     try testing.expect(std.mem.indexOf(u8, s, "_c_r.release_listener_data = zidl_java_release_listener_data;") != null);
     try testing.expect(std.mem.indexOf(u8, s, "zidl_java_release_listener_ctx(env, _c_r.listener_data)") == null);
+}
+
+test "java: callback aliases are callbacks to getters, read-backs and @success_result" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc,
+        \\const long OK = 0;
+        \\@success_result(OK) typedef long Result;
+        \\@callback interface FooListener { void on_event(); };
+        \\typedef FooListener FooAlias;
+        \\interface Child {
+        \\    FooAlias get_listener();
+        \\    Result set_listener(in FooAlias l);
+        \\};
+        \\interface Parent {
+        \\    Child create_child(in FooAlias c);
+        \\};
+    );
+    defer ir_spec.deinit();
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    const opts = interface.Options{ .input_stem = "parent" };
+    try generateJniSource(alloc, &ir_spec, opts, &out);
+    const s = out.items;
+
+    try testing.expect(std.mem.indexOf(u8, s, "Java_ChildImpl_n_1get_1listener") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "UnsupportedOperationException") == null);
+    try testing.expect(std.mem.indexOf(u8, s, "_now_c = Child_get_listener(_h);") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "    if (_rc != 0 && _p_l != NULL) zidl_java_release_listener_ctx(env, _c_l.listener_data);\n") != null);
 }
 
 test "java: @success_result is judged on the provider's value, not the JNI-converted one" {

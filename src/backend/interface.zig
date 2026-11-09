@@ -548,31 +548,38 @@ pub fn isCallbackInterface(iface: *const ir.Interface) bool {
 pub fn callbackSuccessResult(op: *const ir.Operation) ?i64 {
     const ok = ir.successResult(op.return_type orelse return null) orelse return null;
     for (op.params) |p| {
-        if (p.mode != .in_) continue;
-        switch (p.type_ref) {
-            .named => |td| switch (td) {
-                .interface => |iface| if (isCallbackInterface(iface)) return ok,
-                else => {},
-            },
-            else => {},
-        }
+        if (p.mode == .in_ and callbackInterfaceOf(p.type_ref) != null) return ok;
     }
     return null;
 }
 
 /// The `@callback` interface `op` hands back when it is a callback getter:
-/// it takes no arguments and returns a `@callback` interface, which can only
-/// be a callback its provider holds. Its name plays no part. Null for any
-/// other operation.
+/// it takes no arguments and returns a `@callback` interface, or an alias of
+/// one, which can only be a callback its provider holds. Its name plays no
+/// part. Null for any other operation.
 pub fn callbackGetterType(op: *const ir.Operation) ?*const ir.Interface {
     if (op.params.len != 0) return null;
-    return switch (op.return_type orelse return null) {
-        .named => |td| switch (td) {
-            .interface => |iface| if (isCallbackInterface(iface)) iface else null,
-            else => null,
-        },
-        else => null,
-    };
+    return callbackInterfaceOf(op.return_type orelse return null);
+}
+
+/// The `@callback` interface `type_ref` names, directly or through typedefs
+/// aliasing it (an array typedef is not an alias). Null for any other type.
+pub fn callbackInterfaceOf(type_ref: ir.TypeRef) ?*const ir.Interface {
+    var tr = type_ref;
+    while (true) {
+        const td = switch (tr) {
+            .named => |n| n,
+            else => return null,
+        };
+        switch (td) {
+            .typedef => |t| {
+                if (t.dimensions.len != 0) return null;
+                tr = t.type_ref;
+            },
+            .interface => |iface| return if (isCallbackInterface(iface)) iface else null,
+            else => return null,
+        }
+    }
 }
 
 /// Among `ops`, the callback getter that can hand back a registration of
