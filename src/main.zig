@@ -848,7 +848,7 @@ fn printUsage(w: *Io.Writer) !void {
         \\
         \\  --zig-generate-c-api           Emit pub export fn callconv(.c) wrappers for C free-function API (Zig backend)
         \\  --zig-generate-toml-config     Emit applyToml(alloc, table: anytype) !void per struct (Zig backend)
-        \\  --zig-generate-authoring       Emit strict presence-aware decodeToml using zidl_rt.authoring
+        \\  --zig-generate-authoring       Emit strict presence-aware decodeToml using zidl_bindings.authoring
         \\  --zig-pl-cdr                   Generate PL_CDR functions for @mutable types (Zig backend)
         \\  --zig-version <0.17.0|0.16.0|0.15.1>  Output compatibility target (Zig backend)
         \\

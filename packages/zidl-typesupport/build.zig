@@ -2,13 +2,13 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const runtime = b.dependency("zidl_rt", .{ .target = target });
+    const runtime = b.dependency("zidl_bindings", .{ .target = target });
     const header = b.addTranslateC(.{ .root_source_file = b.path("include/zidl_typesupport.h"), .target = target, .optimize = optimize, .link_libc = false });
     const module = b.addModule("zidl_typesupport", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{ .{ .name = "zidl_rt", .module = runtime.module("zidl-rt") }, .{ .name = "zidl_typesupport_c", .module = header.createModule() } },
+        .imports = &.{ .{ .name = "zidl_cdr", .module = runtime.module("zidl_cdr") }, .{ .name = "zidl_bindings", .module = runtime.module("zidl-bindings") }, .{ .name = "zidl_typesupport_c", .module = header.createModule() } },
     });
     module.addIncludePath(b.path("include"));
 
@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = .{ .cwd_relative = path },
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "zidl_rt", .module = runtime.module("zidl-rt") }},
+            .imports = &.{ .{ .name = "zidl_cdr", .module = runtime.module("zidl_cdr") }, .{ .name = "zidl_bindings", .module = runtime.module("zidl-bindings") } },
         });
         const provider = b.createModule(.{
             .root_source_file = .{ .cwd_relative = provider_path.? },
@@ -31,7 +31,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "types", .module = types },
-                .{ .name = "zidl_rt", .module = runtime.module("zidl-rt") },
+                .{ .name = "zidl_cdr", .module = runtime.module("zidl_cdr") },
+                .{ .name = "zidl_bindings", .module = runtime.module("zidl-bindings") },
                 .{ .name = "zidl_typesupport", .module = module },
             },
         });

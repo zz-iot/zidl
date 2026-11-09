@@ -1,12 +1,13 @@
 const std = @import("std");
-const zidl_rt = @import("zidl_rt");
+const zidl_cdr = @import("zidl_cdr");
+const zidl_bindings = @import("zidl_bindings");
 const types = @import("types");
 
 test "XRCE fixture round-trips bounded data" {
     const allocator = std.testing.allocator;
 
-    const board = try zidl_rt.BoundedArray(u8, 16).fromSlice("pico-wh");
-    const payload = try zidl_rt.BoundedArray(u8, 8).fromSlice(&.{ 1, 2, 3, 5 });
+    const board = try zidl_cdr.BoundedArray(u8, 16).fromSlice("pico-wh");
+    const payload = try zidl_cdr.BoundedArray(u8, 8).fromSlice(&.{ 1, 2, 3, 5 });
     const sample = types.CounterStatus{
         .counter = 42,
         .board = board,
@@ -18,11 +19,11 @@ test "XRCE fixture round-trips bounded data" {
     var bytes = std.ArrayListUnmanaged(u8).empty;
     defer bytes.deinit(allocator);
 
-    var writer = zidl_rt.CdrWriter(.xcdr1).init(&bytes, allocator);
+    var writer = zidl_cdr.CdrWriter(.xcdr1).init(&bytes, allocator);
     try writer.writeEncapHeader();
     try types.CounterStatus.serialize(&writer, sample);
 
-    var reader = try zidl_rt.CdrReader.init(bytes.items);
+    var reader = try zidl_cdr.CdrReader.init(bytes.items);
     var decoded: types.CounterStatus = .{};
     try types.CounterStatus.deserializeInto(&decoded, &reader, allocator);
 
@@ -30,7 +31,7 @@ test "XRCE fixture round-trips bounded data" {
     try std.testing.expectEqualSlices(u8, "pico-wh", decoded.board.slice());
     try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 5 }, decoded.payload.slice());
 
-    var key_reader = try zidl_rt.CdrReader.init(bytes.items);
+    var key_reader = try zidl_cdr.CdrReader.init(bytes.items);
     var key_only: types.CounterStatus = .{};
     try types.CounterStatus.deserializeKeyInto(&key_only, &key_reader, allocator);
     try std.testing.expectEqual(@as(u32, 42), key_only.counter);
@@ -44,19 +45,19 @@ test "allocated string sequences decode and deep clone" {
     const allocator = std.testing.allocator;
     var bytes = std.ArrayListUnmanaged(u8).empty;
     defer bytes.deinit(allocator);
-    var writer = zidl_rt.CdrWriter(.xcdr1).init(&bytes, allocator);
+    var writer = zidl_cdr.CdrWriter(.xcdr1).init(&bytes, allocator);
     try writer.writeEncapHeader();
     try writer.writeU32(2);
     try writer.writeString("alpha");
     try writer.writeString("");
-    var reader = try zidl_rt.CdrReader.init(bytes.items);
+    var reader = try zidl_cdr.CdrReader.init(bytes.items);
     var decoded: StringList = .{};
     try StringList.deserializeInto(&decoded, &reader, allocator);
     defer decoded.deinit(allocator);
     var copy = try decoded.clone(allocator);
     defer copy.deinit(allocator);
-    var owned = try zidl_rt.cloneOwned(decoded.names, allocator);
-    defer zidl_rt.deinitOwned(&owned, allocator);
+    var owned = try zidl_bindings.cloneOwned(decoded.names, allocator);
+    defer zidl_bindings.deinitOwned(&owned, allocator);
     for ([_][]const u8{ "alpha", "" }, 0..) |expected, i| {
         try std.testing.expectEqualStrings(expected, std.mem.span(decoded.names._buffer.?[i]));
         try std.testing.expectEqualStrings(expected, std.mem.span(copy.names._buffer.?[i]));

@@ -125,7 +125,7 @@ hand-written native backing — not just golden-output text comparison.
 
 Zig language mapping backend. See `docs/backend_zig.md` for comprehensive reference.
 Keyed structs emit `serializeKey`, `deserializeKey`, `deserializeKeyInto`, and
-`computeKeyHash`. `computeKeyHash` uses `zidl_rt.KeyHashWriter` for canonical
+`computeKeyHash`. `computeKeyHash` uses `zidl_cdr.KeyHashWriter` for canonical
 PLAIN_CDR2 big-endian key serialization and RTPS key-hash finalization.
 
 **Tests:** 132.
@@ -136,8 +136,8 @@ When `opts.pl_cdr && struct.extensibility == .mutable`, emits additional functio
 the normal XCDR2 serialize/deserialize:
 
 ```zig
-fn serializePlCdr(writer: *zidl_rt.PlCdrWriter, value: @This()) !void
-fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: std.mem.Allocator, mode: zidl_rt.PlMode) !void
+fn serializePlCdr(writer: *zidl_cdr.PlCdrWriter, value: @This()) !void
+fn deserializeFromPlCdr(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator, mode: zidl_cdr.PlMode) !void
 ```
 
 - PID = `@id(N)` if present on the member, else sequential member index (same as EMHEADER)
@@ -147,7 +147,7 @@ fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: st
   prefix); deserialize appends one element per occurrence of the PID
 - `@pl_repeated` on a non-sequence member is a build-time error (`error.PlRepeatedOnNonSequence`
   from the IR builder)
-- `mode: zidl_rt.PlMode` (`.lenient` / `.strict`): `.lenient` ends the parameter loop cleanly
+- `mode: zidl_cdr.PlMode` (`.lenient` / `.strict`): `.lenient` ends the parameter loop cleanly
   at a truncated parameter or a missing `PID_SENTINEL` and rounds a non-multiple-of-4 length
   up; `.strict` returns `error.TruncatedParameter` / `error.MissingSentinel` /
   `error.MisalignedParameter` for those, `error.UnknownMustUnderstand` for an unrecognized
@@ -159,7 +159,7 @@ fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: st
   — `out` must still be a fresh `.{}` going in, but the caller no longer needs its own
   `defer out.deinit(alloc)` to avoid leaking a partial decode (generated `deinit()` is
   idempotent, so keeping that `defer` anyway is still safe).
-- `@pl_retain_unknown` on the struct: adds `unknown_params: []zidl_rt.RawParam`;
+- `@pl_retain_unknown` on the struct: adds `unknown_params: []zidl_cdr.RawParam`;
   `deserializeFromPlCdr` keeps each unrecognized parameter (value bytes, owned) and
   `serializePlCdr` replays them before the sentinel, so a decode → re-encode round trip
   preserves vendor extensions and unmodelled parameters. Generated `deinit`/`clone` cover
@@ -175,7 +175,7 @@ fn deserializeFromPlCdr(out: *@This(), reader: *zidl_rt.CdrReader, allocator: st
   `error.PlCdrMemberIdOutOfRange` otherwise, since a larger id both could never be matched
   by a real 16-bit wire PID and would otherwise collide with the vendor-routing sentinel.
 
-**Tests:** codegen (`src/backend/zig.zig`), `zidl-rt` round-trip (`packages/zidl-rt/src/cdr.zig`),
+**Tests:** codegen (`src/backend/zig.zig`), `zidl-rt` round-trip (`packages/zidl-cdr/src/cdr.zig`),
 and a compile-and-run integration suite (`test/integration/zig_pl_cdr/`).
 
 ### TOML config application (`--zig-generate-toml-config`)
@@ -241,24 +241,21 @@ test blocks are discovered by `zig build test`.
 
 ---
 
-## packages/zidl-rt/
+## Native runtime packages
 
-Zig CDR runtime. `src/cdr.zig` — see `docs/runtime_libraries.md`.
-`src/root.zig` — re-exports `CdrWriter`, `CdrReader`, `BoundedArray`, constants.
-Includes `KeyHashWriter`, a canonical RTPS key-hash writer that emits PLAIN_CDR2
-big-endian bytes, keeps the first 16 bytes, and streams the full key into MD5.
+- `packages/zidl-cdr/` owns the Zig codec and builds the stable C ABI archive.
+  Generated C/C++ code links that archive; building it from source requires Zig.
+- `packages/zidl-bindings/` owns allocators, owned values, authoring support and
+  entity handles, with a one-way dependency on the codec.
+- `packages/zidl-rt/` is a temporary root façade pending zzdds migration.
 
-**Tests:** 61 (comprehensive CDR round-trip tests, including PL_CDR and key-hash tests).
+Generated Zig code imports `zidl_cdr` and `zidl_bindings` directly. Native suites
+cover 87 codec, 15 binding and three alias/registry tests. C ABI tests and the
+independent C reference live in `packages/zidl-cdr/c-api/` and cover 103 contracts.
+Agreement between adapters alone is not independent wire-format validation;
+known-answer vectors and the separate C reference remain in use.
 
----
-
-## packages/zidl-cdr/
-
-Standalone C99 CDR library. `include/zidl_cdr.h` + `src/zidl_cdr.c`.
-See `docs/runtime_libraries.md` and `docs/xcdr_encoding.md` for API reference.
-Includes `zidl_md5` and `zidl_cdr_compute_key_hash` for generated C/C++ key hashes.
-
-Cross-validated byte-for-byte against `zidl-rt` (44 tests, including PL_CDR and key-hash cross-validation).
+See `docs/runtime_libraries.md` and `docs/xcdr_encoding.md` for the APIs.
 
 ---
 
@@ -302,7 +299,7 @@ integration tests run as part of `zig build test`.
 | C backend: `@optional` `_set_` macro shape-aware setter | No `memcpy`-based setter for fixed arrays / bounded strings — future work |
 | C backend: user-supplied allocator | Implemented (`ZidlAllocator` + `zidl_cdr_set_allocator`); process-wide only, no per-type / per-reader / per-call override |
 | C++ backend: container allocators | `--cpp-pmr-containers` (opt-in) emits `std::pmr` containers through the process-wide `zidl::setCppAllocator` resource; without it, default STL allocators. No per-container allocator template-parameter support. |
-| Zig 0.15.1 / MicroZig output | Partially implemented: `--zig-version 0.15.1` is wired and bounded strings/sequences use fixed-capacity `zidl_rt.BoundedArray`; full freestanding/no-heap runtime path remains planned |
+| Zig 0.15.1 / MicroZig output | Partially implemented: `--zig-version 0.15.1` is wired and bounded strings/sequences use fixed-capacity `zidl_cdr.BoundedArray`; full freestanding/no-heap runtime path remains planned |
 | `--generate-interfaces` C++: complex-type adaptation | Primitive and string operation signatures are adapted; richer signatures emit `/* TODO */` stubs |
 | Const type-checking | Not implemented (e.g. `const long x = "hello"` is not caught) |
 | Union discriminant type validation | Not implemented |

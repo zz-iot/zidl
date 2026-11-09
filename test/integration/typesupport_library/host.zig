@@ -1,6 +1,6 @@
 const std = @import("std");
 const ts = @import("zidl_typesupport");
-const rt = @import("zidl_rt");
+const zidl_cdr = @import("zidl_cdr");
 const expect = std.testing.expect;
 const expectError = std.testing.expectError;
 const Query = *const fn (u32, [*c][*c]const ts.Library) callconv(.c) u32;
@@ -100,7 +100,7 @@ pub fn main(init: std.process.Init) !void {
     var buffer: std.ArrayList(u8) = .empty;
     defer buffer.deinit(allocator);
     try buffer.ensureTotalCapacity(allocator, 256);
-    var w = rt.CdrWriter(.xcdr2).init(&buffer, allocator);
+    var w = zidl_cdr.CdrWriter(.xcdr2).init(&buffer, allocator);
     try w.writeEncapHeader();
     try w.writeI32(1);
     try w.writeI32(2);

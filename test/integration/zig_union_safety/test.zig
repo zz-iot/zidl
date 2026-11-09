@@ -14,13 +14,13 @@
 
 const std = @import("std");
 const testing = std.testing;
-const zidl_rt = @import("zidl_rt");
+const zidl_cdr = @import("zidl_cdr");
 const fixture = @import("fixture");
 
 fn truncatedEncoding(comptime T: type, value: T, chop: usize) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(testing.allocator);
-    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
     try writer.writeEncapHeader();
     try T.serialize(&writer, value);
     const full = try buf.toOwnedSlice(testing.allocator);
@@ -35,7 +35,7 @@ test "FinalStrUnion: truncated string case leaves _d at its safe default, deinit
     const payload = try truncatedEncoding(fixture.FinalStrUnion, .{ ._d = 99, ._u = .{ .s = "hello world" } }, 4);
     defer testing.allocator.free(payload);
 
-    var reader = try zidl_rt.CdrReader.init(payload);
+    var reader = try zidl_cdr.CdrReader.init(payload);
     var out: fixture.FinalStrUnion = .{};
     try testing.expectError(
         error.EndOfStream,
@@ -53,7 +53,7 @@ test "MutableStrUnion: truncated string case leaves _d at its safe default, dein
     const payload = try truncatedEncoding(fixture.MutableStrUnion, .{ ._d = 1, ._u = .{ .s = "hello world" } }, 4);
     defer testing.allocator.free(payload);
 
-    var reader = try zidl_rt.CdrReader.init(payload);
+    var reader = try zidl_cdr.CdrReader.init(payload);
     var out: fixture.MutableStrUnion = .{};
     try testing.expectError(
         error.EndOfStream,
@@ -74,7 +74,7 @@ test "MutableStrUnion: a payload published earlier in the EMHEADER loop survives
     // arm, so it never lags behind a real publish.
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
-    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
     try writer.writeEncapHeader();
     try fixture.MutableStrUnion.serialize(&writer, .{ ._d = 1, ._u = .{ .s = "hello world" } });
 
@@ -90,7 +90,7 @@ test "MutableStrUnion: a payload published earlier in the EMHEADER loop survives
     std.mem.writeInt(u32, buf.items[4..8], declared, .little);
     try buf.appendSlice(testing.allocator, &[_]u8{ 0xFF, 0xFF, 0xFF, 0xFF });
 
-    var reader = try zidl_rt.CdrReader.init(buf.items);
+    var reader = try zidl_cdr.CdrReader.init(buf.items);
     var out: fixture.MutableStrUnion = .{};
     try testing.expectError(
         error.EndOfStream,
@@ -116,11 +116,11 @@ test "MutableStrUnion: a payload published earlier in the EMHEADER loop survives
 test "FinalStrUnion: successful decode of the string case still round-trips and deinits cleanly" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
-    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
     try writer.writeEncapHeader();
     try fixture.FinalStrUnion.serialize(&writer, .{ ._d = 99, ._u = .{ .s = "hello world" } });
 
-    var reader = try zidl_rt.CdrReader.init(buf.items);
+    var reader = try zidl_cdr.CdrReader.init(buf.items);
     var out: fixture.FinalStrUnion = .{};
     try fixture.FinalStrUnion.deserializeInto(&out, &reader, testing.allocator);
     defer out.deinit(testing.allocator);
@@ -155,7 +155,7 @@ const encap_header_only = [_]u8{ 0x00, 0x03, 0x00, 0x00 };
 // function itself doesn't crash on the way out (below) is the scope of the
 // finding this fixture regresses.
 test "OwningDefaultUnion: a failure before the discriminant is ever read leaves the untouched default owning arm alone" {
-    var reader = try zidl_rt.CdrReader.init(&encap_header_only);
+    var reader = try zidl_cdr.CdrReader.init(&encap_header_only);
     var out: fixture.OwningDefaultUnion = .{};
     try testing.expectError(
         error.EndOfStream,
@@ -170,7 +170,7 @@ test "OwningDefaultUnion: a failure before the discriminant is ever read leaves 
 }
 
 test "MutableOwningDefaultUnion: a failure before the DHEADER is ever read leaves the untouched default owning arm alone" {
-    var reader = try zidl_rt.CdrReader.init(&encap_header_only);
+    var reader = try zidl_cdr.CdrReader.init(&encap_header_only);
     var out: fixture.MutableOwningDefaultUnion = .{};
     try testing.expectError(
         error.EndOfStream,
@@ -183,11 +183,11 @@ test "MutableOwningDefaultUnion: a failure before the DHEADER is ever read leave
 test "OwningDefaultUnion: successful decode of the default owning case still round-trips and deinits cleanly" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(testing.allocator);
-    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
     try writer.writeEncapHeader();
     try fixture.OwningDefaultUnion.serialize(&writer, .{ ._d = 0, ._u = .{ .s = "hello world" } });
 
-    var reader = try zidl_rt.CdrReader.init(buf.items);
+    var reader = try zidl_cdr.CdrReader.init(buf.items);
     var out: fixture.OwningDefaultUnion = .{};
     try fixture.OwningDefaultUnion.deserializeInto(&out, &reader, testing.allocator);
     defer out.deinit(testing.allocator);

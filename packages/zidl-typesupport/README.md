@@ -28,8 +28,8 @@ zig build --build-file packages/zidl-typesupport/build.zig \
 The installed Linux artifact is `/tmp/application-types/install/lib/libproject_a_types.so`.
 Replace the IDL and corresponding stems with your application's. Build each project
 independently; no edits or relinking of the host are required. The generated wrapper
-imports modules named `types`, `zidl_rt` and `zidl_typesupport`; the supplied recipe
-wires one runtime module throughout the build. A zidl dependency also exposes
+imports modules named `types`, `zidl_cdr` and `zidl_typesupport`; the supplied
+recipe wires one canonical codec and binding-support module throughout the build. A zidl dependency also exposes
 `module("zidl_typesupport")` using its existing runtime module.
 
 If the default cache is read-only, set `ZIG_GLOBAL_CACHE_DIR` and

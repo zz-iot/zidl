@@ -1,5 +1,5 @@
 const std = @import("std");
-const rt = @import("zidl_rt");
+const zidl_cdr = @import("zidl_cdr");
 const P = @import("fixture").Projection;
 const testing = std.testing;
 
@@ -24,9 +24,9 @@ fn check(comptime T: type, value: T, name: []const u8) !void {
             defer dynamic.deinit(testing.allocator);
             for (0..3) |mode| {
                 var writer = switch (mode) {
-                    0 => rt.PrimitiveWriter.initFixed(&fixed, if (version == 1) .eight else .four, if (order == 0) .little else .big),
-                    1 => rt.PrimitiveWriter.initCounting(if (version == 1) .eight else .four, if (order == 0) .little else .big),
-                    else => rt.PrimitiveWriter.initDynamic(&dynamic, testing.allocator, if (version == 1) .eight else .four, if (order == 0) .little else .big),
+                    0 => zidl_cdr.PrimitiveWriter.initFixed(&fixed, if (version == 1) .eight else .four, if (order == 0) .little else .big),
+                    1 => zidl_cdr.PrimitiveWriter.initCounting(if (version == 1) .eight else .four, if (order == 0) .little else .big),
+                    else => zidl_cdr.PrimitiveWriter.initDynamic(&dynamic, testing.allocator, if (version == 1) .eight else .four, if (order == 0) .little else .big),
                 };
                 try writer.writeBytes(expected[0..4]);
                 writer.resetPayload();
@@ -35,7 +35,7 @@ fn check(comptime T: type, value: T, name: []const u8) !void {
                 if (mode == 0) try testing.expectEqualSlices(u8, expected, fixed[0..writer.len]);
                 if (mode == 2) try testing.expectEqualSlices(u8, expected, dynamic.items);
             }
-            var reader = try rt.CdrReader.init(expected);
+            var reader = try zidl_cdr.CdrReader.init(expected);
             var decoded: T = .{};
             defer if (@hasDecl(T, "deinit")) decoded.deinit(testing.allocator);
             if (key == 1) try T.deserializeKeyInto(&decoded, &reader, testing.allocator) else try T.deserializeInto(&decoded, &reader, testing.allocator);
@@ -43,7 +43,7 @@ fn check(comptime T: type, value: T, name: []const u8) !void {
             try testing.expectEqual(expected.len, reader.data.len);
             try testing.expectEqual(hash, try T.computeKeyHashChecked(&decoded));
             for (4..expected.len) |n| {
-                reader = try rt.CdrReader.init(expected[0..n]);
+                reader = try zidl_cdr.CdrReader.init(expected[0..n]);
                 var partial: T = .{};
                 defer if (@hasDecl(T, "deinit")) partial.deinit(testing.allocator);
                 const result = if (key == 1) T.deserializeKeyInto(&partial, &reader, testing.allocator) else T.deserializeInto(&partial, &reader, testing.allocator);
@@ -75,7 +75,7 @@ test "inherited and recursively projected wire values match independent bytes" {
     try check(P.RootArray, .{ .values = .{ .{ .before = 11, .inner = mutable("blue") }, .{ .before = 33, .inner = mutable("orange") } }, .ignored = 66 }, "RootArray");
     var elements = [_]P.MutBridge{ bridge(11, "blue", 22), bridge(33, "orange", 44) };
     try check(P.RootSeq, .{
-        .values = try rt.BoundedArray(P.MutBridge, 2).fromSlice(&elements),
+        .values = try zidl_cdr.BoundedArray(P.MutBridge, 2).fromSlice(&elements),
         .dynamic_values = .{ ._buffer = &elements, ._length = 2, ._maximum = 2, ._release = false },
         .ignored = 66,
     }, "RootSeq");
@@ -96,7 +96,7 @@ fn frameBounds(comptime T: type, name: []const u8, offsets: []const usize) !void
             const word: *[4]u8 = bytes[offset..][0..4];
             const size = std.mem.readInt(u32, word, order);
             std.mem.writeInt(u32, word, size - 4, order);
-            var reader = try rt.CdrReader.init(bytes);
+            var reader = try zidl_cdr.CdrReader.init(bytes);
             var value: T = .{};
             defer if (@hasDecl(T, "deinit")) value.deinit(testing.allocator);
             if (T.deserializeKeyInto(&value, &reader, testing.allocator)) |_| return error.BorrowedFollowingFrame else |_| {}
@@ -124,7 +124,7 @@ fn allocationFailures(allocator: std.mem.Allocator) !void {
         _ = fields.next();
         var buffer: [1024]u8 = undefined;
         const bytes = try std.fmt.hexToBytes(&buffer, fields.next().?);
-        var reader = try rt.CdrReader.init(bytes);
+        var reader = try zidl_cdr.CdrReader.init(bytes);
         var value: P.RootSeq = .{};
         defer value.deinit(allocator);
         try P.RootSeq.deserializeKeyInto(&value, &reader, allocator);

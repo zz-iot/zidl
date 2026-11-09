@@ -1,15 +1,15 @@
 const std = @import("std");
-const rt = @import("zidl_rt");
+const zidl_bindings = @import("zidl_bindings");
 const types = @import("authoring_types");
 const testing = std.testing;
 // A minimal tree fixture, not a parser: exercises the generated decoder's
 // duck-typed contract independently of zzdds and any concrete syntax frontend.
 const Value = union(enum) { table: Table, array: []const Node, string: []const u8, boolean: bool, integer: i64, float: f64 };
-const Node = struct { value: Value, location: rt.authoring.Location = .{ .line = 7, .column = 3 } };
+const Node = struct { value: Value, location: zidl_bindings.authoring.Location = .{ .line = 7, .column = 3 } };
 const Entry = struct { key: []const u8, value: Value };
 const Table = struct {
     entries: std.StringArrayHashMapUnmanaged(Value) = .empty,
-    location: rt.authoring.Location = .{},
+    location: zidl_bindings.authoring.Location = .{},
     fn make(a: std.mem.Allocator, values: []const Entry) !Table {
         var result: Table = .{};
         for (values) |e| try result.entries.put(a, e.key, e.value);
@@ -19,7 +19,7 @@ const Table = struct {
         return .{ .value = self.entries.get(key) orelse return null };
     }
 };
-fn decode(table: Table, a: std.mem.Allocator, diag: *rt.authoring.Diagnostic) !rt.authoring.Decoded(types.Config) {
+fn decode(table: Table, a: std.mem.Allocator, diag: *zidl_bindings.authoring.Diagnostic) !zidl_bindings.authoring.Decoded(types.Config) {
     return types.Config.decodeToml(a, table, .{ .named_field = "name" }, diag);
 }
 
@@ -32,7 +32,7 @@ test "generated strict records preserve false, zero, empty arrays and absence" {
         .{ .key = "ratio", .value = .{ .float = 1.5 } },
         .{ .key = "tags", .value = .{ .array = &.{} } },
     });
-    var diag: rt.authoring.Diagnostic = .{};
+    var diag: zidl_bindings.authoring.Diagnostic = .{};
     var result = try decode(table, testing.allocator, &diag);
     defer result.deinit();
     try testing.expectEqual(@as(?bool, false), result.value.enabled);
@@ -62,7 +62,7 @@ test "named records, nested scalar sequences, bounded strings and fixed arrays" 
         .{ .key = "fixed_values", .value = .{ .array = &.{ .{ .value = .{ .integer = 1 } }, .{ .value = .{ .integer = 2 } } } } },
         .{ .key = "mode", .value = .{ .string = "SLOW" } },
     });
-    var diag: rt.authoring.Diagnostic = .{};
+    var diag: zidl_bindings.authoring.Diagnostic = .{};
     var result = try decode(root, testing.allocator, &diag);
     defer result.deinit();
     try testing.expectEqualStrings("1234", result.value.code.slice());
@@ -89,7 +89,7 @@ test "strict errors keep diagnostic storage valid after allocation rollback" {
     defer arena.deinit();
     for (cases) |case| {
         const root = try Table.make(arena.allocator(), &.{.{ .key = case.key, .value = case.value }});
-        var diag: rt.authoring.Diagnostic = .{};
+        var diag: zidl_bindings.authoring.Diagnostic = .{};
         try testing.expectError(case.err, decode(root, testing.allocator, &diag));
         try testing.expectEqualStrings(case.key, diag.fieldPath());
         try testing.expectEqual(@as(usize, 7), diag.location.line);
@@ -105,7 +105,7 @@ test "every strict decoder allocation failure cleans up" {
     const root = try Table.make(a, &.{.{ .key = "items", .value = .{ .table = names } }});
     const Run = struct {
         fn run(alloc: std.mem.Allocator, table: Table) !void {
-            var diag: rt.authoring.Diagnostic = .{};
+            var diag: zidl_bindings.authoring.Diagnostic = .{};
             var result = try decode(table, alloc, &diag);
             defer result.deinit();
         }
@@ -120,7 +120,7 @@ test "decoder bounds collections and rejects conflicting injected names" {
     const item = try Table.make(a, &.{.{ .key = "name", .value = .{ .string = "conflict" } }});
     const names = try Table.make(a, &.{.{ .key = "original", .value = .{ .table = item } }});
     const root = try Table.make(a, &.{.{ .key = "items", .value = .{ .table = names } }});
-    var diag: rt.authoring.Diagnostic = .{};
+    var diag: zidl_bindings.authoring.Diagnostic = .{};
     try testing.expectError(error.DuplicateName, decode(root, testing.allocator, &diag));
     try testing.expectEqualStrings("items.original.name", diag.fieldPath());
     const empty: Node = .{ .value = .{ .table = .{} } };
@@ -131,7 +131,7 @@ test "decoder bounds collections and rejects conflicting injected names" {
 }
 
 test "empty generated authoring record compiles and decodes" {
-    var diag: rt.authoring.Diagnostic = .{};
+    var diag: zidl_bindings.authoring.Diagnostic = .{};
     var result = try types.Empty.decodeToml(testing.allocator, Table{}, .{}, &diag);
     defer result.deinit();
     try testing.expect(result.isPresent(&.{}));
@@ -142,7 +142,7 @@ test "the same conditional setting applies or is recorded as skipped across buil
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const table = try Table.make(arena.allocator(), &.{.{ .key = "_xtypes", .value = .{ .boolean = false } }});
-    var diag: rt.authoring.Diagnostic = .{};
+    var diag: zidl_bindings.authoring.Diagnostic = .{};
     var with = try feature_types.BuildConfig.decodeToml(testing.allocator, table, .{ .conditional_members = true }, &diag);
     defer with.deinit();
     var without = try types.BuildConfig.decodeToml(testing.allocator, table, .{ .conditional_members = true }, &diag);
@@ -169,7 +169,7 @@ test "conditional sections do not hide nested mistakes on builds that support th
     const a = arena.allocator();
     const typo = try Table.make(a, &.{.{ .key = "enabld", .value = .{ .boolean = true } }});
     const root = try Table.make(a, &.{.{ .key = "_feature", .value = .{ .table = typo } }});
-    var diag: rt.authoring.Diagnostic = .{};
+    var diag: zidl_bindings.authoring.Diagnostic = .{};
     var absent = try types.BuildConfig.decodeToml(testing.allocator, root, .{ .conditional_members = true }, &diag);
     defer absent.deinit();
     try testing.expectEqual(@as(usize, 1), absent.skipped_count);
@@ -183,7 +183,7 @@ test "conditional duplicates, malformed names and schema collisions are rejected
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var diag: rt.authoring.Diagnostic = .{};
+    var diag: zidl_bindings.authoring.Diagnostic = .{};
     for ([_]bool{ false, true }) |reverse| {
         const entries = [_]Entry{
             .{ .key = if (reverse) "_port_base" else "port_base", .value = .{ .integer = 1 } },
@@ -199,11 +199,11 @@ test "conditional duplicates, malformed names and schema collisions are rejected
     const Collision = struct {
         _port_base: u16 = 1,
         pub const toml_fields: []const []const u8 = &.{"_port_base"};
-        pub fn tomlSpec(comptime _: []const u8) rt.authoring.Spec {
+        pub fn tomlSpec(comptime _: []const u8) zidl_bindings.authoring.Spec {
             return .{ .kind = .scalar };
         }
     };
-    try testing.expectError(error.ConditionalNameCollision, rt.authoring.decode(Collision, testing.allocator, Table{}, .{ .conditional_members = true }, &diag));
+    try testing.expectError(error.ConditionalNameCollision, zidl_bindings.authoring.decode(Collision, testing.allocator, Table{}, .{ .conditional_members = true }, &diag));
 }
 
 test "named collection entries retain leading underscores" {
@@ -212,7 +212,7 @@ test "named collection entries retain leading underscores" {
     const a = arena.allocator();
     const names = try Table.make(a, &.{.{ .key = "_Telemetry", .value = .{ .table = .{} } }});
     const root = try Table.make(a, &.{.{ .key = "items", .value = .{ .table = names } }});
-    var diag: rt.authoring.Diagnostic = .{};
+    var diag: zidl_bindings.authoring.Diagnostic = .{};
     var result = try types.Config.decodeToml(testing.allocator, root, .{ .conditional_members = true, .named_field = "name" }, &diag);
     defer result.deinit();
     try testing.expectEqualStrings("_Telemetry", result.value.items.slice()[0].name);
@@ -226,7 +226,7 @@ test "compatibility choices and skipped-report limits are explicit" {
         .{ .key = "future", .value = .{ .integer = 1 } },
         .{ .key = "mode", .value = .{ .string = "slow" } },
     });
-    var diag: rt.authoring.Diagnostic = .{};
+    var diag: zidl_bindings.authoring.Diagnostic = .{};
     var result = try types.Config.decodeToml(testing.allocator, root, .{ .unknown_fields = .ignore, .enum_matching = .ascii_case_insensitive }, &diag);
     defer result.deinit();
     try testing.expect(result.value.mode == .SLOW);
@@ -251,7 +251,7 @@ test "existing-value reads retain omissions and replace whole sequences independ
         .{ .key = "tags", .value = .{ .array = &.{.{ .value = .{ .string = "old" } }} } },
         .{ .key = "child", .value = .{ .table = child } },
     });
-    var diag: rt.authoring.Diagnostic = .{};
+    var diag: zidl_bindings.authoring.Diagnostic = .{};
     var base = try types.Config.decodeToml(testing.allocator, start, .{}, &diag);
     const edit_child = try Table.make(a, &.{.{ .key = "enabled", .value = .{ .boolean = false } }});
     const edit = try Table.make(a, &.{
@@ -275,7 +275,7 @@ test "failed existing-value reads and all allocation failures preserve the start
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var diag: rt.authoring.Diagnostic = .{};
+    var diag: zidl_bindings.authoring.Diagnostic = .{};
     const start = try Table.make(a, &.{.{ .key = "label", .value = .{ .string = "original" } }});
     var base = try types.Config.decodeToml(testing.allocator, start, .{}, &diag);
     defer base.deinit();
@@ -285,7 +285,7 @@ test "failed existing-value reads and all allocation failures preserve the start
     const edit = try Table.make(a, &.{ .{ .key = "_future", .value = .{ .table = .{} } }, .{ .key = "enabled", .value = .{ .boolean = false } } });
     const Run = struct {
         fn run(alloc: std.mem.Allocator, seed: types.Config, table: Table) !void {
-            var d: rt.authoring.Diagnostic = .{};
+            var d: zidl_bindings.authoring.Diagnostic = .{};
             var result = try types.Config.decodeTomlFrom(alloc, seed, table, .{ .conditional_members = true }, &d);
             defer result.deinit();
         }
@@ -299,7 +299,7 @@ test "omitted lists are copied and newly introduced optional records use default
     defer arena.deinit();
     const a = arena.allocator();
     const start = try Table.make(a, &.{.{ .key = "tags", .value = .{ .array = &.{.{ .value = .{ .string = "retained" } }} } }});
-    var diag: rt.authoring.Diagnostic = .{};
+    var diag: zidl_bindings.authoring.Diagnostic = .{};
     var base = try types.Config.decodeToml(testing.allocator, start, .{}, &diag);
     const child = try Table.make(a, &.{.{ .key = "enabled", .value = .{ .boolean = false } }});
     const edit = try Table.make(a, &.{.{ .key = "child", .value = .{ .table = child } }});
@@ -316,7 +316,7 @@ test "named collections reject non-string name members even when empty" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var diag: rt.authoring.Diagnostic = .{};
+    var diag: zidl_bindings.authoring.Diagnostic = .{};
     const item = try Table.make(a, &.{});
     const named = try Table.make(a, &.{.{ .key = "FAST", .value = .{ .table = item } }});
     for ([_]Table{ named, .{} }) |table| {

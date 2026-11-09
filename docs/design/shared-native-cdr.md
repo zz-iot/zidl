@@ -3,9 +3,10 @@
 Date: 2026-11-02
 
 Status: agreed architectural direction; primitive, string, framing, generated
-validation and canonical native key checkpoints implemented; full codec and
-production migration pending.
-This document describes planned behavior, not shipped capabilities. Rust binding
+validation and canonical native key checkpoints implemented; package placement
+and production build switch implemented locally;
+coordinated zzdds dependency release pending.
+This document records the design and local checkpoints, not shipped capabilities. Rust binding
 work remains deferred. This effort does not authorize publishing a release.
 
 The [native capability/dependency audit](native-cdr-audit.md) records the
@@ -14,8 +15,9 @@ constraints and proposed extraction boundary. Its findings refine the initial
 discrepancies below.
 
 The [primitive writer checkpoint](native-cdr-primitive-slice.md) now demonstrates
-shared native Zig/C primitive encoding behind an opt-in C build. The remaining
-codec migration, package graph and production build/packaging switch are pending.
+shared native Zig/C primitive encoding, initially behind an opt-in C build. The
+[production build checkpoint](native-cdr-production-slice.md) now makes the
+shared archive the development default.
 
 The [reader/cursor checkpoint](native-cdr-reader-slice.md) extends that core to
 primitive decoding and checked reader advancement/alignment, with explicit
@@ -59,7 +61,7 @@ The [inherited-frame and recursive projection checkpoint](native-cdr-key-project
 now uses one frame for inherited members and projects through keyless structure
 intermediaries, arrays, sequences and aliases. Keyless topic behavior is preserved.
 Local root, integration, interoperability and installed-archive checks pass.
-The package/production switch remains pending.
+Package placement and the production build switch are recorded below.
 
 The [optional-wire checkpoint](native-cdr-optional-wire-slice.md) replaces the
 incorrect XCDR1 optional presence byte with parameter headers and scoped value
@@ -88,14 +90,14 @@ Java retains a separate Java codec under the companion
 [Java runtime decision](java-cdr-runtime.md). This is one shared **native** codec,
 not a requirement that every language serialize through native calls.
 
-## Current state and required capability audit
+## Audit baseline and required capabilities
 
-`packages/zidl-rt/src/cdr.zig` implements the native Zig codec as well as some
+At the audit baseline, `packages/zidl-rt/src/cdr.zig` implemented the native Zig codec as well as some
 binding helpers. `packages/zidl-cdr/src/zidl_cdr.c` independently implements the
 existing C ABI. Its build and several zidl/zzdds consumers compile C source
 directly. The opt-in Zig-backed C adapter now supplies the migrated operations
-listed in the checkpoints above; the C reference remains the default and
-production build/packaging migration is pending.
+listed in the checkpoints above. The production checkpoint subsequently makes
+the shared archive the default and moves the C reference under tests.
 
 | Capability | Current native Zig | Current C ABI implementation |
 | --- | --- | --- |
@@ -212,3 +214,19 @@ automatically outperform C; foreign callers may retain call-boundary costs.
 
 Out of scope: Rust bindings, Java native serialization, generic plugin extraction,
 discovery broker work and a broad DDS ownership redesign.
+
+The [package placement checkpoint](native-cdr-package-slice.md) moves the codec
+to `zidl-cdr`, binding support to `zidl-bindings`, and retains `zidl-rt` aliases.
+The C ABI and default C reference selection remain unchanged at this checkpoint.
+
+The [production build checkpoint](native-cdr-production-slice.md) selects the
+shared archive by default and moves the independent C codec into reference
+tests. zzdds local-source builds use it; its released dependency pin still
+requires a coordinated update.
+
+## Short retirement sequence
+
+This package PR migrates generated Zig code and zidl's consumers to `zidl_cdr`
+and `zidl_bindings`. The next PR migrates zzdds and updates its pin to the merged
+zidl revision. Remove `zidl-rt` immediately after both repositories pass on those
+imports; no long deprecation window or special breaking release is needed.

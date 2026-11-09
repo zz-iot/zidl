@@ -1,5 +1,9 @@
 # Native CDR consolidation audit
 
+Subsequent [package placement](native-cdr-package-slice.md) moves native codec
+source to `zidl-cdr/src` and C ABI test commands to `zidl-cdr/c-api`. Direct
+`zidl-rt` source imports now require the codec and bindings module imports.
+
 Date: 2026-11-03. Scope: the first step of [shared native CDR](shared-native-cdr.md).
 Audited checkouts: zidl `a9fb5c9`, zzdds `b4f54f3`, including the existing local
 design-document changes. This is an audit and proposed implementation boundary;

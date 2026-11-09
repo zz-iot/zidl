@@ -44,6 +44,11 @@ pub fn build(b: *std.Build) void {
     const coverage = b.option(bool, "coverage", "Use LLVM for kcov-compatible test debug information") orelse false;
     const sanitize_thread = b.option(bool, "sanitize-thread", "Enable ThreadSanitizer") orelse false;
     const verbose_tests = b.option(bool, "verbose-tests", "Show successful integration test output") orelse false;
+    const runtimes = @import("build/runtime.zig").add(b, b.path("."), target, optimize, sanitize_thread);
+    const cdr_library = @import("packages/zidl-cdr/c_api_build.zig").add(b, b.path("packages/zidl-cdr"), runtimes.codec, target, .Debug, sanitize_thread, true);
+    b.modules.put(b.allocator, "zidl_cdr", runtimes.codec) catch @panic("OOM");
+    b.modules.put(b.allocator, "zidl_bindings", runtimes.bindings) catch @panic("OOM");
+    b.modules.put(b.allocator, "zidl_rt", runtimes.compatibility) catch @panic("OOM");
 
     const zidl_xtypes_mod = b.addModule("zidl_xtypes", .{
         .root_source_file = b.path("packages/zidl-xtypes/src/root.zig"),
@@ -96,18 +101,24 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
+    const package_step = b.step("test-runtime-packages", "Check canonical runtime packages and compatibility aliases");
+    test_step.dependOn(package_step);
+    for ([_]*std.Build.Module{ runtimes.codec, runtimes.bindings, runtimes.compatibility }) |runtime_module| {
+        const runtime_tests = b.addTest(.{ .root_module = runtime_module, .use_llvm = if (coverage or sanitize_thread) true else null });
+        package_step.dependOn(&b.addRunArtifact(runtime_tests).step);
+    }
+
     const authoring_step = b.step("test-authoring", "Test generated strict presence-aware authoring records");
     const authoring_gen = b.addRunArtifact(exe);
     authoring_gen.addArgs(&.{ "-b", "zig", "--single-file", "--zig-generate-authoring", "--no-typesupport", "--no-typeobject-support", "-o" });
     const authoring_dir = authoring_gen.addOutputDirectoryArg("authoring-config");
     authoring_gen.addFileArg(b.path("test/integration/authoring/config.idl"));
-    const authoring_rt = b.createModule(.{ .root_source_file = b.path("packages/zidl-rt/src/root.zig"), .target = target, .optimize = optimize, .sanitize_thread = sanitize_thread });
     const authoring_schema = b.createModule(.{
         .root_source_file = authoring_dir.path(b, "config.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_thread = sanitize_thread,
-        .imports = &.{.{ .name = "zidl_rt", .module = authoring_rt }},
+        .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings } },
     });
     const authoring_feature_gen = b.addRunArtifact(exe);
     authoring_feature_gen.addArgs(&.{ "-b", "zig", "--single-file", "--zig-generate-authoring", "--no-typesupport", "--no-typeobject-support", "-D", "AUTHORING_FEATURE", "-o" });
@@ -118,14 +129,14 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .sanitize_thread = sanitize_thread,
-        .imports = &.{.{ .name = "zidl_rt", .module = authoring_rt }},
+        .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings } },
     });
     const authoring_test = b.addTest(.{ .name = "authoring-test", .use_llvm = if (coverage or sanitize_thread) true else null, .root_module = b.createModule(.{
         .root_source_file = b.path("test/integration/authoring/test.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_thread = sanitize_thread,
-        .imports = &.{ .{ .name = "zidl_rt", .module = authoring_rt }, .{ .name = "authoring_types", .module = authoring_schema }, .{ .name = "authoring_feature", .module = authoring_feature } },
+        .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings }, .{ .name = "authoring_types", .module = authoring_schema }, .{ .name = "authoring_feature", .module = authoring_feature } },
     }) });
     const authoring_run = b.addRunArtifact(authoring_test);
     authoring_step.dependOn(&authoring_run.step);
@@ -150,11 +161,6 @@ pub fn build(b: *std.Build) void {
 
     // ── Zig integration tests ─────────────────────────────────────────────────
     // These use the committed golden types.zig and run CDR round-trip + vtable tests.
-    const zidl_rt_mod = b.addModule("zidl_rt", .{
-        .root_source_file = b.path("packages/zidl-rt/src/root.zig"),
-        .target = target,
-        .sanitize_thread = sanitize_thread,
-    });
 
     // Share the same runtime module with generated wire-library consumers.
     const ts_header = b.addTranslateC(.{
@@ -168,7 +174,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "zidl_rt", .module = zidl_rt_mod },
+            .{ .name = "zidl_cdr", .module = runtimes.codec },                     .{ .name = "zidl_bindings", .module = runtimes.bindings },
             .{ .name = "zidl_typesupport_c", .module = ts_header.createModule() },
         },
     });
@@ -178,7 +184,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .sanitize_thread = sanitize_thread,
         .imports = &.{
-            .{ .name = "zidl_rt", .module = zidl_rt_mod },
+            .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings },
         },
     });
 
@@ -188,7 +194,8 @@ pub fn build(b: *std.Build) void {
         .sanitize_thread = sanitize_thread,
         .imports = &.{
             .{ .name = "types", .module = golden_zig_mod },
-            .{ .name = "zidl_rt", .module = zidl_rt_mod },
+            .{ .name = "zidl_cdr", .module = runtimes.codec },
+            .{ .name = "zidl_bindings", .module = runtimes.bindings },
         },
     });
 
@@ -199,9 +206,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .sanitize_thread = sanitize_thread,
             .imports = &.{
-                .{ .name = "zidl_rt", .module = zidl_rt_mod },
-                .{ .name = "types", .module = golden_zig_mod },
-                .{ .name = "stub_impl", .module = stub_mod },
+                .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings },
+                .{ .name = "types", .module = golden_zig_mod },    .{ .name = "stub_impl", .module = stub_mod },
             },
         }),
     });
@@ -236,7 +242,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .sanitize_thread = sanitize_thread,
             .imports = &.{
-                .{ .name = "zidl_rt", .module = zidl_rt_mod },
+                .{ .name = "zidl_cdr", .module = runtimes.codec },   .{ .name = "zidl_bindings", .module = runtimes.bindings },
                 .{ .name = "zzdds", .module = fake_middleware_mod },
             },
         });
@@ -248,9 +254,8 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .sanitize_thread = sanitize_thread,
                 .imports = &.{
-                    .{ .name = "zidl_rt", .module = zidl_rt_mod },
-                    .{ .name = "fixture", .module = wrapper_fixture_mod },
-                    .{ .name = "zzdds", .module = fake_middleware_mod },
+                    .{ .name = "zidl_cdr", .module = runtimes.codec },     .{ .name = "zidl_bindings", .module = runtimes.bindings },
+                    .{ .name = "fixture", .module = wrapper_fixture_mod }, .{ .name = "zzdds", .module = fake_middleware_mod },
                 },
             }),
         });
@@ -301,10 +306,7 @@ pub fn build(b: *std.Build) void {
                 .file = topic_dir.path(b, "topic_cdr.cpp"),
                 .flags = variant.flags,
             });
-            conditions_mod.addCSourceFile(.{
-                .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"),
-                .flags = &.{"-std=c99"},
-            });
+            linkCdr(conditions_mod, cdr_library);
             conditions_mod.addIncludePath(topic_dir);
             conditions_mod.addIncludePath(cpp_dir);
             conditions_mod.addIncludePath(c_dir);
@@ -331,7 +333,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .sanitize_thread = sanitize_thread,
             .imports = &.{
-                .{ .name = "zidl_rt", .module = zidl_rt_mod },
+                .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings },
             },
         });
 
@@ -342,7 +344,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .sanitize_thread = sanitize_thread,
                 .imports = &.{
-                    .{ .name = "zidl_rt", .module = zidl_rt_mod },
+                    .{ .name = "zidl_cdr", .module = runtimes.codec },    .{ .name = "zidl_bindings", .module = runtimes.bindings },
                     .{ .name = "fixture", .module = pl_cdr_fixture_mod },
                 },
             }),
@@ -369,7 +371,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .sanitize_thread = sanitize_thread,
             .imports = &.{
-                .{ .name = "zidl_rt", .module = zidl_rt_mod },
+                .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings },
             },
         });
 
@@ -380,7 +382,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .sanitize_thread = sanitize_thread,
                 .imports = &.{
-                    .{ .name = "zidl_rt", .module = zidl_rt_mod },
+                    .{ .name = "zidl_cdr", .module = runtimes.codec },          .{ .name = "zidl_bindings", .module = runtimes.bindings },
                     .{ .name = "fixture", .module = union_safety_fixture_mod },
                 },
             }),
@@ -409,7 +411,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .sanitize_thread = sanitize_thread,
             .imports = &.{
-                .{ .name = "zidl_rt", .module = zidl_rt_mod },
+                .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings },
             },
         });
         const zig_tests = b.addTest(.{
@@ -419,7 +421,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .sanitize_thread = sanitize_thread,
                 .imports = &.{
-                    .{ .name = "zidl_rt", .module = zidl_rt_mod },
+                    .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings },
                     .{ .name = "fixture", .module = zig_fixture_mod },
                 },
             }),
@@ -445,10 +447,7 @@ pub fn build(b: *std.Build) void {
             .file = c_dir.path(b, "fixture_cdr.c"),
             .flags = &.{ "-std=c99", "-Wall", "-Werror" },
         });
-        c_mod.addCSourceFile(.{
-            .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"),
-            .flags = &.{"-std=c99"},
-        });
+        linkCdr(c_mod, cdr_library);
         c_mod.addIncludePath(c_dir);
         c_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
         const c_test = b.addExecutable(.{ .name = "zidl-sequence-elements-c", .root_module = c_mod });
@@ -494,10 +493,7 @@ pub fn build(b: *std.Build) void {
                 .flags = &.{ "-std=c99", "-Wall", "-Werror" },
             });
         }
-        c_split_mod.addCSourceFile(.{
-            .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"),
-            .flags = &.{"-std=c99"},
-        });
+        linkCdr(c_split_mod, cdr_library);
         c_split_mod.addIncludePath(c_split_shim.dirname());
         c_split_mod.addIncludePath(c_split_dir);
         c_split_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
@@ -526,10 +522,7 @@ pub fn build(b: *std.Build) void {
             .file = cpp_dir.path(b, "fixture_cdr.cpp"),
             .flags = &.{ "-std=c++17", "-Wall", "-Werror" },
         });
-        cpp_mod.addCSourceFile(.{
-            .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"),
-            .flags = &.{"-std=c99"},
-        });
+        linkCdr(cpp_mod, cdr_library);
         cpp_mod.addIncludePath(cpp_dir);
         cpp_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
         const cpp_test = b.addExecutable(.{ .name = "zidl-sequence-elements-cpp", .root_module = cpp_mod });
@@ -551,13 +544,13 @@ pub fn build(b: *std.Build) void {
             .root_source_file = zig_dir.path(b, "keys.zig"),
             .target = target,
             .sanitize_thread = sanitize_thread,
-            .imports = &.{.{ .name = "zidl_rt", .module = zidl_rt_mod }},
+            .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings } },
         });
         const tests = b.addTest(.{ .name = "zidl-canonical-keys", .root_module = b.createModule(.{
             .root_source_file = b.path(dir ++ "test.zig"),
             .target = target,
             .sanitize_thread = sanitize_thread,
-            .imports = &.{ .{ .name = "zidl_rt", .module = zidl_rt_mod }, .{ .name = "fixture", .module = fixture } },
+            .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings }, .{ .name = "fixture", .module = fixture } },
         }) });
         key_step.dependOn(&b.addRunArtifact(tests).step);
         for ([_][]const u8{ "c", "cpp" }) |lang| {
@@ -570,7 +563,7 @@ pub fn build(b: *std.Build) void {
             const flags: []const []const u8 = if (cpp) &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" } else &.{ "-std=c99", "-Wall", "-Werror" };
             m.addCSourceFile(.{ .file = b.path(if (cpp) dir ++ "test.cpp" else dir ++ "test.c"), .flags = flags });
             m.addCSourceFile(.{ .file = generated.path(b, if (cpp) "keys_cdr.cpp" else "keys_cdr.c"), .flags = flags });
-            m.addCSourceFile(.{ .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"), .flags = &.{"-std=c99"} });
+            linkCdr(m, cdr_library);
             m.addIncludePath(generated);
             m.addIncludePath(b.path("packages/zidl-cdr/include"));
             const app = b.addExecutable(.{ .name = b.fmt("zidl-canonical-keys-{s}", .{lang}), .root_module = m });
@@ -620,7 +613,7 @@ pub fn build(b: *std.Build) void {
         const fixture = b.createModule(.{
             .root_source_file = zig_dir.path(b, "validation.zig"),
             .target = target,
-            .imports = &.{.{ .name = "zidl_rt", .module = zidl_rt_mod }},
+            .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings } },
         });
         const validation_tests = b.addTest(.{
             .name = "zidl-cdr-validation",
@@ -628,7 +621,7 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path(fixture_dir ++ "test.zig"),
                 .target = target,
                 .imports = &.{
-                    .{ .name = "zidl_rt", .module = zidl_rt_mod },
+                    .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings },
                     .{ .name = "fixture", .module = fixture },
                 },
             }),
@@ -662,7 +655,7 @@ pub fn build(b: *std.Build) void {
                 .file = dir.path(b, if (cpp) "validation_cdr.cpp" else "validation_cdr.c"),
                 .flags = generated_flags,
             });
-            validation_mod.addCSourceFile(.{ .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"), .flags = &.{"-std=c99"} });
+            linkCdr(validation_mod, cdr_library);
             validation_mod.addIncludePath(dir);
             validation_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
             const validation_exe = b.addExecutable(.{ .name = b.fmt("zidl-cdr-validation-{s}", .{lang}), .root_module = validation_mod });
@@ -682,13 +675,13 @@ pub fn build(b: *std.Build) void {
         const fixture = b.createModule(.{
             .root_source_file = zig_dir.path(b, "shapes.zig"),
             .target = target,
-            .imports = &.{.{ .name = "zidl_rt", .module = zidl_rt_mod }},
+            .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings } },
         });
         const tests = b.addTest(.{ .name = "zidl-key-projection", .root_module = b.createModule(.{
             .root_source_file = b.path(dir ++ "test.zig"),
             .target = target,
             .sanitize_thread = sanitize_thread,
-            .imports = &.{ .{ .name = "zidl_rt", .module = zidl_rt_mod }, .{ .name = "fixture", .module = fixture } },
+            .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings }, .{ .name = "fixture", .module = fixture } },
         }) });
         projection_step.dependOn(&b.addRunArtifact(tests).step);
         for ([_][]const u8{ "c", "cpp" }) |lang| {
@@ -701,7 +694,7 @@ pub fn build(b: *std.Build) void {
             const flags: []const []const u8 = if (cpp) &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" } else &.{ "-std=c99", "-Wall", "-Werror" };
             m.addCSourceFile(.{ .file = b.path(if (cpp) dir ++ "test.cpp" else dir ++ "test.c"), .flags = flags });
             m.addCSourceFile(.{ .file = generated.path(b, if (cpp) "shapes_cdr.cpp" else "shapes_cdr.c"), .flags = flags });
-            m.addCSourceFile(.{ .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"), .flags = &.{"-std=c99"} });
+            linkCdr(m, cdr_library);
             m.addIncludePath(generated);
             m.addIncludePath(b.path("packages/zidl-cdr/include"));
             const app = b.addExecutable(.{ .name = b.fmt("zidl-key-projection-{s}", .{lang}), .root_module = m });
@@ -750,13 +743,13 @@ pub fn build(b: *std.Build) void {
         const fixture = b.createModule(.{
             .root_source_file = zig_dir.path(b, "shapes.zig"),
             .target = target,
-            .imports = &.{ .{ .name = "zidl_rt", .module = zidl_rt_mod }, .{ .name = "zzdds", .module = middleware } },
+            .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings }, .{ .name = "zzdds", .module = middleware } },
         });
         const tests = b.addTest(.{ .name = "zidl-optional-wire", .root_module = b.createModule(.{
             .root_source_file = b.path(dir ++ "test.zig"),
             .target = target,
             .sanitize_thread = sanitize_thread,
-            .imports = &.{ .{ .name = "zidl_rt", .module = zidl_rt_mod }, .{ .name = "fixture", .module = fixture } },
+            .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings }, .{ .name = "fixture", .module = fixture } },
         }) });
         projection_step.dependOn(&b.addRunArtifact(tests).step);
         for ([_][]const u8{ "c", "cpp" }) |lang| {
@@ -769,7 +762,7 @@ pub fn build(b: *std.Build) void {
             const flags: []const []const u8 = if (cpp) &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" } else &.{ "-std=c99", "-Wall", "-Werror" };
             m.addCSourceFile(.{ .file = b.path(if (cpp) dir ++ "test.cpp" else dir ++ "test.c"), .flags = flags });
             m.addCSourceFile(.{ .file = generated.path(b, if (cpp) "shapes_cdr.cpp" else "shapes_cdr.c"), .flags = flags });
-            m.addCSourceFile(.{ .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"), .flags = &.{"-std=c99"} });
+            linkCdr(m, cdr_library);
             m.addIncludePath(generated);
             m.addIncludePath(b.path("packages/zidl-cdr/include"));
             const app = b.addExecutable(.{ .name = b.fmt("zidl-optional-wire-{s}", .{lang}), .root_module = m });
@@ -825,7 +818,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .sanitize_thread = sanitize_thread,
             .imports = &.{
-                .{ .name = "zidl_rt", .module = zidl_rt_mod },
+                .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings },
             },
         });
         const zig_tests = b.addTest(.{
@@ -835,7 +828,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .sanitize_thread = sanitize_thread,
                 .imports = &.{
-                    .{ .name = "zidl_rt", .module = zidl_rt_mod },
+                    .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings },
                     .{ .name = "fixture", .module = zig_fixture_mod },
                 },
             }),
@@ -865,10 +858,7 @@ pub fn build(b: *std.Build) void {
             .file = c_dir.path(b, "ka_cdr.c"),
             .flags = &.{ "-std=c99", "-Wall", "-Werror" },
         });
-        c_mod.addCSourceFile(.{
-            .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"),
-            .flags = &.{"-std=c99"},
-        });
+        linkCdr(c_mod, cdr_library);
         c_mod.addIncludePath(c_dir);
         c_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
         const c_test = b.addExecutable(.{ .name = "zidl-xcdr-known-answer-c", .root_module = c_mod });
@@ -898,10 +888,7 @@ pub fn build(b: *std.Build) void {
             .file = cpp_dir.path(b, "ka_cdr.cpp"),
             .flags = &.{ "-std=c++17", "-Wall", "-Werror" },
         });
-        cpp_mod.addCSourceFile(.{
-            .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"),
-            .flags = &.{"-std=c99"},
-        });
+        linkCdr(cpp_mod, cdr_library);
         cpp_mod.addIncludePath(cpp_dir);
         cpp_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
         const cpp_test = b.addExecutable(.{ .name = "zidl-xcdr-known-answer-cpp", .root_module = cpp_mod });
@@ -1010,10 +997,10 @@ pub fn build(b: *std.Build) void {
             .files = &.{
                 "test/integration/c/test.c",
                 "test/golden/c/types_cdr.c",
-                "packages/zidl-cdr/src/zidl_cdr.c",
             },
             .flags = &.{ "-std=c99", "-Wall", "-Werror" },
         });
+        linkCdr(c_mod, cdr_library);
         c_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
         c_mod.addIncludePath(b.path("test/golden/c"));
         const c_exe = b.addExecutable(.{ .name = "test_c", .root_module = c_mod });
@@ -1036,10 +1023,7 @@ pub fn build(b: *std.Build) void {
             },
             .flags = &.{ "-std=c++17", "-Wall" },
         });
-        cpp_mod.addCSourceFiles(.{
-            .files = &.{"packages/zidl-cdr/src/zidl_cdr.c"},
-            .flags = &.{ "-std=c99", "-Wall" },
-        });
+        linkCdr(cpp_mod, cdr_library);
         cpp_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
         cpp_mod.addIncludePath(b.path("test/golden/cpp"));
         const cpp_exe = b.addExecutable(.{ .name = "test_cpp", .root_module = cpp_mod });
@@ -1339,7 +1323,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .sanitize_thread = sanitize_thread,
             .imports = &.{
-                .{ .name = "zidl_rt", .module = zidl_rt_mod },
+                .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings },
             },
         }),
     });
@@ -1362,4 +1346,10 @@ pub fn build(b: *std.Build) void {
     emit_tests_step.dependOn(&b.addInstallArtifact(zig_integration_tests, .{ .dest_dir = .{ .override = .{ .custom = "tests" } } }).step);
     emit_tests_step.dependOn(&b.addInstallArtifact(authoring_test, .{ .dest_dir = .{ .override = .{ .custom = "tests" } } }).step);
     emit_tests_step.dependOn(&b.addInstallArtifact(interop_tests, .{ .dest_dir = .{ .override = .{ .custom = "tests" } } }).step);
+}
+
+// Instrumented archives require the final executable to link the same runtime.
+fn linkCdr(module: *std.Build.Module, library: *std.Build.Step.Compile) void {
+    module.sanitize_thread = library.root_module.sanitize_thread;
+    module.linkLibrary(library);
 }

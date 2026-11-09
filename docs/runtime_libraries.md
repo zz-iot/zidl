@@ -6,48 +6,39 @@
 > this reference also contains aspirational Rust entries that are not evidence
 > of implemented bindings.
 
-## CDR Runtime Strategy
+## Native package layout
 
-Different backends take different approaches to CDR serialization, chosen based on deployment
-constraints and ecosystem norms:
+The current development layout separates codec operations from binding support.
+See the [package placement checkpoint](design/native-cdr-package-slice.md) for
+build imports and compatibility details.
 
-- **C, C++**: call into `zidl-cdr` (external C library). Native FFI, zero overhead.
-- **Zig**: call into `zidl-rt` (external Zig library). Native, zero overhead.
-- **Java, Python, C#**: inline CDR — serialization logic is generated directly into each
-  output file using the target language's standard library (`java.nio.ByteBuffer`,
-  `struct.pack`/`unpack`, `System.Buffers.BinaryPrimitives`). No companion runtime package
-  to distribute or version. This is the right tradeoff for "bigger" language targets where
-  deployment simplicity matters more than a single shared CDR implementation.
-- **Rust (pure mode, default)**: call into `zidl-rs` (companion Rust crate on crates.io).
-  Idiomatic `Vec<T>`, `String`, `HashMap`. `no_std + alloc` compatible. Targets desktop/server
-  Rust projects that want a pure-Rust dep graph with no Zig runtime dependency.
-- **Rust (zig-ffi mode, `--rust-runtime=zig-ffi`)**: zero-copy FFI into the Zig DDS runtime.
-  Sequences and strings use `ZidlSlice<T>`/`ZidlString` (`#[repr(C)]`) from `zidl-types-rs`.
-  Lifetime-annotated borrows allow zero-copy deserialization from the runtime's CDR buffer.
+| Package | Purpose |
+|---|---|
+| `packages/zidl-cdr/` | Canonical native Zig codec; stable C headers and archive build |
+| `packages/zidl-bindings/` | Allocators, owned values, entity boxes and authoring support |
+| `packages/zidl-rt/` | Temporary umbrella pending zzdds migration |
+| `packages/zidl-cdr/c-api/` | C ABI validation and temporary C reference comparison |
+| `packages/zidl-xtypes/` | Zig XTypes constants |
 
-By default, no backend generates code that calls into a Zig-compiled library via FFI. The
-native-lib distribution problem (per-platform `.so`/`.dll` matrix, build step requirement)
-outweighs any "single source of truth" benefit for most targets. The exception is Rust
-`--rust-runtime=zig-ffi`, which is explicitly opt-in for projects already committed to
-linking the Zig DDS runtime.
+Generated C/C++ code uses the C ABI. The shared native implementation is the
+development default. The independent
+C reference is test-only; building the production archive from source requires
+Zig. See the [production build switch](design/native-cdr-production-slice.md)
+for the zzdds dependency rollout boundary. Generated Zig code imports
+`zidl_cdr` and `zidl_bindings` directly. The temporary
+`zidl-rt` aliases will be removed after zzdds migrates. Java currently generates its
+codec inline; its shared runtime migration is planned separately. Rust, Python
+and C# runtime descriptions elsewhere in older documents are proposals, not
+implemented backend guarantees.
 
----
-
-## Companion Packages
-
-The three companion packages shipped with zidl:
-
-| Package | Language | Purpose |
-|---|---|---|
-| `packages/zidl-rt/` | Zig | CDR primitives + BoundedArray; linked by generated Zig code |
-| `packages/zidl-cdr/` | C99 | Standalone CDR library; linked by generated C and C++ code |
-| `packages/zidl-xtypes/` | Zig | XTypes constants; used by zig_typeobject.zig |
+The API reference below retains the compatibility names. Canonical codec source
+now lives in `packages/zidl-cdr/src`; the old `zidl-rt` source paths forward exports.
 
 ---
 
-## zidl-rt (Zig CDR Runtime)
+## zidl-cdr (Native Zig Codec)
 
-**Source:** `packages/zidl-rt/src/cdr.zig`
+**Source:** `packages/zidl-cdr/src/cdr.zig`
 **Tests:** 61
 
 ### CdrWriter
@@ -121,7 +112,7 @@ generated `serializeKey` methods, but it does not retain the whole byte stream.
 It keeps the first 16 bytes and streams the complete key into MD5.
 
 ```zig
-var w = zidl_rt.KeyHashWriter.init();
+var w = zidl_cdr.KeyHashWriter.init();
 try MyStruct.serializeKey(&w, &value);
 const hash: [16]u8 = w.final();
 ```
@@ -218,12 +209,15 @@ Used for `string<N>` (`BoundedArray(u8, N)`) and `sequence<T, N>` (`BoundedArray
 
 ---
 
-## zidl-cdr (C99 CDR Library)
+## zidl-cdr (C ABI Library)
 
-**Source:** `packages/zidl-cdr/include/zidl_cdr.h`, `packages/zidl-cdr/src/zidl_cdr.c`
+**Source:** `packages/zidl-cdr/include/zidl_cdr.h`,
+`packages/zidl-cdr/src/shared_primitives.zig`
 **Tests:** 44 (byte-for-byte validated against zidl-rt)
 
-Standalone C99 library; no external dependencies. Used by generated C and C++ code.
+Stable C ABI over the native codec, used by generated C and C++ code. Source
+builds require Zig; applications link the installed archive with their normal
+compiler. Storage and allocator support remain in `src/zidl_cdr.c`.
 Also used in the Cyclone DDS interop harness.
 
 ### Error Codes

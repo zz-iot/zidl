@@ -14,14 +14,14 @@
 
 const std = @import("std");
 const testing = std.testing;
-const zidl_rt = @import("zidl_rt");
+const zidl_cdr = @import("zidl_cdr");
 const fixture = @import("fixture");
 const mw = @import("zzdds");
 
 test "getFieldFromCdr: IntOnly (no string_like member -- scratch discarded, field not)" {
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(testing.allocator);
-    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
     try writer.writeEncapHeaderDelimited();
     try fixture.IntOnly.serialize(&writer, .{ .seq_num = 7 });
 
@@ -36,7 +36,7 @@ test "getFieldFromCdr: IntOnly (no string_like member -- scratch discarded, fiel
 test "getFieldFromCdr: OnlyComplex (no filterable member -- both field and scratch discarded)" {
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(testing.allocator);
-    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
     try writer.writeEncapHeaderDelimited();
     try fixture.OnlyComplex.serialize(&writer, .{ .values = .{}, .nested = .{ .z = 1 } });
 
@@ -65,7 +65,7 @@ test "wrapper contract: Reading write/take round-trip against the fake middlewar
 test "deserializeSelected: extracts a non-leading @key, skips large non-key members" {
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(testing.allocator);
-    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
     try writer.writeEncapHeaderDelimited();
     const big: [4096]u8 = @splat(0xAB);
     try fixture.KeyedBlob.serialize(&writer, .{
@@ -74,7 +74,7 @@ test "deserializeSelected: extracts a non-leading @key, skips large non-key memb
         .blob = .{ ._buffer = @constCast(&big), ._length = big.len, ._maximum = big.len, ._release = false },
     });
 
-    var reader = try zidl_rt.CdrReader.init(buf.items);
+    var reader = try zidl_cdr.CdrReader.init(buf.items);
     var out: fixture.KeyedBlob = undefined;
     try fixture.KeyedBlob.deserializeSelected(&reader, fixture.KeyedBlob.KEY_FIELD_MASK, &out, testing.allocator);
     defer fixture.KeyedBlob.deinitSelected(&out, fixture.KeyedBlob.KEY_FIELD_MASK, testing.allocator);
@@ -96,7 +96,7 @@ test "computeKeyHashFromCdr: full ALIVE payload with a non-leading @key hashes c
     // properly regardless of where `@key` sits.
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(testing.allocator);
-    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
     try writer.writeEncapHeaderDelimited();
     const value = fixture.KeyedBlob{
         .prefix = "a-prefix-that-should-be-skipped",
@@ -120,7 +120,7 @@ test "computeKeyHashFromCdrKeyOnly: genuine key-only payload with a non-leading 
     // logic is the same "no skip needed" reasoning either way.
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(testing.allocator);
-    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
     try writer.writeEncapHeaderDelimited();
     const value = fixture.KeyedBlob{
         .prefix = "irrelevant-to-a-key-only-payload",
@@ -138,7 +138,7 @@ test "computeKeyHashFromCdrKeyOnly: genuine key-only payload with a non-leading 
 test "getFieldFromCdr: decodes only the referenced field, skips the rest" {
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(testing.allocator);
-    var writer = zidl_rt.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
     try writer.writeEncapHeaderDelimited();
     const big: [4096]u8 = @splat(0xCD);
     try fixture.KeyedBlob.serialize(&writer, .{
@@ -159,14 +159,14 @@ test "getFieldFromCdr: decodes only the referenced field, skips the rest" {
 
 test "selected readers preserve enclosing limits and skip future appendable fields" {
     var bytes = [_]u8{ 0, 9, 0, 0, 8, 0, 0, 0, 42, 0, 0, 0, 99, 0, 0, 0, 7, 0, 0, 0 };
-    var reader = try zidl_rt.CdrReader.init(&bytes);
+    var reader = try zidl_cdr.CdrReader.init(&bytes);
     var out: fixture.IntOnly = .{};
     try fixture.IntOnly.deserializeSelected(&reader, 1, &out, testing.allocator);
     try testing.expectEqual(@as(i32, 42), out.seq_num);
     try testing.expectEqual(@as(usize, 16), reader.pos);
     try testing.expectEqual(bytes.len, reader.data.len);
     bytes[4] = 2;
-    reader = try zidl_rt.CdrReader.init(&bytes);
+    reader = try zidl_cdr.CdrReader.init(&bytes);
     try testing.expectError(error.EndOfStream, fixture.IntOnly.deserializeSelected(&reader, 1, &out, testing.allocator));
     try testing.expect(reader.pos <= 10);
     try testing.expectEqual(bytes.len, reader.data.len);
@@ -179,10 +179,10 @@ test "selected nested keys read full samples while key-only reads retain project
     inline for (.{ .xcdr1, .xcdr2 }) |version| {
         var bytes = std.ArrayListUnmanaged(u8).empty;
         defer bytes.deinit(allocator);
-        var writer = zidl_rt.CdrWriter(version).init(&bytes, allocator);
+        var writer = zidl_cdr.CdrWriter(version).init(&bytes, allocator);
         try writer.writeEncapHeader();
         try fixture.KeyOuter.serialize(&writer, value);
-        var reader = try zidl_rt.CdrReader.init(bytes.items);
+        var reader = try zidl_cdr.CdrReader.init(bytes.items);
         var selected: fixture.KeyOuter = .{};
         try fixture.KeyOuter.deserializeSelected(&reader, fixture.KeyOuter.KEY_FIELD_MASK, &selected, allocator);
         try testing.expectEqual(@as(i32, 42), selected.inner.id);
@@ -191,10 +191,10 @@ test "selected nested keys read full samples while key-only reads retain project
         try testing.expectEqual(expected, fixture.KeyOuter.computeKeyHashFromCdr(@ptrCast(@constCast(&allocator)), bytes.items));
 
         bytes.clearRetainingCapacity();
-        writer = zidl_rt.CdrWriter(version).init(&bytes, allocator);
+        writer = zidl_cdr.CdrWriter(version).init(&bytes, allocator);
         try writer.writeEncapHeader();
         try fixture.KeyOuter.serializeKey(&writer, value);
-        reader = try zidl_rt.CdrReader.init(bytes.items);
+        reader = try zidl_cdr.CdrReader.init(bytes.items);
         var key: fixture.KeyOuter = .{};
         try fixture.KeyOuter.deserializeKeyInto(&key, &reader, allocator);
         try testing.expectEqual(@as(i32, 0), key.inner.ignored);
@@ -206,7 +206,7 @@ test "selected nested keys read full samples while key-only reads retain project
 
 test "a keyless topic retains its empty key while nested values can project" {
     var bytes: [16]u8 = undefined;
-    var writer = zidl_rt.PrimitiveWriter.initFixed(&bytes, .four, .little);
+    var writer = zidl_cdr.PrimitiveWriter.initFixed(&bytes, .four, .little);
     const value: fixture.KeylessBridge = .{ .inner = .{ .ignored = 99, .id = 42 } };
     try fixture.KeylessBridge.serializeKey(&writer, value);
     try testing.expectEqual(@as(usize, 0), writer.len);

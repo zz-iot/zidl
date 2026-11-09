@@ -1,0 +1,15 @@
+.{
+    .name = .zidl_bindings,
+    .version = "0.3.27-zig.0.17.0-dev",
+    .minimum_zig_version = "0.15.1",
+    .fingerprint = 0x8962174811871111,
+    .dependencies = .{
+        .zidl_cdr = .{ .path = "../zidl-cdr" },
+    },
+    .paths = .{
+        "README.md",
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

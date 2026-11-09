@@ -1,6 +1,6 @@
 //! Experimental, middleware-neutral wire typesupport ABI. No OS loader here.
 const std = @import("std");
-const rt = @import("zidl_rt");
+const zidl_cdr = @import("zidl_cdr");
 // The C header is the single source of truth for ABI layout.
 pub const c = @import("zidl_typesupport_c");
 pub const Bytes = c.ZidlTsBytes;
@@ -27,7 +27,7 @@ pub fn query(library: *const Library, major: u32, out: [*c][*c]const Library) u3
 
 /// Reject non-final representation identifiers, nonzero options and padded/trailing
 /// bytes. This prototype accepts exact DDS sample bytes, not RTPS submessage padding.
-pub fn reader(data: [*c]const u8, size: u64) !rt.CdrReader {
+pub fn reader(data: [*c]const u8, size: u64) !zidl_cdr.CdrReader {
     if (data == null or size < 4 or size > std.math.maxInt(usize)) return error.InvalidData;
     const input = data[0..@intCast(size)];
     if (input[0] != 0 or input[2] != 0 or input[3] != 0) return error.UnsupportedRepresentation;
@@ -35,7 +35,7 @@ pub fn reader(data: [*c]const u8, size: u64) !rt.CdrReader {
         0, 1, 6, 7 => {},
         else => return error.UnsupportedRepresentation,
     }
-    return rt.CdrReader.init(input);
+    return zidl_cdr.CdrReader.init(input);
 }
 pub fn status(err: anyerror) u32 {
     return if (err == error.UnsupportedRepresentation) unsupported else invalid_data;

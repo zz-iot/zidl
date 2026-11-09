@@ -140,7 +140,7 @@ pub fn cloneOwned(value: anytype, alloc: std.mem.Allocator) !@TypeOf(value) {
 }
 
 const testing = std.testing;
-const BoundedArray = @import("cdr.zig").BoundedArray;
+const BoundedArray = @import("zidl_cdr").BoundedArray;
 
 const Inner = extern struct { _maximum: u32 = 0, _length: u32 = 0, _buffer: ?[*]i32 = null, _release: bool = false };
 const Outer = extern struct { _maximum: u32 = 0, _length: u32 = 0, _buffer: ?[*]Inner = null, _release: bool = false };
@@ -176,7 +176,9 @@ test "owned: borrowed sequences are neither freed nor required to be heap" {
 test "owned: string elements and bounded sequences of them" {
     const alloc = testing.allocator;
     var strs = try alloc.alloc([*:0]const u8, 1);
-    strs[0] = (try alloc.dupeSentinel(u8, "hi", 0)).ptr;
+    const str = try alloc.allocSentinel(u8, 2, 0);
+    @memcpy(str, "hi");
+    strs[0] = str.ptr;
     var v: StrSeq = .{ ._maximum = 1, ._length = 1, ._buffer = strs.ptr, ._release = true };
 
     var b: BoundedArray([]const u8, 2) = .{};

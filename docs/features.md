@@ -261,7 +261,8 @@ For every struct with at least one `@key` member, all backends emit three additi
 | `deserializeKey` | Reads only `@key` members from a full CDR stream; skips non-key fields |
 | `computeKeyHash` | Applies the RTPS §9.6.4.8 rule: key ≤ 16 bytes → zero-pad; key > 16 bytes → MD5 |
 
-MD5 dependency per language: `std.crypto.hash.Md5` (Zig), `zidl_md5` in `zidl_cdr.c` (C/C++),
+MD5 dependency per language: `std.crypto.hash.Md5` (Zig), the native-backed
+`zidl_md5` C ABI (C/C++),
 `java.security.MessageDigest` (Java).
 
 ---

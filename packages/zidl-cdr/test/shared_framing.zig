@@ -1,5 +1,5 @@
 const std = @import("std");
-const rt = @import("zidl_rt");
+const rt = @import("zidl_cdr_native");
 const adapter = @import("adapter");
 const testing = std.testing;
 const Reader = adapter.Reader;
