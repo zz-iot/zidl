@@ -7335,8 +7335,21 @@ const JniBridgeGenerator = struct {
         // reference, garbage in exactly the way an unconverted `jstring`
         // *param* used to be) and converted via `NewStringUTF` at the return
         // below.
+        // A call registering callbacks with a `@success_result` return keeps
+        // the provider's own value in `_rc`: success is judged on that, not on
+        // `_ret`, which the JNI type may have changed (an `unsigned short`
+        // 65535 is a `jshort` -1).
+        const callback_ok: ?i64 = if (ret_is_entity or ret_is_callback or ret_is_string)
+            null
+        else
+            interface.callbackSuccessResult(op);
+        const ret_c: ?[]u8 = if (callback_ok != null) try self.typeRefToC(op.return_type.?) else null;
+        defer if (ret_c) |c| self.alloc.free(c);
+
         if (ret_is_entity) {
             try self.print("    void *_h = (void *){s}_{s}({s}", .{ call_c_name, op.name, self_expr });
+        } else if (ret_c) |c| {
+            try self.print("    {s} _rc = {s}_{s}({s}", .{ c, call_c_name, op.name, self_expr });
         } else if (ret_is_callback) {
             try self.print("    {s} _l = {s}_{s}({s}", .{ ret_listener_c_name.?, call_c_name, op.name, self_expr });
         } else if (ret_is_string) {
@@ -7369,6 +7382,7 @@ const JniBridgeGenerator = struct {
             }
         }
         try self.write(");\n");
+        if (ret_c != null) try self.print("    {s} _ret = ({s})_rc;\n", .{ jni_ret, jni_ret });
 
         // `create_*`-shaped ops: the new entity has no "old" listener to
         // worry about, only whether ours actually got installed — a failed
@@ -7392,15 +7406,13 @@ const JniBridgeGenerator = struct {
         // never releases the context references taken for them: drop them
         // here. Only `@success_result` on the return type says which value is
         // success (`interface.callbackSuccessResult`).
-        if (!ret_is_entity and !ret_is_callback and !ret_is_string) {
-            if (interface.callbackSuccessResult(op)) |ok| for (op.params) |p| {
-                if (classifyTypeRef(p.type_ref) != .callback) continue;
-                try self.print(
-                    "    if (_ret != {[ok]d} && _p_{[name]s} != NULL) zidl_java_release_listener_ctx(env, _c_{[name]s}.listener_data);\n",
-                    .{ .ok = ok, .name = p.name },
-                );
-            };
-        }
+        if (callback_ok) |ok| for (op.params) |p| {
+            if (classifyTypeRef(p.type_ref) != .callback) continue;
+            try self.print(
+                "    if (_rc != {[ok]d} && _p_{[name]s} != NULL) zidl_java_release_listener_ctx(env, _c_{[name]s}.listener_data);\n",
+                .{ .ok = ok, .name = p.name },
+            );
+        };
 
         // Release any jstring params converted to a native `const char *`
         // above — GetStringUTFChars must be paired with a Release before the
@@ -10304,7 +10316,7 @@ test "java: set_listener populates release_listener_data, no ad-hoc release book
     // call installs nothing, so it drops the reference it took itself.
     try testing.expect(std.mem.indexOf(u8, s, "_c_l.release_listener_data = zidl_java_release_listener_data;") != null);
     try testing.expect(std.mem.indexOf(u8, s, "Widget_set_listener((void *)(intptr_t)ptr") != null);
-    try testing.expect(std.mem.indexOf(u8, s, "    if (_ret != 0 && _p_l != NULL) zidl_java_release_listener_ctx(env, _c_l.listener_data);\n") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "    if (_rc != 0 && _p_l != NULL) zidl_java_release_listener_ctx(env, _c_l.listener_data);\n") != null);
     // get_listener() is a real, supported round-trip now (see the dedicated
     // "java: get_listener() is a real round-trip" test below) — it DOES
     // call Widget_get_listener.
@@ -10331,11 +10343,35 @@ test "java: a failed callback registration drops its context reference only with
     try generateJniSource(alloc, &ir_spec, opts, &out);
     const s = out.items;
 
-    try testing.expect(std.mem.indexOf(u8, s, "    if (_ret != 3 && _p_l != NULL) zidl_java_release_listener_ctx(env, _c_l.listener_data);\n") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "    if (_rc != 3 && _p_l != NULL) zidl_java_release_listener_ctx(env, _c_l.listener_data);\n") != null);
     // Without @success_result a return value says nothing about whether the
     // listener was installed, whatever the op's name.
     try testing.expect(std.mem.indexOf(u8, s, "_c_r.release_listener_data = zidl_java_release_listener_data;") != null);
     try testing.expect(std.mem.indexOf(u8, s, "zidl_java_release_listener_ctx(env, _c_r.listener_data)") == null);
+}
+
+test "java: @success_result is judged on the provider's value, not the JNI-converted one" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc,
+        \\@success_result(65535) typedef unsigned short Result;
+        \\@callback interface FooListener { void on_event(); };
+        \\interface Widget {
+        \\    Result attach(in FooListener l);
+        \\};
+    );
+    defer ir_spec.deinit();
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    const opts = interface.Options{ .input_stem = "widget" };
+    try generateJniSource(alloc, &ir_spec, opts, &out);
+    const s = out.items;
+
+    // As a jshort, a successful 65535 is -1: compare the provider's own value.
+    try testing.expect(std.mem.indexOf(u8, s, "Result _rc = Widget_attach(") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "    jshort _ret = (jshort)_rc;\n") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "    if (_rc != 65535 && _p_l != NULL) zidl_java_release_listener_ctx(env, _c_l.listener_data);\n") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "_ret != 65535") == null);
 }
 
 test "java: --handle-retire-hook retires wrappers of freed handles" {
