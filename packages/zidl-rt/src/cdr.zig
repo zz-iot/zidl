@@ -631,6 +631,18 @@ pub const PlCdrWriter = struct {
         return self.inner.buf.items;
     }
 
+    pub fn beginOptionalMember(self: *PlCdrWriter, member_id: u28, mu: bool, present: bool) !?framing.OptionalWrite {
+        return self.inner.beginOptionalMember(member_id, mu, present);
+    }
+
+    pub fn cancelOptionalMember(self: *PlCdrWriter, token: ?framing.OptionalWrite) void {
+        self.inner.cancelOptionalMember(token);
+    }
+
+    pub fn finishOptionalMember(self: *PlCdrWriter, token: ?framing.OptionalWrite) !void {
+        try self.inner.finishOptionalMember(token);
+    }
+
     // ── Forwarded primitive writes ─────────────────────────────────────────
     /// Append raw bytes at the current position (no length prefix, no padding).
     pub fn writeBytes(self: *PlCdrWriter, data: []const u8) !void {
