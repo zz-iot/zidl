@@ -477,3 +477,26 @@ test "pl_cdr fixture: a vendor-specific PID aliasing a standard @id is retained,
     try testing.expectEqual(VENDOR_ALIASING, rec.unknown_params[0].pid);
     try testing.expectEqualSlices(u8, &[_]u8{ 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04 }, rec.unknown_params[0].bytes);
 }
+
+test "pl_cdr fixture: nested final optional members preserve parent alignment" {
+    const alloc = testing.allocator;
+    for ([_]bool{ false, true }) |present| {
+        const value: fixture.NestedOptionalRec = .{
+            .item = .{ .prefix = 0xa5, .number = if (present) 0x0102030405060708 else null, .tail = 0x1122334455667788 },
+            .tail = -77,
+        };
+        var buf = std.ArrayListUnmanaged(u8).empty;
+        defer buf.deinit(alloc);
+        var writer = zidl_rt.PlCdrWriter.init(&buf, alloc);
+        try writer.writeEncapHeader();
+        try fixture.NestedOptionalRec.serializePlCdr(&writer, value);
+        var reader = try zidl_rt.CdrReader.init(buf.items);
+        var decoded: fixture.NestedOptionalRec = .{};
+        try fixture.NestedOptionalRec.deserializeFromPlCdr(&decoded, &reader, alloc, .strict);
+        try testing.expectEqual(value.item.prefix, decoded.item.prefix);
+        try testing.expectEqual(value.item.number, decoded.item.number);
+        try testing.expectEqual(value.item.tail, decoded.item.tail);
+        try testing.expectEqual(value.tail, decoded.tail);
+        try testing.expectEqual(buf.items.len, reader.pos);
+    }
+}

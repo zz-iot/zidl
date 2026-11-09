@@ -1,5 +1,6 @@
 //! Native storage policies for the first shared-core migration slice.
 //! Primitives, strings and framing; schema traversal remains generated.
+const fixed = @import("cdr_fixed.zig");
 const std = @import("std");
 const primitives = @import("cdr_primitives.zig");
 const strings = @import("cdr_strings.zig");
@@ -89,6 +90,11 @@ pub const PrimitiveWriter = struct {
         try self.writeUnsigned(u64, @bitCast(value));
     }
 
+    pub fn writeFixed(self: *PrimitiveWriter, comptime digits: u8, comptime scale: u8, value: f64) !void {
+        comptime if (digits < 1 or digits > 31 or scale > digits) @compileError("invalid fixed<digits,scale>");
+        try fixed.write(self, digits, scale, value);
+    }
+
     pub fn writeBool(self: *PrimitiveWriter, value: bool) !void {
         try self.writeU8(@intFromBool(value));
     }
@@ -145,6 +151,23 @@ pub const PrimitiveWriter = struct {
     }
     pub fn writeDheader(self: *PrimitiveWriter, size: u32) !void {
         try self.writeU32(size);
+    }
+
+    pub fn beginOptionalMember(self: *PrimitiveWriter, member_id: u28, mu: bool, present: bool) !?framing.OptionalWrite {
+        if (self.alignment_cap == .four) {
+            try self.writeBool(present);
+            return null;
+        }
+        return try framing.beginOptional(self, member_id, mu);
+    }
+
+    pub fn cancelOptionalMember(self: *PrimitiveWriter, token: ?framing.OptionalWrite) void {
+        if (token) |t| self.pos = framing.optionalParentPosition(self.len, t) catch return;
+    }
+
+    pub fn finishOptionalMember(self: *PrimitiveWriter, token: ?framing.OptionalWrite) !void {
+        defer self.cancelOptionalMember(token);
+        if (token) |t| try framing.finishOptional(self.patchStorage(), self.len, t, self.byte_order);
     }
 
     pub fn reserveDheader(self: *PrimitiveWriter) !usize {

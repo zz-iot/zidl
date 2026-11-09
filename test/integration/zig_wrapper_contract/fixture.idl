@@ -46,3 +46,5 @@ struct OnlyComplex {
 
 struct KeyInner { long ignored; @key long id; };
 struct KeyOuter { @key KeyInner inner; @key long tail; };
+
+struct KeylessBridge { KeyInner inner; };

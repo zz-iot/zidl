@@ -16,7 +16,7 @@ int Frame_serialize_key_holder(ZidlCdrWriter *_w, const ::Frame *_v) {
 }
 
 int Frame_serialize(ZidlCdrWriter *_w, const ::Frame *_v) {
-    int _rc;
+    int _rc = ZIDL_CDR_OK; (void)_rc;
     size_t _dh;
     _rc = zidl_cdr_reserve_dheader_maybe(_w, &_dh);
     if (_rc) return _rc;
@@ -37,7 +37,47 @@ int Frame_deserialize(ZidlCdrReader *_r, ::Frame *_v) {
 }
 
 static int Frame_deserialize_bounded_impl(ZidlCdrReader *_r, ::Frame *_v) {
-    int _rc;
+    int _rc = ZIDL_CDR_OK; (void)_rc;
+    if (_r->xcdr_version == ZIDL_XCDR2) {
+        size_t _body_end;
+        _rc = zidl_cdr_read_mutable_dheader(_r, &_body_end);
+        if (_rc) return _rc;
+        _rc = zidl_cdr_reader_limit(_r, _body_end, _r);
+        if (_rc) return _rc;
+    }
+    _rc = zidl_cdr_read_u32(_r, &_v->seq_num);
+    if (_rc) return _rc;
+    { const char *_sp; uint32_t _sl;
+        _rc = zidl_cdr_read_string_zerocopy(_r, &_sp, &_sl);
+        if (_rc) return _rc;
+        _v->topic.assign(_sp, _sl);
+    }
+    return ZIDL_CDR_OK;
+}
+
+int Frame_serialize_key_value(ZidlCdrWriter *_w, const ::Frame *_v) {
+    int _rc = ZIDL_CDR_OK; (void)_rc;
+    size_t _dh;
+    _rc = zidl_cdr_reserve_dheader_maybe(_w, &_dh);
+    if (_rc) return _rc;
+    _rc = zidl_cdr_write_u32(_w, _v->seq_num);
+    if (_rc) return _rc;
+    _rc = zidl_cdr_write_string(_w, _v->topic.c_str(), (uint32_t)_v->topic.size());
+    if (_rc) return _rc;
+    if (_dh != (size_t)-1) { _rc = zidl_cdr_patch_dheader_checked(_w, _dh); if (_rc) return _rc; }
+    return ZIDL_CDR_OK;
+}
+
+static int Frame_deserialize_key_value_bounded_impl(ZidlCdrReader *_r, ::Frame *_v);
+int Frame_deserialize_key_value(ZidlCdrReader *_r, ::Frame *_v) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Frame_deserialize_key_value_bounded_impl(&_local, _v);
+    _r->pos = !_rc && (_r->xcdr_version == ZIDL_XCDR2) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Frame_deserialize_key_value_bounded_impl(ZidlCdrReader *_r, ::Frame *_v) {
+    int _rc = ZIDL_CDR_OK; (void)_rc;
     if (_r->xcdr_version == ZIDL_XCDR2) {
         size_t _body_end;
         _rc = zidl_cdr_read_mutable_dheader(_r, &_body_end);

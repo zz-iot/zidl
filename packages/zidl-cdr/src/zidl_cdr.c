@@ -95,7 +95,8 @@ void zidl_cdr_writer_set_byte_order(ZidlCdrWriter *w, int byte_order) {
 }
 
 static int writer_ensure(ZidlCdrWriter *w, size_t n) {
-    /* Counting mode: no real buffer, nothing to overflow. */
+    if (n > SIZE_MAX - w->len || n > SIZE_MAX - w->pos) return ZIDL_CDR_OVERFLOW;
+    /* Counting mode only needs the counter bounds above. */
     if (!w->buf && !w->grow_fn) return ZIDL_CDR_OK;
     if (w->len + n <= w->cap) return ZIDL_CDR_OK;
     if (!w->grow_fn) return ZIDL_CDR_OVERFLOW;
@@ -114,8 +115,6 @@ static int writer_write_bytes(ZidlCdrWriter *w, const uint8_t *bytes, size_t n) 
 #ifdef ZIDL_CDR_SHARED_PRIMITIVES
 /* Internal storage bridge. Wire encoding lives in the shared Zig core. */
 int zidl_cdr_shared_write_bytes(ZidlCdrWriter *w, const uint8_t *bytes, size_t n) {
-    if (n > SIZE_MAX - w->len || n > SIZE_MAX - w->pos)
-        return ZIDL_CDR_OVERFLOW;
     return writer_write_bytes(w, bytes, n);
 }
 #endif
@@ -283,39 +282,66 @@ int zidl_cdr_write_f64(ZidlCdrWriter *w, double v) {
 
 #endif /* ZIDL_CDR_SHARED_PRIMITIVES */
 
-/* fixed<digits,scale> — packed BCD, alignment 1 */
+#ifndef ZIDL_CDR_SHARED_PRIMITIVES
+/* Two limbs keep the temporary C99 reference independent of Zig's u128. */
+static void fixed_accumulate(uint64_t *hi, uint64_t *lo, uint8_t digit) {
+    uint64_t low = (*lo & UINT32_MAX) * 10u + digit;
+    uint64_t high = (*lo >> 32) * 10u + (low >> 32);
+    *lo = (high << 32) | (low & UINT32_MAX);
+    *hi = *hi * 10u + (high >> 32);
+}
+
+static double fixed_to_double(uint64_t hi, uint64_t lo) {
+    unsigned bit = 0, shift;
+    uint64_t top = hi, significant, remainder, half;
+    if (!hi) return (double)lo;
+    while (top >>= 1) ++bit;
+    shift = bit + 64u - 52u;
+    significant = (hi << (64u - shift)) | (lo >> shift);
+    remainder = lo & ((UINT64_C(1) << shift) - 1u);
+    half = UINT64_C(1) << (shift - 1u);
+    if (remainder > half || (remainder == half && (significant & 1u))) ++significant;
+    return (double)significant * (double)(UINT64_C(1) << shift);
+}
+
 int zidl_cdr_write_fixed(ZidlCdrWriter *w, uint8_t digits, uint8_t scale, double value) {
-    uint8_t n = (uint8_t)((digits / 2u) + 1u); /* wire byte count */
-    uint8_t n2 = (uint8_t)(2u * n);
-    uint8_t pad = (uint8_t)(n2 - digits - 1u); /* 0 if digits odd, 1 if even */
-    uint8_t dig[31] = {0};
-    uint8_t nib[32] = {0};
-    uint8_t buf[16];
-    uint8_t i;
-
-    int negative = (value < 0.0);
-    double scale_factor = 1.0;
-    for (i = 0; i < scale; i++) scale_factor *= 10.0;
-    double abs_scaled = (negative ? -value : value) * scale_factor + 0.5;
-
-    /* Max representable: 10^digits - 1 */
-    double max_val = 1.0;
-    for (i = 0; i < digits; i++) max_val *= 10.0;
-    max_val -= 1.0;
-
-    uint64_t int_val = (abs_scaled >= max_val + 1.0) ? (uint64_t)max_val : (uint64_t)abs_scaled;
-
-    for (i = digits; i > 0; i--) {
-        dig[i - 1] = (uint8_t)(int_val % 10u);
-        int_val /= 10u;
+    uint8_t decimal[31] = {0}, buf[16] = {0};
+    uint64_t hi = 0, lo = 1, bits, mantissa;
+    double factor = 1.0, rounded, limit;
+    unsigned i, n, pad;
+    int exponent, bit, nonzero = 0;
+    if (digits < 1 || digits > 31 || scale > digits || value != value) return ZIDL_CDR_INVALID;
+    for (i = 0; i < digits; ++i) fixed_accumulate(&hi, &lo, 0);
+    limit = fixed_to_double(hi, lo);
+    for (i = 0; i < scale; ++i) factor *= 10.0;
+    rounded = (value < 0 ? -value : value) * factor + 0.5;
+    if (rounded >= limit) {
+        memset(decimal, 9, digits);
+    } else {
+        /* Extract the binary integer into decimal digits without a wide cast. */
+        memcpy(&bits, &rounded, sizeof bits);
+        exponent = (int)((bits >> 52) & 0x7ffu) - 1023;
+        mantissa = (bits & UINT64_C(0x000fffffffffffff)) | (UINT64_C(1) << 52);
+        for (bit = exponent; bit >= 0; --bit) {
+            int source_bit = bit + 52 - exponent;
+            unsigned carry = source_bit >= 0 ? (unsigned)((mantissa >> source_bit) & 1u) : 0;
+            for (i = digits; i > 0; --i) {
+                unsigned digit = decimal[i - 1] * 2u + carry;
+                decimal[i - 1] = (uint8_t)(digit % 10u); carry = digit / 10u;
+            }
+        }
     }
-
-    for (i = 0; i < digits; i++) nib[pad + i] = dig[i];
-    nib[n2 - 1] = negative ? 0xDu : 0xCu;
-
-    for (i = 0; i < n; i++) buf[i] = (uint8_t)((nib[2*i] << 4) | nib[2*i + 1]);
+    n = digits / 2u + 1u;
+    pad = digits % 2u == 0;
+    for (i = 0; i < digits; ++i) {
+        unsigned nibble = pad + i;
+        nonzero |= decimal[i];
+        buf[nibble / 2] |= (uint8_t)(decimal[i] << (nibble % 2 == 0 ? 4 : 0));
+    }
+    buf[n - 1] |= value < 0 && nonzero ? 0xdu : 0xcu;
     return writer_write_bytes(w, buf, n);
 }
+#endif
 
 /* ── String / wstring writes ─────────────────────────────────────────────── */
 
@@ -423,24 +449,18 @@ static int reader_align_pos(ZidlCdrReader *r, size_t boundary) {
 
 #endif
 
+#ifndef ZIDL_CDR_SHARED_PRIMITIVES
 static int reader_read_slice(ZidlCdrReader *r, size_t n, const uint8_t **out) {
-#ifdef ZIDL_CDR_SHARED_PRIMITIVES
-    size_t start = r->pos;
-    int rc = zidl_cdr_skip(r, n);
-    if (rc) return rc;
-    *out = r->data + start;
-    return ZIDL_CDR_OK;
-#else
     /* r->pos <= r->data_len is invariant (init, every advance, seek_to, and the
      * clamp in reader_align_pos all enforce it), so `data_len - pos` cannot
      * underflow -- and comparing against it, rather than `pos + n`, cannot
      * overflow for a hostile n. */
-    if (n > r->data_len - r->pos) return ZIDL_CDR_TRUNCATED;
+    if (r->pos > r->data_len || n > r->data_len - r->pos) return ZIDL_CDR_TRUNCATED;
     *out     = r->data + r->pos;
     r->pos  += n;
     return ZIDL_CDR_OK;
-#endif
 }
+#endif
 
 #ifndef ZIDL_CDR_SHARED_PRIMITIVES
 static uint16_t maybe_swap16(const ZidlCdrReader *r, uint16_t raw) {
@@ -568,41 +588,33 @@ int zidl_cdr_read_f64(ZidlCdrReader *r, double *out) {
 
 #endif /* ZIDL_CDR_SHARED_PRIMITIVES */
 
-/* fixed<digits,scale> — packed BCD, alignment 1 */
+#ifndef ZIDL_CDR_SHARED_PRIMITIVES
 int zidl_cdr_read_fixed(ZidlCdrReader *r, uint8_t digits, uint8_t scale, double *out) {
-    uint8_t n = (uint8_t)((digits / 2u) + 1u);
-    uint8_t n2 = (uint8_t)(2u * n);
-    uint8_t pad = (uint8_t)(n2 - digits - 1u);
+    uint64_t hi = 0, lo = 0;
+    unsigned n, pad, i;
+    uint8_t sign;
     const uint8_t *buf;
-    uint8_t nib[32];
-    uint8_t i;
+    double factor = 1.0, result;
     int rc;
-
+    if (digits < 1 || digits > 31 || scale > digits) return ZIDL_CDR_INVALID;
+    n = digits / 2u + 1u; pad = digits % 2u == 0;
     rc = reader_read_slice(r, n, &buf);
     if (rc) return rc;
-
-    for (i = 0; i < n; i++) {
-        nib[2*i]     = (buf[i] >> 4) & 0x0Fu;
-        nib[2*i + 1] = buf[i] & 0x0Fu;
+    if (pad && (buf[0] >> 4) != 0) return ZIDL_CDR_INVALID;
+    for (i = 0; i < digits; ++i) {
+        unsigned nibble = pad + i;
+        uint8_t digit = (uint8_t)((buf[nibble / 2] >> (nibble % 2 == 0 ? 4 : 0)) & 0xfu);
+        if (digit > 9) return ZIDL_CDR_INVALID;
+        fixed_accumulate(&hi, &lo, digit);
     }
-
-    uint64_t int_val = 0;
-    for (i = 0; i < digits; i++) {
-        uint8_t d = nib[pad + i];
-        if (d > 9u) return ZIDL_CDR_INVALID;
-        int_val = int_val * 10u + d;
-    }
-
-    uint8_t sign_nib = nib[n2 - 1];
-    int negative = (sign_nib == 0xDu || sign_nib == 0xBu);
-
-    double scale_factor = 1.0;
-    for (i = 0; i < scale; i++) scale_factor *= 10.0;
-
-    *out = (double)int_val / scale_factor;
-    if (negative) *out = -*out;
+    sign = buf[n - 1] & 0xfu;
+    if (sign != 0xc && sign != 0xd) return ZIDL_CDR_INVALID;
+    for (i = 0; i < scale; ++i) factor *= 10.0;
+    result = fixed_to_double(hi, lo) / factor;
+    *out = sign == 0xd ? -result : result;
     return ZIDL_CDR_OK;
 }
+#endif
 
 /* ── Allocator ───────────────────────────────────────────────────────────── */
 
@@ -1189,5 +1201,113 @@ int zidl_cdr_emheader_end(const ZidlCdrReader *r, const ZidlEmHeader *em, size_t
     if (em->payload_bytes > r->data_len - pos) return ZIDL_CDR_TRUNCATED;
     *out = pos + em->payload_bytes;
     return ZIDL_CDR_OK;
+}
+#endif
+
+
+#ifndef ZIDL_CDR_SHARED_PRIMITIVES
+int zidl_cdr_begin_optional_write(ZidlCdrWriter *w, uint32_t id, bool mu,
+                                  bool present, ZidlCdrOptionalWrite *scope) {
+    int rc;
+    size_t pad;
+    static const uint8_t zeros[4] = {0};
+    if (id > 0x0fffffffu) return ZIDL_CDR_INVALID;
+    if (w->xcdr_version == ZIDL_XCDR2) {
+        rc = zidl_cdr_write_bool(w, present);
+        if (rc) return rc;
+        scope->length_offset = SIZE_MAX;
+        scope->value_start = scope->parent_pos = 0;
+        return ZIDL_CDR_OK;
+    }
+    pad = (4u - w->pos % 4u) % 4u;
+    rc = writer_write_bytes(w, zeros, pad);
+    if (rc) return rc;
+    rc = zidl_cdr_write_u16(w, 0x7f01u);
+    if (rc) return rc;
+    rc = zidl_cdr_write_u16(w, 8);
+    if (rc) return rc;
+    rc = zidl_cdr_write_u32(w, id | (mu ? 0x40000000u : 0));
+    if (rc) return rc;
+    scope->length_offset = w->len;
+    rc = zidl_cdr_write_u32(w, 0);
+    if (rc) return rc;
+    scope->value_start = w->len;
+    scope->parent_pos = w->pos;
+    w->pos = 0;
+    return ZIDL_CDR_OK;
+}
+
+static bool optional_write_valid(const ZidlCdrWriter *w, const ZidlCdrOptionalWrite *s) {
+    return s->value_start <= w->len && s->parent_pos <= s->value_start &&
+        s->length_offset <= s->value_start && s->value_start - s->length_offset == 4;
+}
+void zidl_cdr_cancel_optional_write(ZidlCdrWriter *w, const ZidlCdrOptionalWrite *s) {
+    if (s->length_offset != SIZE_MAX && optional_write_valid(w, s))
+        w->pos = s->parent_pos + (w->len - s->value_start);
+}
+int zidl_cdr_end_optional_write(ZidlCdrWriter *w, const ZidlCdrOptionalWrite *s) {
+    uint32_t size;
+    if (s->length_offset == SIZE_MAX) return ZIDL_CDR_OK;
+    if (!optional_write_valid(w, s)) return ZIDL_CDR_INVALID;
+    zidl_cdr_cancel_optional_write(w, s);
+    if (w->len - s->value_start > UINT32_MAX) return ZIDL_CDR_OVERFLOW;
+    size = (uint32_t)(w->len - s->value_start);
+    if (w->buf) {
+        size_t i;
+        if (w->len > w->cap) return ZIDL_CDR_INVALID;
+        for (i = 0; i < 4; ++i)
+            w->buf[s->length_offset + i] = (uint8_t)(size >> (8 * (w->byte_order == ZIDL_CDR_BE ? 3 - i : i)));
+    }
+    return ZIDL_CDR_OK;
+}
+
+int zidl_cdr_begin_optional_read(ZidlCdrReader *r, uint32_t id,
+                                 ZidlCdrOptionalRead *s, bool *present) {
+    uint16_t pid, short_size;
+    uint32_t actual, size;
+    size_t start, end;
+    int rc;
+    if (id > 0x0fffffffu) return ZIDL_CDR_INVALID;
+    if (r->xcdr_version == ZIDL_XCDR2) {
+        rc = zidl_cdr_read_bool(r, present);
+        if (rc) return rc;
+        s->parent = *r;
+        s->end = SIZE_MAX;
+        return ZIDL_CDR_OK;
+    }
+    rc = reader_align_pos(r, 4);
+    if (rc) return rc;
+    rc = zidl_cdr_read_u16(r, &pid);
+    if (rc) return rc;
+    rc = zidl_cdr_read_u16(r, &short_size);
+    if (rc) return rc;
+    if (pid & 0x8000u) return ZIDL_CDR_INVALID;
+    actual = pid & 0x3fffu;
+    size = short_size;
+    if (actual == 0x3f01u) {
+        if (short_size != 8) return ZIDL_CDR_INVALID;
+        rc = zidl_cdr_read_u32(r, &actual);
+        if (rc) return rc;
+        if (actual & 0x80000000u) return ZIDL_CDR_INVALID;
+        actual &= 0x0fffffffu;
+        rc = zidl_cdr_read_u32(r, &size);
+        if (rc) return rc;
+    } else if (actual > 0x3f00u) return ZIDL_CDR_INVALID;
+    if (actual != id) return ZIDL_CDR_INVALID;
+    start = r->pos;
+    if (start > r->data_len || size > r->data_len - start) return ZIDL_CDR_TRUNCATED;
+    end = start + size;
+    s->parent = *r;
+    s->parent.pos = s->end = end;
+    r->data += start - 4;
+    r->data_len = 4 + (size_t)size;
+    r->pos = 4;
+    *present = size != 0;
+    return ZIDL_CDR_OK;
+}
+void zidl_cdr_end_optional_read(ZidlCdrReader *r, const ZidlCdrOptionalRead *s) {
+    size_t pos = r->pos;
+    *r = s->parent;
+    if (s->end == SIZE_MAX) r->pos = pos;
 }
 #endif

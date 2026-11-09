@@ -52,8 +52,24 @@ The [ordinary wide-wire checkpoint](native-cdr-wide-wire-slice.md) corrects
 wide-string counts and terminator handling across native and Java codecs, with
 independent endian/version/sequence vectors. The [mutable key-wire checkpoint](native-cdr-key-wire-slice.md)
 adds matching key-only frames and traversal through explicitly keyed nested
-structures, with boundary/cleanup vectors. Inheritance and keyless intermediary
-projection still need follow-up before the production switch.
+structures, with boundary/cleanup vectors. The inherited and intermediary
+projection follow-up is recorded below.
+
+The [inherited-frame and recursive projection checkpoint](native-cdr-key-projection-slice.md)
+now uses one frame for inherited members and projects through keyless structure
+intermediaries, arrays, sequences and aliases. Keyless topic behavior is preserved.
+Local root, integration, interoperability and installed-archive checks pass.
+The package/production switch remains pending.
+
+The [optional-wire checkpoint](native-cdr-optional-wire-slice.md) replaces the
+incorrect XCDR1 optional presence byte with parameter headers and scoped value
+alignment, retaining XCDR2 presence bytes. It adds independent long/compact
+header witnesses and preserves reader/writer state layouts.
+
+The [fixed-point checkpoint](native-cdr-fixed-slice.md) extracts packed BCD into
+one native core, fixes the 31-digit range and validates shape/digit/padding/sign
+inputs. Existing f64/double mappings remain approximate; Java's separate wide
+fixed-point gap and direct optional C++ arrays are tracked in the roadmap.
 
 ## Decision and motivation
 

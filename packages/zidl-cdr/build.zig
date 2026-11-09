@@ -52,6 +52,7 @@ pub fn build(b: *std.Build) void {
         const consumer = b.addSystemCommand(&.{ external_cc, "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZIDL_CDR_SHARED_CONSUMER", "-I" });
         consumer.addDirectoryArg(b.path("include"));
         consumer.addFileArg(b.path("test/shared_primitives.c"));
+        consumer.addFileArg(b.path("test/fixed_external.c"));
         consumer.addArtifactArg(lib);
         consumer.addArg("-o");
         const executable = consumer.addOutputFileArg("cdr-external-consumer");
@@ -75,6 +76,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const fixed_vectors = b.addWriteFiles();
+    const fixed_cases = b.createModule(.{ .root_source_file = fixed_vectors.addCopyFile(zidl_rt_dep.path("src/fixed_test_cases.zig"), "fixed_cases.zig"), .target = target });
     const test_mod = b.createModule(.{
         .root_source_file = b.path("test/roundtrip.zig"),
         .target = target,
@@ -83,8 +86,13 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "zidl_rt", .module = zidl_rt_mod },
+            .{ .name = "fixed_cases", .module = fixed_cases },
             .{ .name = "zidl_cdr", .module = c.mod },
         },
+    });
+    test_mod.addCSourceFile(.{
+        .file = b.path("test/optional.c"),
+        .flags = &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" },
     });
     test_mod.addIncludePath(b.path("include"));
     test_mod.linkLibrary(lib);
@@ -111,8 +119,13 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "zidl_rt", .module = zidl_rt_mod },
+            .{ .name = "fixed_cases", .module = fixed_cases },
             .{ .name = "adapter", .module = adapter_mod },
         },
+    });
+    shared_test_mod.addCSourceFile(.{
+        .file = b.path("test/optional.c"),
+        .flags = &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" },
     });
     shared_test_mod.addIncludePath(b.path("include"));
     shared_test_mod.addCSourceFile(.{

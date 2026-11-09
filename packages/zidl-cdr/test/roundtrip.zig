@@ -1257,3 +1257,12 @@ test "empty narrow strings accept a null content pointer without a zero-length m
     try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_string(&writer, null, 0));
     try testing.expectEqualSlices(u8, &.{ 1, 0, 0, 0, 0 }, &bytes);
 }
+
+extern fn optional_wire_tests() c_int;
+test "optional member C ABI independent wire witnesses" {
+    try std.testing.expectEqual(@as(c_int, 0), optional_wire_tests());
+}
+
+test "C reference fixed decimal contract" {
+    try @import("fixed_contract.zig").check(c);
+}

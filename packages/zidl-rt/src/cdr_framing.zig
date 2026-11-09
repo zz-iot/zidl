@@ -92,6 +92,63 @@ pub fn patchEmheader(storage: ?[]u8, len: usize, offset: usize, start: usize, or
     try storeWord(storage, len, offset, size, order);
 }
 
+/// XCDR1 optional values have exact lengths and their own alignment origin.
+/// Always emit the legal extended form, including for small member IDs.
+pub const OptionalWrite = extern struct {
+    length_offset: usize,
+    value_start: usize,
+    parent_pos: usize,
+};
+
+pub fn beginOptional(sink: anytype, member_id: u32, mu: bool) !OptionalWrite {
+    if (member_id > 0x0fffffff) return error.InvalidOptionalHeader;
+    const pad = (4 - sink.payloadPosition() % 4) % 4;
+    const zeros: [4]u8 = @splat(0);
+    if (pad != 0) try sink.writeBytes(zeros[0..pad]);
+    try sink.writeU16(0x7f01);
+    try sink.writeU16(8);
+    try sink.writeU32(member_id | (@as(u32, @intFromBool(mu)) << 30));
+    const offset = sink.byteLen();
+    try sink.writeU32(0);
+    const token = OptionalWrite{ .length_offset = offset, .value_start = sink.byteLen(), .parent_pos = sink.payloadPosition() };
+    sink.resetPayload();
+    return token;
+}
+
+pub fn optionalParentPosition(len: usize, token: OptionalWrite) error{InvalidPatch}!usize {
+    if (token.value_start > len or token.parent_pos > token.value_start or
+        token.length_offset > token.value_start or token.value_start - token.length_offset != 4)
+        return error.InvalidPatch;
+    return token.parent_pos + (len - token.value_start);
+}
+
+pub fn finishOptional(storage: ?[]u8, len: usize, token: OptionalWrite, order: primitives.ByteOrder) error{ InvalidPatch, Overflow }!void {
+    _ = try optionalParentPosition(len, token);
+    try storeWord(storage, len, token.length_offset, try payloadSize(len, token.value_start), order);
+}
+
+pub const OptionalValue = struct { start: usize, end: usize, must_understand: bool };
+
+pub fn readOptional(data: []const u8, pos: *usize, member_id: u32, order: primitives.ByteOrder) error{ EndOfStream, InvalidOptionalHeader }!OptionalValue {
+    if (member_id > 0x0fffffff) return error.InvalidOptionalHeader;
+    try cursor.alignPosition(pos, data.len, 4, 4);
+    const pid = try primitives.readUnsigned(u16, data, pos, 4, 8, order);
+    var size: u32 = try primitives.readUnsigned(u16, data, pos, 4, 8, order);
+    if (pid & 0x8000 != 0) return error.InvalidOptionalHeader;
+    var id: u32 = pid & 0x3fff;
+    var mu = pid & 0x4000 != 0;
+    if (id == 0x3f01) {
+        if (size != 8) return error.InvalidOptionalHeader;
+        const extended = try primitives.readUnsigned(u32, data, pos, 4, 8, order);
+        if (extended & 0x80000000 != 0) return error.InvalidOptionalHeader;
+        id = extended & 0x0fffffff;
+        mu = extended & 0x40000000 != 0;
+        size = try primitives.readUnsigned(u32, data, pos, 4, 8, order);
+    } else if (id > 0x3f00) return error.InvalidOptionalHeader;
+    if (id != member_id) return error.InvalidOptionalHeader;
+    return .{ .start = pos.*, .end = try bodyEnd(pos.*, size, data.len), .must_understand = mu };
+}
+
 pub fn bodyEnd(pos: usize, size: usize, limit: usize) error{EndOfStream}!usize {
     if (pos > limit or size > limit - pos) return error.EndOfStream;
     return pos + size;

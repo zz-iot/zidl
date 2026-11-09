@@ -153,6 +153,7 @@ const Generator = struct {
     coll_depth: u32 = 0,
     canonical_key: bool = false,
     wire_key: bool = false,
+    reader_window_id: usize = 0,
     alloc: std.mem.Allocator,
     opts: interface.Options,
     out: *std.ArrayList(u8),
@@ -282,7 +283,31 @@ const Generator = struct {
         }
     }
 
+    fn emitOptionalHelpers(self: *Generator, visibility: []const u8) !void {
+        const source = "VIS static int _cdrBeginOptionalWrite(java.nio.ByteBuffer b, int base, int version, int id, boolean mu, boolean present) {\n    if (version == 2) { b.put(present ? (byte)1 : (byte)0); return -1; }\n    _cdrAlign(b, base, 4); b.putShort((short)0x7f01); b.putShort((short)8);\n    b.putInt(id | (mu ? 0x40000000 : 0)); int offset = b.position(); b.putInt(0); return offset;\n}\nVIS static void _cdrEndOptionalWrite(java.nio.ByteBuffer b, int offset) {\n    if (offset >= 0) b.putInt(offset, b.position() - offset - 4);\n}\nVIS static final class _CdrOptional {\n    public final java.nio.ByteBuffer buffer;\n    public final int base, limit, end;\n    public final boolean present;\n    _CdrOptional(java.nio.ByteBuffer b, int origin, int parentLimit, int valueEnd, boolean exists) {\n        buffer = b; base = origin; limit = parentLimit; end = valueEnd; present = exists;\n    }\n    public void close() { buffer.limit(limit); if (end >= 0) buffer.position(end); }\n}\nVIS static _CdrOptional _cdrBeginOptionalRead(java.nio.ByteBuffer b, int base, int version, int id) {\n    if (version == 2) {\n        byte flag = b.get(); if (flag != 0 && flag != 1) throw new IllegalArgumentException(\"invalid optional presence\");\n        return new _CdrOptional(b, base, b.limit(), -1, flag != 0);\n    }\n    _cdrAlign(b, base, 4); int pid = Short.toUnsignedInt(b.getShort());\n    long size = Short.toUnsignedInt(b.getShort()); int actual = pid & 0x3fff;\n    if ((pid & 0x8000) != 0) throw new IllegalArgumentException(\"optional implementation extension\");\n    if (actual == 0x3f01) {\n        if (size != 8) throw new IllegalArgumentException(\"invalid optional extended header\");\n        int word = b.getInt(); if ((word & 0x80000000) != 0) throw new IllegalArgumentException(\"optional implementation extension\");\n        actual = word & 0x0fffffff; size = Integer.toUnsignedLong(b.getInt());\n    } else if (actual > 0x3f00) throw new IllegalArgumentException(\"reserved optional member ID\");\n    if (actual != id) throw new IllegalArgumentException(\"unexpected optional member ID\");\n    if (size > b.remaining()) throw new java.nio.BufferUnderflowException();\n    int start = b.position(), end = start + (int)size, limit = b.limit(); b.limit(end);\n    return new _CdrOptional(b, start, limit, end, size != 0);\n}";
+        var lines = std.mem.splitScalar(u8, source, '\n');
+        while (lines.next()) |line| {
+            try self.ind();
+            if (std.mem.startsWith(u8, line, "VIS")) try self.print("{s}{s}\n", .{ visibility, line[3..] }) else try self.print("{s}\n", .{line});
+        }
+    }
+
+    fn openOptionalRead(self: *Generator, m: ir.StructMember, extra: []const u8) !void {
+        try self.ind();
+        try self.print("{s}{{ _CdrOptional _optScope = _cdrBeginOptionalRead(_buf, _cdrBase, _xcdrVersion, {d});\n", .{ extra, m.annotations.memberId(0) });
+        try self.ind();
+        try self.print("{s}int _parentBase = _cdrBase; _cdrBase = _optScope.base;\n", .{extra});
+        try self.ind();
+        try self.print("{s}try {{\n", .{extra});
+    }
+
+    fn closeOptionalRead(self: *Generator, extra: []const u8) !void {
+        try self.ind();
+        try self.print("{s}}} finally {{ _cdrBase = _parentBase; _optScope.close(); }} }}\n", .{extra});
+    }
+
     fn emitCdrHelpers(self: *Generator) !void {
+        try self.emitOptionalHelpers("private");
         try self.emitKeyAlignmentHelper("private");
         try self.emitWideStringHelpers("private");
         try self.ind();
@@ -1788,6 +1813,8 @@ const Generator = struct {
     // ── CDR serialization emission ────────────────────────────────────────────
 
     fn emitMutableStructWrite(self: *Generator, s: *const ir.Struct, key_only: bool) anyerror!void {
+        const wire_fields = try canonical.wireFields(self.alloc, s, key_only);
+        defer self.alloc.free(wire_fields);
         const previous = self.wire_key;
         self.wire_key = key_only;
         defer self.wire_key = previous;
@@ -1800,8 +1827,12 @@ const Generator = struct {
         try self.write("    _cdrAlign(_buf, _cdrBase, 4);\n");
         try self.ind();
         try self.write("    int _dhPos = _buf.position(); _buf.putInt(0);\n");
-        for (s.members, 0..) |m, idx| {
-            if (key_only and !m.annotations.is_key) continue;
+        for (wire_fields) |field| {
+            var m = field.member.*;
+            const access_name = if (field.base_depth == 0) try self.alloc.dupe(u8, m.name) else try std.fmt.allocPrint(self.alloc, "get_{s}()", .{m.name});
+            defer self.alloc.free(access_name);
+            m.name = access_name;
+            const idx = field.index;
             const member_id: u32 = memberIdAtJava(m, idx);
             const mu_flag = m.annotations.must_understand;
             const lc_opt = lcForJavaTypeRef(m.type_ref, m.dimensions);
@@ -1820,7 +1851,7 @@ const Generator = struct {
                 if (lc_opt) |_| {
                     try self.print("        _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0x{X:0>8});\n", .{fword});
                 } else {
-                    try self.print("        _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0x{X:0>8}); int _niPos_{s} = _buf.position(); _buf.putInt(0);\n", .{ vword, m.name });
+                    try self.print("        _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0x{X:0>8}); int _niPos_{s} = _buf.position(); _buf.putInt(0);\n", .{ vword, field.member.name });
                 }
                 const access = try std.fmt.allocPrint(self.alloc, "this.{s}", .{m.name});
                 defer self.alloc.free(access);
@@ -1831,7 +1862,7 @@ const Generator = struct {
                 }
                 if (lc_opt == null) {
                     try self.ind();
-                    try self.print("        _buf.putInt(_niPos_{s}, _buf.position() - _niPos_{s} - 4);\n", .{ m.name, m.name });
+                    try self.print("        _buf.putInt(_niPos_{s}, _buf.position() - _niPos_{s} - 4);\n", .{ field.member.name, field.member.name });
                 }
                 try self.ind();
                 try self.write("    }\n");
@@ -1840,12 +1871,12 @@ const Generator = struct {
                 if (lc_opt) |_| {
                     try self.print("    _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0x{X:0>8});\n", .{fword});
                 } else {
-                    try self.print("    _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0x{X:0>8}); int _niPos_{s} = _buf.position(); _buf.putInt(0);\n", .{ vword, m.name });
+                    try self.print("    _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0x{X:0>8}); int _niPos_{s} = _buf.position(); _buf.putInt(0);\n", .{ vword, field.member.name });
                 }
                 try self.emitMemberSerialize(m, "    ");
                 if (lc_opt == null) {
                     try self.ind();
-                    try self.print("    _buf.putInt(_niPos_{s}, _buf.position() - _niPos_{s} - 4);\n", .{ m.name, m.name });
+                    try self.print("    _buf.putInt(_niPos_{s}, _buf.position() - _niPos_{s} - 4);\n", .{ field.member.name, field.member.name });
                 }
             }
         }
@@ -1853,26 +1884,49 @@ const Generator = struct {
         try self.write("    _buf.putInt(_dhPos, _buf.position() - _dhPos - 4);\n");
     }
 
-    fn emitStructSerializeFns(self: *Generator, s: *const ir.Struct) anyerror!void {
-        const ext = s.annotations.extensibility;
-        const appendable = ext == .appendable;
-        const mutable = ext == .mutable;
+    fn emitWireMemberRead(self: *Generator, field: canonical.Field, out_var: []const u8, extra: []const u8, present: bool) anyerror!void {
+        const m = field.member.*;
+        if (field.base_depth != 0 and m.annotations.is_optional and !present) {
+            try self.openOptionalRead(m, extra);
+            try self.ind();
+            try self.print("{s}if (_optScope.present) {{\n", .{extra});
+            try self.emitWireMemberRead(field, out_var, extra, true);
+            try self.ind();
+            try self.print("{s}}} else {s}.set_{s}(null);\n", .{ extra, out_var, m.name });
+            try self.closeOptionalRead(extra);
+            return;
+        }
 
-        const has_key = structHasKeyJava(s);
-
-        try self.write("\n");
+        if (field.base_depth == 0) {
+            if (present) try self.emitMemberDeserializePresent(m, out_var, extra) else try self.emitMemberDeserializeKey(m, out_var, extra);
+            return;
+        }
+        const ty = try self.memberJavaType(m);
+        defer self.alloc.free(ty);
         try self.ind();
-        try self.print("public static final boolean HAS_KEY = {s};\n", .{if (has_key) "true" else "false"});
+        try self.print("{s}{{ {s} _memberValue = {s}.get_{s}();\n", .{ extra, ty, out_var, m.name });
+        if (m.dimensions.len != 0) try self.emitDeserializeArray(m.type_ref, "_memberValue", m.dimensions, extra, 0) else try self.emitDeserializeForTypeRef(m.type_ref, "_memberValue", extra);
+        try self.ind();
+        try self.print("{s}{s}.set_{s}(_memberValue); }}\n", .{ extra, out_var, m.name });
+    }
 
+    fn emitStructValueFns(self: *Generator, s: *const ir.Struct, projection: bool) anyerror!void {
+        const mutable = s.annotations.extensibility == .mutable;
+        const appendable = s.annotations.extensibility == .appendable;
+        const wire_fields = try canonical.wireFields(self.alloc, s, projection);
+        defer self.alloc.free(wire_fields);
+        const previous = self.wire_key;
+        self.wire_key = projection;
+        defer self.wire_key = previous;
         // serialize
         try self.write("\n");
         try self.ind();
-        try self.write("public void serialize(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {\n");
+        try self.print("public void {s}(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {{\n", .{if (projection) "serializeKeyValue" else "serialize"});
         try self.ind();
         try self.write("    _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
 
         if (mutable) {
-            try self.emitMutableStructWrite(s, false);
+            try self.emitMutableStructWrite(s, projection);
         } else {
             if (appendable) {
                 try self.ind();
@@ -1881,18 +1935,18 @@ const Generator = struct {
                 try self.write("    if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _dhPos = _buf.position(); _buf.putInt(0); }\n");
             }
 
-            if (s.base) |base| {
-                const qname = try self.qualNameToJava(ir.typeDeclQualifiedName(base));
-                defer self.alloc.free(qname);
-                try self.ind();
-                try self.print("    super.serialize(_buf, _cdrBase, _xcdrVersion);\n", .{});
-            }
-
-            for (s.members) |m| {
+            for (wire_fields) |field| {
+                var m = field.member.*;
+                const access_name = if (field.base_depth == 0) try self.alloc.dupe(u8, m.name) else try std.fmt.allocPrint(self.alloc, "get_{s}()", .{m.name});
+                defer self.alloc.free(access_name);
+                m.name = access_name;
                 if (m.annotations.is_optional) {
-                    // XCDR2: write bool presence flag (1 byte, no alignment), then value if present.
                     try self.ind();
-                    try self.print("    _buf.put(this.{s} != null ? (byte)1 : (byte)0);\n", .{m.name});
+                    try self.print("    {{ int _parentBase = _cdrBase; int _optOffset = _cdrBeginOptionalWrite(_buf, _cdrBase, _xcdrVersion, {d}, {}, this.{s} != null);\n", .{ m.annotations.memberId(@intCast(field.index)), m.annotations.must_understand, m.name });
+                    try self.ind();
+                    try self.write("    if (_xcdrVersion == 1) _cdrBase = _buf.position();\n");
+                    try self.ind();
+                    try self.write("    try {\n");
                     try self.ind();
                     try self.print("    if (this.{s} != null) {{\n", .{m.name});
                     const access = try std.fmt.allocPrint(self.alloc, "this.{s}", .{m.name});
@@ -1904,6 +1958,10 @@ const Generator = struct {
                     }
                     try self.ind();
                     try self.write("    }\n");
+                    try self.ind();
+                    try self.write("    _cdrEndOptionalWrite(_buf, _optOffset);\n");
+                    try self.ind();
+                    try self.write("    } finally { _cdrBase = _parentBase; } }\n");
                     continue;
                 }
                 try self.emitMemberSerialize(m, "    ");
@@ -1920,85 +1978,135 @@ const Generator = struct {
         // deserializeFrom
         try self.write("\n");
         try self.ind();
-        try self.print("public static {s}{s} deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {{\n", .{ self.opts.type_prefix, s.name });
+        try self.print("public static {s}{s} {s}(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {{\n", .{ self.opts.type_prefix, s.name, if (projection) "deserializeKeyValue" else "deserializeFrom" });
         try self.ind();
         try self.write("    _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
         try self.ind();
         try self.print("    {s}{s} _out = new {s}{s}();\n", .{ self.opts.type_prefix, s.name, self.opts.type_prefix, s.name });
 
-        if (mutable) {
-            // @mutable: read DHEADER for end pos, loop on EMHEADER-framed members.
-            try self.ind();
-            try self.write("    _cdrAlign(_buf, _cdrBase, 4); int _emEnd = _buf.position() + _buf.getInt();\n");
-            try self.ind();
-            try self.write("    while (_buf.position() < _emEnd) {\n");
-            try self.ind();
-            try self.write("        _cdrAlign(_buf, _cdrBase, 4); int _emWord = _buf.getInt(); int _memberId = _emWord & 0x0FFFFFFF;\n");
-            try self.ind();
-            try self.write("        int _emLc = (_emWord >>> 28) & 0x7; int _emPayload; if (_emLc == 0) _emPayload = 1; else if (_emLc == 1) _emPayload = 2; else if (_emLc == 2) _emPayload = 4; else if (_emLc == 3) _emPayload = 8; else if (_emLc == 4) _emPayload = _buf.getInt(); else { int _emNext = _buf.getInt(_buf.position()); _emPayload = 4 + (_emLc == 5 ? _emNext : _emLc == 6 ? _emNext * 4 : _emNext * 8); }\n");
-            try self.ind();
-            try self.write("        switch (_memberId) {\n");
-            for (s.members, 0..) |m, idx| {
-                const member_id: u32 = memberIdAtJava(m, idx);
+        if (projection) {
+            if (mutable) {
                 try self.ind();
-                try self.print("            case {d}:\n", .{member_id});
-                if (m.annotations.is_optional) {
-                    // @mutable + @optional: EMHEADER presence = value present; no bool flag.
-                    const out_expr = try std.fmt.allocPrint(self.alloc, "_out.{s}", .{m.name});
-                    defer self.alloc.free(out_expr);
-                    if (m.dimensions.len > 0) {
-                        try self.emitDeserializeArray(m.type_ref, out_expr, m.dimensions, "                ", 0);
-                    } else {
-                        try self.emitDeserializeForTypeRef(m.type_ref, out_expr, "                ");
-                    }
-                } else {
-                    try self.emitMemberDeserialize(m, "_out", "                ");
+                try self.write("    if (_xcdrVersion != 2) throw new IllegalArgumentException(\"mutable key requires XCDR2\");\n");
+                try self.ind();
+                try self.write("    _cdrAlign(_buf, _cdrBase, 4); int _frameLimit = _buf.limit(); int _emSize = _buf.getInt();\n");
+                try self.ind();
+                try self.write("    if (_emSize < 0 || _emSize > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
+                try self.ind();
+                try self.write("    int _emEnd = _buf.position() + _emSize; _buf.limit(_emEnd);\n");
+                try self.ind();
+                try self.write("    try { while (_buf.position() < _emEnd) {\n");
+                try self.ind();
+                try self.write("        int _pad = (4 - (_buf.position() - _cdrBase) % 4) % 4; if (_pad > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
+                try self.ind();
+                try self.write("        _buf.position(_buf.position() + _pad); if (_buf.position() == _emEnd) break;\n");
+                try self.ind();
+                try self.write("        int _emWord = _buf.getInt(); int _memberId = _emWord & 0x0FFFFFFF; int _emLc = (_emWord >>> 28) & 7; long _emPayload;\n");
+                try self.ind();
+                try self.write("        if (_emLc < 4) _emPayload = 1L << _emLc; else if (_emLc == 4) _emPayload = Integer.toUnsignedLong(_buf.getInt()); else { long _next = Integer.toUnsignedLong(_buf.getInt(_buf.position())); _emPayload = 4 + _next * (_emLc == 5 ? 1L : _emLc == 6 ? 4L : 8L); }\n");
+                try self.ind();
+                try self.write("        if (_emPayload > 0xFFFFFFFFL) throw new IllegalArgumentException(\"EMHEADER size overflow\"); if (_emPayload > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
+                try self.ind();
+                try self.write("        int _memberEnd = _buf.position() + (int)_emPayload; _buf.limit(_memberEnd);\n");
+                try self.ind();
+                try self.write("        try { switch (_memberId) {\n");
+                for (wire_fields) |field| {
+                    const m = field.member.*;
+                    const idx = field.index;
+                    const member_id: u32 = memberIdAtJava(m, idx);
+                    try self.ind();
+                    try self.print("            case {d}:\n", .{member_id});
+                    try self.emitWireMemberRead(field, "_out", "                ", true);
+                    try self.ind();
+                    try self.write("                break;\n");
                 }
                 try self.ind();
-                try self.write("                break;\n");
-            }
-            try self.ind();
-            try self.write("            default: _buf.position(_buf.position() + _emPayload); break;\n");
-            try self.ind();
-            try self.write("        }\n");
-            try self.ind();
-            try self.write("    }\n");
-        } else {
-            if (appendable) {
+                try self.write("            default: if ((_emWord & 0x80000000) != 0) throw new IllegalArgumentException(\"unknown must-understand key member\"); break;\n");
                 try self.ind();
-                try self.write("    if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); } // skip DHEADER\n");
-            }
+                try self.write("        } } finally { _buf.limit(_emEnd); }\n");
+                try self.ind();
+                try self.write("        _buf.position(_memberEnd);\n");
+                try self.ind();
+                try self.write("    } } finally { _buf.limit(_frameLimit); }\n");
+            } else {
+                if (appendable) {
+                    try self.ind();
+                    try self.write("    int _keyLimit = _buf.limit(), _keyEnd = _keyLimit;\n");
+                    try self.ind();
+                    try self.write("    if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); int _size = _buf.getInt(); if (_size < 0 || _size > _buf.remaining()) throw new java.nio.BufferUnderflowException(); _keyEnd = _buf.position() + _size; _buf.limit(_keyEnd); }\n");
+                    try self.ind();
+                    try self.write("    try {\n");
+                }
 
-            for (s.members) |m| {
-                if (m.annotations.is_optional) {
-                    // XCDR2: read bool presence flag (1 byte), then value if present.
-                    try self.ind();
-                    try self.print("    {{ boolean _ip_{s} = _buf.get() != 0;\n", .{m.name});
-                    try self.ind();
-                    try self.print("      if (_ip_{s}) {{\n", .{m.name});
-                    const out_expr = try std.fmt.allocPrint(self.alloc, "_out.{s}", .{m.name});
-                    defer self.alloc.free(out_expr);
-                    if (m.dimensions.len > 0) {
-                        try self.emitDeserializeArray(m.type_ref, out_expr, m.dimensions, "        ", 0);
-                    } else {
-                        try self.emitDeserializeForTypeRef(m.type_ref, out_expr, "        ");
-                    }
-                    try self.ind();
-                    try self.write("      } else {\n");
-                    try self.ind();
-                    try self.print("        _out.{s} = null;\n", .{m.name});
-                    try self.ind();
-                    try self.write("      }\n    }\n");
-                    continue;
+                for (wire_fields) |field| {
+                    try self.emitWireMemberRead(field, "_out", "    ", false);
                 }
-                try self.emitMemberDeserialize(m, "_out", "    ");
+                if (appendable) {
+                    try self.ind();
+                    try self.write("    } finally { _buf.limit(_keyLimit); }\n");
+                    try self.ind();
+                    try self.write("    if (_xcdrVersion == 2) _buf.position(_keyEnd);\n");
+                }
+            }
+        } else {
+            if (mutable) {
+                // @mutable: read DHEADER for end pos, loop on EMHEADER-framed members.
+                try self.ind();
+                try self.write("    _cdrAlign(_buf, _cdrBase, 4); int _emEnd = _buf.position() + _buf.getInt();\n");
+                try self.ind();
+                try self.write("    while (_buf.position() < _emEnd) {\n");
+                try self.ind();
+                try self.write("        _cdrAlign(_buf, _cdrBase, 4); int _emWord = _buf.getInt(); int _memberId = _emWord & 0x0FFFFFFF;\n");
+                try self.ind();
+                try self.write("        int _emLc = (_emWord >>> 28) & 0x7; int _emPayload; if (_emLc == 0) _emPayload = 1; else if (_emLc == 1) _emPayload = 2; else if (_emLc == 2) _emPayload = 4; else if (_emLc == 3) _emPayload = 8; else if (_emLc == 4) _emPayload = _buf.getInt(); else { int _emNext = _buf.getInt(_buf.position()); _emPayload = 4 + (_emLc == 5 ? _emNext : _emLc == 6 ? _emNext * 4 : _emNext * 8); }\n");
+                try self.ind();
+                try self.write("        switch (_memberId) {\n");
+                for (wire_fields) |field| {
+                    const m = field.member.*;
+                    const idx = field.index;
+                    const member_id: u32 = memberIdAtJava(m, idx);
+                    try self.ind();
+                    try self.print("            case {d}:\n", .{member_id});
+                    try self.emitWireMemberRead(field, "_out", "                ", true);
+                    try self.ind();
+                    try self.write("                break;\n");
+                }
+                try self.ind();
+                try self.write("            default: _buf.position(_buf.position() + _emPayload); break;\n");
+                try self.ind();
+                try self.write("        }\n");
+                try self.ind();
+                try self.write("    }\n");
+            } else {
+                if (appendable) {
+                    try self.ind();
+                    try self.write("    if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); } // skip DHEADER\n");
+                }
+
+                for (wire_fields) |field| {
+                    try self.emitWireMemberRead(field, "_out", "    ", false);
+                }
             }
         }
-
         try self.ind();
         try self.write("    return _out;\n");
         try self.ind();
         try self.write("}\n");
+    }
+
+    fn emitStructSerializeFns(self: *Generator, s: *const ir.Struct) anyerror!void {
+        const ext = s.annotations.extensibility;
+        const appendable = ext == .appendable;
+        const mutable = ext == .mutable;
+
+        const has_key = structHasKeyJava(s);
+
+        try self.write("\n");
+        try self.ind();
+        try self.print("public static final boolean HAS_KEY = {s};\n", .{if (has_key) "true" else "false"});
+
+        try self.emitStructValueFns(s, false);
+        try self.emitStructValueFns(s, true);
 
         // skip
         try self.write("\n");
@@ -2056,147 +2164,15 @@ const Generator = struct {
 
             try self.write("\n");
             try self.ind();
-            try self.write("protected void serializeKeyFields(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {\n");
-            if (s.base) |base| {
-                if (typeDeclHasKeyJava(base)) {
-                    try self.ind();
-                    try self.write("    super.serializeKeyFields(_buf, _cdrBase, _xcdrVersion);\n");
-                }
-            }
-            for (s.members) |m| {
-                if (!m.annotations.is_key) continue;
-                try self.emitMemberSerialize(m, "    ");
-            }
-            try self.ind();
-            try self.write("}\n");
-
-            try self.write("\n");
-            try self.ind();
             try self.write("public void serializeKey(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {\n");
             try self.ind();
-            try self.write("    _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
-            if (mutable) {
-                try self.emitMutableStructWrite(s, true);
-            } else {
-                if (appendable) {
-                    try self.ind();
-                    try self.write("    int _dhPos = 0;\n");
-                    try self.ind();
-                    try self.write("    if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _dhPos = _buf.position(); _buf.putInt(0); }\n");
-                }
-                try self.ind();
-                try self.write("    serializeKeyFields(_buf, _cdrBase, _xcdrVersion);\n");
-                if (appendable) {
-                    try self.ind();
-                    try self.write("    if (_xcdrVersion == 2) { _buf.putInt(_dhPos, _buf.position() - _dhPos - 4); }\n");
-                }
-            }
+            try self.write("    serializeKeyValue(_buf, _cdrBase, _xcdrVersion);\n");
             try self.ind();
-            try self.write("}\n");
-
-            try self.write("\n");
+            try self.write("}\n\n");
             try self.ind();
             try self.print("public static {s}{s} deserializeKey(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {{\n", .{ self.opts.type_prefix, s.name });
             try self.ind();
-            try self.write("    _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
-            try self.ind();
-            try self.print("    {s}{s} _out = new {s}{s}();\n", .{ self.opts.type_prefix, s.name, self.opts.type_prefix, s.name });
-            try self.ind();
-            try self.write("    deserializeKeyInto(_out, _buf, _cdrBase, _xcdrVersion);\n");
-            try self.ind();
-            try self.write("    return _out;\n");
-            try self.ind();
-            try self.write("}\n");
-
-            try self.write("\n");
-            try self.ind();
-            try self.print("protected static void deserializeKeyInto({s}{s} _out, java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {{\n", .{ self.opts.type_prefix, s.name });
-            if (mutable) {
-                try self.ind();
-                try self.write("    if (_xcdrVersion != 2) throw new IllegalArgumentException(\"mutable key requires XCDR2\");\n");
-                try self.ind();
-                try self.write("    _cdrAlign(_buf, _cdrBase, 4); int _frameLimit = _buf.limit(); int _emSize = _buf.getInt();\n");
-                try self.ind();
-                try self.write("    if (_emSize < 0 || _emSize > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
-                try self.ind();
-                try self.write("    int _emEnd = _buf.position() + _emSize; _buf.limit(_emEnd);\n");
-                try self.ind();
-                try self.write("    try { while (_buf.position() < _emEnd) {\n");
-                try self.ind();
-                try self.write("        int _pad = (4 - (_buf.position() - _cdrBase) % 4) % 4; if (_pad > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
-                try self.ind();
-                try self.write("        _buf.position(_buf.position() + _pad); if (_buf.position() == _emEnd) break;\n");
-                try self.ind();
-                try self.write("        int _emWord = _buf.getInt(); int _memberId = _emWord & 0x0FFFFFFF; int _emLc = (_emWord >>> 28) & 7; long _emPayload;\n");
-                try self.ind();
-                try self.write("        if (_emLc < 4) _emPayload = 1L << _emLc; else if (_emLc == 4) _emPayload = Integer.toUnsignedLong(_buf.getInt()); else { long _next = Integer.toUnsignedLong(_buf.getInt(_buf.position())); _emPayload = 4 + _next * (_emLc == 5 ? 1L : _emLc == 6 ? 4L : 8L); }\n");
-                try self.ind();
-                try self.write("        if (_emPayload > 0xFFFFFFFFL) throw new IllegalArgumentException(\"EMHEADER size overflow\"); if (_emPayload > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
-                try self.ind();
-                try self.write("        int _memberEnd = _buf.position() + (int)_emPayload; _buf.limit(_memberEnd);\n");
-                try self.ind();
-                try self.write("        try { switch (_memberId) {\n");
-                for (s.members, 0..) |m, idx| {
-                    if (!m.annotations.is_key) continue;
-                    const member_id: u32 = memberIdAtJava(m, idx);
-                    try self.ind();
-                    try self.print("            case {d}:\n", .{member_id});
-                    try self.emitMemberDeserializePresent(m, "_out", "                ");
-                    try self.ind();
-                    try self.write("                break;\n");
-                }
-                try self.ind();
-                try self.write("            default: if ((_emWord & 0x80000000) != 0) throw new IllegalArgumentException(\"unknown must-understand key member\"); break;\n");
-                try self.ind();
-                try self.write("        } } finally { _buf.limit(_emEnd); }\n");
-                try self.ind();
-                try self.write("        _buf.position(_memberEnd);\n");
-                try self.ind();
-                try self.write("    } } finally { _buf.limit(_frameLimit); }\n");
-            } else {
-                // XCDR2 has a real DHEADER to bound the key-only payload;
-                // XCDR1 has none, so (like skip() above) it must fall back to
-                // the exact @final key-read logic -- including the
-                // leading-@key-member ordering constraint, which applies
-                // just as much to an @appendable type read as XCDR1 CDR1 as
-                // it does to a genuinely @final type.
-                if (appendable) {
-                    try self.ind();
-                    try self.write("    int _keyEnd = 0;\n");
-                    try self.ind();
-                    try self.write("    if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _keyEnd = _buf.position() + 4 + _buf.getInt(); }\n");
-                }
-                if (s.base) |base| {
-                    const qname = try self.qualNameToJava(ir.typeDeclQualifiedName(base));
-                    defer self.alloc.free(qname);
-                    if (typeDeclHasKeyJava(base)) {
-                        try self.ind();
-                        try self.print("    {s}.deserializeKeyInto(_out, _buf, _cdrBase, _xcdrVersion);\n", .{qname});
-                    } else {
-                        try self.ind();
-                        try self.print("    {s}.skip(_buf, _cdrBase, _xcdrVersion);\n", .{qname});
-                    }
-                }
-                // Key-only payload -- reads key members in order, no skips.
-                // Unconditionally correct here regardless of position: this
-                // method's contract is "the wire bytes are a key-only
-                // payload" (nothing but the @key members, back to back --
-                // see serializeKeyFields, which never emits non-key bytes),
-                // so there is nothing between two key members to skip. A
-                // non-leading @key member is only a hazard if this method is
-                // fed a *full* sample instead -- that caller wants
-                // computeKeyHashFromCdr (deserializeFrom-based, above), not
-                // deserializeKey/deserializeKeyInto.
-                for (s.members) |m| {
-                    if (m.annotations.is_key) {
-                        try self.emitMemberDeserializeKey(m, "_out", "    ");
-                    }
-                }
-                if (appendable) {
-                    try self.ind();
-                    try self.write("    if (_xcdrVersion == 2) { _buf.position(_keyEnd); }\n");
-                }
-            }
+            try self.write("    return deserializeKeyValue(_buf, _cdrBase, _xcdrVersion);\n");
             try self.ind();
             try self.write("}\n");
 
@@ -2389,11 +2365,11 @@ const Generator = struct {
                     const int_expr = try intFieldExprJava(self.alloc, m.type_ref, expr);
                     defer self.alloc.free(int_expr);
                     try self.ind();
-                    try self.print("        case \"{s}\": return {s};\n", .{ m.name, int_expr });
+                    if (m.annotations.is_optional) try self.print("        case \"{s}\": return {s} == null ? null : {s};\n", .{ m.name, expr, int_expr }) else try self.print("        case \"{s}\": return {s};\n", .{ m.name, int_expr });
                 },
                 .float_like => {
                     try self.ind();
-                    try self.print("        case \"{s}\": return (double) {s};\n", .{ m.name, expr });
+                    if (m.annotations.is_optional) try self.print("        case \"{s}\": return {s} == null ? null : (double) {s};\n", .{ m.name, expr, expr }) else try self.print("        case \"{s}\": return (double) {s};\n", .{ m.name, expr });
                 },
                 .string_like => {
                     try self.ind();
@@ -2532,10 +2508,9 @@ const Generator = struct {
         const out_expr = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ out_var, m.name });
         defer self.alloc.free(out_expr);
         if (m.annotations.is_optional) {
+            try self.openOptionalRead(m, extra);
             try self.ind();
-            try self.print("{s}{{ boolean _present_{s} = _buf.get() != 0;\n", .{ extra, m.name });
-            try self.ind();
-            try self.print("{s}  if (_present_{s}) {{\n", .{ extra, m.name });
+            try self.print("{s}  if (_optScope.present) {{\n", .{extra});
             const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
             defer self.alloc.free(inner);
             if (m.dimensions.len > 0) {
@@ -2545,8 +2520,7 @@ const Generator = struct {
             }
             try self.ind();
             try self.print("{s}  }} else {{ {s} = null; }}\n", .{ extra, out_expr });
-            try self.ind();
-            try self.print("{s}}}\n", .{extra});
+            try self.closeOptionalRead(extra);
             return;
         }
         if (m.dimensions.len > 0) {
@@ -2573,10 +2547,9 @@ const Generator = struct {
 
     fn emitMemberSkip(self: *Generator, m: ir.StructMember, extra: []const u8) anyerror!void {
         if (m.annotations.is_optional) {
+            try self.openOptionalRead(m, extra);
             try self.ind();
-            try self.print("{s}{{ boolean _present_{s} = _buf.get() != 0;\n", .{ extra, m.name });
-            try self.ind();
-            try self.print("{s}  if (_present_{s}) {{\n", .{ extra, m.name });
+            try self.print("{s}  if (_xcdrVersion == 2 && _optScope.present) {{\n", .{extra});
             const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
             defer self.alloc.free(inner);
             if (m.dimensions.len > 0) {
@@ -2586,8 +2559,7 @@ const Generator = struct {
             }
             try self.ind();
             try self.print("{s}  }}\n", .{extra});
-            try self.ind();
-            try self.print("{s}}}\n", .{extra});
+            try self.closeOptionalRead(extra);
             return;
         }
         if (m.dimensions.len > 0) {
@@ -2619,6 +2591,30 @@ const Generator = struct {
         defer self.alloc.free(n);
         try self.ind();
         try self.print("{s}if ({s} >= 0) _buf.putInt({s}, _buf.position() - {s} - 4); }}\n", .{ extra, n, n, n });
+    }
+
+    fn openKeyReadWindow(self: *Generator, needed: bool, extra: []const u8) !?usize {
+        if (!self.wire_key or !needed) {
+            try self.emitSkipCollectionDheader(needed, extra);
+            return null;
+        }
+        const id = self.reader_window_id;
+        self.reader_window_id += 1;
+        try self.ind();
+        try self.print("{s}{{ int _keyLimit_{d} = _buf.limit(), _keyEnd_{d} = -1;\n", .{ extra, id, id });
+        try self.ind();
+        try self.print("{s}if (_xcdrVersion == 2) {{ _cdrAlign(_buf, _cdrBase, 4); int _size = _buf.getInt(); if (_size < 0 || _size > _buf.remaining()) throw new java.nio.BufferUnderflowException(); _keyEnd_{d} = _buf.position() + _size; _buf.limit(_keyEnd_{d}); }}\n", .{ extra, id, id });
+        try self.ind();
+        try self.print("{s}try {{\n", .{extra});
+        return id;
+    }
+
+    fn closeKeyReadWindow(self: *Generator, window: ?usize, extra: []const u8) !void {
+        const id = window orelse return;
+        try self.ind();
+        try self.print("{s}}} finally {{ _buf.limit(_keyLimit_{d}); }}\n", .{ extra, id });
+        try self.ind();
+        try self.print("{s}if (_keyEnd_{d} >= 0) _buf.position(_keyEnd_{d}); }}\n", .{ extra, id, id });
     }
 
     fn emitSkipCollectionDheader(self: *Generator, needed: bool, extra: []const u8) !void {
@@ -2775,9 +2771,9 @@ const Generator = struct {
         access: []const u8,
         extra: []const u8,
     ) anyerror!void {
-        if (!self.canonical_key and self.wire_key and tr == .named and typeDeclHasKeyJava(tr.named)) {
+        if (!self.canonical_key and self.wire_key and tr == .named and tr.named == .struct_) {
             try self.ind();
-            try self.print("{s}{s}.serializeKey(_buf, _cdrBase, _xcdrVersion);\n", .{ extra, access });
+            try self.print("{s}{s}.serializeKeyValue(_buf, _cdrBase, _xcdrVersion);\n", .{ extra, access });
             return;
         }
         if (self.canonical_key) switch (tr) {
@@ -2948,11 +2944,11 @@ const Generator = struct {
         out_expr: []const u8,
         extra: []const u8,
     ) anyerror!void {
-        if (self.wire_key and tr == .named and typeDeclHasKeyJava(tr.named)) {
+        if (self.wire_key and tr == .named and tr.named == .struct_) {
             const qname = try self.qualNameToJava(ir.typeDeclQualifiedName(tr.named));
             defer self.alloc.free(qname);
             try self.ind();
-            try self.print("{s}{s} = {s}.deserializeKey(_buf, _cdrBase, _xcdrVersion);\n", .{ extra, out_expr, qname });
+            try self.print("{s}{s} = {s}.deserializeKeyValue(_buf, _cdrBase, _xcdrVersion);\n", .{ extra, out_expr, qname });
             return;
         }
         switch (tr) {
@@ -2988,7 +2984,7 @@ const Generator = struct {
                 const i_var = try std.fmt.allocPrint(self.alloc, "_i_{s}", .{safe_name});
                 defer self.alloc.free(i_var);
 
-                try self.emitSkipCollectionDheader(!cdr_skip.isPrimitiveElement(seq.element.*), extra);
+                const key_window = try self.openKeyReadWindow(!cdr_skip.isPrimitiveElement(seq.element.*), extra);
                 try self.ind();
                 try self.print(
                     "{s}_cdrAlign(_buf, _cdrBase, 4); int {s} = _buf.getInt();\n",
@@ -3015,6 +3011,7 @@ const Generator = struct {
                 self.coll_depth -= 1;
                 try self.ind();
                 try self.print("{s}}}\n", .{extra});
+                try self.closeKeyReadWindow(key_window, extra);
             },
             .named => |td| switch (td) {
                 .enum_ => |e| {
@@ -3110,11 +3107,11 @@ const Generator = struct {
         seq_expr: []const u8,
         extra: []const u8,
     ) anyerror!void {
-        if (self.wire_key and elem_tr == .named and typeDeclHasKeyJava(elem_tr.named)) {
+        if (self.wire_key and elem_tr == .named and elem_tr.named == .struct_) {
             const qname = try self.qualNameToJava(ir.typeDeclQualifiedName(elem_tr.named));
             defer self.alloc.free(qname);
             try self.ind();
-            try self.print("{s}{s}.add({s}.deserializeKey(_buf, _cdrBase, _xcdrVersion));\n", .{ extra, seq_expr, qname });
+            try self.print("{s}{s}.add({s}.deserializeKeyValue(_buf, _cdrBase, _xcdrVersion));\n", .{ extra, seq_expr, qname });
             return;
         }
         switch (elem_tr) {
@@ -3241,8 +3238,9 @@ const Generator = struct {
         extra: []const u8,
         depth: usize,
     ) anyerror!void {
-        if (depth == 0) try self.emitSkipCollectionDheader(!cdr_skip.isPrimitiveElement(cdr_skip.arrayInnermost(elem_tr)), extra);
+        const key_window = if (depth == 0) try self.openKeyReadWindow(!cdr_skip.isPrimitiveElement(cdr_skip.arrayInnermost(elem_tr)), extra) else null;
         try self.emitDeserializeArrayDims(elem_tr, base_access, dims, extra, depth);
+        try self.closeKeyReadWindow(key_window, extra);
     }
 
     fn emitDeserializeArrayDims(
@@ -8937,7 +8935,7 @@ fn generateCdrUtils(
     try gen.write("    public static void _cdrAlign(java.nio.ByteBuffer _buf, int _cdrBase, int _align) {\n");
     try gen.write("        if (_align <= 1) return;\n");
     try gen.write("        int _p = (_buf.position() - _cdrBase) % _align;\n");
-    try gen.write("        if (_p != 0) { for (int _i = 0; _i < _align - _p; _i++) _buf.put((byte)0); }\n");
+    try gen.write("        if (_p != 0) _buf.position(_buf.position() + (_align - _p));\n");
     try gen.write("    }\n");
     try gen.write("    public static void _cdrWriteString(java.nio.ByteBuffer _buf, int _cdrBase, String _s) {\n");
     try gen.write("        _cdrAlign(_buf, _cdrBase, 4);\n");
@@ -8946,6 +8944,7 @@ fn generateCdrUtils(
     try gen.write("        _buf.put(_b);\n");
     try gen.write("        _buf.put((byte)0);\n");
     try gen.write("    }\n");
+    try gen.emitOptionalHelpers("public");
     try gen.write("    public static String _cdrReadString(java.nio.ByteBuffer _buf, int _cdrBase) {\n");
     try gen.write("        _cdrAlign(_buf, _cdrBase, 4);\n");
     try gen.write("        int _len = _buf.getInt() - 1;\n");
@@ -10054,12 +10053,12 @@ test "java: @optional scalar field uses boxed type" {
     , "test", "this.maybe_x = null;");
 }
 
-test "java: @optional CDR serialize writes presence flag then value" {
+test "java: @optional CDR serialize scopes versioned framing" {
     const alloc = testing.allocator;
     // Presence flag written before value
     try testGen(alloc,
         \\struct Opt { @optional long maybe_x; long y; };
-    , "test", "_buf.put(this.maybe_x != null ? (byte)1 : (byte)0);");
+    , "test", "_cdrBeginOptionalWrite(_buf, _cdrBase, _xcdrVersion, 0, false, this.maybe_x != null);");
     // Value written inside null-check
     try testGen(alloc,
         \\struct Opt { @optional long maybe_x; long y; };
@@ -10070,12 +10069,12 @@ test "java: @optional CDR serialize writes presence flag then value" {
     , "test", "_cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.y);");
 }
 
-test "java: @optional CDR deserialize reads presence flag and sets null" {
+test "java: @optional CDR deserialize scopes framing and sets null" {
     const alloc = testing.allocator;
     // Presence flag read
     try testGen(alloc,
         \\struct Opt { @optional long maybe_x; long y; };
-    , "test", "boolean _ip_maybe_x = _buf.get() != 0;");
+    , "test", "_cdrBeginOptionalRead(_buf, _cdrBase, _xcdrVersion, 0);");
     // Value read on present
     try testGen(alloc,
         \\struct Opt { @optional long maybe_x; long y; };

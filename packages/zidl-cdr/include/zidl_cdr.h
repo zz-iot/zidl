@@ -160,7 +160,8 @@ int zidl_cdr_write_f64 (ZidlCdrWriter *w, double    v);
 /**
  * Write a fixed<digits,scale> value as packed BCD (alignment 1).
  * N = (digits/2)+1 bytes; sign nibble 0xC positive/zero, 0xD negative.
- * digits must be 1..31; scale must be <= digits.
+ * digits must be 1..31; scale <= digits. NaN is invalid; overflow saturates.
+ * Rounds half away from zero; rounded zero is emitted with a positive sign.
  */
 int zidl_cdr_write_fixed(ZidlCdrWriter *w, uint8_t digits, uint8_t scale, double value);
 
@@ -210,6 +211,25 @@ typedef struct ZidlCdrReader {
     int            is_pl_cdr;
 } ZidlCdrReader;
 
+/* Scoped optional members for FINAL/APPENDABLE structures. XCDR1 uses an
+ * extended parameter header and resets value alignment; XCDR2 uses a bool.
+ * End each successful begin, including after a value operation fails.
+ * Writer cancel restores alignment without patching an incomplete value. */
+typedef struct ZidlCdrOptionalWrite {
+    size_t length_offset, value_start, parent_pos;
+} ZidlCdrOptionalWrite;
+typedef struct ZidlCdrOptionalRead {
+    ZidlCdrReader parent;
+    size_t end; /* SIZE_MAX for an XCDR2 presence flag */
+} ZidlCdrOptionalRead;
+int zidl_cdr_begin_optional_write(ZidlCdrWriter *w, uint32_t member_id,
+                                bool must_understand, bool present, ZidlCdrOptionalWrite *scope);
+int zidl_cdr_end_optional_write(ZidlCdrWriter *w, const ZidlCdrOptionalWrite *scope);
+void zidl_cdr_cancel_optional_write(ZidlCdrWriter *w, const ZidlCdrOptionalWrite *scope);
+int zidl_cdr_begin_optional_read(ZidlCdrReader *r, uint32_t member_id,
+                               ZidlCdrOptionalRead *scope, bool *present);
+void zidl_cdr_end_optional_read(ZidlCdrReader *r, const ZidlCdrOptionalRead *scope);
+
 /**
  * Parse the 4-byte CDR encapsulation header and initialize the reader.
  * Returns ZIDL_CDR_INVALID for unknown encapsulation IDs or data shorter
@@ -236,7 +256,8 @@ int zidl_cdr_read_f64 (ZidlCdrReader *r, double    *out);
 
 /**
  * Read a fixed<digits,scale> value from packed BCD (alignment 1).
- * Returns ZIDL_CDR_INVALID if a digit nibble > 9 is encountered.
+ * INVALID on bad parameters, digits, sign (only C/D) or nonzero leading pad.
+ * The double mapping is approximate; malformed input leaves *out unchanged.
  */
 int zidl_cdr_read_fixed(ZidlCdrReader *r, uint8_t digits, uint8_t scale, double *out);
 

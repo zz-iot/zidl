@@ -670,6 +670,141 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    // Inherited wire frames and recursive key-value projection.
+    {
+        const projection_step = b.step("test-key-projection", "Check inherited frames and recursive key-only values");
+        test_step.dependOn(projection_step);
+        const dir = "test/integration/key_projection/";
+        const gen_zig = b.addRunArtifact(exe);
+        gen_zig.addArgs(&.{ "-b", "zig", "-o" });
+        const zig_dir = gen_zig.addOutputDirectoryArg("key-projection-zig");
+        gen_zig.addFileArg(b.path(dir ++ "shapes.idl"));
+        const fixture = b.createModule(.{
+            .root_source_file = zig_dir.path(b, "shapes.zig"),
+            .target = target,
+            .imports = &.{.{ .name = "zidl_rt", .module = zidl_rt_mod }},
+        });
+        const tests = b.addTest(.{ .name = "zidl-key-projection", .root_module = b.createModule(.{
+            .root_source_file = b.path(dir ++ "test.zig"),
+            .target = target,
+            .sanitize_thread = sanitize_thread,
+            .imports = &.{ .{ .name = "zidl_rt", .module = zidl_rt_mod }, .{ .name = "fixture", .module = fixture } },
+        }) });
+        projection_step.dependOn(&b.addRunArtifact(tests).step);
+        for ([_][]const u8{ "c", "cpp" }) |lang| {
+            const cpp = std.mem.eql(u8, lang, "cpp");
+            const gen = b.addRunArtifact(exe);
+            gen.addArgs(&.{ "-b", lang, "-o" });
+            const generated = gen.addOutputDirectoryArg(b.fmt("key-projection-{s}", .{lang}));
+            gen.addFileArg(b.path(dir ++ "shapes.idl"));
+            const m = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .sanitize_thread = sanitize_thread, .link_libc = true, .link_libcpp = cpp });
+            const flags: []const []const u8 = if (cpp) &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" } else &.{ "-std=c99", "-Wall", "-Werror" };
+            m.addCSourceFile(.{ .file = b.path(if (cpp) dir ++ "test.cpp" else dir ++ "test.c"), .flags = flags });
+            m.addCSourceFile(.{ .file = generated.path(b, if (cpp) "shapes_cdr.cpp" else "shapes_cdr.c"), .flags = flags });
+            m.addCSourceFile(.{ .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"), .flags = &.{"-std=c99"} });
+            m.addIncludePath(generated);
+            m.addIncludePath(b.path("packages/zidl-cdr/include"));
+            const app = b.addExecutable(.{ .name = b.fmt("zidl-key-projection-{s}", .{lang}), .root_module = m });
+            const run = b.addRunArtifact(app);
+            run.addFileArg(b.path(dir ++ "vectors.txt"));
+            projection_step.dependOn(&run.step);
+        }
+        const maybe_javac = b.findProgram(.{ .names = &.{"javac"} });
+        const maybe_java = b.findProgram(.{ .names = &.{"java"} });
+        if (maybe_javac != null and maybe_java != null) {
+            for ([_]bool{ false, true }) |split| {
+                const gen = b.addRunArtifact(exe);
+                gen.addArgs(&.{ "-b", "java" });
+                if (split) gen.addArgs(&.{ "--split-files", "--java-package", "keyprojection" });
+                gen.addArg("-o");
+                const generated = gen.addOutputDirectoryArg(if (split) "key-projection-java-split" else "key-projection-java");
+                gen.addFileArg(b.path(dir ++ "shapes.idl"));
+                const compile_java = b.addSystemCommand(&.{ maybe_javac.?, "-Xlint:unchecked", "-Werror", "-d" });
+                const classes = compile_java.addOutputDirectoryArg(if (split) "key-projection-java-split-classes" else "key-projection-java-classes");
+                if (split) {
+                    for ([_][]const u8{ "ShapesCdrUtils", "FBase", "FMid", "FDerived", "ABase", "ADerived", "MBase", "MDerived", "Bridge", "RootBridge", "PlainBase", "InheritedBridge", "RootInherited", "MutBridge", "RootMut", "AppBridge", "RootArray", "RootSeq" }) |name| {
+                        compile_java.addFileArg(generated.path(b, b.fmt("{s}.java", .{name})));
+                    }
+                } else compile_java.addFileArg(generated.path(b, "Shapes.java"));
+                compile_java.addFileArg(b.path(dir ++ "ProjectionTest.java"));
+                const run = b.addSystemCommand(&.{ maybe_java.?, "-cp" });
+                run.addDirectoryArg(classes);
+                run.addArg("ProjectionTest");
+                run.addFileArg(b.path(dir ++ "vectors.txt"));
+                run.addArg(if (split) "keyprojection." else "Shapes$Projection$");
+                projection_step.dependOn(&run.step);
+            }
+        }
+    }
+
+    // Optional member framing and scoped alignment.
+    {
+        const projection_step = b.step("test-optional-wire", "Check optional member framing and scoped alignment");
+        test_step.dependOn(projection_step);
+        const dir = "test/integration/optional_wire/";
+        const gen_zig = b.addRunArtifact(exe);
+        gen_zig.addArgs(&.{ "-b", "zig", "--generate-zzdds-wrappers", "-o" });
+        const zig_dir = gen_zig.addOutputDirectoryArg("optional-wire-zig");
+        gen_zig.addFileArg(b.path(dir ++ "shapes.idl"));
+        const middleware = b.createModule(.{ .root_source_file = b.path("test/integration/zig_wrapper_contract/fake_middleware.zig"), .target = target });
+        const fixture = b.createModule(.{
+            .root_source_file = zig_dir.path(b, "shapes.zig"),
+            .target = target,
+            .imports = &.{ .{ .name = "zidl_rt", .module = zidl_rt_mod }, .{ .name = "zzdds", .module = middleware } },
+        });
+        const tests = b.addTest(.{ .name = "zidl-optional-wire", .root_module = b.createModule(.{
+            .root_source_file = b.path(dir ++ "test.zig"),
+            .target = target,
+            .sanitize_thread = sanitize_thread,
+            .imports = &.{ .{ .name = "zidl_rt", .module = zidl_rt_mod }, .{ .name = "fixture", .module = fixture } },
+        }) });
+        projection_step.dependOn(&b.addRunArtifact(tests).step);
+        for ([_][]const u8{ "c", "cpp" }) |lang| {
+            const cpp = std.mem.eql(u8, lang, "cpp");
+            const gen = b.addRunArtifact(exe);
+            gen.addArgs(&.{ "-b", lang, "-o" });
+            const generated = gen.addOutputDirectoryArg(b.fmt("optional-wire-{s}", .{lang}));
+            gen.addFileArg(b.path(dir ++ "shapes.idl"));
+            const m = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .sanitize_thread = sanitize_thread, .link_libc = true, .link_libcpp = cpp });
+            const flags: []const []const u8 = if (cpp) &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" } else &.{ "-std=c99", "-Wall", "-Werror" };
+            m.addCSourceFile(.{ .file = b.path(if (cpp) dir ++ "test.cpp" else dir ++ "test.c"), .flags = flags });
+            m.addCSourceFile(.{ .file = generated.path(b, if (cpp) "shapes_cdr.cpp" else "shapes_cdr.c"), .flags = flags });
+            m.addCSourceFile(.{ .file = b.path("packages/zidl-cdr/src/zidl_cdr.c"), .flags = &.{"-std=c99"} });
+            m.addIncludePath(generated);
+            m.addIncludePath(b.path("packages/zidl-cdr/include"));
+            const app = b.addExecutable(.{ .name = b.fmt("zidl-optional-wire-{s}", .{lang}), .root_module = m });
+            const run = b.addRunArtifact(app);
+            run.addFileArg(b.path(dir ++ "vectors.txt"));
+            projection_step.dependOn(&run.step);
+        }
+        const maybe_javac = b.findProgram(.{ .names = &.{"javac"} });
+        const maybe_java = b.findProgram(.{ .names = &.{"java"} });
+        if (maybe_javac != null and maybe_java != null) {
+            for ([_]bool{ false, true }) |split| {
+                const gen = b.addRunArtifact(exe);
+                gen.addArgs(&.{ "-b", "java", "--generate-zzdds-wrappers" });
+                if (split) gen.addArgs(&.{ "--split-files", "--java-package", "optionalwire" });
+                gen.addArg("-o");
+                const generated = gen.addOutputDirectoryArg(if (split) "optional-wire-java-split" else "optional-wire-java");
+                gen.addFileArg(b.path(dir ++ "shapes.idl"));
+                const compile_java = b.addSystemCommand(&.{ maybe_javac.?, "-Xlint:unchecked", "-Werror", "-d" });
+                const classes = compile_java.addOutputDirectoryArg(if (split) "optional-wire-java-split-classes" else "optional-wire-java-classes");
+                if (split) {
+                    for ([_][]const u8{ "ShapesCdrUtils", "Pair", "Values", "Inner", "Base", "Derived" }) |name| {
+                        compile_java.addFileArg(generated.path(b, b.fmt("{s}.java", .{name})));
+                    }
+                } else compile_java.addFileArg(generated.path(b, "Shapes.java"));
+                compile_java.addFileArg(b.path(dir ++ "OptionalTest.java"));
+                const run = b.addSystemCommand(&.{ maybe_java.?, "-cp" });
+                run.addDirectoryArg(classes);
+                run.addArg("OptionalTest");
+                run.addFileArg(b.path(dir ++ "vectors.txt"));
+                run.addArg(if (split) "optionalwire." else "Shapes$OptionalWire$");
+                projection_step.dependOn(&run.step);
+            }
+        }
+    }
+
     // ── XCDR known-answer checks ──────────────────────────────────────────────
     // test/integration/xcdr_known_answer/ka.idl covers every collection kind
     // (primitive / non-primitive / nested / array-typedef elements, multi-

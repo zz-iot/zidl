@@ -171,7 +171,27 @@ static void selected_frame_bounds() {
     assert(reader.pos <= 10 && reader.data_len == sizeof bytes);
 }
 
+static void optional_selection() {
+    uint8_t bytes[] = {0,1,0,0, 0,0,4,0, 42,0,0,0, 1,0,0,0, 99,0,0,0};
+    ZidlCdrReader reader;
+    OptionalConditionValue value{};
+    assert(zidl_cdr_reader_init(&reader, bytes, sizeof bytes) == 0);
+    assert(OptionalConditionValue_deserialize_selected(&reader, 4, &value) == 0);
+    assert(value.tail == 99 && !value.number && !value.text);
+    assert(reader.pos == sizeof bytes && reader.data == bytes && reader.data_len == sizeof bytes);
+    zzdds_filter_value field{};
+    uint8_t scratch[32];
+    assert(OptionalConditionValue_get_field_from_cdr(bytes, sizeof bytes, "number", 6, &field, scratch, sizeof scratch));
+    assert(field.kind == 0 && field.i == 42);
+    assert(!OptionalConditionValue_get_field_from_cdr(bytes, sizeof bytes, "text", 4, &field, scratch, sizeof scratch));
+    bytes[6] = 2;
+    assert(zidl_cdr_reader_init(&reader, bytes, sizeof bytes) == 0);
+    assert(OptionalConditionValue_deserialize_selected(&reader, 1, &value) == ZIDL_CDR_TRUNCATED);
+    assert(reader.data == bytes && reader.data_len == sizeof bytes && reader.pos <= sizeof bytes);
+}
+
 int main() {
+    optional_selection();
     selected_frame_bounds();
     DDS_DataReader_s reader_handle;
     auto reader = DDS::DataReaderImpl::_getOrCreate(&reader_handle);

@@ -637,6 +637,8 @@ const Generator = struct {
         if (has_key) try self.print("#define {s}_KEY_HASH_FORCE_MD5 {d}\n", .{ c_name, @intFromBool(try canonical.forceMd5(self.alloc, s)) });
         try self.print("{s}{s}int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, c_name });
         try self.print("{s}{s}int {s}_serialize_key_holder(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, c_name });
+        try self.print("{s}{s}int {s}_serialize_key_value(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, c_name });
+        try self.print("{s}{s}int {s}_deserialize_key_value(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, c_name });
         try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, c_name });
         try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         // Keyless structs still get these prototypes when wrappers were
@@ -2027,6 +2029,8 @@ const CdrGenerator = struct {
     // ── Struct / Exception ────────────────────────────────────────────────────
 
     fn emitMutableStructWrite(self: *CdrGenerator, s: *const ir.Struct, key_only: bool) anyerror!void {
+        const wire_fields = try canonical.wireFields(self.alloc, s, key_only);
+        defer self.alloc.free(wire_fields);
         const previous = self.wire_key;
         self.wire_key = key_only;
         defer self.wire_key = previous;
@@ -2035,13 +2039,15 @@ const CdrGenerator = struct {
         try self.writeI("size_t _dh;\n");
         try self.writeI("_rc = zidl_cdr_reserve_dheader(_w, &_dh);\n");
         try self.writeI("if (_rc) return _rc;\n");
-        for (s.members, 0..) |m, idx| {
-            if (key_only and !m.annotations.is_key) continue;
+        for (wire_fields) |field| {
+            const m = field.member.*;
+            const idx = field.index;
+            try self.openWireField(field, true, true);
             const member_id: u32 = memberIdAtC(m, idx);
             const mu: u8 = if (m.annotations.must_understand) 1 else 0;
             if (m.annotations.is_optional) {
                 // @mutable + @optional: only emit EMHEADER when the bit is set in _present.
-                const bit_idx = optBitIdxForMember(s.*, idx);
+                const bit_idx = optBitIdxForMember(field.owner.*, idx);
                 try self.printI("if (_v->_present & (1ULL << {d}u)) {{\n", .{bit_idx});
                 self.indent_depth += 1;
                 const access_opt = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
@@ -2070,6 +2076,8 @@ const CdrGenerator = struct {
                 }
                 self.indent_depth -= 1;
                 try self.writeI("}\n");
+
+                try self.closeWireField(field, true);
                 continue;
             }
             const access = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
@@ -2096,8 +2104,237 @@ const CdrGenerator = struct {
                 try self.printI("_rc = zidl_cdr_patch_emheader_checked(_w, _em{d}, _es{d}); if (_rc) return _rc; }}\n", .{ idx, idx });
                 self.indent_depth -= 1;
             }
+
+            try self.closeWireField(field, true);
         }
         try self.writeI("_rc = zidl_cdr_patch_dheader_checked(_w, _dh); if (_rc) return _rc;\n");
+    }
+
+    fn openWireField(self: *CdrGenerator, field: canonical.Field, read_only: bool, scope: bool) !void {
+        if (field.base_depth == 0) return;
+        if (scope) {
+            try self.writeI("{\n");
+            self.indent_depth += 1;
+        }
+        const name = try self.prefixedCName(field.owner_name);
+        defer self.alloc.free(name);
+        var path = std.ArrayList(u8).empty;
+        defer path.deinit(self.alloc);
+        try path.appendSlice(self.alloc, "_v->");
+        for (0..field.base_depth) |i| try path.appendSlice(self.alloc, if (i == 0) "_base" else "._base");
+        try self.printI("{s}{s} *_base_value = &{s};\n", .{ if (read_only) "const " else "", name, path.items });
+        try self.printI("{s}{s} *_v = _base_value;\n", .{ if (read_only) "const " else "", name });
+    }
+
+    fn closeWireField(self: *CdrGenerator, field: canonical.Field, scope: bool) !void {
+        if (field.base_depth == 0 or !scope) return;
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+    }
+
+    fn emitOptionalValueFns(self: *CdrGenerator, c_name: []const u8, suffix: []const u8, field: canonical.Field) !void {
+        const m = field.member.*;
+        const id = m.annotations.memberId(@intCast(field.index));
+        const owner = try self.prefixedCName(field.owner_name);
+        defer self.alloc.free(owner);
+        const access = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
+        defer self.alloc.free(access);
+        try self.print("static int {s}_optional_write_value_{d}{s}(ZidlCdrWriter *_w, const {s} *_v) {{\n", .{ c_name, id, suffix, owner });
+        try self.writeI("int _rc = 0; (void)_rc;\n");
+        if (m.dimensions.len > 0) try self.emitWriteArray(m.type_ref, access, m.dimensions, 0) else try self.emitWriteForTypeRef(m.type_ref, m.name, access);
+        try self.writeI("return 0;\n");
+        try self.write("}\n\n");
+        try self.print("static int {s}_optional_write_{d}{s}(ZidlCdrWriter *_w, const {s} *_v) {{\n", .{ c_name, id, suffix, owner });
+        try self.writeI("ZidlCdrOptionalWrite _scope;\n");
+        try self.printI("bool _present = (_v->_present & (1ULL << {d}u)) != 0;\n", .{optBitIdxForMember(field.owner.*, field.index)});
+        try self.printI("int _rc = zidl_cdr_begin_optional_write(_w, {d}, {d}, _present, &_scope);\n", .{ id, @intFromBool(m.annotations.must_understand) });
+        try self.writeI("if (_rc) return _rc;\n");
+
+        try self.printI("if (_present) _rc = {s}_optional_write_value_{d}{s}(_w, _v);\n", .{ c_name, id, suffix });
+        try self.writeI("if (_rc) { zidl_cdr_cancel_optional_write(_w, &_scope); return _rc; }\n");
+        try self.writeI("return zidl_cdr_end_optional_write(_w, &_scope);\n");
+        try self.write("}\n\n");
+        try self.print("static int {s}_optional_read_value_{d}{s}(ZidlCdrReader *_r, {s} *_v) {{\n", .{ c_name, id, suffix, owner });
+        try self.writeI("int _rc = 0; (void)_rc;\n");
+        try self.emitReadPresentMember(m, optBitIdxForMember(field.owner.*, field.index));
+        try self.writeI("return 0;\n");
+        try self.write("}\n\n");
+        try self.print("static int {s}_optional_read_{d}{s}(ZidlCdrReader *_r, {s} *_v) {{\n", .{ c_name, id, suffix, owner });
+        try self.writeI("ZidlCdrOptionalRead _scope; bool _present;\n");
+        try self.printI("int _rc = zidl_cdr_begin_optional_read(_r, {d}, &_scope, &_present);\n", .{id});
+        try self.writeI("if (_rc) return _rc;\n");
+
+        try self.printI("if (_present) _rc = {s}_optional_read_value_{d}{s}(_r, _v);\n", .{ c_name, id, suffix });
+        try self.printI("else _v->_present &= ~(1ULL << {d}u);\n", .{optBitIdxForMember(field.owner.*, field.index)});
+        try self.writeI("zidl_cdr_end_optional_read(_r, &_scope);\n");
+        try self.writeI("return _rc;\n");
+        try self.write("}\n\n");
+    }
+
+    fn emitStructValueFns(self: *CdrGenerator, s: *const ir.Struct, c_name: []const u8, projection: bool) !void {
+        const mutable = s.annotations.extensibility == .mutable;
+        const appendable = s.annotations.extensibility != .final;
+        const suffix: []const u8 = if (projection) "_key_value" else "";
+        const wire_fields = try canonical.wireFields(self.alloc, s, projection);
+        defer self.alloc.free(wire_fields);
+        const previous = self.wire_key;
+        self.wire_key = projection;
+        defer self.wire_key = previous;
+        if (!mutable) for (wire_fields) |field| {
+            if (field.member.annotations.is_optional) try self.emitOptionalValueFns(c_name, suffix, field);
+        };
+        // ── serialize ────────────────────────────────────────────────────────
+
+        try self.print("int {s}_serialize{s}(ZidlCdrWriter *_w, const {s} *_v) {{\n", .{ c_name, suffix, c_name });
+        try self.writeI("int _rc = ZIDL_CDR_OK; (void)_rc;\n");
+        if (mutable) {
+            try self.emitMutableStructWrite(s, projection);
+            try self.writeI("return ZIDL_CDR_OK;\n");
+            try self.write("}\n\n");
+        } else {
+            if (appendable) {
+                try self.writeI("size_t _dh;\n");
+                try self.writeI("_rc = zidl_cdr_reserve_dheader_maybe(_w, &_dh);\n");
+                try self.writeI("if (_rc) return _rc;\n");
+            }
+
+            for (wire_fields) |field| {
+                const m = field.member.*;
+                try self.openWireField(field, true, true);
+                if (m.annotations.is_optional) {
+                    try self.printI("_rc = {s}_optional_write_{d}{s}(_w, _v);\n", .{ c_name, m.annotations.memberId(@intCast(field.index)), suffix });
+                    try self.writeI("if (_rc) return _rc;\n");
+                    try self.closeWireField(field, true);
+                    continue;
+                }
+                const access = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
+                defer self.alloc.free(access);
+                if (m.dimensions.len > 0) {
+                    try self.emitWriteArray(m.type_ref, access, m.dimensions, 0);
+                } else {
+                    try self.emitWriteForTypeRef(m.type_ref, m.name, access);
+                }
+
+                try self.closeWireField(field, true);
+            }
+            if (appendable) {
+                try self.writeI("if (_dh != (size_t)-1) { _rc = zidl_cdr_patch_dheader_checked(_w, _dh); if (_rc) return _rc; }\n");
+            }
+            try self.writeI("return ZIDL_CDR_OK;\n");
+            try self.write("}\n\n");
+        }
+
+        // ── deserialize ──────────────────────────────────────────────────────
+
+        {
+            const name = try std.fmt.allocPrint(self.alloc, "{s}_deserialize{s}", .{ c_name, suffix });
+            defer self.alloc.free(name);
+            try cdr_skip.emitReadFunction(self, name, c_name, false, if (mutable) "1" else if (appendable) "_r->xcdr_version == ZIDL_XCDR2" else "0");
+        }
+        if (mutable) {
+            if (projection) try self.writeI("if (_r->xcdr_version != ZIDL_XCDR2) return ZIDL_CDR_INVALID;\n");
+            try self.writeI("int _rc = ZIDL_CDR_OK; (void)_rc;\n");
+            for (wire_fields) |field| {
+                if (!field.member.annotations.is_optional or optBitIdxForMember(field.owner.*, @intCast(field.index)) != 0) continue;
+                try self.openWireField(field, false, true);
+                try self.writeI("_v->_present = 0;\n");
+                try self.closeWireField(field, true);
+            }
+            try self.writeI("size_t _em_end;\n");
+            try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_em_end);\n");
+            try self.writeI("if (_rc) return _rc;\n");
+            try cdr_skip.limitReader(self, "_em_end");
+            try self.writeI("for (size_t _frame_limit = _r->data_len, _member_end = _r->pos; zidl_cdr_mutable_has_more(_r, _em_end); _r->pos = _member_end, _r->data_len = _frame_limit) {\n");
+            self.indent_depth += 1;
+            try self.writeI("ZidlEmHeader _emh;\n");
+            try self.writeI("_rc = zidl_cdr_read_emheader(_r, &_emh);\n");
+            try self.writeI("if (_rc) return _rc;\n");
+            try cdr_skip.memberWindow(self);
+            try self.writeI("switch (_emh.member_id) {\n");
+            self.indent_depth += 1;
+            for (wire_fields) |field| {
+                const m = field.member.*;
+                const idx = field.index;
+                const member_id: u32 = memberIdAtC(m, idx);
+                try self.printI("case {d}: {{\n", .{member_id});
+                self.indent_depth += 1;
+                try self.openWireField(field, false, false);
+                if (m.annotations.is_optional) {
+                    // @mutable + @optional: receiving the EMHEADER means the field is present.
+                    // Zero it first so a partial read stays freeable.
+                    const bit_idx = optBitIdxForMember(field.owner.*, idx);
+                    try self.printI("memset(&_v->{s}, 0, sizeof(_v->{s}));\n", .{ m.name, m.name });
+                    try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit_idx});
+                }
+                {
+                    const lval = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
+                    defer self.alloc.free(lval);
+                    if (m.dimensions.len > 0) {
+                        try self.emitReadArray(m.type_ref, m.name, lval, m.dimensions, 0);
+                    } else {
+                        try self.emitReadForTypeRef(m.type_ref, m.name, lval);
+                    }
+                }
+                try self.writeI("break;\n");
+
+                try self.closeWireField(field, false);
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            }
+            try self.writeI("default:\n");
+            self.indent_depth += 1;
+            try self.writeI("if (_emh.must_understand) return ZIDL_CDR_INVALID;\n");
+            try self.writeI("_rc = zidl_cdr_skip_emheader_payload(_r, &_emh);\n");
+            try self.writeI("if (_rc) return _rc;\n");
+            try self.writeI("break;\n");
+            self.indent_depth -= 1;
+            self.indent_depth -= 1;
+            try self.writeI("}\n"); // switch
+            self.indent_depth -= 1;
+            try self.writeI("}\n"); // while
+            try self.writeI("return ZIDL_CDR_OK;\n");
+            try self.write("}\n\n");
+        } else {
+            try self.writeI("int _rc = ZIDL_CDR_OK; (void)_rc;\n");
+            for (wire_fields) |field| {
+                if (!field.member.annotations.is_optional or optBitIdxForMember(field.owner.*, @intCast(field.index)) != 0) continue;
+                try self.openWireField(field, false, true);
+                try self.writeI("_v->_present = 0;\n");
+                try self.closeWireField(field, true);
+            }
+            if (appendable) {
+                try self.writeI("if (_r->xcdr_version == ZIDL_XCDR2) {\n");
+                self.indent_depth += 1;
+                try self.writeI("size_t _body_end;\n");
+                try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_body_end);\n");
+                try cdr_skip.readRcCheck(self);
+                try cdr_skip.limitReader(self, "_body_end");
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            }
+
+            for (wire_fields) |field| {
+                const m = field.member.*;
+                try self.openWireField(field, false, true);
+                if (m.annotations.is_optional) {
+                    try self.printI("_rc = {s}_optional_read_{d}{s}(_r, _v);\n", .{ c_name, m.annotations.memberId(@intCast(field.index)), suffix });
+                    try self.writeI("if (_rc) return _rc;\n");
+                    try self.closeWireField(field, true);
+                    continue;
+                }
+                const lval = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
+                defer self.alloc.free(lval);
+                if (m.dimensions.len > 0) {
+                    try self.emitReadArray(m.type_ref, m.name, lval, m.dimensions, 0);
+                } else {
+                    try self.emitReadForTypeRef(m.type_ref, m.name, lval);
+                }
+
+                try self.closeWireField(field, true);
+            }
+            try self.writeI("return ZIDL_CDR_OK;\n");
+            try self.write("}\n\n");
+        }
     }
 
     fn emitStructFns(self: *CdrGenerator, s: *const ir.Struct) !void {
@@ -2120,177 +2357,8 @@ const CdrGenerator = struct {
         const has_key = structHasKeyC(s);
         try canonical.emitCStruct(self, s, c_name, c_name, false, has_key);
 
-        // ── serialize ────────────────────────────────────────────────────────
-
-        try self.print("int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v) {{\n", .{ c_name, c_name });
-        try self.writeI("int _rc;\n");
-        if (mutable) {
-            try self.emitMutableStructWrite(s, false);
-            try self.writeI("return ZIDL_CDR_OK;\n");
-            try self.write("}\n\n");
-        } else {
-            if (appendable) {
-                try self.writeI("size_t _dh;\n");
-                try self.writeI("_rc = zidl_cdr_reserve_dheader_maybe(_w, &_dh);\n");
-                try self.writeI("if (_rc) return _rc;\n");
-            }
-            if (s.base) |base| {
-                const base_c = try self.prefixedCName(ir.typeDeclQualifiedName(base));
-                defer self.alloc.free(base_c);
-                try self.printI("_rc = {s}_serialize(_w, &_v->_base);\n", .{base_c});
-                try self.writeI("if (_rc) return _rc;\n");
-            }
-            for (s.members, 0..) |m, idx| {
-                if (m.annotations.is_optional) {
-                    // @final/@appendable + @optional: write bool presence flag then value.
-                    const bit_idx = optBitIdxForMember(s.*, idx);
-                    try self.printI("_rc = zidl_cdr_write_bool(_w, (_v->_present & (1ULL << {d}u)) ? 1 : 0);\n", .{bit_idx});
-                    try self.writeI("if (_rc) return _rc;\n");
-                    try self.printI("if (_v->_present & (1ULL << {d}u)) {{\n", .{bit_idx});
-                    self.indent_depth += 1;
-                    const access_opt = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
-                    defer self.alloc.free(access_opt);
-                    if (m.dimensions.len > 0) {
-                        try self.emitWriteArray(m.type_ref, access_opt, m.dimensions, 0);
-                    } else {
-                        try self.emitWriteForTypeRef(m.type_ref, m.name, access_opt);
-                    }
-                    self.indent_depth -= 1;
-                    try self.writeI("}\n");
-                    continue;
-                }
-                const access = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
-                defer self.alloc.free(access);
-                if (m.dimensions.len > 0) {
-                    try self.emitWriteArray(m.type_ref, access, m.dimensions, 0);
-                } else {
-                    try self.emitWriteForTypeRef(m.type_ref, m.name, access);
-                }
-            }
-            if (appendable) {
-                try self.writeI("if (_dh != (size_t)-1) { _rc = zidl_cdr_patch_dheader_checked(_w, _dh); if (_rc) return _rc; }\n");
-            }
-            try self.writeI("return ZIDL_CDR_OK;\n");
-            try self.write("}\n\n");
-        }
-
-        // ── deserialize ──────────────────────────────────────────────────────
-
-        {
-            const name = try std.fmt.allocPrint(self.alloc, "{s}_deserialize", .{c_name});
-            defer self.alloc.free(name);
-            try cdr_skip.emitReadFunction(self, name, c_name, false, if (mutable) "1" else if (appendable) "_r->xcdr_version == ZIDL_XCDR2" else "0");
-        }
-        if (mutable) {
-            try self.writeI("int _rc;\n");
-            if (has_optional) try self.writeI("_v->_present = 0;\n");
-            try self.writeI("size_t _em_end;\n");
-            try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_em_end);\n");
-            try self.writeI("if (_rc) return _rc;\n");
-            try cdr_skip.limitReader(self, "_em_end");
-            try self.writeI("for (size_t _frame_limit = _r->data_len, _member_end = _r->pos; zidl_cdr_mutable_has_more(_r, _em_end); _r->pos = _member_end, _r->data_len = _frame_limit) {\n");
-            self.indent_depth += 1;
-            try self.writeI("ZidlEmHeader _emh;\n");
-            try self.writeI("_rc = zidl_cdr_read_emheader(_r, &_emh);\n");
-            try self.writeI("if (_rc) return _rc;\n");
-            try cdr_skip.memberWindow(self);
-            try self.writeI("switch (_emh.member_id) {\n");
-            self.indent_depth += 1;
-            for (s.members, 0..) |m, idx| {
-                const member_id: u32 = memberIdAtC(m, idx);
-                try self.printI("case {d}: {{\n", .{member_id});
-                self.indent_depth += 1;
-                if (m.annotations.is_optional) {
-                    // @mutable + @optional: receiving the EMHEADER means the field is present.
-                    // Zero it first so a partial read stays freeable.
-                    const bit_idx = optBitIdxForMember(s.*, idx);
-                    try self.printI("memset(&_v->{s}, 0, sizeof(_v->{s}));\n", .{ m.name, m.name });
-                    try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit_idx});
-                }
-                {
-                    const lval = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
-                    defer self.alloc.free(lval);
-                    if (m.dimensions.len > 0) {
-                        try self.emitReadArray(m.type_ref, m.name, lval, m.dimensions, 0);
-                    } else {
-                        try self.emitReadForTypeRef(m.type_ref, m.name, lval);
-                    }
-                }
-                try self.writeI("break;\n");
-                self.indent_depth -= 1;
-                try self.writeI("}\n");
-            }
-            try self.writeI("default:\n");
-            self.indent_depth += 1;
-            try self.writeI("if (_emh.must_understand) return ZIDL_CDR_INVALID;\n");
-            try self.writeI("_rc = zidl_cdr_skip_emheader_payload(_r, &_emh);\n");
-            try self.writeI("if (_rc) return _rc;\n");
-            try self.writeI("break;\n");
-            self.indent_depth -= 1;
-            self.indent_depth -= 1;
-            try self.writeI("}\n"); // switch
-            self.indent_depth -= 1;
-            try self.writeI("}\n"); // while
-            try self.writeI("return ZIDL_CDR_OK;\n");
-            try self.write("}\n\n");
-        } else {
-            try self.writeI("int _rc;\n");
-            if (has_optional) try self.writeI("_v->_present = 0;\n");
-            if (appendable) {
-                try self.writeI("if (_r->xcdr_version == ZIDL_XCDR2) {\n");
-                self.indent_depth += 1;
-                try self.writeI("size_t _body_end;\n");
-                try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_body_end);\n");
-                try cdr_skip.readRcCheck(self);
-                try cdr_skip.limitReader(self, "_body_end");
-                self.indent_depth -= 1;
-                try self.writeI("}\n");
-            }
-            if (s.base) |base| {
-                const base_c = try self.prefixedCName(ir.typeDeclQualifiedName(base));
-                defer self.alloc.free(base_c);
-                try self.printI("_rc = {s}_deserialize(_r, &_v->_base);\n", .{base_c});
-                try self.writeI("if (_rc) return _rc;\n");
-            }
-            for (s.members, 0..) |m, idx| {
-                if (m.annotations.is_optional) {
-                    // @final/@appendable + @optional: read bool flag then value.
-                    const bit_idx = optBitIdxForMember(s.*, idx);
-                    try self.printI("{{ bool _ip_{s};\n", .{m.name});
-                    self.indent_depth += 1;
-                    try self.printI("_rc = zidl_cdr_read_bool(_r, &_ip_{s});\n", .{m.name});
-                    try self.writeI("if (_rc) return _rc;\n");
-                    try self.printI("if (_ip_{s}) {{\n", .{m.name});
-                    self.indent_depth += 1;
-                    const lval_opt = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
-                    defer self.alloc.free(lval_opt);
-                    // Mark present (over zeroed storage) before reading, so a
-                    // decode that fails part-way leaves `_free` able to
-                    // release whatever the member already allocated.
-                    try self.printI("memset(&{s}, 0, sizeof({s}));\n", .{ lval_opt, lval_opt });
-                    try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit_idx});
-                    if (m.dimensions.len > 0) {
-                        try self.emitReadArray(m.type_ref, m.name, lval_opt, m.dimensions, 0);
-                    } else {
-                        try self.emitReadForTypeRef(m.type_ref, m.name, lval_opt);
-                    }
-                    self.indent_depth -= 1;
-                    try self.writeI("}\n");
-                    self.indent_depth -= 1;
-                    try self.writeI("}\n");
-                    continue;
-                }
-                const lval = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
-                defer self.alloc.free(lval);
-                if (m.dimensions.len > 0) {
-                    try self.emitReadArray(m.type_ref, m.name, lval, m.dimensions, 0);
-                } else {
-                    try self.emitReadForTypeRef(m.type_ref, m.name, lval);
-                }
-            }
-            try self.writeI("return ZIDL_CDR_OK;\n");
-            try self.write("}\n\n");
-        }
+        try self.emitStructValueFns(s, c_name, false);
+        try self.emitStructValueFns(s, c_name, true);
 
         // ── skip ─────────────────────────────────────────────────────────────
 
@@ -2338,122 +2406,10 @@ const CdrGenerator = struct {
             defer self.wire_key = previous_wire_key;
 
             try self.print("int {s}_serialize_key(ZidlCdrWriter *_w, const {s} *_v) {{\n", .{ c_name, c_name });
-            try self.writeI("int _rc;\n");
-            if (mutable) {
-                try self.emitMutableStructWrite(s, true);
-            } else {
-                if (appendable) {
-                    try self.writeI("size_t _dh;\n");
-                    try self.writeI("_rc = zidl_cdr_reserve_dheader_maybe(_w, &_dh);\n");
-                    try self.writeI("if (_rc) return _rc;\n");
-                }
-                if (s.base) |base| {
-                    if (typeDeclHasKeyC(base)) {
-                        const base_c = try self.prefixedCName(ir.typeDeclQualifiedName(base));
-                        defer self.alloc.free(base_c);
-                        try self.printI("_rc = {s}_serialize_key(_w, &_v->_base);\n", .{base_c});
-                        try self.writeI("if (_rc) return _rc;\n");
-                    }
-                }
-                for (s.members) |m| {
-                    if (!m.annotations.is_key) continue;
-                    const access = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
-                    defer self.alloc.free(access);
-                    if (m.dimensions.len > 0) {
-                        try self.emitWriteArray(m.type_ref, access, m.dimensions, 0);
-                    } else {
-                        try self.emitWriteForTypeRef(m.type_ref, m.name, access);
-                    }
-                }
-                if (appendable) {
-                    try self.writeI("if (_dh != (size_t)-1) { _rc = zidl_cdr_patch_dheader_checked(_w, _dh); if (_rc) return _rc; }\n");
-                }
-            }
-            try self.writeI("return ZIDL_CDR_OK;\n");
+            try self.printI("return {s}_serialize_key_value(_w, _v);\n", .{c_name});
             try self.write("}\n\n");
-
-            {
-                const name = try std.fmt.allocPrint(self.alloc, "{s}_deserialize_key", .{c_name});
-                defer self.alloc.free(name);
-                try cdr_skip.emitReadFunction(self, name, c_name, false, if (mutable) "1" else if (appendable) "_r->xcdr_version == ZIDL_XCDR2" else "0");
-            }
-            try self.writeI("int _rc;\n");
-            if (mutable) {
-                try self.writeI("if (_r->xcdr_version != ZIDL_XCDR2) return ZIDL_CDR_INVALID;\n");
-                try self.writeI("size_t _em_end;\n");
-                try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_em_end);\n");
-                try self.writeI("if (_rc) return _rc;\n");
-                try cdr_skip.limitReader(self, "_em_end");
-                try self.writeI("for (size_t _frame_limit = _r->data_len, _member_end = _r->pos; zidl_cdr_mutable_has_more(_r, _em_end); _r->pos = _member_end, _r->data_len = _frame_limit) {\n");
-                self.indent_depth += 1;
-                try self.writeI("ZidlEmHeader _emh;\n");
-                try self.writeI("_rc = zidl_cdr_read_emheader(_r, &_emh);\n");
-                try self.writeI("if (_rc) return _rc;\n");
-                try cdr_skip.memberWindow(self);
-                try self.writeI("switch (_emh.member_id) {\n");
-                self.indent_depth += 1;
-                for (s.members, 0..) |m, idx| {
-                    if (!m.annotations.is_key) continue;
-                    const member_id: u32 = memberIdAtC(m, idx);
-                    try self.printI("case {d}: {{\n", .{member_id});
-                    self.indent_depth += 1;
-                    try self.emitReadPresentMember(m, optBitIdxForMember(s.*, idx));
-                    try self.writeI("break;\n");
-                    self.indent_depth -= 1;
-                    try self.writeI("}\n");
-                }
-                try self.writeI("default:\n");
-                self.indent_depth += 1;
-                try self.writeI("if (_emh.must_understand) return ZIDL_CDR_INVALID;\n");
-                try self.writeI("_rc = zidl_cdr_skip_emheader_payload(_r, &_emh);\n");
-                try self.writeI("if (_rc) return _rc;\n");
-                try self.writeI("break;\n");
-                self.indent_depth -= 1;
-                self.indent_depth -= 1;
-                try self.writeI("}\n");
-                self.indent_depth -= 1;
-                try self.writeI("}\n");
-            } else {
-                if (appendable) {
-                    try self.writeI("size_t _key_end = (size_t)-1;\n");
-                    try self.writeI("if (_r->xcdr_version == ZIDL_XCDR2) {\n");
-                    self.indent_depth += 1;
-                    try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_key_end);\n");
-                    try self.writeI("if (_rc) return _rc;\n");
-                    try cdr_skip.limitReader(self, "_key_end");
-                    self.indent_depth -= 1;
-                    try self.writeI("}\n");
-                }
-                if (s.base) |base| {
-                    const base_c = try self.prefixedCName(ir.typeDeclQualifiedName(base));
-                    defer self.alloc.free(base_c);
-                    if (typeDeclHasKeyC(base)) {
-                        try self.printI("_rc = {s}_deserialize_key(_r, &_v->_base);\n", .{base_c});
-                    } else {
-                        try self.printI("_rc = {s}_skip(_r);\n", .{base_c});
-                    }
-                    try self.writeI("if (_rc) return _rc;\n");
-                }
-                // @final: key-only payload -- reads key members in order, no
-                // skips. Unconditionally correct here regardless of position:
-                // this function's contract is "the wire bytes are a key-only
-                // payload" (nothing but the @key members, back to back --
-                // see _serialize_key, which never emits non-key bytes), so
-                // there is nothing between two key members to skip. A
-                // non-leading @key member is only a hazard if this function
-                // is fed a *full* sample instead -- that caller wants
-                // _compute_key_hash_from_cdr (_deserialize_selected-based),
-                // not this one.
-                for (s.members, 0..) |m, idx| {
-                    if (m.annotations.is_key) {
-                        try self.emitReadPresentMember(m, optBitIdxForMember(s.*, idx));
-                    }
-                }
-                if (appendable) {
-                    try self.writeI("if (_key_end != (size_t)-1) { _rc = zidl_cdr_seek_to(_r, _key_end); if (_rc) return _rc; }\n");
-                }
-            }
-            try self.writeI("return ZIDL_CDR_OK;\n");
+            try self.print("int {s}_deserialize_key(ZidlCdrReader *_r, {s} *_v) {{\n", .{ c_name, c_name });
+            try self.printI("return {s}_deserialize_key_value(_r, _v);\n", .{c_name});
             try self.write("}\n\n");
 
             try self.print("int {s}_compute_key_hash(const {s} *_v, uint8_t _hash[16]) {{\n", .{ c_name, c_name });
@@ -2468,143 +2424,17 @@ const CdrGenerator = struct {
             try self.writeI("return _rc;\n");
             try self.write("}\n\n");
 
-            // _compute_key_hash_from_cdr_key_only: compute key hash from a
-            // genuine key-only CDR wire payload (4-byte encapsulation header
-            // included) -- RTPS DISPOSE/UNREGISTER, nothing but the @key
-            // members. Do not feed this a full sample; see the unified
-            // _compute_key_hash_from_cdr (deserialize_selected-based, emitted
-            // below alongside the selective-parse family) for that.
-
-            // Compute needs_cleanup first — required before setting goto_label.
-            const needs_cleanup = blk: {
-                var any = false;
-                for (s.members) |m| {
-                    if (m.annotations.is_key and keyFieldAllocatesC(m.type_ref)) {
-                        any = true;
-                        break;
-                    }
-                }
-                break :blk any;
-            };
-
             try self.print("int {s}_compute_key_hash_from_cdr_key_only(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {{\n", .{c_name});
-            try self.writeI("ZidlCdrReader _r_data;\n");
-            try self.writeI("int _rc = zidl_cdr_reader_init(&_r_data, _payload, _len);\n");
+            try self.writeI("ZidlCdrReader _reader;\n");
+            try self.writeI("int _rc = zidl_cdr_reader_init(&_reader, _payload, _len);\n");
             try self.writeI("if (_rc) return _rc;\n");
-            try self.writeI("ZidlCdrReader *_r = &_r_data;\n");
-            try self.printI("{s} _v_data;\n", .{c_name});
-            try self.printI("memset(&_v_data, 0, sizeof({s}));\n", .{c_name});
-            try self.printI("{s} *_v = &_v_data;\n", .{c_name});
-            // All reads from this point use goto_label so that every exit path
-            // (CDR error or successful completion) passes through the cleanup block.
-            // free(NULL) — from zero-initialized struct fields — is safe in C99.
-            if (needs_cleanup) self.goto_label = "_kh_cleanup";
-            if (mutable) {
-                try self.writeI("if (_r->xcdr_version != ZIDL_XCDR2) return ZIDL_CDR_INVALID;\n");
-                try self.writeI("size_t _em_end;\n");
-                try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_em_end);\n");
-                try self.emitRcCheck();
-                try cdr_skip.limitReader(self, "_em_end");
-                try self.writeI("for (size_t _frame_limit = _r->data_len, _member_end = _r->pos; zidl_cdr_mutable_has_more(_r, _em_end); _r->pos = _member_end, _r->data_len = _frame_limit) {\n");
-                self.indent_depth += 1;
-                try self.writeI("ZidlEmHeader _emh;\n");
-                try self.writeI("_rc = zidl_cdr_read_emheader(_r, &_emh);\n");
-                try self.emitRcCheck();
-                try cdr_skip.memberWindow(self);
-                try self.writeI("switch (_emh.member_id) {\n");
-                self.indent_depth += 1;
-                for (s.members, 0..) |m, idx| {
-                    if (!m.annotations.is_key) continue;
-                    const member_id: u32 = memberIdAtC(m, idx);
-                    try self.printI("case {d}: {{\n", .{member_id});
-                    self.indent_depth += 1;
-                    try self.emitReadPresentMember(m, optBitIdxForMember(s.*, idx));
-                    try self.writeI("break;\n");
-                    self.indent_depth -= 1;
-                    try self.writeI("}\n");
-                }
-                try self.writeI("default:\n");
-                self.indent_depth += 1;
-                try self.writeI("if (_emh.must_understand) {\n");
-                self.indent_depth += 1;
-                try self.emitReturnRc("ZIDL_CDR_INVALID");
-                self.indent_depth -= 1;
-                try self.writeI("}\n");
-                try self.writeI("_rc = zidl_cdr_skip_emheader_payload(_r, &_emh);\n");
-                try self.emitRcCheck();
-                try self.writeI("break;\n");
-                self.indent_depth -= 1;
-                self.indent_depth -= 1;
-                try self.writeI("}\n");
-                self.indent_depth -= 1;
-                try self.writeI("}\n");
-            } else if (appendable) {
-                // Read DHEADER to get the extent of the key payload.  Then read
-                // key fields in declaration order.  The seek_to at the end handles
-                // both cases: full payload (skips trailing non-key fields) and
-                // key-only payload (no-op when pos already equals _key_end).
-                try self.writeI("size_t _key_end = (size_t)-1;\n");
-                try self.writeI("if (_r->xcdr_version == ZIDL_XCDR2) {\n");
-                self.indent_depth += 1;
-                try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_key_end);\n");
-                try self.emitRcCheck();
-                try cdr_skip.limitReader(self, "_key_end");
-                self.indent_depth -= 1;
-                try self.writeI("}\n");
-                for (s.members, 0..) |m, idx| {
-                    if (m.annotations.is_key) {
-                        try self.emitReadPresentMember(m, optBitIdxForMember(s.*, idx));
-                    }
-                    // Non-key members are NOT skipped: seek_to(_key_end) handles
-                    // both trailing non-key bytes (full payload) and their absence
-                    // (key-only payload).
-                }
-                if (self.goto_label) |label| {
-                    try self.printI("if (_key_end != (size_t)-1) {{ _rc = zidl_cdr_seek_to(_r, _key_end); if (_rc) goto {s}; }}\n", .{label});
-                } else {
-                    try self.writeI("if (_key_end != (size_t)-1) { _rc = zidl_cdr_seek_to(_r, _key_end); if (_rc) return _rc; }\n");
-                }
-            } else {
-                // @final: key fields are leading — read them and stop.
-                for (s.members, 0..) |m, idx| {
-                    if (m.annotations.is_key) {
-                        try self.emitReadPresentMember(m, optBitIdxForMember(s.*, idx));
-                    }
-                }
-            }
-            // Deactivate goto_label before emitting the cleanup block itself.
-            self.goto_label = null;
-            if (needs_cleanup) {
-                // Normal path falls through to the label; error paths jump here.
-                // _rc holds the compute_key_hash result on success, or the CDR
-                // error code on failure.  free(NULL) is a safe no-op for fields
-                // that were never allocated (e.g. earlier key fields on failure).
-                try self.printI("_rc = {s}_compute_key_hash(_v, _hash);\n", .{c_name});
-                try self.writeI("_kh_cleanup:\n");
-                for (s.members) |m| {
-                    if (!m.annotations.is_key) continue;
-                    try self.emitFreeKeyField(m);
-                }
-                try self.writeI("return _rc;\n");
-            } else {
-                try self.printI("return {s}_compute_key_hash(_v, _hash);\n", .{c_name});
-            }
+            try self.printI("{s} _value; memset(&_value, 0, sizeof(_value));\n", .{c_name});
+            try self.printI("_rc = {s}_deserialize_key_value(&_reader, &_value);\n", .{c_name});
+            try self.printI("if (!_rc) _rc = {s}_compute_key_hash(&_value, _hash);\n", .{c_name});
+            if (structHasSequenceFields(s)) try self.printI("{s}_free(&_value);\n", .{c_name});
+            try self.writeI("return _rc;\n");
             try self.write("}\n\n");
 
-            // _compute_key_hash_from_cdr: complete ALIVE sample's wire bytes
-            // in, key hash out -- the name a caller should reach for by
-            // default (see _compute_key_hash_from_cdr_key_only above for the
-            // narrower key-only case). Decodes the *whole* sample via the
-            // already-correct, already-leak-safe _deserialize (so a
-            // non-leading @key member is read correctly -- no key-only-decoder
-            // skip hazard) and extracts just the key from the result, then
-            // frees it. Costs decoding non-key members it doesn't need, but
-            // this is a fallback path (only reached when a peer omits the
-            // inline key hash), not the hot path -- simplicity and reusing
-            // proven decode machinery win over a hand-rolled selective walk
-            // here. _v_data starts zeroed, and _free is documented safe on a
-            // zeroed-or-partially-decoded value, so freeing it unconditionally
-            // (success or failure) needs no goto_label bookkeeping.
             try self.print("int {s}_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {{\n", .{c_name});
             try self.writeI("ZidlCdrReader _r_data;\n");
             try self.writeI("int _rc = zidl_cdr_reader_init(&_r_data, _payload, _len);\n");
@@ -2745,22 +2575,8 @@ const CdrGenerator = struct {
                 try self.printI("if (_want & (1ull << {d})) {{\n", .{idx});
                 self.indent_depth += 1;
                 if (m.annotations.is_optional) {
-                    const bit_idx = optBitIdxForMember(s.*, idx);
-                    try self.printI("{{ bool _ip_{s};\n", .{m.name});
-                    self.indent_depth += 1;
-                    try self.printI("_rc = zidl_cdr_read_bool(_r, &_ip_{s});\n", .{m.name});
+                    try self.printI("_rc = {s}_optional_read_{d}(_r, _v);\n", .{ c_name, memberIdAtC(m, idx) });
                     try self.writeI("if (_rc) return _rc;\n");
-                    try self.printI("if (_ip_{s}) {{\n", .{m.name});
-                    self.indent_depth += 1;
-                    // Same ordering as the full deserialize: present over
-                    // zeroed storage first, so a partial read stays freeable.
-                    try self.printI("memset(&_v->{s}, 0, sizeof(_v->{s}));\n", .{ m.name, m.name });
-                    try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit_idx});
-                    try self.emitReadMember(m);
-                    self.indent_depth -= 1;
-                    try self.writeI("}\n");
-                    self.indent_depth -= 1;
-                    try self.writeI("}\n");
                 } else {
                     try self.emitReadMember(m);
                 }
@@ -2867,13 +2683,17 @@ const CdrGenerator = struct {
         }
         try self.writeI("bool _matched = false;\n");
         var first = true;
-        for (s.members) |m| {
+        for (s.members, 0..) |m, idx| {
             if (m.dimensions.len > 0) continue; // array member: not a simple filterable field
             const kind = classifyFilterFieldKindC(m.type_ref);
             if (kind == .skip) continue;
             try self.printI("{s} (_field_len == sizeof(\"{s}\") - 1 && memcmp(_field, \"{s}\", _field_len) == 0) {{\n", .{ if (first) "if" else "} else if", m.name, m.name });
             first = false;
             self.indent_depth += 1;
+            if (m.annotations.is_optional) {
+                try self.printI("if (_v._present & (1ULL << {d}u)) {{\n", .{optBitIdxForMember(s.*, idx)});
+                self.indent_depth += 1;
+            }
             switch (kind) {
                 .skip => unreachable,
                 .int_like => {
@@ -2902,6 +2722,10 @@ const CdrGenerator = struct {
                     self.indent_depth -= 1;
                     try self.writeI("}\n");
                 },
+            }
+            if (m.annotations.is_optional) {
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
             }
             self.indent_depth -= 1;
         }
@@ -3836,7 +3660,7 @@ const CdrGenerator = struct {
                 const qname = ir.typeDeclQualifiedName(td);
                 const c_type = try self.prefixedCName(qname);
                 defer self.alloc.free(c_type);
-                try self.printI("_rc = {s}_{s}(_w, &{s});\n", .{ c_type, if (self.canonical_key) "serialize_key_holder" else if (self.wire_key and typeDeclHasKeyC(td)) "serialize_key" else "serialize", access });
+                try self.printI("_rc = {s}_{s}(_w, &{s});\n", .{ c_type, if (self.canonical_key) "serialize_key_holder" else if (self.wire_key and td == .struct_) "serialize_key_value" else "serialize", access });
                 try self.writeI("if (_rc) return _rc;\n");
             },
             .enum_ => |e| {
@@ -3862,7 +3686,7 @@ const CdrGenerator = struct {
                 const qname = ir.typeDeclQualifiedName(td);
                 const c_type = try self.prefixedCName(qname);
                 defer self.alloc.free(c_type);
-                try self.printI("_rc = {s}_{s}(_w, &{s});\n", .{ c_type, if (self.canonical_key) "serialize_key_holder" else if (self.wire_key and typeDeclHasKeyC(td)) "serialize_key" else "serialize", access });
+                try self.printI("_rc = {s}_{s}(_w, &{s});\n", .{ c_type, if (self.canonical_key) "serialize_key_holder" else if (self.wire_key and td == .struct_) "serialize_key_value" else "serialize", access });
                 try self.writeI("if (_rc) return _rc;\n");
             },
             else => {
@@ -4171,7 +3995,7 @@ const CdrGenerator = struct {
                 // A wire length whose byte size wraps `size_t` (32-bit
                 // targets) would allocate a short buffer the element loop
                 // then overruns.
-                try self.printI("if ((size_t){s} > SIZE_MAX / sizeof({s})) {{\n", .{ sl, elem_c });
+                try self.printI("if ({s} != 0 && sizeof({s}) > SIZE_MAX / {s}) {{\n", .{ sl, elem_c, sl });
                 self.indent_depth += 1;
                 try self.emitReturnRc("ZIDL_CDR_OVERFLOW");
                 self.indent_depth -= 1;
@@ -4239,7 +4063,7 @@ const CdrGenerator = struct {
                 const qname = ir.typeDeclQualifiedName(td);
                 const c_type = try self.prefixedCName(qname);
                 defer self.alloc.free(c_type);
-                try self.printI("_rc = {s}_{s}(_r, &{s});\n", .{ c_type, if (self.wire_key and typeDeclHasKeyC(td)) "deserialize_key" else "deserialize", lval });
+                try self.printI("_rc = {s}_{s}(_r, &{s});\n", .{ c_type, if (self.wire_key and td == .struct_) "deserialize_key_value" else "deserialize", lval });
                 try self.emitRcCheck();
             },
             .enum_ => |e| {
@@ -4270,7 +4094,7 @@ const CdrGenerator = struct {
                 const qname = ir.typeDeclQualifiedName(td);
                 const c_type = try self.prefixedCName(qname);
                 defer self.alloc.free(c_type);
-                try self.printI("_rc = {s}_{s}(_r, &{s});\n", .{ c_type, if (self.wire_key and typeDeclHasKeyC(td)) "deserialize_key" else "deserialize", lval });
+                try self.printI("_rc = {s}_{s}(_r, &{s});\n", .{ c_type, if (self.wire_key and td == .struct_) "deserialize_key_value" else "deserialize", lval });
                 try self.writeI("if (_rc) return _rc;\n");
             },
             else => {
@@ -6296,68 +6120,28 @@ test "c_backend cdr: serialize @key member emits serialize_key" {
     try testing.expect(has(s, "zidl_cdr_write_i32(_w, _v->id)"));
 }
 
-test "c_backend cdr: compute_key_hash_from_cdr_key_only frees @key unbounded string" {
-    // Greptile PR #5: _compute_key_hash_from_cdr_key_only must free heap allocations
-    // made by emitReadMember before returning, or it leaks on every hash call.
-    var c_src = try testGenCdr("@final struct Msg { @key string tag; long value; };", "msg");
-    defer c_src.deinit(testing.allocator);
-    const s = c_src.items;
-    // Should NOT directly return compute_key_hash — needs cleanup step first
-    try testing.expect(!has(s, "return Msg_compute_key_hash(_v, _hash)"));
-    // goto-based cleanup: _rc = compute_key_hash, label, free, return _rc
-    try testing.expect(has(s, "_rc = Msg_compute_key_hash(_v, _hash)"));
-    try testing.expect(has(s, "_kh_cleanup:"));
-    try testing.expect(has(s, "zidl_cdr_free_str(_v->tag)"));
-    try testing.expect(has(s, "return _rc;"));
-    // All reads before the label must use goto, not return
-    try testing.expect(has(s, "if (_rc) goto _kh_cleanup;"));
-}
-
-test "c_backend cdr: compute_key_hash_from_cdr_key_only with @key sequence<long> frees buffer only" {
-    // Primitive element sequence: only the buffer needs freeing, no element loop.
-    var c_src = try testGenCdr("@final struct Msg { @key sequence<long> ids; long value; };", "msg");
-    defer c_src.deinit(testing.allocator);
-    const s = c_src.items;
-    try testing.expect(has(s, "_rc = Msg_compute_key_hash(_v, _hash)"));
-    try testing.expect(has(s, "_kh_cleanup:"));
-    try testing.expect(has(s, "zidl_cdr_free(_v->ids._buffer,"));
-    // No element loop needed for primitive elements
-    try testing.expect(!has(s, "_fsi"));
-}
-
-test "c_backend cdr: compute_key_hash_from_cdr_key_only with @key sequence<string> frees elements then buffer" {
-    // Greptile PR #5: sequence<string> must free each char* element before the buffer.
-    var c_src = try testGenCdr("@final struct Msg { @key sequence<string> tags; long value; };", "msg");
-    defer c_src.deinit(testing.allocator);
-    const s = c_src.items;
-    try testing.expect(has(s, "_kh_cleanup:"));
-    // Element loop must appear before the buffer free
-    try testing.expect(has(s, "zidl_cdr_free_str(_v->tags._buffer[_fsi])"));
-    try testing.expect(has(s, "zidl_cdr_free(_v->tags._buffer,"));
-}
-
-test "c_backend cdr: compute_key_hash_from_cdr_key_only with @key string array frees each element" {
-    // Greptile PR #5: string[N] as @key must free each char* in a loop, not just comment.
-    var c_src = try testGenCdr("@final struct Msg { @key string name[3]; long value; };", "msg");
-    defer c_src.deinit(testing.allocator);
-    const s = c_src.items;
-    try testing.expect(has(s, "_kh_cleanup:"));
-    // Must emit a free loop over the array elements
-    try testing.expect(has(s, "_fai0"));
-    try testing.expect(has(s, "< 3u"));
-    try testing.expect(has(s, "zidl_cdr_free_str(_v->name[_fai0])"));
-    // Must NOT be just a comment
-    try testing.expect(!has(s, "/* NOTE:"));
-}
-
-test "c_backend cdr: compute_key_hash_from_cdr_key_only with only primitive key has no cleanup" {
-    // Primitive @key fields don't allocate: direct return is correct.
-    var c_src = try testGenCdr("@final struct Sample { @key unsigned long id; string name; };", "sample");
-    defer c_src.deinit(testing.allocator);
-    const s = c_src.items;
-    try testing.expect(has(s, "return Sample_compute_key_hash(_v, _hash)"));
-    // No free/result split needed
-    try testing.expect(!has(s, "free((void *)_v->name)")); // name is not @key
+test "c_backend cdr: key-only hash delegates decoding and cleans partially initialized values" {
+    const cases = [_]struct { idl: []const u8, cleanup: bool }{
+        .{ .idl = "@final struct Msg { @key string tag; long value; };", .cleanup = true },
+        .{ .idl = "@final struct Msg { @key sequence<long> ids; long value; };", .cleanup = true },
+        .{ .idl = "@final struct Msg { @key sequence<string> tags; long value; };", .cleanup = true },
+        .{ .idl = "@final struct Msg { @key string name[3]; long value; };", .cleanup = true },
+        .{ .idl = "@final struct Msg { @key long id; string name; };", .cleanup = true },
+        .{ .idl = "@final struct Msg { @key long id; long value; };", .cleanup = false },
+    };
+    for (cases) |case| {
+        var c_src = try testGenCdr(case.idl, "msg");
+        defer c_src.deinit(testing.allocator);
+        const source = c_src.items;
+        const begin = std.mem.indexOf(u8, source, "int Msg_compute_key_hash_from_cdr_key_only(").?;
+        const end = std.mem.indexOfPos(u8, source, begin, "int Msg_compute_key_hash_from_cdr(").?;
+        const body = source[begin..end];
+        try testing.expect(has(body, "memset(&_value, 0, sizeof(_value))"));
+        try testing.expect(has(body, "_rc = Msg_deserialize_key_value(&_reader, &_value);"));
+        try testing.expect(has(body, "if (!_rc) _rc = Msg_compute_key_hash(&_value, _hash);"));
+        try testing.expectEqual(case.cleanup, has(body, "Msg_free(&_value);"));
+        try testing.expect(has(body, "return _rc;"));
+    }
 }
 
 test "c_backend cdr: compute_key_hash_from_cdr (unsuffixed) uses full deserialize, not the key-only decoder" {
@@ -6724,7 +6508,7 @@ test "c_backend cdr: @mutable @optional deserialize sets _present" {
     try testing.expect(!has(s, "TODO"));
 }
 
-test "c_backend cdr: @final @optional serialize writes bool flag" {
+test "c_backend cdr: @final @optional serialize scopes versioned framing" {
     var src = try testGenCdr(
         \\struct Cfg {
         \\    @id(1) @optional unsigned short port_base;
@@ -6732,12 +6516,12 @@ test "c_backend cdr: @final @optional serialize writes bool flag" {
     , "cfg");
     defer src.deinit(testing.allocator);
     const s = src.items;
-    try testing.expect(has(s, "zidl_cdr_write_bool"));
+    try testing.expect(has(s, "zidl_cdr_begin_optional_write(_w, 1, 0, _present, &_scope)"));
     try testing.expect(has(s, "_v->_present & (1ULL << 0u)"));
     try testing.expect(!has(s, "TODO"));
 }
 
-test "c_backend cdr: @final @optional deserialize reads bool flag" {
+test "c_backend cdr: @final @optional deserialize scopes versioned framing" {
     var src = try testGenCdr(
         \\struct Cfg {
         \\    @id(1) @optional unsigned short port_base;
@@ -6745,8 +6529,8 @@ test "c_backend cdr: @final @optional deserialize reads bool flag" {
     , "cfg");
     defer src.deinit(testing.allocator);
     const s = src.items;
-    try testing.expect(has(s, "bool _ip_port_base;"));
-    try testing.expect(has(s, "zidl_cdr_read_bool(_r, &_ip_port_base)"));
+    try testing.expect(has(s, "ZidlCdrOptionalRead _scope; bool _present;"));
+    try testing.expect(has(s, "zidl_cdr_begin_optional_read(_r, 1, &_scope, &_present)"));
     try testing.expect(has(s, "_v->_present |= (1ULL << 0u)"));
     try testing.expect(!has(s, "int8_t _ip_"));
     try testing.expect(!has(s, "TODO"));
@@ -7233,8 +7017,8 @@ test "c_backend cdr: sequence decode guards size, empties on OOM, zeroes heap-ow
     , "t");
     defer s.deinit(testing.allocator);
     const c = s.items;
-    try testing.expect(has(c, "if ((size_t)_sl > SIZE_MAX / sizeof(Named)) {"));
-    try testing.expect(has(c, "if ((size_t)_sl > SIZE_MAX / sizeof(int32_t)) {"));
+    try testing.expect(has(c, "if (_sl != 0 && sizeof(Named) > SIZE_MAX / _sl) {"));
+    try testing.expect(has(c, "if (_sl != 0 && sizeof(int32_t) > SIZE_MAX / _sl) {"));
     try testing.expect(has(c, "_v->named._length = 0;"));
     try testing.expect(has(c, "if (_v->named._buffer) memset(_v->named._buffer, 0, _sl * sizeof(Named));"));
     // POD elements need no zeroing.

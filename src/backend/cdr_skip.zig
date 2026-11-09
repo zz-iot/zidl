@@ -142,9 +142,14 @@ pub fn emitSkipMember(self: anytype, m: ir.StructMember) anyerror!void {
     if (m.annotations.is_optional) {
         try self.writeI("{ bool _present;\n");
         self.indent_depth += 1;
-        try self.writeI("_rc = zidl_cdr_read_bool(_r, &_present);\n");
+        try self.writeI("ZidlCdrOptionalRead _scope;\n");
+        try self.printI("_rc = zidl_cdr_begin_optional_read(_r, {d}, &_scope, &_present);\n", .{m.annotations.memberId(0)});
         try self.writeI("if (_rc) return _rc;\n");
-        try self.writeI("if (_present) {\n");
+        try self.writeI("if (_r->xcdr_version != ZIDL_XCDR2) {\n");
+        self.indent_depth += 1;
+        try self.writeI("zidl_cdr_end_optional_read(_r, &_scope);\n");
+        self.indent_depth -= 1;
+        try self.writeI("} else if (_present) {\n");
         self.indent_depth += 1;
         if (m.dimensions.len > 0) {
             try emitSkipArray(self, m.type_ref, m.dimensions, 0);

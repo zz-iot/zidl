@@ -58,3 +58,16 @@ struct VendorAliasRec {
     @id(0x21) long guarded;
     @id(5) string name;
 };
+
+@final
+struct InnerOptional {
+    octet prefix;
+    @optional long long number;
+    long long tail;
+};
+
+@mutable
+struct NestedOptionalRec {
+    @id(5) InnerOptional item;
+    @id(6) long tail;
+};
