@@ -176,6 +176,18 @@ public class Sample implements java.io.Serializable {
         return _out;
     }
 
+    public void serializeKeyValue(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
+        _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.id);
+    }
+
+    public static Sample deserializeKeyValue(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
+        _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        Sample _out = new Sample();
+        _cdrAlign(_buf, _cdrBase, 4); _out.id = _buf.getInt();
+        return _out;
+    }
+
     public static void skip(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
         _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
         _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
@@ -203,24 +215,12 @@ public class Sample implements java.io.Serializable {
         Point.skip(_buf, _cdrBase, _xcdrVersion);
     }
 
-    protected void serializeKeyFields(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
-        _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.id);
-    }
-
     public void serializeKey(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
-        _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
-        serializeKeyFields(_buf, _cdrBase, _xcdrVersion);
+        serializeKeyValue(_buf, _cdrBase, _xcdrVersion);
     }
 
     public static Sample deserializeKey(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
-        _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
-        Sample _out = new Sample();
-        deserializeKeyInto(_out, _buf, _cdrBase, _xcdrVersion);
-        return _out;
-    }
-
-    protected static void deserializeKeyInto(Sample _out, java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
-        _cdrAlign(_buf, _cdrBase, 4); _out.id = _buf.getInt();
+        return deserializeKeyValue(_buf, _cdrBase, _xcdrVersion);
     }
 
     public byte[] computeKeyHash() {

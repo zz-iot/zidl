@@ -187,6 +187,9 @@ int shared_framing_read_sample(ZidlCdrReader *r) {
 
 /* Link this with a normal C compiler against the staged archive. */
 int main(void) {
+    extern int fixed_external_contract(void);
+    { int rc = fixed_external_contract(); if (rc) return 100 + rc; }
+
     {
         static const uint8_t wide[] = { 0, 7, 0, 0, 2, 0, 0, 0, 'A', 0 };
         ZidlCdrReader r;

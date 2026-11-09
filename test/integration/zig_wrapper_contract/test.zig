@@ -203,3 +203,14 @@ test "selected nested keys read full samples while key-only reads retain project
         try testing.expectEqual(bytes.items.len, reader.pos);
     }
 }
+
+test "a keyless topic retains its empty key while nested values can project" {
+    var bytes: [16]u8 = undefined;
+    var writer = zidl_rt.PrimitiveWriter.initFixed(&bytes, .four, .little);
+    const value: fixture.KeylessBridge = .{ .inner = .{ .ignored = 99, .id = 42 } };
+    try fixture.KeylessBridge.serializeKey(&writer, value);
+    try testing.expectEqual(@as(usize, 0), writer.len);
+    try testing.expectEqual(@as([16]u8, @splat(0)), fixture.KeylessBridge.computeKeyHash(&value));
+    try fixture.KeylessBridge.serializeKeyValue(&writer, value);
+    try testing.expectEqualSlices(u8, &.{ 42, 0, 0, 0 }, bytes[0..writer.len]);
+}

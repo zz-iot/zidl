@@ -29,7 +29,7 @@ public class TypesCdrUtils {
     public static void _cdrAlign(java.nio.ByteBuffer _buf, int _cdrBase, int _align) {
         if (_align <= 1) return;
         int _p = (_buf.position() - _cdrBase) % _align;
-        if (_p != 0) { for (int _i = 0; _i < _align - _p; _i++) _buf.put((byte)0); }
+        if (_p != 0) _buf.position(_buf.position() + (_align - _p));
     }
     public static void _cdrWriteString(java.nio.ByteBuffer _buf, int _cdrBase, String _s) {
         _cdrAlign(_buf, _cdrBase, 4);
@@ -37,6 +37,41 @@ public class TypesCdrUtils {
         _buf.putInt(_b.length + 1);
         _buf.put(_b);
         _buf.put((byte)0);
+    }
+    public static int _cdrBeginOptionalWrite(java.nio.ByteBuffer b, int base, int version, int id, boolean mu, boolean present) {
+        if (version == 2) { b.put(present ? (byte)1 : (byte)0); return -1; }
+        _cdrAlign(b, base, 4); b.putShort((short)0x7f01); b.putShort((short)8);
+        b.putInt(id | (mu ? 0x40000000 : 0)); int offset = b.position(); b.putInt(0); return offset;
+    }
+    public static void _cdrEndOptionalWrite(java.nio.ByteBuffer b, int offset) {
+        if (offset >= 0) b.putInt(offset, b.position() - offset - 4);
+    }
+    public static final class _CdrOptional {
+        public final java.nio.ByteBuffer buffer;
+        public final int base, limit, end;
+        public final boolean present;
+        _CdrOptional(java.nio.ByteBuffer b, int origin, int parentLimit, int valueEnd, boolean exists) {
+            buffer = b; base = origin; limit = parentLimit; end = valueEnd; present = exists;
+        }
+        public void close() { buffer.limit(limit); if (end >= 0) buffer.position(end); }
+    }
+    public static _CdrOptional _cdrBeginOptionalRead(java.nio.ByteBuffer b, int base, int version, int id) {
+        if (version == 2) {
+            byte flag = b.get(); if (flag != 0 && flag != 1) throw new IllegalArgumentException("invalid optional presence");
+            return new _CdrOptional(b, base, b.limit(), -1, flag != 0);
+        }
+        _cdrAlign(b, base, 4); int pid = Short.toUnsignedInt(b.getShort());
+        long size = Short.toUnsignedInt(b.getShort()); int actual = pid & 0x3fff;
+        if ((pid & 0x8000) != 0) throw new IllegalArgumentException("optional implementation extension");
+        if (actual == 0x3f01) {
+            if (size != 8) throw new IllegalArgumentException("invalid optional extended header");
+            int word = b.getInt(); if ((word & 0x80000000) != 0) throw new IllegalArgumentException("optional implementation extension");
+            actual = word & 0x0fffffff; size = Integer.toUnsignedLong(b.getInt());
+        } else if (actual > 0x3f00) throw new IllegalArgumentException("reserved optional member ID");
+        if (actual != id) throw new IllegalArgumentException("unexpected optional member ID");
+        if (size > b.remaining()) throw new java.nio.BufferUnderflowException();
+        int start = b.position(), end = start + (int)size, limit = b.limit(); b.limit(end);
+        return new _CdrOptional(b, start, limit, end, size != 0);
     }
     public static String _cdrReadString(java.nio.ByteBuffer _buf, int _cdrBase) {
         _cdrAlign(_buf, _cdrBase, 4);

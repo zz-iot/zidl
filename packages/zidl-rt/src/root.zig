@@ -92,7 +92,11 @@ pub const ENCAP_PL_CDR_LE = cdr.ENCAP_PL_CDR_LE;
 pub const ENCAP_PL_CDR_BE = cdr.ENCAP_PL_CDR_BE;
 
 test {
+    _ = @import("cdr_optional_test.zig");
+    _ = @import("cdr_fixed_test.zig");
     std.testing.refAllDecls(@This());
 }
 
 pub const cdr_keys = @import("cdr_keys.zig");
+
+pub const cdr_fixed = @import("cdr_fixed.zig");

@@ -36,6 +36,7 @@
 //!
 //! Every read validates bounds; returns `error.EndOfStream` on truncation.
 
+const fixed = @import("cdr_fixed.zig");
 const std = @import("std");
 const primitives = @import("cdr_primitives.zig");
 const cursor = @import("cdr_cursor.zig");
@@ -171,6 +172,23 @@ pub fn CdrWriter(comptime xcdr_version: XcdrVersion) type {
             self.pos = 0;
         }
 
+        pub fn beginOptionalMember(self: *Self, member_id: u28, mu: bool, present: bool) !?framing.OptionalWrite {
+            if (xcdr_version == .xcdr2) {
+                try self.writeBool(present);
+                return null;
+            }
+            return try framing.beginOptional(self, member_id, mu);
+        }
+
+        pub fn cancelOptionalMember(self: *Self, token: ?framing.OptionalWrite) void {
+            if (token) |t| self.pos = framing.optionalParentPosition(self.buf.items.len, t) catch return;
+        }
+
+        pub fn finishOptionalMember(self: *Self, token: ?framing.OptionalWrite) !void {
+            defer self.cancelOptionalMember(token);
+            if (token) |t| try framing.finishOptional(self.buf.items, self.buf.items.len, t, .little);
+        }
+
         // ── Encapsulation header ──────────────────────────────────────────
 
         /// Emit the 4-byte CDR encapsulation header for this writer's XCDR
@@ -258,50 +276,7 @@ pub fn CdrWriter(comptime xcdr_version: XcdrVersion) type {
         pub fn writeFixed(self: *Self, comptime D: u8, comptime S: u8, value: f64) !void {
             comptime if (D < 1 or D > 31) @compileError("fixed<D,S>: D must be 1..31");
             comptime if (S > D) @compileError("fixed<D,S>: S must be <= D");
-            const N = comptime (D / 2) + 1;
-
-            const negative = value < 0.0;
-            // Compute 10^S at comptime for scaling.
-            const scale: f64 = comptime blk: {
-                var f: f64 = 1.0;
-                var i: u8 = 0;
-                while (i < S) : (i += 1) f *= 10.0;
-                break :blk f;
-            };
-            // Round to nearest integer and clamp to max representable (D digits).
-            const abs_v = @abs(value) * scale + 0.5;
-            const max_int: u64 = comptime blk: {
-                var m: u64 = 1;
-                var i: u8 = 0;
-                while (i < D) : (i += 1) m *= 10;
-                break :blk m - 1;
-            };
-            var int_val: u64 = if (abs_v >= @as(f64, @floatFromInt(max_int)) + 1.0)
-                max_int
-            else
-                @intFromFloat(abs_v);
-
-            // Extract D digits MSB-first.
-            var digits: [31]u8 = @splat(0);
-            {
-                var i: usize = D;
-                while (i > 0) {
-                    i -= 1;
-                    digits[i] = @intCast(int_val % 10);
-                    int_val /= 10;
-                }
-            }
-
-            // Pack nibbles: 2N nibbles = (2N-D-1) leading zeros + D digits + sign.
-            const n2 = comptime 2 * N;
-            const pad = comptime n2 - D - 1; // 0 if D odd, 1 if D even
-            var nibbles: [n2]u8 = @splat(0);
-            @memcpy(nibbles[pad .. pad + D], digits[0..D]);
-            nibbles[n2 - 1] = if (negative) 0xD else 0xC;
-
-            var buf: [N]u8 = undefined;
-            for (0..N) |j| buf[j] = (nibbles[2 * j] << 4) | nibbles[2 * j + 1];
-            try self.writeBytes(&buf);
+            try fixed.write(self, D, S, value);
         }
 
         // ── String / wstring writes ───────────────────────────────────────
@@ -526,46 +501,7 @@ pub const KeyHashWriter = struct {
     pub fn writeFixed(self: *KeyHashWriter, comptime D: u8, comptime S: u8, value: f64) !void {
         comptime if (D < 1 or D > 31) @compileError("fixed<D,S>: D must be 1..31");
         comptime if (S > D) @compileError("fixed<D,S>: S must be <= D");
-        const N = comptime (D / 2) + 1;
-
-        const negative = value < 0.0;
-        const scale: f64 = comptime blk: {
-            var f: f64 = 1.0;
-            var i: u8 = 0;
-            while (i < S) : (i += 1) f *= 10.0;
-            break :blk f;
-        };
-        const abs_v = @abs(value) * scale + 0.5;
-        const max_int: u64 = comptime blk: {
-            var m: u64 = 1;
-            var i: u8 = 0;
-            while (i < D) : (i += 1) m *= 10;
-            break :blk m - 1;
-        };
-        var int_val: u64 = if (abs_v >= @as(f64, @floatFromInt(max_int)) + 1.0)
-            max_int
-        else
-            @intFromFloat(abs_v);
-
-        var digits: [31]u8 = @splat(0);
-        {
-            var i: usize = D;
-            while (i > 0) {
-                i -= 1;
-                digits[i] = @intCast(int_val % 10);
-                int_val /= 10;
-            }
-        }
-
-        const n2 = comptime 2 * N;
-        const pad = comptime n2 - D - 1;
-        var nibbles: [n2]u8 = @splat(0);
-        @memcpy(nibbles[pad .. pad + D], digits[0..D]);
-        nibbles[n2 - 1] = if (negative) 0xD else 0xC;
-
-        var buf: [N]u8 = undefined;
-        for (0..N) |j| buf[j] = (nibbles[2 * j] << 4) | nibbles[2 * j + 1];
-        try self.writeBytes(&buf);
+        try fixed.write(self, D, S, value);
     }
 
     pub fn writeString(self: *KeyHashWriter, v: []const u8) !void {
@@ -824,6 +760,33 @@ pub const CdrReader = struct {
         return scope;
     }
 
+    pub const OptionalScope = struct {
+        reader: *CdrReader,
+        parent: CdrReader,
+        framed: bool,
+        present: bool,
+
+        pub fn close(self: *OptionalScope) void {
+            const pos = self.reader.pos;
+            self.reader.* = self.parent;
+            if (!self.framed) self.reader.pos = pos;
+        }
+    };
+
+    /// Close on success and failure before closing any enclosing frame.
+    pub fn beginOptionalMember(self: *CdrReader, member_id: u28) !OptionalScope {
+        if (self.xcdr_version == .xcdr2) {
+            const present = try self.readBool();
+            return .{ .reader = self, .parent = self.*, .framed = false, .present = present };
+        }
+        const span = try framing.readOptional(self.data, &self.pos, member_id, self.byte_order);
+        var parent = self.*;
+        parent.pos = span.end;
+        self.data = self.data[span.start - 4 .. span.end];
+        self.pos = 4;
+        return .{ .reader = self, .parent = parent, .framed = true, .present = span.start != span.end };
+    }
+
     // ── Internal helpers ──────────────────────────────────────────────────
 
     fn readSlice(self: *CdrReader, n: usize) ![]const u8 {
@@ -907,38 +870,7 @@ pub const CdrReader = struct {
     pub fn readFixed(self: *CdrReader, comptime D: u8, comptime S: u8) !f64 {
         comptime if (D < 1 or D > 31) @compileError("fixed<D,S>: D must be 1..31");
         comptime if (S > D) @compileError("fixed<D,S>: S must be <= D");
-        const N = comptime (D / 2) + 1;
-        const n2 = comptime 2 * N;
-        const pad = comptime n2 - D - 1; // leading zero nibbles
-
-        const buf = try self.readSlice(N);
-
-        // Unpack nibbles.
-        var nibbles: [n2]u8 = undefined;
-        for (0..N) |j| {
-            nibbles[2 * j] = (buf[j] >> 4) & 0x0F;
-            nibbles[2 * j + 1] = buf[j] & 0x0F;
-        }
-
-        // Reconstruct integer from D digit nibbles.
-        var int_val: u64 = 0;
-        for (0..D) |k| {
-            const d = nibbles[pad + k];
-            if (d > 9) return error.InvalidFixedPtDigit;
-            int_val = int_val * 10 + d;
-        }
-
-        const sign_nib = nibbles[n2 - 1];
-        const negative = (sign_nib == 0xD or sign_nib == 0xB);
-
-        const scale: f64 = comptime blk: {
-            var f: f64 = 1.0;
-            var i: u8 = 0;
-            while (i < S) : (i += 1) f *= 10.0;
-            break :blk f;
-        };
-        const result = @as(f64, @floatFromInt(int_val)) / scale;
-        return if (negative) -result else result;
+        return fixed.read(self.data, &self.pos, D, S);
     }
 
     // ── String / wstring reads ────────────────────────────────────────────

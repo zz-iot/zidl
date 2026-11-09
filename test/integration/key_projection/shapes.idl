@@ -1,0 +1,22 @@
+module Projection {
+    struct FBase { long ignored; @id(8) @key long id; };
+    struct FMid : FBase { long middle; };
+    struct FDerived : FMid { long tail; };
+    @appendable struct ABase { long ignored; @id(8) @key long id; };
+    @appendable struct ADerived : ABase { long tail; };
+    @mutable struct MBase { @optional long ignored; @id(8) @key string key; };
+    @mutable struct MDerived : MBase { long tail; };
+    struct Bridge { long before; FDerived inner; long after; };
+    struct RootBridge { @key Bridge item; long ignored; };
+    struct PlainBase { long before; };
+    struct InheritedBridge : PlainBase { FDerived inner; long after; };
+    struct RootInherited { @key InheritedBridge item; long ignored; };
+    @mutable struct MutBridge { long before; MDerived inner; long after; };
+    @mutable struct RootMut { @key MutBridge item; @key long token; long ignored; };
+    @appendable struct AppBridge { long before; MDerived inner; };
+    typedef AppBridge AppBridgeArray[2];
+    struct RootArray { @key AppBridgeArray values; long ignored; };
+    typedef MutBridge MutBridgeAlias;
+    typedef sequence<MutBridgeAlias,2> BridgeList;
+    struct RootSeq { @key BridgeList values; @key sequence<MutBridgeAlias> dynamic_values; long ignored; };
+};

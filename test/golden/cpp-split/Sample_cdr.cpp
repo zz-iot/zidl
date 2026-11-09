@@ -13,7 +13,7 @@ int Sample_serialize_key_holder(ZidlCdrWriter *_w, const ::Sample *_v) {
 }
 
 int Sample_serialize(ZidlCdrWriter *_w, const ::Sample *_v) {
-    int _rc;
+    int _rc = ZIDL_CDR_OK; (void)_rc;
     _rc = zidl_cdr_write_u32(_w, _v->id);
     if (_rc) return _rc;
     _rc = zidl_cdr_write_bool(_w, _v->b);
@@ -68,7 +68,7 @@ int Sample_deserialize(ZidlCdrReader *_r, ::Sample *_v) {
 }
 
 static int Sample_deserialize_bounded_impl(ZidlCdrReader *_r, ::Sample *_v) {
-    int _rc;
+    int _rc = ZIDL_CDR_OK; (void)_rc;
     _rc = zidl_cdr_read_u32(_r, &_v->id);
     if (_rc) return _rc;
     _rc = zidl_cdr_read_bool(_r, &_v->b);
@@ -123,6 +123,28 @@ static int Sample_deserialize_bounded_impl(ZidlCdrReader *_r, ::Sample *_v) {
     return ZIDL_CDR_OK;
 }
 
+int Sample_serialize_key_value(ZidlCdrWriter *_w, const ::Sample *_v) {
+    int _rc = ZIDL_CDR_OK; (void)_rc;
+    _rc = zidl_cdr_write_u32(_w, _v->id);
+    if (_rc) return _rc;
+    return ZIDL_CDR_OK;
+}
+
+static int Sample_deserialize_key_value_bounded_impl(ZidlCdrReader *_r, ::Sample *_v);
+int Sample_deserialize_key_value(ZidlCdrReader *_r, ::Sample *_v) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Sample_deserialize_key_value_bounded_impl(&_local, _v);
+    _r->pos = !_rc && (0) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Sample_deserialize_key_value_bounded_impl(ZidlCdrReader *_r, ::Sample *_v) {
+    int _rc = ZIDL_CDR_OK; (void)_rc;
+    _rc = zidl_cdr_read_u32(_r, &_v->id);
+    if (_rc) return _rc;
+    return ZIDL_CDR_OK;
+}
+
 static int Sample_skip_bounded_impl(ZidlCdrReader *_r);
 int Sample_skip(ZidlCdrReader *_r) {
     ZidlCdrReader _local = *_r;
@@ -159,25 +181,11 @@ static int Sample_skip_bounded_impl(ZidlCdrReader *_r) {
 }
 
 int Sample_serialize_key(ZidlCdrWriter *_w, const ::Sample *_v) {
-    int _rc;
-    _rc = zidl_cdr_write_u32(_w, _v->id);
-    if (_rc) return _rc;
-    return ZIDL_CDR_OK;
+    return Sample_serialize_key_value(_w, _v);
 }
 
-static int Sample_deserialize_key_bounded_impl(ZidlCdrReader *_r, ::Sample *_v);
 int Sample_deserialize_key(ZidlCdrReader *_r, ::Sample *_v) {
-    ZidlCdrReader _local = *_r;
-    int _rc = Sample_deserialize_key_bounded_impl(&_local, _v);
-    _r->pos = !_rc && (0) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
-    return _rc;
-}
-
-static int Sample_deserialize_key_bounded_impl(ZidlCdrReader *_r, ::Sample *_v) {
-    int _rc;
-    _rc = zidl_cdr_read_u32(_r, &_v->id);
-    if (_rc) return _rc;
-    return ZIDL_CDR_OK;
+    return Sample_deserialize_key_value(_r, _v);
 }
 
 int Sample_compute_key_hash(const ::Sample *_v, uint8_t _hash[16]) {
@@ -192,15 +200,13 @@ int Sample_compute_key_hash(const ::Sample *_v, uint8_t _hash[16]) {
 }
 
 int Sample_compute_key_hash_from_cdr_key_only(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {
-    ZidlCdrReader _r_data;
-    int _rc = zidl_cdr_reader_init(&_r_data, _payload, _len);
+    ZidlCdrReader _reader;
+    int _rc = zidl_cdr_reader_init(&_reader, _payload, _len);
     if (_rc) return _rc;
-    ZidlCdrReader *_r = &_r_data;
-    ::Sample _v_data{};
-    ::Sample *_v = &_v_data;
-    _rc = zidl_cdr_read_u32(_r, &_v->id);
-    if (_rc) return _rc;
-    return Sample_compute_key_hash(_v, _hash);
+    ::Sample _value{};
+    _rc = Sample_deserialize_key_value(&_reader, &_value);
+    if (!_rc) _rc = Sample_compute_key_hash(&_value, _hash);
+    return _rc;
 }
 
 int Sample_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {

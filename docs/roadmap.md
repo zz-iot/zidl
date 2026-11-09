@@ -80,7 +80,9 @@ Features*.
   is auto-treated as `@callback`; the planned deprecation warning for relying on that
   (instead of an explicit `@callback`) is not yet emitted. `annotations.md`.
 - **`fixed<D,S>` is mapped to `f64`** (approximate/lossy) in the Zig, Java, and C++
-  backends. `zig.zig:32`.
+  backends. This limits lossless high-precision wire roundtrips and canonical key
+  hashing from decoded values; an exact decimal value mapping remains open.
+  `zig.zig:32`.
 - **`any` / `object` / `value_base`** CDR read/write is unsupported — C and Zig emit a
   `// unsupported` marker; Java emits `// TODO: any/object` and its skip path throws
   `IllegalArgumentException`. `c.zig:4428`, `zig.zig:6539`, `java.zig:2363`.
@@ -116,6 +118,15 @@ Features*.
   `std::pmr`) is a deliberately deferred option; not built.
 
 ### C++ backend
+
+- **Direct `@optional` array members generate invalid C++.** For example,
+  `@optional long values[2]` declares a bare array while its codec calls
+  `.has_value()` / `.emplace()`. This predates native CDR consolidation; it is a
+  generator bug, not an intentional language restriction. Add an optional-capable
+  array representation (for example `std::optional<std::array<T, N>>`), including
+  multidimensional arrays and array typedefs, and compile/roundtrip tests for both CDR versions.
+  Arrays inside an optional aggregate work. See the
+  [optional-wire checkpoint](design/native-cdr-optional-wire-slice.md).
 
 - **`--generate-c-api` complex-type adapter (`ConcreteImplGenerator`)** — the largest single
   gap. Non-adaptable parameter/return types (bare/nested sequences, complex QoS structs,
@@ -161,6 +172,12 @@ Features*.
   interop accessor instead of a public virtual on every interface).
 
 ### Java backend
+
+- **Full-range fixed-point BCD values.** Generated helpers use `long`
+  intermediates, so values exceeding that range cannot use the full 31-digit
+  wire representation. Add wide integer conversion and strict BCD validation;
+  this is separate from replacing the approximate `double` value mapping.
+  Native shared BCD extraction does not change the Java helpers.
 
 - **`bitset` CDR** — no standard Java CDR mapping; emits `// TODO: bitset`. (The bitset
   *type* is generated as a real class.)

@@ -8,6 +8,8 @@ const wire = @import("cdr_skip.zig");
 pub const Field = struct {
     member: *const ir.StructMember,
     owner_name: []const u8,
+    owner: *const ir.Struct,
+    index: usize,
     base_depth: usize,
     id: u32,
     ordinal: usize,
@@ -22,19 +24,21 @@ fn collect(alloc: std.mem.Allocator, s: *const ir.Struct, depth: usize, result: 
     for (s.members, 0..) |*member, index| try result.append(alloc, .{
         .member = member,
         .owner_name = s.qualified_name,
+        .owner = s,
+        .index = index,
         .base_depth = depth,
         .id = member.annotations.memberId(@intCast(index)),
         .ordinal = result.items.len,
     });
 }
 
-pub fn fields(alloc: std.mem.Allocator, s: *const ir.Struct) ![]Field {
+pub fn wireFields(alloc: std.mem.Allocator, s: *const ir.Struct, projection: bool) ![]Field {
     var result = std.ArrayList(Field).empty;
     errdefer result.deinit(alloc);
     try collect(alloc, s, 0, &result);
     var has_key = false;
     for (result.items) |field| has_key = has_key or field.member.annotations.is_key;
-    if (has_key) {
+    if (projection and has_key) {
         var count: usize = 0;
         for (result.items) |field| if (field.member.annotations.is_key) {
             result.items[count] = field;
@@ -42,12 +46,25 @@ pub fn fields(alloc: std.mem.Allocator, s: *const ir.Struct) ![]Field {
         };
         result.items.len = count;
     }
-    std.mem.sort(Field, result.items, {}, struct {
+    return result.toOwnedSlice(alloc);
+}
+
+pub fn zigMemberPath(alloc: std.mem.Allocator, field: Field) ![]u8 {
+    var path = std.ArrayList(u8).empty;
+    errdefer path.deinit(alloc);
+    for (0..field.base_depth) |_| try path.appendSlice(alloc, "_base.");
+    try path.appendSlice(alloc, field.member.name);
+    return path.toOwnedSlice(alloc);
+}
+
+pub fn fields(alloc: std.mem.Allocator, s: *const ir.Struct) ![]Field {
+    const members = try wireFields(alloc, s, true);
+    std.mem.sort(Field, members, {}, struct {
         fn less(_: void, a: Field, b: Field) bool {
             return if (a.id == b.id) a.ordinal < b.ordinal else a.id < b.id;
         }
     }.less);
-    return result.toOwnedSlice(alloc);
+    return members;
 }
 
 const Validator = struct {

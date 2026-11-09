@@ -49,6 +49,28 @@ public class Frame implements java.io.Serializable {
         return _out;
     }
 
+    public void serializeKeyValue(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
+        _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        int _dhPos = 0;
+        if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _dhPos = _buf.position(); _buf.putInt(0); }
+        _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.seq_num);
+        _cdrWriteString(_buf, _cdrBase, this.topic);
+        if (_xcdrVersion == 2) { _buf.putInt(_dhPos, _buf.position() - _dhPos - 4); }
+    }
+
+    public static Frame deserializeKeyValue(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
+        _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        Frame _out = new Frame();
+        int _keyLimit = _buf.limit(), _keyEnd = _keyLimit;
+        if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); int _size = _buf.getInt(); if (_size < 0 || _size > _buf.remaining()) throw new java.nio.BufferUnderflowException(); _keyEnd = _buf.position() + _size; _buf.limit(_keyEnd); }
+        try {
+        _cdrAlign(_buf, _cdrBase, 4); _out.seq_num = _buf.getInt();
+        _out.topic = _cdrReadString(_buf, _cdrBase);
+        } finally { _buf.limit(_keyLimit); }
+        if (_xcdrVersion == 2) _buf.position(_keyEnd);
+        return _out;
+    }
+
     public static void skip(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
         _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
         if (_xcdrVersion == 2) {

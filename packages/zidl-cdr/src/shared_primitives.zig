@@ -114,10 +114,10 @@ fn input(r: *const Reader) error{EndOfStream}![]const u8 {
     return error.EndOfStream;
 }
 
-fn readStatus(err: error{ EndOfStream, InvalidBool, InvalidPrimitiveSize, InvalidString, InvalidEncapsulation, InvalidEmheader }) c_int {
+fn readStatus(err: error{ EndOfStream, InvalidBool, InvalidPrimitiveSize, InvalidString, InvalidEncapsulation, InvalidEmheader, InvalidOptionalHeader }) c_int {
     return switch (err) {
         error.EndOfStream => -2,
-        error.InvalidBool, error.InvalidPrimitiveSize, error.InvalidString, error.InvalidEncapsulation, error.InvalidEmheader => -3,
+        error.InvalidBool, error.InvalidPrimitiveSize, error.InvalidString, error.InvalidEncapsulation, error.InvalidEmheader, error.InvalidOptionalHeader => -3,
     };
 }
 
@@ -457,5 +457,79 @@ export fn zidl_cdr_write_key_wstring(w: *Writer, data: ?[*]const u16, len: u32) 
 export fn zidl_cdr_write_key_wstring_length(w: *Writer, len: u32) c_int {
     var sink = Sink{ .writer = w };
     rt.cdr_keys.writeWstringLength(&sink, len) catch |err| return if (err == error.Overflow) -1 else sink.status;
+    return 0;
+}
+
+pub const OptionalWrite = rt.cdr_framing.OptionalWrite;
+pub const OptionalRead = extern struct { parent: Reader, end: usize };
+
+export fn zidl_cdr_begin_optional_write(w: *Writer, member_id: u32, mu: bool, present: bool, scope: *OptionalWrite) c_int {
+    if (member_id > 0x0fffffff) return -3;
+    if (w.xcdr_version == 2) {
+        const rc = zidl_cdr_write_bool(w, present);
+        if (rc != 0) return rc;
+        scope.* = .{ .length_offset = std.math.maxInt(usize), .value_start = 0, .parent_pos = 0 };
+        return 0;
+    }
+    var sink = Sink{ .writer = w };
+    const token = rt.cdr_framing.beginOptional(&sink, member_id, mu) catch |err| return switch (err) {
+        error.InvalidOptionalHeader => -3,
+        else => sink.status,
+    };
+    scope.* = token;
+    return 0;
+}
+
+export fn zidl_cdr_cancel_optional_write(w: *Writer, scope: *const OptionalWrite) void {
+    if (scope.length_offset == std.math.maxInt(usize)) return;
+    w.pos = rt.cdr_framing.optionalParentPosition(w.len, scope.*) catch return;
+}
+
+export fn zidl_cdr_end_optional_write(w: *Writer, scope: *const OptionalWrite) c_int {
+    defer zidl_cdr_cancel_optional_write(w, scope);
+    if (scope.length_offset == std.math.maxInt(usize)) return 0;
+    rt.cdr_framing.finishOptional(patchStorage(w), w.len, scope.*, order(w)) catch |err| return patchStatus(err);
+    return 0;
+}
+
+export fn zidl_cdr_begin_optional_read(r: *Reader, member_id: u32, scope: *OptionalRead, present: *bool) c_int {
+    if (member_id > 0x0fffffff) return -3;
+    if (r.xcdr_version == 2) {
+        const rc = zidl_cdr_read_bool(r, present);
+        if (rc != 0) return rc;
+        scope.* = .{ .parent = r.*, .end = std.math.maxInt(usize) };
+        return 0;
+    }
+    const span = rt.cdr_framing.readOptional(input(r) catch return -2, &r.pos, member_id, if (r.byte_order == 0) .little else .big) catch |err| return readStatus(err);
+    scope.* = .{ .parent = r.*, .end = span.end };
+    scope.parent.pos = span.end;
+    r.data = r.data.? + (span.start - 4);
+    r.data_len = 4 + (span.end - span.start);
+    r.pos = 4;
+    present.* = span.start != span.end;
+    return 0;
+}
+
+export fn zidl_cdr_end_optional_read(r: *Reader, scope: *const OptionalRead) void {
+    const pos = r.pos;
+    r.* = scope.parent;
+    if (scope.end == std.math.maxInt(usize)) r.pos = pos;
+}
+
+export fn zidl_cdr_write_fixed(w: *Writer, digits: u8, scale: u8, value: f64) c_int {
+    var sink = Sink{ .writer = w };
+    rt.cdr_fixed.write(&sink, digits, scale, value) catch |err| return switch (err) {
+        error.InvalidFixedPtParameters, error.InvalidFixedPtValue => -3,
+        else => sink.status,
+    };
+    return 0;
+}
+
+export fn zidl_cdr_read_fixed(r: *Reader, digits: u8, scale: u8, out: *f64) c_int {
+    const result = rt.cdr_fixed.read(input(r) catch return -2, &r.pos, digits, scale) catch |err| return switch (err) {
+        error.EndOfStream => -2,
+        else => -3,
+    };
+    out.* = result;
     return 0;
 }

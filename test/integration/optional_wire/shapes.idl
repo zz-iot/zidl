@@ -1,0 +1,22 @@
+module OptionalWire {
+    struct Pair { unsigned long long values[2]; };
+    struct Values {
+        @id(0) @optional unsigned long long number;
+        @id(16128) @optional string text;
+        @id(16129) @optional Pair numbers;
+        @id(31) @optional sequence<string, 2> texts;
+        unsigned long long tail;
+    };
+    struct Inner {
+        octet prefix;
+        @id(7) @optional unsigned long long value;
+        unsigned long long tail;
+    };
+    @appendable struct Base {
+        @optional Inner item;
+    };
+    @appendable struct Derived : Base {
+        @optional string extra;
+        unsigned long long tail;
+    };
+};

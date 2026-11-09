@@ -15,7 +15,7 @@ int Point_serialize_key_holder(ZidlCdrWriter *_w, const Point *_v) {
 }
 
 int Point_serialize(ZidlCdrWriter *_w, const Point *_v) {
-    int _rc;
+    int _rc = ZIDL_CDR_OK; (void)_rc;
     _rc = zidl_cdr_write_i32(_w, _v->x);
     if (_rc) return _rc;
     _rc = zidl_cdr_write_i32(_w, _v->y);
@@ -32,7 +32,33 @@ int Point_deserialize(ZidlCdrReader *_r, Point *_v) {
 }
 
 static int Point_deserialize_bounded_impl(ZidlCdrReader *_r, Point *_v) {
-    int _rc;
+    int _rc = ZIDL_CDR_OK; (void)_rc;
+    _rc = zidl_cdr_read_i32(_r, &_v->x);
+    if (_rc) return _rc;
+    _rc = zidl_cdr_read_i32(_r, &_v->y);
+    if (_rc) return _rc;
+    return ZIDL_CDR_OK;
+}
+
+int Point_serialize_key_value(ZidlCdrWriter *_w, const Point *_v) {
+    int _rc = ZIDL_CDR_OK; (void)_rc;
+    _rc = zidl_cdr_write_i32(_w, _v->x);
+    if (_rc) return _rc;
+    _rc = zidl_cdr_write_i32(_w, _v->y);
+    if (_rc) return _rc;
+    return ZIDL_CDR_OK;
+}
+
+static int Point_deserialize_key_value_bounded_impl(ZidlCdrReader *_r, Point *_v);
+int Point_deserialize_key_value(ZidlCdrReader *_r, Point *_v) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Point_deserialize_key_value_bounded_impl(&_local, _v);
+    _r->pos = !_rc && (0) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Point_deserialize_key_value_bounded_impl(ZidlCdrReader *_r, Point *_v) {
+    int _rc = ZIDL_CDR_OK; (void)_rc;
     _rc = zidl_cdr_read_i32(_r, &_v->x);
     if (_rc) return _rc;
     _rc = zidl_cdr_read_i32(_r, &_v->y);

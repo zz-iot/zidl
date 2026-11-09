@@ -325,3 +325,41 @@ test "invalid bool consumes its byte and leaves the C output unchanged" {
     try testing.expectEqual(bytes.len, native.pos);
     try testing.expectEqual(bytes.len, foreign.pos);
 }
+
+extern fn optional_wire_tests() c_int;
+test "optional member C ABI independent wire witnesses" {
+    try std.testing.expectEqual(@as(c_int, 0), optional_wire_tests());
+}
+
+extern fn optional_layout(*[9]usize) void;
+test "optional scope C and Zig layouts agree" {
+    var actual: [9]usize = undefined;
+    optional_layout(&actual);
+    const W = adapter.OptionalWrite;
+    const R = adapter.OptionalRead;
+    const expected = [_]usize{
+        @sizeOf(W),                  @alignOf(W),                @offsetOf(W, "length_offset"),
+        @offsetOf(W, "value_start"), @offsetOf(W, "parent_pos"), @sizeOf(R),
+        @alignOf(R),                 @offsetOf(R, "parent"),     @offsetOf(R, "end"),
+    };
+    try testing.expectEqualSlices(usize, &expected, &actual);
+}
+
+const FixedAPI = struct {
+    pub const ZidlCdrWriter = adapter.Writer;
+    pub const ZidlCdrReader = adapter.Reader;
+    pub extern fn zidl_cdr_writer_init(*ZidlCdrWriter, c_int) c_int;
+    pub extern fn zidl_cdr_writer_init_fixed(*ZidlCdrWriter, [*]u8, usize, c_int) void;
+    pub extern fn zidl_cdr_writer_init_counting(*ZidlCdrWriter, c_int) void;
+    pub extern fn zidl_cdr_writer_deinit(*ZidlCdrWriter) void;
+    pub extern fn zidl_cdr_writer_set_byte_order(*ZidlCdrWriter, c_int) void;
+    pub extern fn zidl_cdr_write_encap(*ZidlCdrWriter) c_int;
+    pub extern fn zidl_cdr_write_u8(*ZidlCdrWriter, u8) c_int;
+    pub extern fn zidl_cdr_write_fixed(*ZidlCdrWriter, u8, u8, f64) c_int;
+    pub extern fn zidl_cdr_reader_init(*ZidlCdrReader, [*]const u8, usize) c_int;
+    pub extern fn zidl_cdr_read_u8(*ZidlCdrReader, *u8) c_int;
+    pub extern fn zidl_cdr_read_fixed(*ZidlCdrReader, u8, u8, *f64) c_int;
+};
+test "shared C ABI fixed decimal contract" {
+    try @import("fixed_contract.zig").check(FixedAPI);
+}
