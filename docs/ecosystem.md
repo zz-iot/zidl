@@ -16,7 +16,7 @@ zidl (this repo)
   └── generates: type definitions + CDR serializers + TypeObjects
   └── generates: DDS binding layer (--generate-interfaces)
 
-zidl-rt / zidl-cdr / zidl-xtypes (companion packages in this repo)
+zidl-cdr / zidl-bindings / zidl-xtypes (companion packages in this repo)
   └── runtime CDR encode/decode used by generated code
 
 [future: Zig DDS runtime]
@@ -59,7 +59,7 @@ XRCE profile constraints are validated before backends run (`validateXrce` in
 `src/backend/interface.zig`). Violation is a compile-time error, not a runtime check.
 
 The `--zig-version 0.15.1` flag emits Zig output compatible with MicroZig clients:
-bounded strings and sequences use fixed-capacity `zidl_rt.BoundedArray` storage.
+bounded strings and sequences use fixed-capacity `zidl_cdr.BoundedArray` storage.
 A fully freestanding/no-heap runtime path remains planned work — see [`roadmap.md`](roadmap.md).
 
 ---
@@ -180,7 +180,7 @@ The C backend's opaque single-pointer handle (`typedef struct FooDataWriter_s
 *FooDataWriter;`) is one word, not two, so crossing between the two
 representations needs real work at the `callconv(.c)` boundary — a bare
 pointer isn't enough to recover `{ptr, vtable}` generically. The export layer
-bridges this with a small heap-allocated box (`zidl_rt.EntityBox`) holding the
+bridges this with a small heap-allocated box (`zidl_bindings.EntityBox`) holding the
 real pair; boxing/unboxing happens **only** in the generated export functions,
 never in Zig-native code:
 
@@ -192,9 +192,9 @@ pub export fn DDS_Publisher_create_datawriter(
     a_listener: ?*const DDS.DataWriterListener,
     mask: DDS.StatusMask,
 ) callconv(.c) *anyopaque {
-    const _self: DDS.Publisher = zidl_rt.unboxAsView(DDS.Publisher, self);
+    const _self: DDS.Publisher = zidl_bindings.unboxAsView(DDS.Publisher, self);
     const _r = _self.vtable.create_datawriter(
-        _self.ptr, zidl_rt.unboxAsView(DDS.Topic, a_topic), qos, a_listener, mask,
+        _self.ptr, zidl_bindings.unboxAsView(DDS.Topic, a_topic), qos, a_listener, mask,
     );
     return _r.vtable.get_c_abi_handle(_r.ptr);
 }
@@ -236,7 +236,7 @@ obtained by upcasting it are `==`-comparable, not just independently self-consis
 works by generating a second, boxing-only `CAbiViews` type per annotated interface
 (nesting the interface's primary base's own `CAbiViews`, `extern struct`-offset-0-composed
 so a leaf's box can be safely reinterpreted as any ancestor's) and routing that
-interface's unboxing through `zidl_rt.unboxAsView` instead of `unboxAs` — see
+interface's unboxing through `zidl_bindings.unboxAsView` instead of `unboxAs` — see
 `zidl/docs/design/binding-c-abi-identity.md` for the full design and why it's
 opt-in per interface rather than automatic (it isn't safe for a *secondary* base of a
 multiply-inherited interface, e.g. `Topic`'s `TopicDescription`).

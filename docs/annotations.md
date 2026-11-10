@@ -131,7 +131,7 @@ encoding.  Not intended for user IDL.
 
 Internal annotation used by the RTPS discovery layer.  The generated
 `deserializeFromPlCdr` keeps every PL_CDR parameter it has no member for in an
-`unknown_params: []zidl_rt.RawParam` field, and `serializePlCdr` replays them
+`unknown_params: []zidl_cdr.RawParam` field, and `serializePlCdr` replays them
 before the sentinel, so a decode → re-encode round trip preserves vendor
 extensions and not-yet-modelled parameters byte-for-byte.  Generated
 `deinit`/`clone` cover the field.  Ignored on non-`@mutable` types and without

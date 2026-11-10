@@ -1,4 +1,4 @@
-## Interop test harness: Cyclone DDS ↔ zidl-rt cross-validation.
+## Interop test harness: Cyclone DDS ↔ the native Zig codec cross-validation.
 ##
 ## Targets:
 ##   zig-test — run the Zig interop tests only (no Cyclone required; default)

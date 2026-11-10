@@ -72,7 +72,7 @@ time a binding sees discovery data it is an ordinary decoded `@final` struct. Re
 if a non-Zig program needs to implement RTPS wire discovery directly.
 
 **PL_CDR decode has a strictness `mode` and an opt-in lossless-retention mode.**
-`deserializeFromPlCdr` takes `mode: zidl_rt.PlMode` — `.lenient` (tolerate a truncated tail
+`deserializeFromPlCdr` takes `mode: zidl_cdr.PlMode` — `.lenient` (tolerate a truncated tail
 / missing sentinel / misaligned length, as a hand-rolled RTPS parser does) or `.strict`
 (typed errors for those plus an unknown must-understand PID and a repeated singleton PID).
 `@pl_retain_unknown` on the struct additionally keeps every unmodelled parameter verbatim

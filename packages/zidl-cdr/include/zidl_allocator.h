@@ -15,7 +15,7 @@
  *
  * `alloc`/`resize`/`free` mirror the shape of Zig's `std.mem.Allocator.VTable`
  * (alloc/resize/free split) so a Zig-side adapter is a mechanical,
- * allocation-free translation — see `zidl-rt`'s `allocator.zig`.
+ * allocation-free translation — see `zidl-bindings`' `allocator.zig`.
  *
  * Contract:
  *   - `ctx` is opaque to the callee; passed back unchanged on every call.

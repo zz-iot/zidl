@@ -246,7 +246,7 @@ pub fn notifyHandleRetired(handle: *anyopaque) void {
 /// nonzero for retired handles and only accepts boxEntity allocations.
 /// Call from a `comptime` block
 /// in the library that owns this runtime instance, so the observers it
-/// registers see that instance's frees: `comptime { zidl_rt.exportHandleRetireHook("mylib_handle_retire"); }`.
+/// registers see that instance's frees: `comptime { zidl_bindings.exportHandleRetireHook("mylib_handle_retire"); }`.
 pub fn exportHandleRetireHook(comptime name: []const u8) void {
     const S = struct {
         fn isRetired(handle: ?*anyopaque) callconv(.c) c_int {
@@ -327,11 +327,11 @@ test "the observer table grows past one block, and a removal frees only its own 
 }
 
 test "logical retirement persists until free and notifies once" {
-    comptime exportHandleRetireHook("zidl_rt_test_retirement");
+    comptime exportHandleRetireHook("zidl_bindings_test_retirement");
     const Hook = struct {
-        extern fn zidl_rt_test_retirement_is_retired(handle: ?*anyopaque) callconv(.c) c_int;
+        extern fn zidl_bindings_test_retirement_is_retired(handle: ?*anyopaque) callconv(.c) c_int;
     };
-    try std.testing.expectEqual(@as(c_int, 1), Hook.zidl_rt_test_retirement_is_retired(null));
+    try std.testing.expectEqual(@as(c_int, 1), Hook.zidl_bindings_test_retirement_is_retired(null));
     const Observer = struct {
         var count: usize = 0;
         fn on(_: ?*anyopaque, handle: *anyopaque) callconv(.c) void {
@@ -345,11 +345,11 @@ test "logical retirement persists until free and notifies once" {
     var value: u8 = 0;
     const handle = try boxEntity(std.testing.allocator, &value, &value);
     try std.testing.expect(!isEntityBoxRetired(handle));
-    try std.testing.expectEqual(@as(c_int, 0), Hook.zidl_rt_test_retirement_is_retired(handle));
+    try std.testing.expectEqual(@as(c_int, 0), Hook.zidl_bindings_test_retirement_is_retired(handle));
     retireEntityBox(handle);
     retireEntityBox(handle);
     try std.testing.expect(isEntityBoxRetired(handle));
-    try std.testing.expectEqual(@as(c_int, 1), Hook.zidl_rt_test_retirement_is_retired(handle));
+    try std.testing.expectEqual(@as(c_int, 1), Hook.zidl_bindings_test_retirement_is_retired(handle));
     try std.testing.expectEqual(@as(*anyopaque, &value), unboxEntity(handle).ptr);
     try std.testing.expectEqual(@as(usize, 1), Observer.count);
     freeEntityBox(std.testing.allocator, handle);

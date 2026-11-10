@@ -1,45 +1,37 @@
 # Runtime Libraries Reference
 
-> Planned changes: [shared native CDR core](design/shared-native-cdr.md) and
-> [shared Java CDR runtime](design/java-cdr-runtime.md). These decisions supersede
-> the historical strategy rationale below. The migrations have not shipped;
-> this reference also contains aspirational Rust entries that are not evidence
-> of implemented bindings.
+> Native consolidation is implemented; the [shared Java CDR runtime](design/java-cdr-runtime.md)
+> remains planned. Historical Rust descriptions below are proposals.
 
 ## Native package layout
 
-The current development layout separates codec operations from binding support.
+The native layout separates codec operations from binding support.
 See the [package placement checkpoint](design/native-cdr-package-slice.md) for
-build imports and compatibility details.
+the original extraction boundary.
 
 | Package | Purpose |
 |---|---|
 | `packages/zidl-cdr/` | Canonical native Zig codec; stable C headers and archive build |
 | `packages/zidl-bindings/` | Allocators, owned values, entity boxes and authoring support |
-| `packages/zidl-rt/` | Temporary umbrella pending zzdds migration |
 | `packages/zidl-cdr/c-api/` | C ABI validation and temporary C reference comparison |
 | `packages/zidl-xtypes/` | Zig XTypes constants |
 
-Generated C/C++ code uses the C ABI. The shared native implementation is the
-development default. The independent
-C reference is test-only; building the production archive from source requires
-Zig. See the [production build switch](design/native-cdr-production-slice.md)
-for the zzdds dependency rollout boundary. Generated Zig code imports
-`zidl_cdr` and `zidl_bindings` directly. The temporary
-`zidl-rt` aliases will be removed after zzdds migrates. Java currently generates its
-codec inline; its shared runtime migration is planned separately. Rust, Python
-and C# runtime descriptions elsewhere in older documents are proposals, not
-implemented backend guarantees.
-
-The API reference below retains the compatibility names. Canonical codec source
-now lives in `packages/zidl-cdr/src`; the old `zidl-rt` source paths forward exports.
+Generated C/C++ code uses the stable C ABI backed by the canonical native codec.
+The independent C reference is test-only; building the production archive from
+source requires Zig. Prebuilt archives can be linked by C/C++ toolchains.
+Generated Zig code imports `zidl_cdr` and `zidl_bindings` directly. The
+`zidl_rt` module and `packages/zidl-rt` compatibility package have been removed
+following zzdds migration. See [the Zig build guide](backend_zig.md) to update
+old imports. Java currently generates its codec inline; its shared runtime
+migration is planned separately. Rust, Python and C# runtime descriptions in
+older documents are proposals, not implemented backend guarantees.
 
 ---
 
 ## zidl-cdr (Native Zig Codec)
 
 **Source:** `packages/zidl-cdr/src/cdr.zig`
-**Tests:** 61
+**Tests:** 87
 
 ### CdrWriter
 
@@ -188,7 +180,7 @@ from CDR payload start; parameter length includes trailing pad.
 
 ### BoundedArray
 
-`std.BoundedArray` was removed in Zig 0.16.0. `zidl-rt` provides a
+`std.BoundedArray` was removed in Zig 0.16.0. `zidl-cdr` provides a
 minimal compatible replacement:
 
 ```zig
@@ -213,7 +205,7 @@ Used for `string<N>` (`BoundedArray(u8, N)`) and `sequence<T, N>` (`BoundedArray
 
 **Source:** `packages/zidl-cdr/include/zidl_cdr.h`,
 `packages/zidl-cdr/src/shared_primitives.zig`
-**Tests:** 44 (byte-for-byte validated against zidl-rt)
+**Tests:** 44 (C ABI/native adapter agreement)
 
 Stable C ABI over the native codec, used by generated C and C++ code. Source
 builds require Zig; applications link the installed archive with their normal
@@ -474,7 +466,7 @@ See `docs/xtypes_typeobject.md` for full context.
 
 ## Performance Notes
 
-**zidl-rt CdrWriter:**
+**zidl-cdr CdrWriter:**
 - Buffer growth uses Zig's standard doubling strategy (`ArrayListUnmanaged`).
 - No per-write allocation — padding and primitive writes touch only the buffer.
 - DHEADER patching requires random-access into the buffer (no streaming writers).

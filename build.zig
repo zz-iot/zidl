@@ -48,7 +48,6 @@ pub fn build(b: *std.Build) void {
     const cdr_library = @import("packages/zidl-cdr/c_api_build.zig").add(b, b.path("packages/zidl-cdr"), runtimes.codec, target, .Debug, sanitize_thread, true);
     b.modules.put(b.allocator, "zidl_cdr", runtimes.codec) catch @panic("OOM");
     b.modules.put(b.allocator, "zidl_bindings", runtimes.bindings) catch @panic("OOM");
-    b.modules.put(b.allocator, "zidl_rt", runtimes.compatibility) catch @panic("OOM");
 
     const zidl_xtypes_mod = b.addModule("zidl_xtypes", .{
         .root_source_file = b.path("packages/zidl-xtypes/src/root.zig"),
@@ -101,9 +100,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
-    const package_step = b.step("test-runtime-packages", "Check canonical runtime packages and compatibility aliases");
+    const package_step = b.step("test-runtime-packages", "Check canonical codec and binding runtime packages");
     test_step.dependOn(package_step);
-    for ([_]*std.Build.Module{ runtimes.codec, runtimes.bindings, runtimes.compatibility }) |runtime_module| {
+    for ([_]*std.Build.Module{ runtimes.codec, runtimes.bindings }) |runtime_module| {
         const runtime_tests = b.addTest(.{ .root_module = runtime_module, .use_llvm = if (coverage or sanitize_thread) true else null });
         package_step.dependOn(&b.addRunArtifact(runtime_tests).step);
     }
