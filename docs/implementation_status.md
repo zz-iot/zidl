@@ -12,8 +12,9 @@ Current verification inventory:
 - `zig build test`: 783 tests passed (771 library tests, 1 CLI test, 11 Zig integration tests) plus golden-output comparison. C/C++/Java integration tests run separately via `zig build integration-test`.
 - `zig build integration-test`: compile-and-run integration for generated C, C++, and Java code.
 - `zig build interop-test`: 10 committed CDR interop vector tests.
-- `packages/zidl-rt`: 61 Zig runtime tests.
-- `packages/zidl-cdr`: 44 CDR cross-validation tests.
+- `packages/zidl-cdr`: native codec tests.
+- `packages/zidl-bindings`: ownership, entity, allocator and authoring tests.
+- `packages/zidl-cdr/c-api`: C ABI/native agreement and C reference tests.
 
 ---
 
@@ -175,7 +176,7 @@ fn deserializeFromPlCdr(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: s
   `error.PlCdrMemberIdOutOfRange` otherwise, since a larger id both could never be matched
   by a real 16-bit wire PID and would otherwise collide with the vendor-routing sentinel.
 
-**Tests:** codegen (`src/backend/zig.zig`), `zidl-rt` round-trip (`packages/zidl-cdr/src/cdr.zig`),
+**Tests:** codegen (`src/backend/zig.zig`), native codec round-trip (`packages/zidl-cdr/src/cdr.zig`),
 and a compile-and-run integration suite (`test/integration/zig_pl_cdr/`).
 
 ### TOML config application (`--zig-generate-toml-config`)
@@ -247,10 +248,11 @@ test blocks are discovered by `zig build test`.
   Generated C/C++ code links that archive; building it from source requires Zig.
 - `packages/zidl-bindings/` owns allocators, owned values, authoring support and
   entity handles, with a one-way dependency on the codec.
-- `packages/zidl-rt/` is a temporary root façade pending zzdds migration.
+- The transitional `packages/zidl-rt/` package and `zidl_rt` module are removed
+  after zidl and zzdds migrated to the canonical modules.
 
 Generated Zig code imports `zidl_cdr` and `zidl_bindings` directly. Native suites
-cover 87 codec, 15 binding and three alias/registry tests. C ABI tests and the
+cover codec and binding tests. C ABI tests and the
 independent C reference live in `packages/zidl-cdr/c-api/` and cover 103 contracts.
 Agreement between adapters alone is not independent wire-format validation;
 known-answer vectors and the separate C reference remain in use.

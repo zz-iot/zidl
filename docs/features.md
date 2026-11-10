@@ -53,8 +53,8 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 
 **Reference**: [`backend_zig.md`](backend_zig.md)  
 **Output**: `.zig` source  
-**Runtime**: `zidl-rt` (included in this repo)  
-**Tests**: 132 codegen + 11 integration + 61 runtime + 30 PL_CDR (codegen + zidl-rt + compile-and-run) + 10 interop
+**Runtime**: `zidl-cdr` and `zidl-bindings` (included in this repo)
+**Tests**: 132 codegen + 11 integration + 61 runtime + 30 PL_CDR (codegen + native codec + compile-and-run) + 10 interop
 
 ### IDL → Zig type mapping
 
@@ -75,11 +75,11 @@ currently emitted only inside `struct` declarations; `typedef`/alias remains def
 | `long double` | `f128` |
 | `fixed<D,S>` | `f64` |
 | `string` (unbounded) | `[]const u8` |
-| `string<N>` (bounded) | `zidl_rt.BoundedArray(u8, N)` |
+| `string<N>` (bounded) | `zidl_cdr.BoundedArray(u8, N)` |
 | `wstring` (unbounded) | `[]const u16` (`u16` literals unsupported — emits comment) |
-| `wstring<N>` (bounded) | `zidl_rt.BoundedArray(u16, N)` |
+| `wstring<N>` (bounded) | `zidl_cdr.BoundedArray(u16, N)` |
 | `sequence<T>` | `extern struct { _maximum: u32, _length: u32, _buffer: ?[*]T, _release: bool }` (C PSM layout; named typedef if via `typedef sequence<T>`) |
-| `sequence<T, N>` | `zidl_rt.BoundedArray(T, N)` |
+| `sequence<T, N>` | `zidl_cdr.BoundedArray(T, N)` |
 | `T[N]` | `[N]T` |
 | `map<K,V>` (non-string key) | `std.AutoArrayHashMapUnmanaged(K, V)` |
 | `map<string,V>` | `std.StringArrayHashMapUnmanaged(V)` |

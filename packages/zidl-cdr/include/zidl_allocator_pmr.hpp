@@ -8,7 +8,7 @@
  * Design note: this uses std::pmr, which commits to exception-based OOM
  * signaling (std::pmr::memory_resource::allocate() is specified to throw,
  * not return null) — a deliberate departure from ZidlAllocator's own C-level
- * contract (graceful nullptr return) and from zidl-cdr's/zidl-rt's Zig
+ * contract (graceful nullptr return) and from zidl-bindings' Zig
  * adapter's graceful-failure behavior. Under a `-fno-exceptions` build this
  * degrades to std::abort() on OOM rather than a checkable failure — an
  * accepted, well-precedented embedded C++ pattern (matching how libstdc++'s

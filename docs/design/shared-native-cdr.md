@@ -2,12 +2,11 @@
 
 Date: 2026-11-02
 
-Status: agreed architectural direction; primitive, string, framing, generated
-validation and canonical native key checkpoints implemented; package placement
-and production build switch implemented locally;
-coordinated zzdds dependency release pending.
-This document records the design and local checkpoints, not shipped capabilities. Rust binding
-work remains deferred. This effort does not authorize publishing a release.
+Status: native consolidation, package split and production switch implemented;
+zzdds migration merged in [zzdds #141](https://github.com/zz-iot/zzdds/pull/141). The transitional `zidl-rt` package and module
+are removed. The checkpoints below record the implementation sequence and
+superseded intermediate states. Rust binding work remains deferred; Java shared
+runtime extraction is separate. This effort does not authorize publishing a release.
 
 The [native capability/dependency audit](native-cdr-audit.md) records the
 2026-11-03 code inventory, independently checked key semantics, compatibility
@@ -224,9 +223,10 @@ shared archive by default and moves the independent C codec into reference
 tests. zzdds local-source builds use it; its released dependency pin still
 requires a coordinated update.
 
-## Short retirement sequence
+## Retirement complete
 
-This package PR migrates generated Zig code and zidl's consumers to `zidl_cdr`
-and `zidl_bindings`. The next PR migrates zzdds and updates its pin to the merged
-zidl revision. Remove `zidl-rt` immediately after both repositories pass on those
-imports; no long deprecation window or special breaking release is needed.
+Generated Zig code, zidl and zzdds consume `zidl_cdr` and `zidl_bindings` directly.
+The zzdds migration merged in [zzdds #141](https://github.com/zz-iot/zzdds/pull/141), so `packages/zidl-rt` and the `zidl_rt`
+module export are removed along with their compatibility tests and build/release
+wiring. There is no extended deprecation period. The independent old C codec
+remains a test reference and is not part of the production dependency graph.

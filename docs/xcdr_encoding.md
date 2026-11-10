@@ -234,7 +234,7 @@ members with a `uint64_t _present` bitmask (max 64 optional members per struct);
 
 ---
 
-## zidl-rt (Zig) API Summary
+## zidl-cdr (Zig) API Summary
 
 `packages/zidl-cdr/src/cdr.zig`:
 

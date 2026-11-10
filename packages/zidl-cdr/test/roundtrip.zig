@@ -1,8 +1,9 @@
-//! Cross-validation tests for zidl-cdr (C library) against zidl-rt (Zig).
+//! Byte-agreement tests for the C ABI and native Zig codec.
 //!
-//! These tests call the C library via a build-translated header module and verify that:
-//!   1. The C library serializes identical bytes to zidl-rt for the same values.
-//!   2. The C library correctly deserializes bytes produced by zidl-rt.
+//! The default archive shares the codec; the test-only C reference is selectable.
+//! These tests call the C ABI via a translated header and verify that:
+//!   1. The C library serializes identical bytes to the native Zig codec for the same values.
+//!   2. The C library correctly deserializes bytes produced by the native Zig codec.
 //!
 //! Coverage:
 //!   - XCDR1 LE and XCDR2 LE encapsulation headers
@@ -19,14 +20,14 @@ const c = @import("zidl_cdr");
 
 // ── Cross-validation helpers ──────────────────────────────────────────────────
 
-/// Assert C write produces the same bytes as zidl-rt for XCDR2.
+/// Assert C write produces the same bytes as the native Zig codec for XCDR2.
 fn crossVal2(
     comptime T: type,
     value: T,
     comptime rt_write_fn: fn (*native.CdrWriter(.xcdr2), T) anyerror!void,
     c_write_fn: *const fn (*c.ZidlCdrWriter, T) callconv(.c) c_int,
 ) !void {
-    // zidl-rt side
+    // Native Zig side
     var rt_buf = std.ArrayListUnmanaged(u8).empty;
     defer rt_buf.deinit(testing.allocator);
     var rt_w = native.CdrWriter(.xcdr2).init(&rt_buf, testing.allocator);
@@ -43,7 +44,7 @@ fn crossVal2(
     try testing.expectEqualSlices(u8, rt_buf.items, cw.buf[0..cw.len]);
 }
 
-/// Assert C write produces the same bytes as zidl-rt for XCDR1.
+/// Assert C write produces the same bytes as the native Zig codec for XCDR1.
 fn crossVal1(
     comptime T: type,
     value: T,
@@ -612,7 +613,7 @@ test "crossval: fixed<4,2> even-digit padding" {
 
 // ── PL_CDR cross-validation ───────────────────────────────────────────────────
 
-test "pl_cdr: C encap header matches zidl-rt PlCdrWriter" {
+test "pl_cdr: C encap header matches the native Zig codec PlCdrWriter" {
     // C writer
     var cw: c.ZidlCdrWriter = undefined;
     _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_PL_CDR);

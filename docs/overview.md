@@ -17,7 +17,7 @@ All backends generate:
 
 | Backend | Flag | Output | Runtime dependency |
 |---|---|---|---|
-| Zig | `-b zig` | `.zig` source | `zidl-rt` (included in this repo) |
+| Zig | `-b zig` | `.zig` source | `zidl-cdr` and `zidl-bindings` (included in this repo) |
 | C | `-b c` | `.h` + `.c` | `zidl-cdr` (included in this repo) |
 | C++11 | `-b cpp` | `.hpp` + `_cdr.cpp` | `zidl-cdr` (included in this repo) |
 | Java | `-b java` | `.java` | none (CDR inlined) |
@@ -48,7 +48,7 @@ option generates the abstract DCPS API layer.
 | [`backend_c.md`](backend_c.md) | C type mapping, `.h`/`.c` structure, `zidl-cdr` usage, known limitations |
 | [`backend_cpp.md`](backend_cpp.md) | C++11 type mapping, `.hpp` structure, `zidl-cdr` usage, known limitations |
 | [`backend_java.md`](backend_java.md) | Java type mapping, `.java` structure, inline CDR, options |
-| [`runtime_libraries.md`](runtime_libraries.md) | `zidl-rt`, `zidl-cdr`, `zidl-xtypes` API reference; CDR runtime strategy per language |
+| [`runtime_libraries.md`](runtime_libraries.md) | `zidl-cdr`, `zidl-bindings`, `zidl-xtypes` API reference; CDR runtime strategy per language |
 | [`features.md`](features.md) | Completed feature inventory per backend; test coverage summary |
 | [`testing.md`](testing.md) | Running tests; golden files; Cyclone DDS interop harness |
 | [`ecosystem.md`](ecosystem.md) | zidl's role in a DDS stack; Full DDS vs XRCE; `--generate-interfaces`; TypeObject/type discovery |

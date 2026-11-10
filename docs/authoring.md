@@ -2,7 +2,7 @@
 
 `--zig-generate-authoring` is an opt-in Zig generator feature. It emits static
 `toml_fields`/`tomlSpec` schema metadata and a `decodeToml` entry point backed by
-`zidl_rt.authoring`. It is independent of the legacy mutating `applyToml` API:
+`zidl_bindings.authoring`. It is independent of the legacy mutating `applyToml` API:
 existing `--zig-generate-toml-config` output and dependency behavior are preserved.
 The new flag adds methods/metadata, not data fields or an application configuration
 format. Pair the generated code with the matching runtime release.
@@ -27,7 +27,7 @@ Nested tables satisfy the same contract; the parser remains owned by its consume
 The independent integration tests construct trees directly without a parser.
 
 ```zig
-var diagnostic: zidl_rt.authoring.Diagnostic = .{};
+var diagnostic: zidl_bindings.authoring.Diagnostic = .{};
 var result = try Config.decodeToml(allocator, table, .{}, &diagnostic);
 defer result.deinit();
 if (result.isPresent(&.{ "settings", "enabled" })) {

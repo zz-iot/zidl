@@ -64,15 +64,6 @@ jobs:
         run: zig build test -Dsanitize-thread
         working-directory: packages/zidl-bindings
 
-      - name: Test (zidl-rt)
-        run: zig build test
-        working-directory: packages/zidl-rt
-
-      - name: Test (zidl-rt TSan)
-        if: matrix.os == 'ubuntu-latest'
-        run: zig build test -Dsanitize-thread
-        working-directory: packages/zidl-rt
-
       - name: Test (zidl-cdr)
         run: zig build test install
         working-directory: packages/zidl-cdr
@@ -190,7 +181,7 @@ jobs:
       - name: Test native packages on the consumer compiler
         shell: bash
         run: |
-          for package in zidl-cdr zidl-bindings zidl-rt; do
+          for package in zidl-cdr zidl-bindings; do
             (cd "packages/$package" && zig build test)
           done
       - name: Test generated decoder on the consumer compiler
@@ -227,10 +218,6 @@ jobs:
       - name: Build test binaries (main)
         run: zig build emit-tests -Doptimize=Debug -Dtarget=x86_64-linux-gnu
 
-      - name: Build test binaries (zidl-rt)
-        run: zig build emit-tests -Doptimize=Debug -Dtarget=x86_64-linux-gnu
-        working-directory: packages/zidl-rt
-
       - name: Build test binaries (zidl-cdr)
         run: zig build emit-tests -Doptimize=Debug -Dtarget=x86_64-linux-gnu
         working-directory: packages/zidl-cdr
@@ -249,7 +236,6 @@ jobs:
           ERRORS=0
           for bin in \
             zig-out/tests/* \
-            packages/zidl-rt/zig-out/tests/* \
             packages/zidl-cdr/zig-out/tests/* \
             packages/zidl-bindings/zig-out/tests/* \
             packages/zidl-cdr/c-api/zig-out/tests/*; do
@@ -326,10 +312,6 @@ jobs:
       - name: Build test binaries (main)
         run: zig build emit-tests -Dcoverage=true
 
-      - name: Build test binaries (zidl-rt)
-        run: zig build emit-tests -Dcoverage=true
-        working-directory: packages/zidl-rt
-
       - name: Build test binaries (zidl-cdr)
         run: zig build emit-tests -Dcoverage=true
         working-directory: packages/zidl-cdr
@@ -349,7 +331,7 @@ jobs:
             kcov --include-path="$(pwd)/src,$(pwd)/packages" \
               --strip-path="$(pwd)" --exclude-line=unreachable,@panic coverage/ "$@"
           }
-          for directory in zig-out/tests packages/zidl-rt/zig-out/tests packages/zidl-cdr/zig-out/tests packages/zidl-bindings/zig-out/tests packages/zidl-cdr/c-api/zig-out/tests; do
+          for directory in zig-out/tests packages/zidl-cdr/zig-out/tests packages/zidl-bindings/zig-out/tests packages/zidl-cdr/c-api/zig-out/tests; do
             # A missing suite is a collection failure, not an empty successful run.
             test -d "$directory"
             count=0

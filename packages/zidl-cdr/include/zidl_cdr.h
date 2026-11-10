@@ -1,18 +1,18 @@
 /**
- * zidl-cdr — Standalone C99 CDR library.
+ * zidl-cdr — C99 API for the canonical native CDR codec.
  *
- * Implements OMG XCDR1 and XCDR2 (little-endian output) for DDS CDR
- * serialization.  No dependencies; compiles with any hosted or freestanding
- * C99 toolchain (GCC, Clang, MSVC, IAR, arm-none-eabi-gcc).
+ * Implements OMG XCDR1 and XCDR2 for DDS CDR serialization. Building the
+ * native archive requires Zig; applications can consume its public headers
+ * and prebuilt archive with their supported C/C++ toolchain.
  *
- * Key properties (matching zidl-rt semantics):
+ * Key properties shared with the native Zig API:
  *   - CDR alignment is from the start of the CDR payload (after the 4-byte
  *     encapsulation header).  ZidlCdrWriter.pos resets to 0 after
  *     zidl_cdr_write_encap().
  *   - XCDR1: natural alignment up to 8 bytes (IDL §9.3.1).
  *   - XCDR2: natural alignment capped at 4 bytes (XTypes §7.4.1).
- *   - Always emits little-endian output.  Reader handles both byte orders.
- *   - Cross-validated byte-for-byte against zidl-rt.
+ *   - Output defaults to little-endian; writers and readers support both byte orders.
+ *   - C ABI/native adapter agreement and independent wire vectors are tested.
  *
  * ## Error codes
  *   ZIDL_CDR_OK          ( 0) — success

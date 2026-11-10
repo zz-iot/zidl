@@ -80,7 +80,7 @@ pub const ENCAP_PL_CDR_BE: u16 = 0x0002;
 // ── BoundedArray ─────────────────────────────────────────────────────────────
 //
 // std.BoundedArray was removed in Zig 0.16.0.  We define a minimal
-// compatible replacement here so generated code can use `zidl_rt.BoundedArray`.
+// compatible replacement here so generated code can use `zidl_cdr.BoundedArray`.
 
 /// A fixed-capacity array that tracks its own length.
 /// Compatible with the std.BoundedArray API used by zidl-generated code.
@@ -616,7 +616,7 @@ pub const PlCdrWriter = struct {
         try framing.writeSentinel(&self.inner);
     }
 
-    /// Re-emit a parameter retained verbatim (`zidl_rt.RawParam`): the raw `pid`
+    /// Re-emit a parameter retained verbatim (`zidl_cdr.RawParam`): the raw `pid`
     /// (flag bits included) and its value bytes, re-padded to a 4-byte boundary.
     /// Used by a `@pl_retain_unknown` type's generated `serializePlCdr` to
     /// replay unknown parameters before the sentinel.

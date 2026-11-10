@@ -1,4 +1,4 @@
-// Interop test types for zidl-rt ↔ Cyclone DDS cross-validation.
+// Interop test types for the native Zig codec ↔ Cyclone DDS cross-validation.
 //
 // These types cover the cases from CLAUDE.md's interop strategy:
 //   - @final struct with all primitive types

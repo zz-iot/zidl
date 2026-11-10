@@ -117,15 +117,6 @@ jobs:
         run: zig build test -Dsanitize-thread
         working-directory: packages/zidl-bindings
 
-      - name: Test (zidl-rt)
-        run: zig build test
-        working-directory: packages/zidl-rt
-
-      - name: Test (zidl-rt TSan)
-        if: matrix.os == 'ubuntu-latest'
-        run: zig build test -Dsanitize-thread
-        working-directory: packages/zidl-rt
-
       - name: Test (zidl-cdr)
         run: zig build test install
         working-directory: packages/zidl-cdr
@@ -225,7 +216,6 @@ jobs:
         run: |
           for zon in \
             build.zig.zon \
-            packages/zidl-rt/build.zig.zon \
             packages/zidl-bindings/build.zig.zon \
             packages/zidl-cdr/build.zig.zon \
             packages/zidl-cdr/c-api/build.zig.zon \
@@ -300,7 +290,6 @@ jobs:
         run: |
           for zon in \
             build.zig.zon \
-            packages/zidl-rt/build.zig.zon \
             packages/zidl-bindings/build.zig.zon \
             packages/zidl-cdr/build.zig.zon \
             packages/zidl-cdr/c-api/build.zig.zon \
@@ -317,7 +306,6 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add \
             build.zig.zon \
-            packages/zidl-rt/build.zig.zon \
             packages/zidl-bindings/build.zig.zon \
             packages/zidl-cdr/build.zig.zon \
             packages/zidl-cdr/c-api/build.zig.zon \
@@ -377,7 +365,6 @@ jobs:
         run: |
           for zon in \
             build.zig.zon \
-            packages/zidl-rt/build.zig.zon \
             packages/zidl-bindings/build.zig.zon \
             packages/zidl-cdr/build.zig.zon \
             packages/zidl-cdr/c-api/build.zig.zon \
@@ -387,7 +374,6 @@ jobs:
           done
           git add \
             build.zig.zon \
-            packages/zidl-rt/build.zig.zon \
             packages/zidl-bindings/build.zig.zon \
             packages/zidl-cdr/build.zig.zon \
             packages/zidl-cdr/c-api/build.zig.zon \

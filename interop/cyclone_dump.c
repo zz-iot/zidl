@@ -3,7 +3,7 @@
  * write the resulting byte streams to binary files in expected/.
  *
  * The files include the 4-byte CDR encapsulation header followed by the
- * CDR-encoded payload, matching exactly what zidl-rt's CdrWriter produces.
+ * CDR-encoded payload, matching exactly what the native Zig codec's CdrWriter produces.
  *
  * Build: see Makefile.
  * Usage: ./cyclone_dump [output_dir]   (default: expected/)

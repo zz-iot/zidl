@@ -37,7 +37,6 @@
         "build.zig.zon",
         "build",
         "src",
-        "packages/zidl-rt",
         "packages/zidl-bindings",
         "packages/zidl-cdr",
         "packages/zidl-xtypes",

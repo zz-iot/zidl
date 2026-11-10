@@ -32,8 +32,10 @@ app.root_module.addImport("zidl_cdr", zidl_dep.module("zidl_cdr"));
 app.root_module.addImport("zidl_bindings", zidl_dep.module("zidl_bindings"));
 ```
 
-Here `app` is your executable build step. New generated code does not import the
-temporary `zidl-rt` umbrella.
+Here `app` is your executable build step. The `zidl_rt` module and
+`packages/zidl-rt` compatibility package have been removed. Migrate codec
+operations to `zidl_cdr` and ownership, allocator, entity and authoring operations
+to `zidl_bindings`, using these same module instances throughout the build.
 
 ---
 

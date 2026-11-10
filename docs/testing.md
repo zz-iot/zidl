@@ -28,28 +28,25 @@ suite, rather than warnings during every build.
 Runs:
 - **Library unit tests** (678): parser, lexer, preprocessor, semantic analysis, IR builder, backend codegen, and backend interface utilities.
 - **CLI unit test** (1): smoke test of the CLI entry point.
-- **Zig integration tests** (8): compile the committed `test/golden/zig/types.zig` against `zidl-rt` and run CDR round-trip and vtable tests.
+- **Zig integration tests** (8): compile the committed `test/golden/zig/types.zig` against the canonical runtime modules and run CDR round-trip and vtable tests.
 - **Golden output comparison**: regenerates all backends into `build-tmp/golden-check/` and compares byte-for-byte against `test/golden/`. Any added, removed, or changed file is a failure.
 
-Also runs the package tests:
+Also runs the canonical codec and binding tests through `zig build test-runtime-packages`.
+Run the package suites separately with:
 
 ```sh
-# run separately, or they're triggered by CI
-zig build test --build-file packages/zidl-rt/build.zig    # 61 tests
-zig build test --build-file packages/zidl-cdr/build.zig   # 44 tests
-```
-
-Or from the package directory:
-
-```sh
-cd packages/zidl-rt  && zig build test   # 61 CDR round-trip tests
-cd packages/zidl-cdr && zig build test   # 44 CDR cross-validation tests
+(cd packages/zidl-cdr && zig build test)
+(cd packages/zidl-bindings && zig build test)
+(cd packages/zidl-cdr/c-api && zig build test)
+# Temporary independent C codec reference:
+(cd packages/zidl-cdr/c-api && zig build test -Dshared-primitives=false)
 ```
 
 ### Coverage collection
 
 CI builds coverage executables with `zig build emit-tests -Dcoverage=true`,
-including the same command in `packages/zidl-rt` and `packages/zidl-cdr`.
+including the same command in `packages/zidl-cdr`, `packages/zidl-bindings`,
+and `packages/zidl-cdr/c-api`.
 This selects LLVM for those executables: kcov instrumentation of the default
 x86 backend's debug line addresses crashes during the lexer tests. Ordinary
 builds and tests keep the default compiler backend.
@@ -177,11 +174,17 @@ Only regenerate if `types.idl` or `interop/cyclone_dump.c` changes.
 
 ---
 
-## zidl-rt / zidl-cdr Cross-Validation
+## Native and C ABI agreement
 
-`packages/zidl-cdr/` includes 44 tests that validate the C99 CDR library against `zidl-rt` (Zig) byte-for-byte. This catches encoding divergence between the two runtimes — generated C code uses `zidl-cdr`, generated Zig code uses `zidl-rt`, and they must produce identical wire bytes.
+`packages/zidl-cdr/c-api` runs the C ABI contract and byte-agreement tests against
+the canonical Zig codec. The default archive shares that implementation, so this
+checks adapters rather than independently maintained codec correctness. Use
+`-Dshared-primitives=false` to compare the retained C reference instead.
+Independent known-answer vectors and Cyclone DDS interoperability checks remain
+necessary for wire-format validation.
 
-Coverage includes: all primitive types, strings, sequences, DHEADER framing for `@appendable`, PL_CDR EMHEADER framing for `@mutable`, and key hash computation.
+Coverage includes primitives, strings, sequences, DHEADER and ParameterList
+framing, key hashing, malformed/truncated input and allocation cleanup.
 
 ---
 

@@ -18,6 +18,10 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Remove the transitional `zidl-rt` package and `zidl_rt` module export after
+  zidl and zzdds migrated. Import codec APIs from `zidl_cdr` and ownership,
+  allocator, entity and authoring support from `zidl_bindings`.
+
 - The shared native C ABI archive links with MSVC when built for an MSVC-ABI target
   (`-Dtarget=x86_64-windows-msvc`). It names `ntdll`, which its Zig runtime calls, as a
   default library, and no longer bundles the UBSan runtime, whose `/exclude-symbols`

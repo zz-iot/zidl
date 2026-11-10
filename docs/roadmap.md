@@ -330,7 +330,7 @@ the non-Zig backends ("Zig-specific for now").
 
 `--profile xrce` exists and validates XRCE constraints (only `@final`, bounded strings/
 sequences, no maps/optional/wstring, no TypeObject output). The Zig backend accepts
-`--zig-version 0.15.1` and emits bounded code on fixed-capacity `zidl_rt.BoundedArray`. This
+`--zig-version 0.15.1` and emits bounded code on fixed-capacity `zidl_cdr.BoundedArray`. This
 is the first MicroZig-enabling slice, not a complete freestanding output mode. Remaining:
 
 1. Wire the committed `test/xrce-microzig/` compile fixture into `zig build integration-test`
@@ -339,7 +339,7 @@ is the first MicroZig-enabling slice, not a complete freestanding output mode. R
    XRCE-client path.
 3. Define the no-heap writer/reader surface for MicroZig clients — bounded-field storage is
    heap-free, but CDR buffers still use the normal runtime model.
-4. Audit generated code + `zidl-rt` APIs for freestanding compatibility.
+4. Audit generated code + canonical runtime APIs for freestanding compatibility.
 5. Add XRCE-client fixtures exercising bounded-only IDL on embedded-friendly output.
 6. Keep DDS-XRCE agent/broker work out of zidl unless codegen needs explicit hooks — zidl
    generates client-side type support only.
@@ -449,15 +449,16 @@ flags (see `decisions.md`).
 
 ---
 
+## Native runtime retirement complete
+
+Zidl and zzdds now consume `zidl_cdr` and `zidl_bindings` directly. The
+transitional `zidl-rt` package and `zidl_rt` export have been removed. The old C
+codec remains only as a test reference. Shared Java runtime extraction is a
+separate pending effort.
+
 ## Deferred / Out of Scope
 
 - **DDS-RPC request/reply codegen** — a separate future `--rpc` path; architecture must not
   preclude it.
 - **Non-CDR wire encodings** (XCDR↔JSON, XCDR↔XML, MQTT bridge) and DynamicType /
   DynamicData / TypeObjectFactory — belong in a DDS runtime, not zidl.
-
-### Retire the transitional Zig runtime umbrella
-
-The package split migrates generated code and zidl's consumers to `zidl_cdr` and
-`zidl_bindings`. Next migrate zzdds and its dependency pin, then remove `zidl-rt`
-as soon as both repositories pass. No extended deprecation period is required.
