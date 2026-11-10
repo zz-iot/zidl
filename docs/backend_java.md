@@ -13,7 +13,10 @@ mapping (formal/21-08-01 v1.0).
 | `Types.java` | All types from the IDL (default single-file mode) |
 
 With `--split-files`, one `.java` file is produced per top-level named type, named
-after the type (e.g. `MyStruct.java`, `MyEnum.java`).
+after the type (e.g. `MyStruct.java`, `MyEnum.java`), plus a shared
+`<Stem>CdrUtils.java` for that IDL input. Use a named `--java-package` for
+split codec output; the current unnamed-package helper import is a known
+compilation gap recorded in the [runtime audit](design/java-cdr-audit.md).
 
 ---
 
@@ -34,7 +37,7 @@ after the type (e.g. `MyStruct.java`, `MyEnum.java`).
 | `float` | `float` |
 | `double` | `double` |
 | `long double` | `double` |
-| `fixed<D,S>` | literal value |
+| `fixed<D,S>` | `double` (approximate; split-mode helper gap is recorded in the audit) |
 | `string` / `wstring` | `String` |
 | `sequence<T>` | `java.util.List<T>` (an `ArrayList`); a sequence of an array typedef is `List<int[]>` etc. |
 | `T[N]` | `T[]` |
@@ -43,9 +46,9 @@ after the type (e.g. `MyStruct.java`, `MyEnum.java`).
 | `enum` | Java `enum` with `int value` field and `fromValue(int)` factory |
 | `bitmask` | `int` (`long` above `@bit_bound(32)`), with a constants class of flag values |
 | `bitset` | Java `class` with integer storage field |
-| `struct` | Java `class` (public fields, default constructor, copy constructor) |
+| `struct` | Java `class` (private fields with `get_*`/`set_*`, default/copy constructors) |
 | `union` | Java `class` with discriminant field + typed case methods |
-| IDL module | Java package (with `--java-package` prefix prepended) |
+| IDL module | Nested namespace class in single-file output; split types are top-level under `--java-package` |
 
 ---
 
@@ -57,54 +60,47 @@ create generic arrays.
 
 ## Generated File Structure
 
+Single-file output wraps IDL types in an outer class named after the input stem.
+For a top-level `Sample` in `model.idl`:
+
 ```java
-package com.example;   // from --java-package com.example
+package com.example; // --java-package com.example
 
-// Inline CDR helpers — generated once per output file
-// (ZidlCdrWriter, ZidlCdrReader inner classes)
+public class Model {
+    // Private static _cdr* helper methods occur once in this outer class.
+    public static class Sample implements java.io.Serializable {
+        private int x;
+        private String name = "";
 
-public class MyStruct {
-    public int x = 0;
-    public String name = "";
+        public int get_x() { return x; }
+        public void set_x(int value) { x = value; }
+        public String get_name() { return name; }
+        public void set_name(String value) { name = value; }
 
-    public MyStruct() {}
-
-    public MyStruct(MyStruct other) { ... }   // copy constructor
-
-    public static void serialize(java.nio.ByteBuffer buf, MyStruct v) { ... }
-    public static MyStruct deserialize(java.nio.ByteBuffer buf) { ... }
-
-    // For keyed types:
-    public static void serializeKey(java.nio.ByteBuffer buf, MyStruct v) { ... }
-    public static MyStruct deserializeKey(java.nio.ByteBuffer buf, int cdrBase) { ... }
-    public byte[] computeKeyHash() { ... }
-}
-
-public enum MyEnum {
-    VALUE_A(0),
-    VALUE_B(1);
-
-    public final int value;
-    MyEnum(int v) { this.value = v; }
-
-    public static MyEnum fromValue(int v) { ... }
+        // Constructors, codec and optional key methods are generated here.
+    }
 }
 ```
 
----
+Split-file types are top-level classes and import the public static helpers
+from `<Stem>CdrUtils`. These helpers are shared within one input, but repeated
+across IDL inputs. The shared Java runtime is planned; no runtime JAR is required
+by current output. There are no `ZidlCdrWriter`/`ZidlCdrReader` helper classes.
 
 ## CDR Serialize/Deserialize Signatures
 
-```java
-/* Serialize v into buf at the current position. */
-public static void serialize(java.nio.ByteBuffer buf, Foo v);
+Representative methods on a generated type:
 
-/* Deserialize from buf at the current position. */
-public static Foo deserialize(java.nio.ByteBuffer buf);
+```java
+public void serialize(java.nio.ByteBuffer buf, int cdrBase, int xcdrVersion);
+public static Sample deserializeFrom(java.nio.ByteBuffer buf, int cdrBase, int xcdrVersion);
+public static void skip(java.nio.ByteBuffer buf, int cdrBase, int xcdrVersion);
 ```
 
-CDR helpers (`ZidlCdrWriter`, `ZidlCdrReader`) are generated inline in the output file;
-there is no external runtime jar or dependency.
+The buffer position supplies the current cursor, while `cdrBase` supplies the
+alignment origin (normally 4 after an encapsulation header). Ordinary generated
+methods set little-endian byte order. Supported version/shape combinations and
+known validation gaps are inventoried in the [audit](design/java-cdr-audit.md).
 
 ---
 
@@ -113,18 +109,20 @@ there is no external runtime jar or dependency.
 For structs with `@key` members:
 
 ```java
-/* Serialize key fields only as canonical PLAIN_CDR2 big-endian */
-public static void serializeKey(java.nio.ByteBuffer buf, Foo v);
-
-/* Deserialize key fields from a full CDR stream; non-key fields zeroed */
-public static Foo deserializeKey(java.nio.ByteBuffer buf, int cdrBase);
-
-/* Deserialize key fields into an existing instance */
-public static void deserializeKeyInto(Foo out, java.nio.ByteBuffer buf, int cdrBase);
-
-/* Compute RTPS key hash: key ≤ 16 bytes → zero-pad; > 16 bytes → MD5 */
+public void serializeKeyHolder(java.nio.ByteBuffer buf, int cdrBase);
+public void serializeKey(java.nio.ByteBuffer buf, int cdrBase, int xcdrVersion);
+public static Sample deserializeKey(java.nio.ByteBuffer buf, int cdrBase, int xcdrVersion);
 public byte[] computeKeyHash();
+public static byte[] computeKeyHashFromCdr(byte[] payload);
+public static byte[] computeKeyHashFromCdrKeyOnly(byte[] payload);
 ```
+
+`serializeKeyHolder` emits canonical big-endian PLAIN_CDR2 holder bytes, without
+encapsulation. Wire key methods retain their version-specific framing.
+`computeKeyHash` uses the declared maximum key size to select padding or MD5;
+an unbounded key type or a maximum above 16 forces MD5 even for short values.
+The incoming full-sample and key-only entry points accept their respective
+encapsulated wire shapes and derive the same canonical holder hash.
 
 MD5 uses `java.security.MessageDigest.getInstance("MD5")` — no external dependency.
 

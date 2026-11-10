@@ -1,0 +1,572 @@
+{
+  "generator": "zidl 0.3.29-zig.0.17.0-dev",
+  "revision": "171400aa3c7c75274cbb4f2192e721efcd42ef73",
+  "java": "openjdk version \"21.0.13\" 2026-10-20\nOpenJDK Runtime Environment (build 21.0.13+9-1-deb13u2-Debian)\nOpenJDK 64-Bit Server VM (build 21.0.13+9-1-deb13u2-Debian, mixed mode, sharing)",
+  "platform": "Linux-6.12.115+deb13.1-amd64-x86_64-with-glibc2.41",
+  "warmup": 200000,
+  "forks": 3,
+  "sizes": {
+    "single": {
+      "files": 1,
+      "source_bytes": 39274,
+      "helper_declarations": 17,
+      "helper_bytes": 7302,
+      "classes": 7,
+      "class_bytes": 29229,
+      "observations": [
+        {
+          "case": "string_zero",
+          "result": "units:",
+          "position": 4,
+          "limit": 4
+        },
+        {
+          "case": "string_negative",
+          "result": "units:",
+          "position": 4,
+          "limit": 4
+        },
+        {
+          "case": "string_nonzero_terminator",
+          "result": "units:0041",
+          "position": 6,
+          "limit": 6
+        },
+        {
+          "case": "string_truncated",
+          "result": "BufferUnderflowException",
+          "position": 4,
+          "limit": 5
+        },
+        {
+          "case": "string_invalid_utf8",
+          "result": "units:fffd",
+          "position": 6,
+          "limit": 6
+        },
+        {
+          "case": "wstring_odd",
+          "result": "IllegalArgumentException",
+          "position": 4,
+          "limit": 5
+        },
+        {
+          "case": "wstring_unpaired",
+          "result": "units:d800",
+          "position": 6,
+          "limit": 6
+        },
+        {
+          "case": "wire_align",
+          "result": "7f7f7f7f",
+          "position": 4,
+          "limit": 4
+        },
+        {
+          "case": "key_align",
+          "result": "7f000000",
+          "position": 4,
+          "limit": 4
+        },
+        {
+          "case": "wire_align_readonly",
+          "result": "7f7f7f7f",
+          "position": 4,
+          "limit": 4
+        },
+        {
+          "case": "key_align_readonly",
+          "result": "ReadOnlyBufferException",
+          "position": 1,
+          "limit": 4
+        },
+        {
+          "case": "detect_two_byte_header",
+          "result": "1",
+          "position": 0,
+          "limit": 2
+        },
+        {
+          "case": "appendable_zero_body",
+          "result": "7",
+          "position": 8,
+          "limit": 8
+        },
+        {
+          "case": "optional_close_after_underflow",
+          "result": "bounded",
+          "position": 12,
+          "limit": 16
+        }
+      ]
+    },
+    "split": {
+      "files": 6,
+      "source_bytes": 36411,
+      "helper_declarations": 15,
+      "helper_bytes": 5949,
+      "classes": 7,
+      "class_bytes": 27206,
+      "observations": [
+        {
+          "case": "string_zero",
+          "result": "NegativeArraySizeException",
+          "position": 4,
+          "limit": 4
+        },
+        {
+          "case": "string_negative",
+          "result": "NegativeArraySizeException",
+          "position": 4,
+          "limit": 4
+        },
+        {
+          "case": "string_nonzero_terminator",
+          "result": "units:0041",
+          "position": 6,
+          "limit": 6
+        },
+        {
+          "case": "string_truncated",
+          "result": "BufferUnderflowException",
+          "position": 4,
+          "limit": 5
+        },
+        {
+          "case": "string_invalid_utf8",
+          "result": "units:fffd",
+          "position": 6,
+          "limit": 6
+        },
+        {
+          "case": "wstring_odd",
+          "result": "IllegalArgumentException",
+          "position": 4,
+          "limit": 5
+        },
+        {
+          "case": "wstring_unpaired",
+          "result": "units:d800",
+          "position": 6,
+          "limit": 6
+        },
+        {
+          "case": "wire_align",
+          "result": "7f7f7f7f",
+          "position": 4,
+          "limit": 4
+        },
+        {
+          "case": "key_align",
+          "result": "7f000000",
+          "position": 4,
+          "limit": 4
+        },
+        {
+          "case": "wire_align_readonly",
+          "result": "7f7f7f7f",
+          "position": 4,
+          "limit": 4
+        },
+        {
+          "case": "key_align_readonly",
+          "result": "ReadOnlyBufferException",
+          "position": 1,
+          "limit": 4
+        },
+        {
+          "case": "detect_two_byte_header",
+          "result": "1",
+          "position": 0,
+          "limit": 2
+        },
+        {
+          "case": "appendable_zero_body",
+          "result": "7",
+          "position": 8,
+          "limit": 8
+        },
+        {
+          "case": "optional_close_after_underflow",
+          "result": "bounded",
+          "position": 12,
+          "limit": 16
+        }
+      ]
+    },
+    "single_types": {
+      "files": 1,
+      "source_bytes": 4619,
+      "helper_declarations": 0,
+      "helper_bytes": 0,
+      "classes": 6,
+      "class_bytes": 6558
+    },
+    "split_types": {
+      "files": 5,
+      "source_bytes": 4664,
+      "helper_declarations": 0,
+      "helper_bytes": 0,
+      "classes": 5,
+      "class_bytes": 5468
+    },
+    "single_wrappers": {
+      "files": 13,
+      "source_bytes": 131304,
+      "helper_declarations": 17,
+      "helper_bytes": 7302,
+      "classes": null
+    },
+    "split_wrappers": {
+      "files": 18,
+      "source_bytes": 127539,
+      "helper_declarations": 15,
+      "helper_bytes": 5949,
+      "classes": null
+    }
+  },
+  "timings": [
+    {
+      "shape": "scalar",
+      "version": 1,
+      "iterations": 500000,
+      "ns_per_roundtrip": 76.703,
+      "checksum": 22360338064,
+      "mode": "single",
+      "fork": 0
+    },
+    {
+      "shape": "scalar",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 86.961,
+      "checksum": 22360338064,
+      "mode": "single",
+      "fork": 0
+    },
+    {
+      "shape": "frame",
+      "version": 1,
+      "iterations": 500000,
+      "ns_per_roundtrip": 2403.169,
+      "checksum": 22333738064,
+      "mode": "single",
+      "fork": 0
+    },
+    {
+      "shape": "frame",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 2903.543,
+      "checksum": 22333738064,
+      "mode": "single",
+      "fork": 0
+    },
+    {
+      "shape": "tagged",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 660.641,
+      "checksum": 22344238064,
+      "mode": "single",
+      "fork": 0
+    },
+    {
+      "shape": "keys",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 1478.401,
+      "checksum": 215940272,
+      "mode": "single",
+      "fork": 0
+    },
+    {
+      "shape": "scalar",
+      "version": 1,
+      "iterations": 500000,
+      "ns_per_roundtrip": 79.02,
+      "checksum": 22360338064,
+      "mode": "split",
+      "fork": 0
+    },
+    {
+      "shape": "scalar",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 74.59,
+      "checksum": 22360338064,
+      "mode": "split",
+      "fork": 0
+    },
+    {
+      "shape": "frame",
+      "version": 1,
+      "iterations": 500000,
+      "ns_per_roundtrip": 2410.788,
+      "checksum": 22333738064,
+      "mode": "split",
+      "fork": 0
+    },
+    {
+      "shape": "frame",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 2455.034,
+      "checksum": 22333738064,
+      "mode": "split",
+      "fork": 0
+    },
+    {
+      "shape": "tagged",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 530.28,
+      "checksum": 22344238064,
+      "mode": "split",
+      "fork": 0
+    },
+    {
+      "shape": "keys",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 1409.255,
+      "checksum": 215940272,
+      "mode": "split",
+      "fork": 0
+    },
+    {
+      "shape": "scalar",
+      "version": 1,
+      "iterations": 500000,
+      "ns_per_roundtrip": 84.337,
+      "checksum": 22360338064,
+      "mode": "single",
+      "fork": 1
+    },
+    {
+      "shape": "scalar",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 85.351,
+      "checksum": 22360338064,
+      "mode": "single",
+      "fork": 1
+    },
+    {
+      "shape": "frame",
+      "version": 1,
+      "iterations": 500000,
+      "ns_per_roundtrip": 2510.939,
+      "checksum": 22333738064,
+      "mode": "single",
+      "fork": 1
+    },
+    {
+      "shape": "frame",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 2484.623,
+      "checksum": 22333738064,
+      "mode": "single",
+      "fork": 1
+    },
+    {
+      "shape": "tagged",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 525.909,
+      "checksum": 22344238064,
+      "mode": "single",
+      "fork": 1
+    },
+    {
+      "shape": "keys",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 1426.94,
+      "checksum": 215940272,
+      "mode": "single",
+      "fork": 1
+    },
+    {
+      "shape": "scalar",
+      "version": 1,
+      "iterations": 500000,
+      "ns_per_roundtrip": 93.47,
+      "checksum": 22360338064,
+      "mode": "split",
+      "fork": 1
+    },
+    {
+      "shape": "scalar",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 90.532,
+      "checksum": 22360338064,
+      "mode": "split",
+      "fork": 1
+    },
+    {
+      "shape": "frame",
+      "version": 1,
+      "iterations": 500000,
+      "ns_per_roundtrip": 3125.996,
+      "checksum": 22333738064,
+      "mode": "split",
+      "fork": 1
+    },
+    {
+      "shape": "frame",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 2577.38,
+      "checksum": 22333738064,
+      "mode": "split",
+      "fork": 1
+    },
+    {
+      "shape": "tagged",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 517.484,
+      "checksum": 22344238064,
+      "mode": "split",
+      "fork": 1
+    },
+    {
+      "shape": "keys",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 1330.472,
+      "checksum": 215940272,
+      "mode": "split",
+      "fork": 1
+    },
+    {
+      "shape": "scalar",
+      "version": 1,
+      "iterations": 500000,
+      "ns_per_roundtrip": 80.33,
+      "checksum": 22360338064,
+      "mode": "single",
+      "fork": 2
+    },
+    {
+      "shape": "scalar",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 85.184,
+      "checksum": 22360338064,
+      "mode": "single",
+      "fork": 2
+    },
+    {
+      "shape": "frame",
+      "version": 1,
+      "iterations": 500000,
+      "ns_per_roundtrip": 2533.516,
+      "checksum": 22333738064,
+      "mode": "single",
+      "fork": 2
+    },
+    {
+      "shape": "frame",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 2399.641,
+      "checksum": 22333738064,
+      "mode": "single",
+      "fork": 2
+    },
+    {
+      "shape": "tagged",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 514.441,
+      "checksum": 22344238064,
+      "mode": "single",
+      "fork": 2
+    },
+    {
+      "shape": "keys",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 1363.881,
+      "checksum": 215940272,
+      "mode": "single",
+      "fork": 2
+    },
+    {
+      "shape": "scalar",
+      "version": 1,
+      "iterations": 500000,
+      "ns_per_roundtrip": 74.68,
+      "checksum": 22360338064,
+      "mode": "split",
+      "fork": 2
+    },
+    {
+      "shape": "scalar",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 85.269,
+      "checksum": 22360338064,
+      "mode": "split",
+      "fork": 2
+    },
+    {
+      "shape": "frame",
+      "version": 1,
+      "iterations": 500000,
+      "ns_per_roundtrip": 2506.817,
+      "checksum": 22333738064,
+      "mode": "split",
+      "fork": 2
+    },
+    {
+      "shape": "frame",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 2548.649,
+      "checksum": 22333738064,
+      "mode": "split",
+      "fork": 2
+    },
+    {
+      "shape": "tagged",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 553.323,
+      "checksum": 22344238064,
+      "mode": "split",
+      "fork": 2
+    },
+    {
+      "shape": "keys",
+      "version": 2,
+      "iterations": 500000,
+      "ns_per_roundtrip": 1271.687,
+      "checksum": 215940272,
+      "mode": "split",
+      "fork": 2
+    }
+  ],
+  "javac_target": 8,
+  "java_vm_flags": [
+    "-Xms128m",
+    "-Xmx128m"
+  ],
+  "generator_sha256": "9f77a703bbad29ab24926f0cdb8d6151e071c54e7750450325890f4e85eb2c85",
+  "fixture_sha256": "06778c681dc06b6de46850a61f856b5dbda00057952c714dfa25eb1482042015",
+  "benchmark_sha256": "55bf06754f6400080bcda83968043329c79d3f34fae2735b33d31228d5e82b17",
+  "compilation_probes": {
+    "split_default_package": {
+      "returncode": 1,
+      "diagnostic": "<generated>/split_default_package/Simple.java:5: error: cannot find symbol\nimport static ProbeCdrUtils.*;\n              ^\n  symbol: class ProbeCdrUtils\n<generated>/split_default_package/Simple.java:30: error: cannot find symbol\n        _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.value);\n        ^\n  symbol:   method _cdrAlign(ByteBuffer,int,int)\n  location: class Simple\n<generated>/split_default_package/Simple.java:36: error: cannot find symbol\n        _cdrAlign(_buf, _cdrBase, 4); _out.value = _buf.getInt();\n        ^\n  symbol:   method _cdrAlign(ByteBuffer,int,int)\n  location: class Simple\n<generated>/split_default_package/Simple.java:42: error: cannot find symbol\n        _cdrAlign(_buf, _cdrBase, 4); _buf.putInt(this.value);\n        ^\n  symbol:   method _cdrAlign(ByteBuffer,int,int)\n  location: class Simple\n<generated>/split_default_package/Simple.java:48: error: cannot find symbol\n        _cdrAlign(_buf, _cdrBase, 4); _out.value = _buf.getInt();\n        ^\n  symbol:   method _cdrAlign(ByteBuffer,int,int)\n  location: class Simple\n<generated>/split_default_package/Simple.java:54: error: cannot find symbol\n        _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();\n        ^\n  symbol:   method _cdrAlign(ByteBuffer,int,int)\n  location: class Simple\n<generated>/split_default_package/Simple.java:57: error: cannot find symbol\n        _cdrAlignKey(_buf, _cdrBase, 4); _buf.putInt(this.get_value());\n        ^\n  symbol:   method _cdrAlignKey(ByteBuffer,int,int)\n  location: class Simple\n7 errors\n"
+    },
+    "split_fixed": {
+      "returncode": 1,
+      "diagnostic": "<generated>/split_fixed/Price.java:31: error: cannot find symbol\n        _cdrWriteFixed(_buf, 8, 2, this.amount);\n        ^\n  symbol:   method _cdrWriteFixed(ByteBuffer,int,int,double)\n  location: class Price\n<generated>/split_fixed/Price.java:37: error: cannot find symbol\n        _out.amount = _cdrReadFixed(_buf, 8, 2);\n                      ^\n  symbol:   method _cdrReadFixed(ByteBuffer,int,int)\n  location: class Price\n<generated>/split_fixed/Price.java:43: error: cannot find symbol\n        _cdrWriteFixed(_buf, 8, 2, this.amount);\n        ^\n  symbol:   method _cdrWriteFixed(ByteBuffer,int,int,double)\n  location: class Price\n<generated>/split_fixed/Price.java:49: error: cannot find symbol\n        _out.amount = _cdrReadFixed(_buf, 8, 2);\n                      ^\n  symbol:   method _cdrReadFixed(ByteBuffer,int,int)\n  location: class Price\n<generated>/split_fixed/Price.java:55: error: cannot find symbol\n        _cdrReadFixed(_buf, 8, 2);\n        ^\n  symbol:   method _cdrReadFixed(ByteBuffer,int,int)\n  location: class Price\n<generated>/split_fixed/Price.java:58: error: cannot find symbol\n        _cdrWriteFixed(_buf, 8, 2, this.get_amount());\n        ^\n  symbol:   method _cdrWriteFixed(ByteBuffer,int,int,double)\n  location: class Price\n6 errors\n"
+    }
+  }
+}

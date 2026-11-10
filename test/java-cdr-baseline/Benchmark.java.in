@@ -1,0 +1,65 @@
+@IMPORTS@
+import java.nio.ByteBuffer;
+import java.util.Arrays;
+
+public final class Benchmark {
+    private static volatile long sink;
+    private static final Scalar scalar = new Scalar();
+    private static final Frame frame = new Frame();
+    private static final Tagged tagged = new Tagged();
+    private static final ByteBuffer buffer = ByteBuffer.allocate(4096);
+    static {
+        scalar.set_id(7); scalar.set_value(42); scalar.set_measurement(3.25);
+        frame.set_tag(scalar);
+        Text text = new Text();
+        text.set_label("example"); text.set_wide("\u03bb\ud83d\ude00");
+        text.set_values(Arrays.asList(1, 2, 3, 4));
+        frame.set_entries(Arrays.asList(text, text, text));
+        tagged.set_code(17); tagged.set_optional_value(19); tagged.set_label("tagged");
+    }
+    private static long roundtrip(String shape, int version, int tick) {
+        scalar.set_id(tick & 65535); tagged.set_code(tick & 65535);
+        if (shape.equals("keys")) {
+            frame.get_entries().get(0).set_label((tick & 1) == 0 ? "example" : "alternate");
+            byte[] shortKey = scalar.computeKeyHash();
+            byte[] longKey = frame.get_entries().get(0).computeKeyHash();
+            return (shortKey[3] & 255) + (longKey[0] & 255);
+        }
+        buffer.clear(); buffer.position(4);
+        if (shape.equals("scalar")) scalar.serialize(buffer, 4, version);
+        else if (shape.equals("frame")) frame.serialize(buffer, 4, version);
+        else tagged.serialize(buffer, 4, version);
+        buffer.limit(buffer.position()); buffer.position(4);
+        if (shape.equals("scalar")) {
+            Scalar result = Scalar.deserializeFrom(buffer, 4, version);
+            if (result.get_id() != scalar.get_id() || result.get_value() != 42 || result.get_measurement() != 3.25)
+                throw new AssertionError("scalar roundtrip");
+            return result.get_id() + result.get_value();
+        }
+        if (shape.equals("frame")) {
+            Frame result = Frame.deserializeFrom(buffer, 4, version);
+            Text text = result.get_entries().get(2);
+            if (result.get_tag().get_id() != scalar.get_id() || !text.get_label().equals("example") ||
+                !text.get_wide().equals("\u03bb\ud83d\ude00") || text.get_values().get(3) != 4)
+                throw new AssertionError("frame roundtrip");
+            return result.get_tag().get_id() + text.get_values().get(3);
+        }
+        Tagged result = Tagged.deserializeFrom(buffer, 4, version);
+        if (result.get_code() != tagged.get_code() || result.get_optional_value() != 19 || !result.get_label().equals("tagged"))
+            throw new AssertionError("tagged roundtrip");
+        return result.get_code() + result.get_optional_value();
+    }
+    public static void main(String[] args) {
+        String shape = args[0]; int version = Integer.parseInt(args[1]);
+        int warmup = Integer.parseInt(args[2]), iterations = Integer.parseInt(args[3]);
+        long sum = 0;
+        for (int i = 0; i < warmup; i++) sum += roundtrip(shape, version, i);
+        long start = System.nanoTime();
+        for (int i = 0; i < iterations; i++) sum += roundtrip(shape, version, i);
+        long elapsed = System.nanoTime() - start;
+        sink = sum;
+        System.out.printf(java.util.Locale.ROOT,
+            "{\"shape\":\"%s\",\"version\":%d,\"iterations\":%d,\"ns_per_roundtrip\":%.3f,\"checksum\":%d}%n",
+            shape, version, iterations, (double)elapsed / iterations, sink);
+    }
+}

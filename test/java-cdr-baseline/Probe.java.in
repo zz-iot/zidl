@@ -1,0 +1,77 @@
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+
+public final class Probe {
+    private static Class<?> helpers;
+    private static Object call(String name, Class<?>[] types, Object... args) throws Exception {
+        Method method = helpers.getDeclaredMethod(name, types);
+        method.setAccessible(true);
+        return method.invoke(null, args);
+    }
+    private static String describe(Object value) {
+        if (!(value instanceof String)) return String.valueOf(value);
+        StringBuilder units = new StringBuilder("units:");
+        for (char c : ((String)value).toCharArray()) units.append(String.format("%04x", (int)c));
+        return units.toString();
+    }
+    private static void report(String name, String result, ByteBuffer buffer) {
+        System.out.println("{\"case\":\"" + name + "\",\"result\":\"" + result +
+            "\",\"position\":" + buffer.position() + ",\"limit\":" + buffer.limit() + "}");
+    }
+    private static void read(String name, String method, byte[] bytes) throws Exception {
+        ByteBuffer buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
+        try {
+            report(name, describe(call(method, new Class<?>[]{ByteBuffer.class, int.class}, buffer, 0)), buffer);
+        } catch (InvocationTargetException e) { report(name, e.getCause().getClass().getSimpleName(), buffer); }
+    }
+    private static void align(boolean key, boolean readonly) throws Exception {
+        byte[] bytes = {127, 127, 127, 127};
+        ByteBuffer buffer = ByteBuffer.wrap(bytes);
+        if (readonly) buffer = buffer.asReadOnlyBuffer();
+        buffer.position(1);
+        String name = (key ? "key" : "wire") + "_align" + (readonly ? "_readonly" : "");
+        try {
+            call(key ? "_cdrAlignKey" : "_cdrAlign", new Class<?>[]{ByteBuffer.class, int.class, int.class}, buffer, 0, 4);
+            StringBuilder result = new StringBuilder();
+            for (byte b : bytes) result.append(String.format("%02x", b));
+            report(name, result.toString(), buffer);
+        } catch (InvocationTargetException e) { report(name, e.getCause().getClass().getSimpleName(), buffer); }
+    }
+    public static void main(String[] args) throws Exception {
+        helpers = Class.forName(args[0]);
+        read("string_zero", "_cdrReadString", new byte[]{0,0,0,0});
+        read("string_negative", "_cdrReadString", new byte[]{-1,-1,-1,-1});
+        read("string_nonzero_terminator", "_cdrReadString", new byte[]{2,0,0,0,65,127});
+        read("string_truncated", "_cdrReadString", new byte[]{4,0,0,0,65});
+        read("string_invalid_utf8", "_cdrReadString", new byte[]{2,0,0,0,(byte)0xc3,0});
+        read("wstring_odd", "_cdrReadWstring", new byte[]{1,0,0,0,65});
+        read("wstring_unpaired", "_cdrReadWstring", new byte[]{2,0,0,0,0,(byte)0xd8});
+        align(false, false); align(true, false); align(false, true); align(true, true);
+        ByteBuffer shortHeader = ByteBuffer.wrap(new byte[]{0,1});
+        try {
+            report("detect_two_byte_header", describe(call("_cdrDetectXcdr", new Class<?>[]{byte[].class}, shortHeader.array())), shortHeader);
+        } catch (InvocationTargetException e) {
+            report("detect_two_byte_header", e.getCause().getClass().getSimpleName(), shortHeader);
+        }
+        ByteBuffer bounded = ByteBuffer.wrap(new byte[]{0,0,0,0,7,0,0,0}).order(ByteOrder.LITTLE_ENDIAN);
+        Class<?> window = Class.forName(args[1]);
+        try {
+            Object value = window.getMethod("deserializeFrom", ByteBuffer.class, int.class, int.class).invoke(null, bounded, 0, 2);
+            report("appendable_zero_body", describe(window.getMethod("get_value").invoke(value)), bounded);
+        } catch (InvocationTargetException e) {
+            report("appendable_zero_body", e.getCause().getClass().getSimpleName(), bounded);
+        }
+        ByteBuffer optional = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN);
+        optional.putShort((short)7); optional.putShort((short)8); optional.position(0);
+        Object scope = call("_cdrBeginOptionalRead", new Class<?>[]{ByteBuffer.class,int.class,int.class,int.class}, optional,0,1,7);
+        String outcome;
+        try { optional.getLong(); optional.get(); outcome = "unexpected_read"; }
+        catch (java.nio.BufferUnderflowException e) { outcome = "bounded"; }
+        finally {
+            Method close = scope.getClass().getMethod("close"); close.setAccessible(true); close.invoke(scope);
+        }
+        report("optional_close_after_underflow", outcome, optional);
+    }
+}

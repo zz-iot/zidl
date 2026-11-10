@@ -2,8 +2,11 @@
 
 Date: 2026-11-02
 
-Status: agreed architectural direction; API, packaging and migration pending.
+Status: audit and executable baseline completed; runtime extraction, API and
+delivery implementation pending.
 This document describes planned behavior, not an already available package.
+See the [Java CDR audit](java-cdr-audit.md) for helper inventory, observed buffer
+semantics, correctness gaps, size/performance baseline and first-slice proposal.
 
 The [Java canonical key checkpoint](java-cdr-key-slice.md) corrects generated
 holder traversal and hash policy without introducing the planned shared runtime.
