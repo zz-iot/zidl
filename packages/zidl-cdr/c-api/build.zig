@@ -21,12 +21,31 @@ pub fn build(b: *std.Build) void {
     const lib = @import("zidl_cdr").addCAbiLibrary(b, codec_dep.path("."), zidl_cdr_mod, target, optimize, sanitize_thread, shared_primitives);
     b.installArtifact(lib);
 
-    const external_test = b.step("test-external-c", "Link/run the shared archive with a native Unix-style system C compiler");
-    const external_cc = b.option([]const u8, "external-cc", "System C compiler executable for test-external-c") orelse "cc";
+    const external_test = b.step("test-external-c", "Link/run the shared archive with a native system C compiler (cc, or MSVC cl for an MSVC-ABI target)");
+    const msvc = target.result.os.tag == .windows and target.result.abi == .msvc;
+    const external_cc = b.option([]const u8, "external-cc", "System C compiler executable for test-external-c") orelse if (msvc) "cl" else "cc";
+    const host = b.graph.host.result;
     if (!shared_primitives) {
         external_test.dependOn(&b.addFail("test-external-c requires -Dshared-primitives=true").step);
+    } else if (msvc) {
+        if (host.os.tag != .windows or host.cpu.arch != target.result.cpu.arch) {
+            external_test.dependOn(&b.addFail("test-external-c with an MSVC-ABI target requires a Windows host of the same architecture").step);
+        } else {
+            // cl takes one /Fo object path per source file, so compile each
+            // separately. The archive names ntdll as a default library.
+            const consumer = b.addSystemCommand(&.{ external_cc, "/nologo" });
+            for ([_][]const u8{ "shared_primitives", "fixed_external" }) |name| {
+                const compile = b.addSystemCommand(&.{ external_cc, "/nologo", "/c", "/std:c11", "/W3", "/WX", "/DZIDL_CDR_SHARED_CONSUMER" });
+                compile.addPrefixedDirectoryArg("/I", codec_dep.path("include"));
+                compile.addFileArg(codec_dep.path(b.fmt("test/{s}.c", .{name})));
+                consumer.addFileArg(compile.addPrefixedOutputFileArg("/Fo", b.fmt("{s}.obj", .{name})));
+            }
+            consumer.addArtifactArg(lib);
+            const executable = consumer.addPrefixedOutputFileArg("/Fe", "cdr-external-consumer.exe");
+            external_test.dependOn(&b.addRunFile(executable).step);
+        }
     } else if (!target.query.isNative() or (target.result.os.tag != .linux and target.result.os.tag != .macos)) {
-        external_test.dependOn(&b.addFail("test-external-c currently requires a native Linux/macOS target and Unix-style C compiler").step);
+        external_test.dependOn(&b.addFail("test-external-c requires a native Linux/macOS target with a Unix-style C compiler, or an MSVC-ABI Windows target with cl").step);
     } else {
         const consumer = b.addSystemCommand(&.{ external_cc, "-std=c11", "-Wall", "-Wextra", "-Werror", "-DZIDL_CDR_SHARED_CONSUMER", "-I" });
         consumer.addDirectoryArg(codec_dep.path("include"));

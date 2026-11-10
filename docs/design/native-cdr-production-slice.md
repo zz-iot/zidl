@@ -26,9 +26,10 @@ The planned zzdds consumer update constructs one codec archive for its Zig C ABI
 exports, shared library,
 C/C++ binding smoke tests and installed SDK. It uses the codec module already
 owned by its `zidl_rt` graph. This preserves Zig type identity and avoids
-constructing another binding registry. Standalone archives bundle Zig compiler
-and safety runtimes for external C/C++ linkers. C support compilation disables
-C sanitizer/stack-protector hooks; native Zig bounds and overflow checks remain.
+constructing another binding registry. Standalone archives bundle the Zig
+compiler runtime for external C/C++ linkers. C support compilation disables
+C sanitizer/stack-protector hooks, so nothing references the UBSan runtime and
+it is not bundled; native Zig bounds and overflow checks remain.
 TSan archive builds use LLVM. The macOS install path retains Darwin archive
 repacking and includes the Zig runtimes in the repacked object.
 
@@ -54,7 +55,16 @@ archive using their normal toolchain. Building that archive from source now
 requires Zig; compiling `src/zidl_cdr.c` alone provides only storage/allocator
 support. The test-only C reference is not a supported production fallback.
 The release source archive includes the native implementation and build helper.
-The installed SDK link names are unchanged. Generated Zig imports now name
+The installed SDK link names are unchanged.
+
+MSVC links only an archive built for an MSVC-ABI target
+(`-Dtarget=x86_64-windows-msvc`). One built for Zig's default Windows target
+(GNU ABI) fails with `LNK1143` on its bundled compiler runtime. The Zig runtime
+in the archive calls ntdll directly, so `src/zidl_cdr.c` names it as a default
+library for MSVC-ABI builds. The bundled UBSan runtime's `/exclude-symbols`
+directives were MSVC `LNK4229` warnings, and it is no longer bundled.
+`test-external-c` links the archive with `cl` on Windows CI, in Debug and
+ReleaseSafe. Generated Zig imports now name
 `zidl_cdr` and `zidl_bindings`; regenerate and wire both modules when updating.
 
 ## Validation
@@ -71,7 +81,8 @@ The installed SDK link names are unchanged. Generated Zig imports now name
 Earlier local work verified the shared archive through zzdds Zig/C/C++/Java,
 allocator/loan tests and Windows/macOS cross-builds. Those checks predate the
 new generated-import contract and must be repeated in the zzdds consumer PR.
-Native Linux checks do not replace native MSVC/Apple linker CI.
+Native Linux checks do not replace native Apple linker CI; MSVC is now
+covered by `test-external-c` on Windows.
 
 The next zzdds PR migrates its imports and generated-module wiring, then pins
 this merged revision. Once that passes, remove the temporary `zidl-rt` umbrella
