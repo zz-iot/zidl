@@ -5,6 +5,12 @@
 #include <stdlib.h>   /* malloc, realloc, free */
 #include <string.h>   /* memcpy, strlen */
 
+/* The native core's Zig runtime calls ntdll directly. An MSVC-ABI archive
+ * names it as a default library so MSVC consumers need not list it. */
+#if defined(_WIN32) && defined(_MSC_VER)
+#pragma comment(lib, "ntdll")
+#endif
+
 /* ── Writer ──────────────────────────────────────────────────────────────── */
 
 static int writer_grow_default(ZidlCdrWriter *w, size_t needed) {

@@ -18,6 +18,12 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- The shared native C ABI archive links with MSVC when built for an MSVC-ABI target
+  (`-Dtarget=x86_64-windows-msvc`). It names `ntdll`, which its Zig runtime calls, as a
+  default library, and no longer bundles the UBSan runtime, whose `/exclude-symbols`
+  directives MSVC warned about. `test-external-c` links it with `cl` on Windows CI. An
+  archive for Zig's default Windows target (GNU ABI) still does not link with MSVC.
+
 - Add `@success_result(value)` for integer typedefs: an operation returning one succeeds
   only with that value. When such an operation takes an `in` `@callback` argument and
   returns anything else, the C++ and Java bindings release the registration they built

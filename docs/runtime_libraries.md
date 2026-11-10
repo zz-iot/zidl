@@ -217,7 +217,9 @@ Used for `string<N>` (`BoundedArray(u8, N)`) and `sequence<T, N>` (`BoundedArray
 
 Stable C ABI over the native codec, used by generated C and C++ code. Source
 builds require Zig; applications link the installed archive with their normal
-compiler. Storage and allocator support remain in `src/zidl_cdr.c`.
+compiler. MSVC needs an archive built for an MSVC-ABI target
+(`-Dtarget=x86_64-windows-msvc`). Storage and allocator support remain in
+`src/zidl_cdr.c`.
 Also used in the Cyclone DDS interop harness.
 
 ### Error Codes

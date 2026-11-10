@@ -146,6 +146,16 @@ jobs:
           zig build test-external-c -Dshared-primitives=true -Doptimize=ReleaseSafe
         working-directory: packages/zidl-cdr/c-api
 
+      - name: Test shared archive with MSVC
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+          call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          zig build test-external-c -Dtarget=x86_64-windows-msvc || exit /b 1
+          zig build test-external-c -Dtarget=x86_64-windows-msvc -Doptimize=ReleaseSafe || exit /b 1
+        working-directory: packages/zidl-cdr/c-api
+
       - name: Test (C ABI reference)
         run: zig build test -Dshared-primitives=false
         working-directory: packages/zidl-cdr/c-api

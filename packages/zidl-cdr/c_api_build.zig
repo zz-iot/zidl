@@ -11,8 +11,9 @@ pub fn add(b: *std.Build, root: std.Build.LazyPath, native: *std.Build.Module, t
     const lib = b.addLibrary(.{ .name = "zidl_cdr", .root_module = mod, .linkage = .static });
     if (sanitize_thread) lib.use_llvm = true;
     if (shared) {
+        // No UBSan runtime: nothing references it with sanitize_c off, and
+        // its /exclude-symbols directives are LNK4229 warnings under MSVC.
         lib.bundle_compiler_rt = true;
-        lib.bundle_ubsan_rt = true;
     }
     lib.installHeadersDirectory(root.path(b, "include"), "", .{ .include_extensions = null });
     return lib;
