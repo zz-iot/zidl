@@ -18,6 +18,24 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Add `@success_result(value)` for integer typedefs: an operation returning one succeeds
+  only with that value. When such an operation takes an `in` `@callback` argument and
+  returns anything else, the C++ and Java bindings release the registration they built
+  for it. This replaces C++'s release on a nonzero return from an operation named
+  `set_listener`; Java released on no failure, so a rejected call kept its Java listener
+  alive.
+
+- **Breaking:** only `@callback` makes an interface a callback. An interface whose name
+  ends in `Listener` is no longer treated as one without it, and an operation named
+  `set_listener` no longer releases its listener on a nonzero return. Annotate listener
+  interfaces `@callback`, and return-code typedefs `@success_result`.
+
+- C++ and Java find a callback's getter by its shape, not the name `get_listener`: an
+  operation with no arguments returning a `@callback` interface. A `create_*` call's
+  read-back uses the created interface's one getter for the callback's type or a base
+  of it, and skips the read-back when there are several. The generated calls now use
+  the getter's own name.
+
 - Add optional `--handle-retire-query` support for C++ and Java bindings so late
   callbacks cannot recreate wrappers after logical deletion. Add runtime box
   retirement state and idempotent notification, separate from memory cleanup.

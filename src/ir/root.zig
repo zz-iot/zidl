@@ -44,6 +44,7 @@ pub const isCallbackInterface = types.isCallbackInterface;
 pub const isSharedBaseInterface = types.isSharedBaseInterface;
 pub const hasSharedCAbiBox = types.hasSharedCAbiBox;
 pub const retiredResult = types.retiredResult;
+pub const successResult = types.successResult;
 pub const Operation = types.Operation;
 pub const Parameter = types.Parameter;
 pub const ParamMode = types.ParamMode;

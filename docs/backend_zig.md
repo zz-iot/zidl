@@ -417,8 +417,8 @@ The `listener_data` field is threaded as the last argument to each callback.
 `noop_WriterListener` has all function pointers null (safe to pass when no
 callbacks are needed).
 
-The name heuristic (interfaces whose name ends in `"Listener"`) is a deprecated
-fallback for IDL files that do not yet use `@callback`.  See `docs/annotations.md`.
+Only `@callback` makes an interface a callback; its name does not. See
+`docs/annotations.md`.
 
 ### Const
 ```zig

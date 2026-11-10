@@ -76,9 +76,6 @@ Features*.
   `@range` / `@min` / `@max` / `@unit` / `@external` / `@position` / `@value` / `@default` /
   `@default_literal` / `@autoid` / `@service` / `@oneway` / `@ami`; `@hashid` and
   `@autoid(HASH)` are not auto-applied to member IDs. `idl4_annotations.md`.
-- **Deprecated listener heuristic warning** — an interface whose name ends in `Listener`
-  is auto-treated as `@callback`; the planned deprecation warning for relying on that
-  (instead of an explicit `@callback`) is not yet emitted. `annotations.md`.
 - **`fixed<D,S>` is mapped to `f64`** (approximate/lossy) in the Zig, Java, and C++
   backends. This limits lossless high-precision wire roundtrips and canonical key
   hashing from decoded values; an exact decimal value mapping remains open.

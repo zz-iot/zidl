@@ -530,8 +530,6 @@ pub fn prefixedCNameFromQualified(
 
 /// True for `@callback`-annotated interfaces (listener interfaces), which get a
 /// plain C callback struct instead of an entity opaque handle / vtable.
-/// Falls back to the "Listener" name-suffix heuristic for IDL that predates the
-/// `@callback` annotation — deprecated, kept for backwards compatibility.
 ///
 /// Thin re-export of the canonical `ir.isCallbackInterface`: kept as a
 /// function here (rather than deleting it and updating every call site to say
@@ -539,6 +537,75 @@ pub fn prefixedCNameFromQualified(
 /// naturally look for it.
 pub fn isCallbackInterface(iface: *const ir.Interface) bool {
     return ir.isCallbackInterface(iface);
+}
+
+/// For an operation taking an `in` `@callback` argument, the value it returns
+/// on success, from `@success_result` on its return type. Any other value
+/// means it registered none of its callback arguments, so the caller still
+/// owns the registrations it built for them. Null when `op` takes no callback
+/// or its return type has no `@success_result`: its return value then says
+/// nothing about whether it kept them.
+pub fn callbackSuccessResult(op: *const ir.Operation) ?i64 {
+    const ok = ir.successResult(op.return_type orelse return null) orelse return null;
+    for (op.params) |p| {
+        if (p.mode == .in_ and callbackInterfaceOf(p.type_ref) != null) return ok;
+    }
+    return null;
+}
+
+/// The `@callback` interface `op` hands back when it is a callback getter:
+/// it takes no arguments and returns a `@callback` interface, or an alias of
+/// one, which can only be a callback its provider holds. Its name plays no
+/// part. Null for any other operation.
+pub fn callbackGetterType(op: *const ir.Operation) ?*const ir.Interface {
+    if (op.params.len != 0) return null;
+    return callbackInterfaceOf(op.return_type orelse return null);
+}
+
+/// The `@callback` interface `type_ref` names, directly or through typedefs
+/// aliasing it (an array typedef is not an alias). Null for any other type.
+pub fn callbackInterfaceOf(type_ref: ir.TypeRef) ?*const ir.Interface {
+    var tr = type_ref;
+    while (true) {
+        const td = switch (tr) {
+            .named => |n| n,
+            else => return null,
+        };
+        switch (td) {
+            .typedef => |t| {
+                if (t.dimensions.len != 0) return null;
+                tr = t.type_ref;
+            },
+            .interface => |iface| return if (isCallbackInterface(iface)) iface else null,
+            else => return null,
+        }
+    }
+}
+
+/// Among `ops`, the callback getter that can hand back a registration of
+/// `cb`: one whose type is `cb` or a base of it. Null when none can, or when
+/// several can: a guess could read a different callback than the one
+/// registered as `cb`. An operation inherited along two paths is one getter.
+pub fn callbackGetterFor(ops: []const ir.Operation, cb: *const ir.Interface) ?*const ir.Operation {
+    var found: ?*const ir.Operation = null;
+    for (ops) |*o| {
+        const t = callbackGetterType(o) orelse continue;
+        if (!isSameOrBase(t, cb)) continue;
+        if (found) |f| {
+            if (!std.mem.eql(u8, f.name, o.name)) return null;
+        } else found = o;
+    }
+    return found;
+}
+
+/// Whether `base` is `iface` or one of its bases, at any depth.
+fn isSameOrBase(base: *const ir.Interface, iface: *const ir.Interface) bool {
+    if (std.mem.eql(u8, base.qualified_name, iface.qualified_name)) return true;
+    for (iface.bases) |b| {
+        if (b != .interface) continue;
+        if (isSameOrBase(base, b.interface)) return true;
+    }
+    return false;
 }
 
 /// Thin re-export of the canonical `ir.hasSharedCAbiBox`, for the same reason
