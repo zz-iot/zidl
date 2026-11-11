@@ -123,3 +123,6 @@ Java object model and broader DDS ownership changes are outside this effort.
 The [appendable struct frame checkpoint](java-cdr-frame-bounds.md) bounds Java
 readers before shared-runtime extraction; mutable member and union decoding
 remain follow-up work.
+
+The [mutable member and union checkpoint](java-cdr-member-bounds.md) extends
+bounded reading to mutable structs and unions and appendable unions.

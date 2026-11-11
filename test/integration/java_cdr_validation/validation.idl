@@ -7,3 +7,8 @@ module JavaValidation {
     @final struct Parent { App inner; long tail; };
     @mutable struct Mut { long value; };
 };
+module JavaValidation {
+    @mutable struct MutText { @key string text; };
+    @appendable union AppChoice switch(long) { case 0: long value; };
+    @mutable union MutChoice switch(long) { case 0: long value; };
+};

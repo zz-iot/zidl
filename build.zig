@@ -112,12 +112,13 @@ pub fn build(b: *std.Build) void {
                 const classes = compile_java.addOutputDirectoryArg("classes");
                 if (split) {
                     compile_java.addFileArg(generated.path(b, "ValidationCdrUtils.java"));
-                    for ([_][]const u8{ "Narrow", "App", "AppText", "Parent", "Mut" }) |name| {
+                    for ([_][]const u8{ "Narrow", "App", "AppText", "Parent", "Mut", "MutText", "AppChoice", "MutChoice" }) |name| {
                         compile_java.addFileArg(generated.path(b, b.fmt("{s}.java", .{name})));
                     }
                 } else compile_java.addFileArg(generated.path(b, "Validation.java"));
                 compile_java.addFileArg(b.path("test/integration/java_cdr_validation/ValidationTest.java"));
                 compile_java.addFileArg(b.path("test/integration/java_cdr_validation/FrameTest.java"));
+                compile_java.addFileArg(b.path("test/integration/java_cdr_validation/MemberTest.java"));
                 const run = b.addSystemCommand(&.{ java, "-Xmx32m", "-cp" });
                 run.addDirectoryArg(classes);
                 run.addArgs(&.{ "ValidationTest", if (split) "javavalidation." else "Validation$JavaValidation$" });
@@ -126,6 +127,10 @@ pub fn build(b: *std.Build) void {
                 frames.addDirectoryArg(classes);
                 frames.addArgs(&.{ "FrameTest", if (split) "javavalidation." else "Validation$JavaValidation$" });
                 java_validation_step.dependOn(&frames.step);
+                const members = b.addSystemCommand(&.{ java, "-Xmx32m", "-cp" });
+                members.addDirectoryArg(classes);
+                members.addArgs(&.{ "MemberTest", if (split) "javavalidation." else "Validation$JavaValidation$" });
+                java_validation_step.dependOn(&members.step);
             }
         }
     }

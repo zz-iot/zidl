@@ -24,3 +24,6 @@ schema-evolution defaults for such members.
 unknown trailing bytes, selected skips, XCDR1, offset origins, direct/read-only
 buffers, cursor/limit restoration, and mutable bulk skip boundaries in both Java
 output modes.
+
+The subsequent [member and union checkpoint](java-cdr-member-bounds.md) implements
+the mutable member and appendable union follow-ups identified above.

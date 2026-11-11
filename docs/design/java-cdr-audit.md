@@ -240,3 +240,6 @@ measurements above remain the pre-fix audit snapshot.
 
 The next correctness slice bounds appendable struct reads and length-based skips:
 [Java appendable struct frame bounds](java-cdr-frame-bounds.md).
+
+[Mutable member and union bounds](java-cdr-member-bounds.md) extends checked
+windows to ordinary mutable structs and union decoding.

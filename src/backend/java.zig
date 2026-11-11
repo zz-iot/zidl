@@ -1118,14 +1118,24 @@ const Generator = struct {
             // @mutable union: read DHEADER, then EMHEADER loop.
             // member_id=0 is the discriminant; other IDs are case values.
             try self.ind();
-            try self.write("_cdrAlign(_buf, _cdrBase, 4); int _emEnd = _buf.position() + _buf.getInt();\n");
+            try self.write("int _frameLimit = _buf.limit(), _emEnd = _cdrReadFrameEnd(_buf, _cdrBase); _buf.limit(_emEnd);\n");
             try self.ind();
-            try self.write("while (_buf.position() < _emEnd) {\n");
+            try self.write("try { while (_buf.position() < _emEnd) {\n");
             self.depth += 1;
             try self.ind();
-            try self.write("_cdrAlign(_buf, _cdrBase, 4); int _emWord = _buf.getInt(); int _memberId = _emWord & 0x0FFFFFFF;\n");
+            try self.write("int _pad = (4 - (_buf.position() - _cdrBase) % 4) % 4; if (_pad > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
             try self.ind();
-            try self.write("int _emLc = (_emWord >>> 28) & 0x7; int _emPayload; if (_emLc == 0) _emPayload = 1; else if (_emLc == 1) _emPayload = 2; else if (_emLc == 2) _emPayload = 4; else if (_emLc == 3) _emPayload = 8; else if (_emLc == 4) _emPayload = _buf.getInt(); else { int _emNext = _buf.getInt(_buf.position()); _emPayload = 4 + (_emLc == 5 ? _emNext : _emLc == 6 ? _emNext * 4 : _emNext * 8); }\n");
+            try self.write("_buf.position(_buf.position() + _pad); if (_buf.position() == _emEnd) break;\n");
+            try self.ind();
+            try self.write("int _emWord = _buf.getInt(); int _memberId = _emWord & 0x0FFFFFFF;\n");
+            try self.ind();
+            try self.write("int _emLc = (_emWord >>> 28) & 0x7; long _emPayload; if (_emLc < 4) _emPayload = 1L << _emLc; else if (_emLc == 4) _emPayload = Integer.toUnsignedLong(_buf.getInt()); else { if (_buf.remaining() < 4) throw new java.nio.BufferUnderflowException(); long _next = Integer.toUnsignedLong(_buf.getInt(_buf.position())); _emPayload = 4 + _next * (_emLc == 5 ? 1L : _emLc == 6 ? 4L : 8L); }\n");
+            try self.ind();
+            try self.write("if (_emPayload > 0xFFFFFFFFL) throw new IllegalArgumentException(\"EMHEADER size overflow\"); if (_emPayload > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
+            try self.ind();
+            try self.write("int _memberEnd = _buf.position() + (int)_emPayload; _buf.limit(_memberEnd);\n");
+            try self.ind();
+            try self.write("try {\n");
             try self.ind();
             try self.write("if (_memberId == 0) {\n");
             self.depth += 1;
@@ -1163,11 +1173,12 @@ const Generator = struct {
             self.depth += 1;
             // Switch on discriminant to read the corresponding case value.
             try self.ind();
-            try self.write("switch (_out._discriminator) {\n");
+            try self.write("switch (_memberId) {\n");
             self.depth += 1;
-            for (u.cases) |cas| {
+            for (u.cases, 0..) |cas, cas_idx| {
                 if (isDefaultUnionCase(cas)) continue;
-                try self.emitJavaUnionCaseLabelLines(u.discriminant, cas);
+                try self.ind();
+                try self.print("case {d}:\n", .{cas.annotations.memberId(@intCast(cas_idx + 1))});
                 const out_expr = try std.fmt.allocPrint(self.alloc, "_out.{s}", .{cas.name});
                 defer self.alloc.free(out_expr);
                 if (cas.dimensions.len > 0) {
@@ -1186,7 +1197,7 @@ const Generator = struct {
             };
             if (dc_mu) |dc| {
                 try self.ind();
-                try self.write("default:\n");
+                try self.print("case {d}:\n", .{dc.annotations.memberId(0xFFFF_FFFF) & 0x0FFFFFFF});
                 const out_expr = try std.fmt.allocPrint(self.alloc, "_out.{s}", .{dc.name});
                 defer self.alloc.free(out_expr);
                 if (dc.dimensions.len > 0) {
@@ -1196,24 +1207,26 @@ const Generator = struct {
                 }
                 try self.ind();
                 try self.write("break;\n");
-            } else {
-                try self.ind();
-                try self.write("default: _buf.position(_buf.position() + _emPayload); break;\n");
             }
+            try self.ind();
+            try self.write("default: if ((_emWord & 0x80000000) != 0) throw new IllegalArgumentException(\"unknown must-understand member\"); break;\n");
             self.depth -= 1;
             try self.ind();
             try self.write("}\n");
             self.depth -= 1;
             try self.ind();
             try self.write("}\n");
+            try self.ind();
+            try self.write("} finally { _buf.limit(_emEnd); }\n");
+            try self.ind();
+            try self.write("_buf.position(_memberEnd);\n");
             self.depth -= 1;
             try self.ind();
             try self.write("}\n");
+            try self.ind();
+            try self.write("} finally { _buf.limit(_frameLimit); }\n");
         } else {
-            if (appendable) {
-                try self.ind();
-                try self.write("if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); } // skip DHEADER\n");
-            }
+            if (appendable) try self.emitAppendableReadBegin();
             // Read discriminant
             if (disc_is_enum) {
                 const disc_java = try self.typeRefToJava(u.discriminant, &.{});
@@ -1303,6 +1316,7 @@ const Generator = struct {
                 try self.ind();
                 try self.write("}\n");
             }
+            if (appendable) try self.emitAppendableReadEnd();
         }
         try self.ind();
         try self.write("return _out;\n");
@@ -2068,93 +2082,53 @@ const Generator = struct {
         try self.ind();
         try self.print("    {s}{s} _out = new {s}{s}();\n", .{ self.opts.type_prefix, s.name, self.opts.type_prefix, s.name });
 
-        if (projection) {
-            if (mutable) {
+        if (mutable) {
+            if (projection) {
                 try self.ind();
                 try self.write("    if (_xcdrVersion != 2) throw new IllegalArgumentException(\"mutable key requires XCDR2\");\n");
-                try self.ind();
-                try self.write("    _cdrAlign(_buf, _cdrBase, 4); int _frameLimit = _buf.limit(); int _emSize = _buf.getInt();\n");
-                try self.ind();
-                try self.write("    if (_emSize < 0 || _emSize > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
-                try self.ind();
-                try self.write("    int _emEnd = _buf.position() + _emSize; _buf.limit(_emEnd);\n");
-                try self.ind();
-                try self.write("    try { while (_buf.position() < _emEnd) {\n");
-                try self.ind();
-                try self.write("        int _pad = (4 - (_buf.position() - _cdrBase) % 4) % 4; if (_pad > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
-                try self.ind();
-                try self.write("        _buf.position(_buf.position() + _pad); if (_buf.position() == _emEnd) break;\n");
-                try self.ind();
-                try self.write("        int _emWord = _buf.getInt(); int _memberId = _emWord & 0x0FFFFFFF; int _emLc = (_emWord >>> 28) & 7; long _emPayload;\n");
-                try self.ind();
-                try self.write("        if (_emLc < 4) _emPayload = 1L << _emLc; else if (_emLc == 4) _emPayload = Integer.toUnsignedLong(_buf.getInt()); else { long _next = Integer.toUnsignedLong(_buf.getInt(_buf.position())); _emPayload = 4 + _next * (_emLc == 5 ? 1L : _emLc == 6 ? 4L : 8L); }\n");
-                try self.ind();
-                try self.write("        if (_emPayload > 0xFFFFFFFFL) throw new IllegalArgumentException(\"EMHEADER size overflow\"); if (_emPayload > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
-                try self.ind();
-                try self.write("        int _memberEnd = _buf.position() + (int)_emPayload; _buf.limit(_memberEnd);\n");
-                try self.ind();
-                try self.write("        try { switch (_memberId) {\n");
-                for (wire_fields) |field| {
-                    const m = field.member.*;
-                    const idx = field.index;
-                    const member_id: u32 = memberIdAtJava(m, idx);
-                    try self.ind();
-                    try self.print("            case {d}:\n", .{member_id});
-                    try self.emitWireMemberRead(field, "_out", "                ", true);
-                    try self.ind();
-                    try self.write("                break;\n");
-                }
-                try self.ind();
-                try self.write("            default: if ((_emWord & 0x80000000) != 0) throw new IllegalArgumentException(\"unknown must-understand key member\"); break;\n");
-                try self.ind();
-                try self.write("        } } finally { _buf.limit(_emEnd); }\n");
-                try self.ind();
-                try self.write("        _buf.position(_memberEnd);\n");
-                try self.ind();
-                try self.write("    } } finally { _buf.limit(_frameLimit); }\n");
-            } else {
-                if (appendable) try self.emitAppendableReadBegin();
-                for (wire_fields) |field| {
-                    try self.emitWireMemberRead(field, "_out", "    ", false);
-                }
-                if (appendable) try self.emitAppendableReadEnd();
             }
+            try self.ind();
+            try self.write("    int _frameLimit = _buf.limit(); int _emEnd = _cdrReadFrameEnd(_buf, _cdrBase); _buf.limit(_emEnd);\n");
+            try self.ind();
+            try self.write("    try { while (_buf.position() < _emEnd) {\n");
+            try self.ind();
+            try self.write("        int _pad = (4 - (_buf.position() - _cdrBase) % 4) % 4; if (_pad > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
+            try self.ind();
+            try self.write("        _buf.position(_buf.position() + _pad); if (_buf.position() == _emEnd) break;\n");
+            try self.ind();
+            try self.write("        int _emWord = _buf.getInt(); int _memberId = _emWord & 0x0FFFFFFF; int _emLc = (_emWord >>> 28) & 0x7; long _emPayload;\n");
+            try self.ind();
+            try self.write("        if (_emLc < 4) _emPayload = 1L << _emLc; else if (_emLc == 4) _emPayload = Integer.toUnsignedLong(_buf.getInt()); else { if (_buf.remaining() < 4) throw new java.nio.BufferUnderflowException(); long _next = Integer.toUnsignedLong(_buf.getInt(_buf.position())); _emPayload = 4 + _next * (_emLc == 5 ? 1L : _emLc == 6 ? 4L : 8L); }\n");
+            try self.ind();
+            try self.write("        if (_emPayload > 0xFFFFFFFFL) throw new IllegalArgumentException(\"EMHEADER size overflow\"); if (_emPayload > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
+            try self.ind();
+            try self.write("        int _memberEnd = _buf.position() + (int)_emPayload; _buf.limit(_memberEnd);\n");
+            try self.ind();
+            try self.write("        try { switch (_memberId) {\n");
+            for (wire_fields) |field| {
+                const m = field.member.*;
+                const idx = field.index;
+                const member_id: u32 = memberIdAtJava(m, idx);
+                try self.ind();
+                try self.print("            case {d}:\n", .{member_id});
+                try self.emitWireMemberRead(field, "_out", "                ", true);
+                try self.ind();
+                try self.write("                break;\n");
+            }
+            try self.ind();
+            try self.write("            default: if ((_emWord & 0x80000000) != 0) throw new IllegalArgumentException(\"unknown must-understand member\"); break;\n");
+            try self.ind();
+            try self.write("        } } finally { _buf.limit(_emEnd); }\n");
+            try self.ind();
+            try self.write("        _buf.position(_memberEnd);\n");
+            try self.ind();
+            try self.write("    } } finally { _buf.limit(_frameLimit); }\n");
         } else {
-            if (mutable) {
-                // @mutable: read DHEADER for end pos, loop on EMHEADER-framed members.
-                try self.ind();
-                try self.write("    _cdrAlign(_buf, _cdrBase, 4); int _emEnd = _buf.position() + _buf.getInt();\n");
-                try self.ind();
-                try self.write("    while (_buf.position() < _emEnd) {\n");
-                try self.ind();
-                try self.write("        _cdrAlign(_buf, _cdrBase, 4); int _emWord = _buf.getInt(); int _memberId = _emWord & 0x0FFFFFFF;\n");
-                try self.ind();
-                try self.write("        int _emLc = (_emWord >>> 28) & 0x7; int _emPayload; if (_emLc == 0) _emPayload = 1; else if (_emLc == 1) _emPayload = 2; else if (_emLc == 2) _emPayload = 4; else if (_emLc == 3) _emPayload = 8; else if (_emLc == 4) _emPayload = _buf.getInt(); else { int _emNext = _buf.getInt(_buf.position()); _emPayload = 4 + (_emLc == 5 ? _emNext : _emLc == 6 ? _emNext * 4 : _emNext * 8); }\n");
-                try self.ind();
-                try self.write("        switch (_memberId) {\n");
-                for (wire_fields) |field| {
-                    const m = field.member.*;
-                    const idx = field.index;
-                    const member_id: u32 = memberIdAtJava(m, idx);
-                    try self.ind();
-                    try self.print("            case {d}:\n", .{member_id});
-                    try self.emitWireMemberRead(field, "_out", "                ", true);
-                    try self.ind();
-                    try self.write("                break;\n");
-                }
-                try self.ind();
-                try self.write("            default: _buf.position(_buf.position() + _emPayload); break;\n");
-                try self.ind();
-                try self.write("        }\n");
-                try self.ind();
-                try self.write("    }\n");
-            } else {
-                if (appendable) try self.emitAppendableReadBegin();
-                for (wire_fields) |field| {
-                    try self.emitWireMemberRead(field, "_out", "    ", false);
-                }
-                if (appendable) try self.emitAppendableReadEnd();
+            if (appendable) try self.emitAppendableReadBegin();
+            for (wire_fields) |field| {
+                try self.emitWireMemberRead(field, "_out", "    ", false);
             }
+            if (appendable) try self.emitAppendableReadEnd();
         }
         try self.ind();
         try self.write("    return _out;\n");
@@ -11364,7 +11338,7 @@ test "java: @mutable struct deserialize loops over EMHEADERs" {
     // Read DHEADER → end position
     try testGen(alloc,
         \\@mutable struct S { long x; long y; };
-    , "test", "_cdrAlign(_buf, _cdrBase, 4); int _emEnd = _buf.position() + _buf.getInt();");
+    , "test", "_emEnd = _cdrReadFrameEnd(_buf, _cdrBase);");
     // EMHEADER loop
     try testGen(alloc,
         \\@mutable struct S { long x; long y; };
@@ -11387,7 +11361,7 @@ test "java: @mutable struct deserialize loops over EMHEADERs" {
     // Unknown member skip
     try testGen(alloc,
         \\@mutable struct S { long x; long y; };
-    , "test", "default: _buf.position(_buf.position() + _emPayload); break;");
+    , "test", "_buf.position(_memberEnd);");
 }
 
 test "java: @mutable struct @id annotation overrides member_id" {
@@ -11431,7 +11405,7 @@ test "java: @mutable union deserialize reads DHEADER then loops EMHEADERs" {
     // DHEADER read
     try testGen(alloc,
         \\@mutable union U switch (long) { case 0: long x; case 1: long y; };
-    , "test", "_cdrAlign(_buf, _cdrBase, 4); int _emEnd = _buf.position() + _buf.getInt();");
+    , "test", "_emEnd = _cdrReadFrameEnd(_buf, _cdrBase);");
     // Discriminant arm: member_id == 0
     try testGen(alloc,
         \\@mutable union U switch (long) { case 0: long x; case 1: long y; };
@@ -11446,7 +11420,7 @@ test "java: @mutable union deserialize reads DHEADER then loops EMHEADERs" {
     , "test", "} else {");
     try testGen(alloc,
         \\@mutable union U switch (long) { case 0: long x; case 1: long y; };
-    , "test", "switch (_out._discriminator) {");
+    , "test", "switch (_memberId) {");
 }
 
 test "java: fixed<5,2> field type is double and serializes as BCD" {
@@ -11748,7 +11722,7 @@ test "java: @mutable key reads peek the NEXTINT for EMHEADER length codes 5-7" {
         \\@bit_bound(8) enum Small { A, B };
         \\@mutable struct K { @key string id; Small e; };
     ;
-    try testGen(alloc, idl, "test", "else if (_emLc == 4) _emPayload = _buf.getInt(); else { int _emNext = _buf.getInt(_buf.position());");
+    try testGen(alloc, idl, "test", "long _next = Integer.toUnsignedLong(_buf.getInt(_buf.position()));");
     // The 1-byte enum member gets EMHEADER LC 0.
     try testGen(alloc, idl, "test", "_buf.putInt(0x00000001);");
 }
