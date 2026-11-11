@@ -100,6 +100,16 @@ public class Types {
     private static void _cdrSkipString(java.nio.ByteBuffer _buf, int _cdrBase) {
         _buf.position(_cdrStringEnd(_buf, _cdrBase));
     }
+    private static int _cdrReadFrameEnd(java.nio.ByteBuffer _buf, int _cdrBase) {
+        long _offset = (long)_buf.position() - _cdrBase;
+        if (_offset < 0) throw new IllegalArgumentException("invalid CDR base");
+        int _pad = (int)((4 - _offset % 4) % 4);
+        if (_buf.remaining() < _pad || _buf.remaining() - _pad < 4) throw new java.nio.BufferUnderflowException();
+        _buf.position(_buf.position() + _pad);
+        long _size = Integer.toUnsignedLong(_buf.getInt());
+        if (_size > _buf.remaining()) throw new java.nio.BufferUnderflowException();
+        return _buf.position() + (int)_size;
+    }
     private static void _cdrWriteFixed(java.nio.ByteBuffer _buf, int _d, int _s, double _v) {
         int _n = (_d / 2) + 1; int _n2 = _n * 2; int _pad = _n2 - _d - 1;
         boolean _neg = _v < 0.0;
@@ -671,9 +681,13 @@ public class Types {
         public static Frame deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
             Frame _out = new Frame();
-            if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); } // skip DHEADER
+            int _frameLimit = _buf.limit(), _frameEnd = _frameLimit;
+            if (_xcdrVersion == 2) { _frameEnd = _cdrReadFrameEnd(_buf, _cdrBase); _buf.limit(_frameEnd); }
+            try {
             _cdrAlign(_buf, _cdrBase, 4); _out.seq_num = _buf.getInt();
             _out.topic = _cdrReadString(_buf, _cdrBase);
+            } finally { _buf.limit(_frameLimit); }
+            if (_xcdrVersion == 2) _buf.position(_frameEnd);
             return _out;
         }
 
@@ -689,20 +703,20 @@ public class Types {
         public static Frame deserializeKeyValue(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
             Frame _out = new Frame();
-            int _keyLimit = _buf.limit(), _keyEnd = _keyLimit;
-            if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); int _size = _buf.getInt(); if (_size < 0 || _size > _buf.remaining()) throw new java.nio.BufferUnderflowException(); _keyEnd = _buf.position() + _size; _buf.limit(_keyEnd); }
+            int _frameLimit = _buf.limit(), _frameEnd = _frameLimit;
+            if (_xcdrVersion == 2) { _frameEnd = _cdrReadFrameEnd(_buf, _cdrBase); _buf.limit(_frameEnd); }
             try {
             _cdrAlign(_buf, _cdrBase, 4); _out.seq_num = _buf.getInt();
             _out.topic = _cdrReadString(_buf, _cdrBase);
-            } finally { _buf.limit(_keyLimit); }
-            if (_xcdrVersion == 2) _buf.position(_keyEnd);
+            } finally { _buf.limit(_frameLimit); }
+            if (_xcdrVersion == 2) _buf.position(_frameEnd);
             return _out;
         }
 
         public static void skip(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
             if (_xcdrVersion == 2) {
-                _cdrAlign(_buf, _cdrBase, 4); int _end = _buf.position() + 4 + _buf.getInt();
+                int _end = _cdrReadFrameEnd(_buf, _cdrBase);
                 _buf.position(_end);
             } else {
                 _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
@@ -758,9 +772,13 @@ public class Types {
         public static Beacon deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
             Beacon _out = new Beacon();
-            if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); } // skip DHEADER
+            int _frameLimit = _buf.limit(), _frameEnd = _frameLimit;
+            if (_xcdrVersion == 2) { _frameEnd = _cdrReadFrameEnd(_buf, _cdrBase); _buf.limit(_frameEnd); }
+            try {
             _cdrAlign(_buf, _cdrBase, 4); _out.id = _buf.getInt();
             _out.payload = _cdrReadString(_buf, _cdrBase);
+            } finally { _buf.limit(_frameLimit); }
+            if (_xcdrVersion == 2) _buf.position(_frameEnd);
             return _out;
         }
 
@@ -775,19 +793,19 @@ public class Types {
         public static Beacon deserializeKeyValue(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
             Beacon _out = new Beacon();
-            int _keyLimit = _buf.limit(), _keyEnd = _keyLimit;
-            if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); int _size = _buf.getInt(); if (_size < 0 || _size > _buf.remaining()) throw new java.nio.BufferUnderflowException(); _keyEnd = _buf.position() + _size; _buf.limit(_keyEnd); }
+            int _frameLimit = _buf.limit(), _frameEnd = _frameLimit;
+            if (_xcdrVersion == 2) { _frameEnd = _cdrReadFrameEnd(_buf, _cdrBase); _buf.limit(_frameEnd); }
             try {
             _cdrAlign(_buf, _cdrBase, 4); _out.id = _buf.getInt();
-            } finally { _buf.limit(_keyLimit); }
-            if (_xcdrVersion == 2) _buf.position(_keyEnd);
+            } finally { _buf.limit(_frameLimit); }
+            if (_xcdrVersion == 2) _buf.position(_frameEnd);
             return _out;
         }
 
         public static void skip(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
             if (_xcdrVersion == 2) {
-                _cdrAlign(_buf, _cdrBase, 4); int _end = _buf.position() + 4 + _buf.getInt();
+                int _end = _cdrReadFrameEnd(_buf, _cdrBase);
                 _buf.position(_end);
             } else {
                 _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
@@ -858,7 +876,9 @@ public class Types {
         public static Beacon deserializeSelected(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion, long _want) {
             _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
             Beacon _out = new Beacon();
-            if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); } // skip DHEADER
+            int _frameLimit = _buf.limit(), _frameEnd = _frameLimit;
+            if (_xcdrVersion == 2) { _frameEnd = _cdrReadFrameEnd(_buf, _cdrBase); _buf.limit(_frameEnd); }
+            try {
             if ((_want & (1L << 0)) != 0) {
                 _cdrAlign(_buf, _cdrBase, 4); _out.id = _buf.getInt();
             } else {
@@ -869,6 +889,8 @@ public class Types {
             } else {
                 _cdrSkipString(_buf, _cdrBase);
             }
+            } finally { _buf.limit(_frameLimit); }
+            if (_xcdrVersion == 2) _buf.position(_frameEnd);
             return _out;
         }
         public static final boolean KEY_HASH_FORCE_MD5 = false;

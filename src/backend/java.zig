@@ -371,6 +371,45 @@ const Generator = struct {
         try self.write("}\n");
     }
 
+    fn emitFrameHelpers(self: *Generator, visibility: []const u8) !void {
+        try self.ind();
+        try self.print("{s} static int _cdrReadFrameEnd(java.nio.ByteBuffer _buf, int _cdrBase) {{\n", .{visibility});
+        try self.ind();
+        try self.write("    long _offset = (long)_buf.position() - _cdrBase;\n");
+        try self.ind();
+        try self.write("    if (_offset < 0) throw new IllegalArgumentException(\"invalid CDR base\");\n");
+        try self.ind();
+        try self.write("    int _pad = (int)((4 - _offset % 4) % 4);\n");
+        try self.ind();
+        try self.write("    if (_buf.remaining() < _pad || _buf.remaining() - _pad < 4) throw new java.nio.BufferUnderflowException();\n");
+        try self.ind();
+        try self.write("    _buf.position(_buf.position() + _pad);\n");
+        try self.ind();
+        try self.write("    long _size = Integer.toUnsignedLong(_buf.getInt());\n");
+        try self.ind();
+        try self.write("    if (_size > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
+        try self.ind();
+        try self.write("    return _buf.position() + (int)_size;\n");
+        try self.ind();
+        try self.write("}\n");
+    }
+
+    fn emitAppendableReadBegin(self: *Generator) !void {
+        try self.ind();
+        try self.write("    int _frameLimit = _buf.limit(), _frameEnd = _frameLimit;\n");
+        try self.ind();
+        try self.write("    if (_xcdrVersion == 2) { _frameEnd = _cdrReadFrameEnd(_buf, _cdrBase); _buf.limit(_frameEnd); }\n");
+        try self.ind();
+        try self.write("    try {\n");
+    }
+
+    fn emitAppendableReadEnd(self: *Generator) !void {
+        try self.ind();
+        try self.write("    } finally { _buf.limit(_frameLimit); }\n");
+        try self.ind();
+        try self.write("    if (_xcdrVersion == 2) _buf.position(_frameEnd);\n");
+    }
+
     fn emitCdrHelpers(self: *Generator) !void {
         try self.emitOptionalHelpers("private");
         try self.emitKeyAlignmentHelper("private");
@@ -386,6 +425,7 @@ const Generator = struct {
         try self.ind();
         try self.write("}\n");
         try self.emitStringHelpers("private");
+        try self.emitFrameHelpers("private");
         try self.ind();
         try self.write("private static void _cdrWriteFixed(java.nio.ByteBuffer _buf, int _d, int _s, double _v) {\n");
         try self.ind();
@@ -2073,24 +2113,11 @@ const Generator = struct {
                 try self.ind();
                 try self.write("    } } finally { _buf.limit(_frameLimit); }\n");
             } else {
-                if (appendable) {
-                    try self.ind();
-                    try self.write("    int _keyLimit = _buf.limit(), _keyEnd = _keyLimit;\n");
-                    try self.ind();
-                    try self.write("    if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); int _size = _buf.getInt(); if (_size < 0 || _size > _buf.remaining()) throw new java.nio.BufferUnderflowException(); _keyEnd = _buf.position() + _size; _buf.limit(_keyEnd); }\n");
-                    try self.ind();
-                    try self.write("    try {\n");
-                }
-
+                if (appendable) try self.emitAppendableReadBegin();
                 for (wire_fields) |field| {
                     try self.emitWireMemberRead(field, "_out", "    ", false);
                 }
-                if (appendable) {
-                    try self.ind();
-                    try self.write("    } finally { _buf.limit(_keyLimit); }\n");
-                    try self.ind();
-                    try self.write("    if (_xcdrVersion == 2) _buf.position(_keyEnd);\n");
-                }
+                if (appendable) try self.emitAppendableReadEnd();
             }
         } else {
             if (mutable) {
@@ -2122,14 +2149,11 @@ const Generator = struct {
                 try self.ind();
                 try self.write("    }\n");
             } else {
-                if (appendable) {
-                    try self.ind();
-                    try self.write("    if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); } // skip DHEADER\n");
-                }
-
+                if (appendable) try self.emitAppendableReadBegin();
                 for (wire_fields) |field| {
                     try self.emitWireMemberRead(field, "_out", "    ", false);
                 }
+                if (appendable) try self.emitAppendableReadEnd();
             }
         }
         try self.ind();
@@ -2160,7 +2184,7 @@ const Generator = struct {
         try self.write("    _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
         if (mutable) {
             try self.ind();
-            try self.write("    _cdrAlign(_buf, _cdrBase, 4); int _end = _buf.position() + _buf.getInt();\n");
+            try self.write("    int _end = _cdrReadFrameEnd(_buf, _cdrBase);\n");
             try self.ind();
             try self.write("    _buf.position(_end);\n");
         } else if (appendable) {
@@ -2170,7 +2194,7 @@ const Generator = struct {
             try self.ind();
             try self.write("    if (_xcdrVersion == 2) {\n");
             try self.ind();
-            try self.write("        _cdrAlign(_buf, _cdrBase, 4); int _end = _buf.position() + 4 + _buf.getInt();\n");
+            try self.write("        int _end = _cdrReadFrameEnd(_buf, _cdrBase);\n");
             try self.ind();
             try self.write("        _buf.position(_end);\n");
             try self.ind();
@@ -2491,10 +2515,7 @@ const Generator = struct {
         } else {
             try self.ind();
             try self.print("    {s} _out = new {s}();\n", .{ jn, jn });
-            if (appendable) {
-                try self.ind();
-                try self.write("    if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); } // skip DHEADER\n");
-            }
+            if (appendable) try self.emitAppendableReadBegin();
             for (s.members, 0..) |m, idx| {
                 try self.ind();
                 try self.print("    if ((_want & (1L << {d})) != 0) {{\n", .{idx});
@@ -2505,6 +2526,7 @@ const Generator = struct {
                 try self.ind();
                 try self.write("    }\n");
             }
+            if (appendable) try self.emitAppendableReadEnd();
             try self.ind();
             try self.write("    return _out;\n");
         }
@@ -9001,6 +9023,7 @@ fn generateCdrUtils(
     try gen.write("        if (_p != 0) _buf.position(_buf.position() + (_align - _p));\n");
     try gen.write("    }\n");
     try gen.emitStringHelpers("public");
+    try gen.emitFrameHelpers("public");
     try gen.emitOptionalHelpers("public");
     try gen.write("    public static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf) { return _cdrComputeKeyHash(_buf, false); }\n");
     try gen.write("    public static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf, boolean _forceMd5) {\n");
@@ -9638,7 +9661,7 @@ test "java: CDR appendable DHEADER" {
     , "test", "if (_xcdrVersion == 2) { _buf.putInt(_dhPos, _buf.position() - _dhPos - 4); }");
     try testGen(alloc,
         \\@appendable struct S { long x; };
-    , "test", "if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); } // skip DHEADER");
+    , "test", "if (_xcdrVersion == 2) { _frameEnd = _cdrReadFrameEnd(_buf, _cdrBase); _buf.limit(_frameEnd); }");
 }
 
 // ── XCDR1/XCDR2 regression coverage ──────────────────────────────────────────

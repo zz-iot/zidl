@@ -1,3 +1,9 @@
 module JavaValidation {
     @final struct Narrow { @key string text; };
 };
+module JavaValidation {
+    @appendable struct App { @key long value; };
+    @appendable struct AppText { @key string text; long tail; };
+    @final struct Parent { App inner; long tail; };
+    @mutable struct Mut { long value; };
+};

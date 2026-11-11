@@ -43,9 +43,13 @@ public class Frame implements java.io.Serializable {
     public static Frame deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
         _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
         Frame _out = new Frame();
-        if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); } // skip DHEADER
+        int _frameLimit = _buf.limit(), _frameEnd = _frameLimit;
+        if (_xcdrVersion == 2) { _frameEnd = _cdrReadFrameEnd(_buf, _cdrBase); _buf.limit(_frameEnd); }
+        try {
         _cdrAlign(_buf, _cdrBase, 4); _out.seq_num = _buf.getInt();
         _out.topic = _cdrReadString(_buf, _cdrBase);
+        } finally { _buf.limit(_frameLimit); }
+        if (_xcdrVersion == 2) _buf.position(_frameEnd);
         return _out;
     }
 
@@ -61,20 +65,20 @@ public class Frame implements java.io.Serializable {
     public static Frame deserializeKeyValue(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
         _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
         Frame _out = new Frame();
-        int _keyLimit = _buf.limit(), _keyEnd = _keyLimit;
-        if (_xcdrVersion == 2) { _cdrAlign(_buf, _cdrBase, 4); int _size = _buf.getInt(); if (_size < 0 || _size > _buf.remaining()) throw new java.nio.BufferUnderflowException(); _keyEnd = _buf.position() + _size; _buf.limit(_keyEnd); }
+        int _frameLimit = _buf.limit(), _frameEnd = _frameLimit;
+        if (_xcdrVersion == 2) { _frameEnd = _cdrReadFrameEnd(_buf, _cdrBase); _buf.limit(_frameEnd); }
         try {
         _cdrAlign(_buf, _cdrBase, 4); _out.seq_num = _buf.getInt();
         _out.topic = _cdrReadString(_buf, _cdrBase);
-        } finally { _buf.limit(_keyLimit); }
-        if (_xcdrVersion == 2) _buf.position(_keyEnd);
+        } finally { _buf.limit(_frameLimit); }
+        if (_xcdrVersion == 2) _buf.position(_frameEnd);
         return _out;
     }
 
     public static void skip(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
         _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
         if (_xcdrVersion == 2) {
-            _cdrAlign(_buf, _cdrBase, 4); int _end = _buf.position() + 4 + _buf.getInt();
+            int _end = _cdrReadFrameEnd(_buf, _cdrBase);
             _buf.position(_end);
         } else {
             _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();

@@ -97,7 +97,7 @@ pub fn build(b: *std.Build) void {
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     const test_step = b.step("test", "Run unit tests + Zig integration tests");
-    const java_validation_step = b.step("test-java-cdr-validation", "Test Java CDR string validation");
+    const java_validation_step = b.step("test-java-cdr-validation", "Test Java CDR string and frame validation");
     test_step.dependOn(java_validation_step);
     if (b.findProgram(.{ .names = &.{"javac"} })) |javac| {
         if (b.findProgram(.{ .names = &.{"java"} })) |java| {
@@ -112,13 +112,20 @@ pub fn build(b: *std.Build) void {
                 const classes = compile_java.addOutputDirectoryArg("classes");
                 if (split) {
                     compile_java.addFileArg(generated.path(b, "ValidationCdrUtils.java"));
-                    compile_java.addFileArg(generated.path(b, "Narrow.java"));
+                    for ([_][]const u8{ "Narrow", "App", "AppText", "Parent", "Mut" }) |name| {
+                        compile_java.addFileArg(generated.path(b, b.fmt("{s}.java", .{name})));
+                    }
                 } else compile_java.addFileArg(generated.path(b, "Validation.java"));
                 compile_java.addFileArg(b.path("test/integration/java_cdr_validation/ValidationTest.java"));
+                compile_java.addFileArg(b.path("test/integration/java_cdr_validation/FrameTest.java"));
                 const run = b.addSystemCommand(&.{ java, "-Xmx32m", "-cp" });
                 run.addDirectoryArg(classes);
                 run.addArgs(&.{ "ValidationTest", if (split) "javavalidation." else "Validation$JavaValidation$" });
                 java_validation_step.dependOn(&run.step);
+                const frames = b.addSystemCommand(&.{ java, "-Xmx32m", "-cp" });
+                frames.addDirectoryArg(classes);
+                frames.addArgs(&.{ "FrameTest", if (split) "javavalidation." else "Validation$JavaValidation$" });
+                java_validation_step.dependOn(&frames.step);
             }
         }
     }

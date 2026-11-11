@@ -119,3 +119,7 @@ The efforts can proceed separately. Coordinate shared vectors, expected canonica
 key behavior and intentional validation changes, rather than introducing a Java
 dependency on the native codec. Native serialization, FFM/JNI migration, a new
 Java object model and broader DDS ownership changes are outside this effort.
+
+The [appendable struct frame checkpoint](java-cdr-frame-bounds.md) bounds Java
+readers before shared-runtime extraction; mutable member and union decoding
+remain follow-up work.

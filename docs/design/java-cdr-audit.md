@@ -237,3 +237,6 @@ checks when the first JAR API is implemented.
 The first implementation slice is described in
 [Java CDR string validation](java-cdr-string-validation.md). Historical baseline
 measurements above remain the pre-fix audit snapshot.
+
+The next correctness slice bounds appendable struct reads and length-based skips:
+[Java appendable struct frame bounds](java-cdr-frame-bounds.md).
