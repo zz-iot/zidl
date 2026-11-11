@@ -14,9 +14,11 @@ mapping (formal/21-08-01 v1.0).
 
 With `--split-files`, one `.java` file is produced per top-level named type, named
 after the type (e.g. `MyStruct.java`, `MyEnum.java`), plus a shared
-`<Stem>CdrUtils.java` for that IDL input. Use a named `--java-package` for
-split codec output; the current unnamed-package helper import is a known
-compilation gap recorded in the [runtime audit](design/java-cdr-audit.md).
+`<Stem>CdrUtils.java` for that IDL input. With `--java-package`, helpers share the
+types' package. Without it, types stay in the default package and helpers use
+`zidl.generated`, allowing legal static imports. Compile all generated sources
+with `javac -d <classes> ...` so javac creates the package directories. See the
+[output-mode checkpoint](design/java-cdr-output-parity.md).
 
 ---
 
@@ -37,7 +39,7 @@ compilation gap recorded in the [runtime audit](design/java-cdr-audit.md).
 | `float` | `float` |
 | `double` | `double` |
 | `long double` | `double` |
-| `fixed<D,S>` | `double` (approximate; split-mode helper gap is recorded in the audit) |
+| `fixed<D,S>` | `double` (approximate, using the same packed-BCD helpers in both modes) |
 | `string` / `wstring` | `String` |
 | `sequence<T>` | `java.util.List<T>` (an `ArrayList`); a sequence of an array typedef is `List<int[]>` etc. |
 | `T[N]` | `T[]` |
@@ -150,7 +152,7 @@ Pass the library name with `--java-jni-library <name>`.
 
 | Option | Effect |
 |---|---|
-| `--java-package <pkg>` | Package prefix prepended to IDL module path (e.g. `com.example`) |
+| `--java-package <pkg>` | Java package for generated types (e.g. `com.example`) |
 | `--split-files` | One `.java` file per top-level type |
 | `--java-jni-library <name>` | `System.loadLibrary()` name for `--generate-interfaces` JNI bridge |
 | `--no-typesupport` | Suppress CDR serialize/deserialize output |

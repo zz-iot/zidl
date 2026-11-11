@@ -23,3 +23,10 @@ module JavaValidation {
     @final struct EmptyValues { sequence<Empty> values; long tail; };
     @final struct NestedValues { sequence<sequence<long>> values; long tail; };
 };
+module JavaValidation {
+    @final struct FixedValues { fixed<5,2> small; fixed<8,2> large; long tail; };
+    bitset Flags { bitfield<12> value; };
+};
+module JavaValidation {
+    @final struct OptionalValues { @optional long value; long tail; };
+};

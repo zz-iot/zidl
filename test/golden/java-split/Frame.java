@@ -2,7 +2,7 @@
 
 import java.util.List;
 import java.util.ArrayList;
-import static TypesCdrUtils.*;
+import static zidl.generated.TypesCdrUtils.*;
 
 public class Frame implements java.io.Serializable {
     private static final long serialVersionUID = 1L;

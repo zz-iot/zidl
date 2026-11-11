@@ -97,22 +97,29 @@ pub fn build(b: *std.Build) void {
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     const test_step = b.step("test", "Run unit tests + Zig integration tests");
-    const java_validation_step = b.step("test-java-cdr-validation", "Test Java CDR string and frame validation");
+    const java_validation_step = b.step("test-java-cdr-validation", "Test Java CDR validation and output modes");
     test_step.dependOn(java_validation_step);
     if (b.findProgram(.{ .names = &.{"javac"} })) |javac| {
         if (b.findProgram(.{ .names = &.{"java"} })) |java| {
-            for ([_]bool{ false, true }) |split| {
+            for (0..3) |mode| {
+                const split = mode != 0;
+                const prefix: []const u8 = switch (mode) {
+                    0 => "Validation$JavaValidation$",
+                    1 => "javavalidation.",
+                    else => "",
+                };
                 const gen = b.addRunArtifact(exe);
                 gen.addArgs(&.{ "-b", "java" });
-                if (split) gen.addArgs(&.{ "--split-files", "--java-package", "javavalidation" });
+                if (split) gen.addArg("--split-files");
+                if (mode == 1) gen.addArgs(&.{ "--java-package", "javavalidation" });
                 gen.addArg("-o");
-                const generated = gen.addOutputDirectoryArg(if (split) "java-validation-split" else "java-validation-single");
+                const generated = gen.addOutputDirectoryArg(b.fmt("java-validation-{d}", .{mode}));
                 gen.addFileArg(b.path("test/integration/java_cdr_validation/validation.idl"));
                 const compile_java = b.addSystemCommand(&.{ javac, "-Xlint:unchecked", "-Werror", "-d" });
                 const classes = compile_java.addOutputDirectoryArg("classes");
                 if (split) {
                     compile_java.addFileArg(generated.path(b, "ValidationCdrUtils.java"));
-                    for ([_][]const u8{ "Narrow", "App", "AppText", "Parent", "Mut", "MutText", "AppChoice", "MutChoice", "Numbers", "Words", "WordArray", "Dict", "Bounded", "BoundedMap", "Empty", "EmptyValues", "NestedValues" }) |name| {
+                    for ([_][]const u8{ "Narrow", "App", "AppText", "Parent", "Mut", "MutText", "AppChoice", "MutChoice", "Numbers", "Words", "WordArray", "Dict", "Bounded", "BoundedMap", "Empty", "EmptyValues", "NestedValues", "FixedValues", "Flags", "OptionalValues" }) |name| {
                         compile_java.addFileArg(generated.path(b, b.fmt("{s}.java", .{name})));
                     }
                 } else compile_java.addFileArg(generated.path(b, "Validation.java"));
@@ -120,22 +127,27 @@ pub fn build(b: *std.Build) void {
                 compile_java.addFileArg(b.path("test/integration/java_cdr_validation/FrameTest.java"));
                 compile_java.addFileArg(b.path("test/integration/java_cdr_validation/MemberTest.java"));
                 compile_java.addFileArg(b.path("test/integration/java_cdr_validation/CollectionTest.java"));
+                compile_java.addFileArg(b.path("test/integration/java_cdr_validation/ParityTest.java"));
                 const run = b.addSystemCommand(&.{ java, "-Xmx32m", "-cp" });
                 run.addDirectoryArg(classes);
-                run.addArgs(&.{ "ValidationTest", if (split) "javavalidation." else "Validation$JavaValidation$" });
+                run.addArgs(&.{ "ValidationTest", prefix });
                 java_validation_step.dependOn(&run.step);
                 const frames = b.addSystemCommand(&.{ java, "-Xmx32m", "-cp" });
                 frames.addDirectoryArg(classes);
-                frames.addArgs(&.{ "FrameTest", if (split) "javavalidation." else "Validation$JavaValidation$" });
+                frames.addArgs(&.{ "FrameTest", prefix });
                 java_validation_step.dependOn(&frames.step);
                 const members = b.addSystemCommand(&.{ java, "-Xmx32m", "-cp" });
                 members.addDirectoryArg(classes);
-                members.addArgs(&.{ "MemberTest", if (split) "javavalidation." else "Validation$JavaValidation$" });
+                members.addArgs(&.{ "MemberTest", prefix });
                 java_validation_step.dependOn(&members.step);
                 const collections = b.addSystemCommand(&.{ java, "-Xmx32m", "-cp" });
                 collections.addDirectoryArg(classes);
-                collections.addArgs(&.{ "CollectionTest", if (split) "javavalidation." else "Validation$JavaValidation$" });
+                collections.addArgs(&.{ "CollectionTest", prefix });
                 java_validation_step.dependOn(&collections.step);
+                const parity = b.addSystemCommand(&.{ java, "-Xmx32m", "-cp" });
+                parity.addDirectoryArg(classes);
+                parity.addArgs(&.{ "ParityTest", prefix });
+                java_validation_step.dependOn(&parity.step);
             }
         }
     }

@@ -129,3 +129,7 @@ bounded reading to mutable structs and unions and appendable unions.
 
 The [collection checkpoint](java-cdr-collection-bounds.md) bounds collection
 readers/skips and validates counts before incremental allocation.
+
+The [output-mode checkpoint](java-cdr-output-parity.md) closes the audited split
+compilation gaps. All standalone codec validation fixtures now run in three
+output modes before runtime extraction.

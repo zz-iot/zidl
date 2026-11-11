@@ -214,5 +214,5 @@ qualified for these hosts. See
 [`packages/zidl-typesupport/README.md`](../packages/zidl-typesupport/README.md).
 
 Java string, frame, member, and collection validation can also be run independently with
-`zig build test-java-cdr-validation`. It checks both single-file and split-file
+`zig build test-java-cdr-validation`. It checks single-file, named split, and default-package split
 output and runs under the main test step when `java` and `javac` are available.

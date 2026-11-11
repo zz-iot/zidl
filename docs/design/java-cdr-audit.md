@@ -246,3 +246,11 @@ windows to ordinary mutable structs and union decoding.
 
 [Collection bounds and allocation](java-cdr-collection-bounds.md) extends checked
 windows to collection reads/skips and removes eager allocation from wire counts.
+
+[Output-mode parity](java-cdr-output-parity.md) closes the split fixed-helper,
+default-package import, and split bitset import gaps before runtime extraction.
+
+Additional split compilation follow-up: `--generate-interfaces` interface stubs still
+qualify their interface through the single-file outer class (for example,
+`Types.Greeter`), so those optional stubs do not compile with only split types.
+This is separate from codec helper extraction.
