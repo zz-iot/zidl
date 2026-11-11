@@ -2,10 +2,10 @@
 
 Date: 2026-11-02
 
-Status: first extraction implemented for alignment and narrow UTF-8 strings,
-with standalone `zidl-cdr-java` JAR/source builds and runtime API 1. Other helper
-families and zzdds Java delivery remain follow-up work. See the
-[first extraction checkpoint](java-cdr-extraction-1.md).
+Status: shared helper extraction is implemented through runtime API 2, with
+standalone `zidl-cdr-java` JAR/source builds. Schema traversal and primitive
+operations remain generated; zzdds Java delivery is follow-up work. See the
+[helper extraction checkpoint](java-cdr-extraction-2.md).
 See the [Java CDR audit](java-cdr-audit.md) for helper inventory, observed buffer
 semantics, correctness gaps, size/performance baseline and first-slice proposal.
 
@@ -133,3 +133,6 @@ readers/skips and validates counts before incremental allocation.
 The [output-mode checkpoint](java-cdr-output-parity.md) closes the audited split
 compilation gaps. All standalone codec validation fixtures now run in three
 output modes before runtime extraction.
+
+The [API 2 helper checkpoint](java-cdr-extraction-2.md) moves the remaining helper
+families and shared mutable-member header parsing into the runtime.

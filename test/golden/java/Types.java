@@ -4,14 +4,8 @@ import java.util.List;
 import java.util.ArrayList;
 
 public class Types {
-    private static int _cdrBeginOptionalWrite(java.nio.ByteBuffer b, int base, int version, int id, boolean mu, boolean present) {
-        if (version == 2) { b.put(present ? (byte)1 : (byte)0); return -1; }
-        _cdrAlign(b, base, 4); b.putShort((short)0x7f01); b.putShort((short)8);
-        b.putInt(id | (mu ? 0x40000000 : 0)); int offset = b.position(); b.putInt(0); return offset;
-    }
-    private static void _cdrEndOptionalWrite(java.nio.ByteBuffer b, int offset) {
-        if (offset >= 0) b.putInt(offset, b.position() - offset - 4);
-    }
+    private static int _cdrBeginOptionalWrite(java.nio.ByteBuffer b, int base, int version, int id, boolean mu, boolean present) { return io.zidl.cdr.Cdr.beginOptionalWrite(b, base, version, id, mu, present); }
+    private static void _cdrEndOptionalWrite(java.nio.ByteBuffer b, int offset) { io.zidl.cdr.Cdr.endOptionalWrite(b, offset); }
     private static final class _CdrOptional {
         public final java.nio.ByteBuffer buffer;
         public final int base, limit, end;
@@ -19,118 +13,30 @@ public class Types {
         _CdrOptional(java.nio.ByteBuffer b, int origin, int parentLimit, int valueEnd, boolean exists) {
             buffer = b; base = origin; limit = parentLimit; end = valueEnd; present = exists;
         }
-        public void close() { buffer.limit(limit); if (end >= 0) buffer.position(end); }
+        public void close() { io.zidl.cdr.Cdr.closeOptional(buffer, limit, end); }
     }
     private static _CdrOptional _cdrBeginOptionalRead(java.nio.ByteBuffer b, int base, int version, int id) {
-        if (version == 2) {
-            byte flag = b.get(); if (flag != 0 && flag != 1) throw new IllegalArgumentException("invalid optional presence");
-            return new _CdrOptional(b, base, b.limit(), -1, flag != 0);
-        }
-        _cdrAlign(b, base, 4); int pid = Short.toUnsignedInt(b.getShort());
-        long size = Short.toUnsignedInt(b.getShort()); int actual = pid & 0x3fff;
-        if ((pid & 0x8000) != 0) throw new IllegalArgumentException("optional implementation extension");
-        if (actual == 0x3f01) {
-            if (size != 8) throw new IllegalArgumentException("invalid optional extended header");
-            int word = b.getInt(); if ((word & 0x80000000) != 0) throw new IllegalArgumentException("optional implementation extension");
-            actual = word & 0x0fffffff; size = Integer.toUnsignedLong(b.getInt());
-        } else if (actual > 0x3f00) throw new IllegalArgumentException("reserved optional member ID");
-        if (actual != id) throw new IllegalArgumentException("unexpected optional member ID");
-        if (size > b.remaining()) throw new java.nio.BufferUnderflowException();
-        int start = b.position(), end = start + (int)size, limit = b.limit(); b.limit(end);
-        return new _CdrOptional(b, start, limit, end, size != 0);
+        io.zidl.cdr.Cdr.OptionalScope scope = io.zidl.cdr.Cdr.beginOptionalRead(b, base, version, id);
+        return new _CdrOptional(scope.buffer, scope.base, scope.limit, scope.end, scope.present);
     }
     private static void _cdrAlignKey(java.nio.ByteBuffer _buf, int _cdrBase, int _align) { io.zidl.cdr.Cdr.alignKey(_buf, _cdrBase, _align); }
-    private static void _cdrWriteWstring(java.nio.ByteBuffer _buf, int _cdrBase, String _s) {
-        if (_s.length() > Integer.MAX_VALUE / 2) throw new IllegalArgumentException("wide string length overflow");
-        _cdrAlignKey(_buf, _cdrBase, 4); _buf.putInt(_s.length() * 2);
-        for (int _i = 0; _i < _s.length(); _i++) _buf.putChar(_s.charAt(_i));
-    }
-    private static int _cdrWstringBytes(java.nio.ByteBuffer _buf, int _cdrBase) {
-        int _pad = (4 - (_buf.position() - _cdrBase) % 4) % 4;
-        if (_pad > _buf.remaining()) throw new java.nio.BufferUnderflowException();
-        _buf.position(_buf.position() + _pad); int _bytes = _buf.getInt();
-        if ((_bytes & 1) != 0) throw new IllegalArgumentException("odd wide string byte count");
-        if (_bytes < 0 || _bytes > _buf.remaining()) throw new java.nio.BufferUnderflowException();
-        return _bytes;
-    }
-    private static String _cdrReadWstring(java.nio.ByteBuffer _buf, int _cdrBase) {
-        int _bytes = _cdrWstringBytes(_buf, _cdrBase); char[] _units = new char[_bytes / 2];
-        for (int _i = 0; _i < _units.length; _i++) _units[_i] = _buf.getChar();
-        return new String(_units);
-    }
-    private static void _cdrSkipWstring(java.nio.ByteBuffer _buf, int _cdrBase) {
-        int _bytes = _cdrWstringBytes(_buf, _cdrBase); _buf.position(_buf.position() + _bytes);
-    }
-    static { io.zidl.cdr.Cdr.requireApi(1); }
+    private static void _cdrWriteWstring(java.nio.ByteBuffer b, int base, String value) { io.zidl.cdr.Cdr.writeWstring(b, base, value); }
+    private static int _cdrWstringBytes(java.nio.ByteBuffer b, int base) { return io.zidl.cdr.Cdr.wstringBytes(b, base); }
+    private static String _cdrReadWstring(java.nio.ByteBuffer b, int base) { return io.zidl.cdr.Cdr.readWstring(b, base); }
+    private static void _cdrSkipWstring(java.nio.ByteBuffer b, int base) { io.zidl.cdr.Cdr.skipWstring(b, base); }
+    static { io.zidl.cdr.Cdr.requireApi(2); }
     private static void _cdrAlign(java.nio.ByteBuffer _buf, int _cdrBase, int _align) { io.zidl.cdr.Cdr.align(_buf, _cdrBase, _align); }
     private static int _cdrStringEnd(java.nio.ByteBuffer _buf, int _cdrBase) { return io.zidl.cdr.Cdr.stringEnd(_buf, _cdrBase); }
     private static void _cdrWriteString(java.nio.ByteBuffer _buf, int _cdrBase, String _s) { io.zidl.cdr.Cdr.writeString(_buf, _cdrBase, _s); }
     private static String _cdrReadString(java.nio.ByteBuffer _buf, int _cdrBase) { return io.zidl.cdr.Cdr.readString(_buf, _cdrBase); }
     private static void _cdrSkipString(java.nio.ByteBuffer _buf, int _cdrBase) { io.zidl.cdr.Cdr.skipString(_buf, _cdrBase); }
-    private static int _cdrReadFrameEnd(java.nio.ByteBuffer _buf, int _cdrBase) {
-        long _offset = (long)_buf.position() - _cdrBase;
-        if (_offset < 0) throw new IllegalArgumentException("invalid CDR base");
-        int _pad = (int)((4 - _offset % 4) % 4);
-        if (_buf.remaining() < _pad || _buf.remaining() - _pad < 4) throw new java.nio.BufferUnderflowException();
-        _buf.position(_buf.position() + _pad);
-        long _size = Integer.toUnsignedLong(_buf.getInt());
-        if (_size > _buf.remaining()) throw new java.nio.BufferUnderflowException();
-        return _buf.position() + (int)_size;
-    }
-    private static int _cdrReadCount(java.nio.ByteBuffer _buf, int _cdrBase, int _bound) {
-        long _offset = (long)_buf.position() - _cdrBase;
-        if (_offset < 0) throw new IllegalArgumentException("invalid CDR base");
-        int _pad = (int)((4 - _offset % 4) % 4);
-        if (_buf.remaining() < _pad || _buf.remaining() - _pad < 4) throw new java.nio.BufferUnderflowException();
-        _buf.position(_buf.position() + _pad);
-        long _count = Integer.toUnsignedLong(_buf.getInt());
-        if (_count > _bound) throw new IllegalArgumentException("CDR collection count exceeds Java or IDL bound");
-        return (int)_count;
-    }
-    private static void _cdrWriteFixed(java.nio.ByteBuffer _buf, int _d, int _s, double _v) {
-        int _n = (_d / 2) + 1; int _n2 = _n * 2; int _pad = _n2 - _d - 1;
-        boolean _neg = _v < 0.0;
-        double _sf = Math.pow(10, _s); long _iv = (long)(Math.abs(_v) * _sf + 0.5);
-        byte[] _dig = new byte[_d];
-        for (int _i = _d - 1; _i >= 0; _i--) { _dig[_i] = (byte)(_iv % 10); _iv /= 10; }
-        byte[] _nib = new byte[_n2];
-        for (int _i = 0; _i < _d; _i++) _nib[_pad + _i] = _dig[_i];
-        _nib[_n2 - 1] = _neg ? (byte)0x0D : (byte)0x0C;
-        byte[] _bcd = new byte[_n];
-        for (int _i = 0; _i < _n; _i++) _bcd[_i] = (byte)((_nib[2*_i] << 4) | _nib[2*_i+1]);
-        _buf.put(_bcd);
-    }
-    private static double _cdrReadFixed(java.nio.ByteBuffer _buf, int _d, int _s) {
-        int _n = (_d / 2) + 1; int _n2 = _n * 2; int _pad = _n2 - _d - 1;
-        byte[] _bcd = new byte[_n]; _buf.get(_bcd);
-        byte[] _nib = new byte[_n2];
-        for (int _i = 0; _i < _n; _i++) { _nib[2*_i] = (byte)((_bcd[_i]>>4)&0x0F); _nib[2*_i+1] = (byte)(_bcd[_i]&0x0F); }
-        long _iv = 0; for (int _k = 0; _k < _d; _k++) _iv = _iv * 10 + _nib[_pad + _k];
-        boolean _neg = (_nib[_n2-1] == 0x0D || _nib[_n2-1] == 0x0B);
-        double _r = (double)_iv / Math.pow(10, _s); return _neg ? -_r : _r;
-    }
-
-    private static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf) { return _cdrComputeKeyHash(_buf, false); }
-    private static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf, boolean _forceMd5) {
-        int _len = _buf.position();
-        byte[] _key = new byte[_len];
-        _buf.position(0); _buf.get(_key);
-        if (!_forceMd5 && _len <= 16) {
-            byte[] _out = new byte[16];
-            System.arraycopy(_key, 0, _out, 0, _len);
-            return _out;
-        }
-        try { return java.security.MessageDigest.getInstance("MD5").digest(_key); }
-        catch (java.security.NoSuchAlgorithmException _e) { throw new IllegalStateException(_e); }
-    }
-
-    private static int _cdrDetectXcdr(byte[] _payload) {
-        int _id = ((_payload[0] & 0xFF) << 8) | (_payload[1] & 0xFF);
-        if (_id == 0x0001) return 1;
-        if (_id == 0x0007 || _id == 0x0009 || _id == 0x000b) return 2;
-        throw new IllegalArgumentException("zidl: unsupported CDR encapsulation id 0x" + Integer.toHexString(_id));
-    }
-
+    private static int _cdrReadFrameEnd(java.nio.ByteBuffer _buf, int _cdrBase) { return io.zidl.cdr.Cdr.readFrameEnd(_buf, _cdrBase); }
+    private static int _cdrReadCount(java.nio.ByteBuffer _buf, int _cdrBase, int _bound) { return io.zidl.cdr.Cdr.readCount(_buf, _cdrBase, _bound); }
+    private static void _cdrWriteFixed(java.nio.ByteBuffer _buf, int _d, int _s, double _v) { io.zidl.cdr.Cdr.writeFixed(_buf, _d, _s, _v); }
+    private static double _cdrReadFixed(java.nio.ByteBuffer _buf, int _d, int _s) { return io.zidl.cdr.Cdr.readFixed(_buf, _d, _s); }
+    private static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf) { return io.zidl.cdr.Cdr.computeKeyHash(_buf, false); }
+    private static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf, boolean _forceMd5) { return io.zidl.cdr.Cdr.computeKeyHash(_buf, _forceMd5); }
+    private static int _cdrDetectXcdr(byte[] _payload) { return io.zidl.cdr.Cdr.detectXcdr(_payload); }
     public enum Color {
         RED(0),
         GREEN(1),

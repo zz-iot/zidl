@@ -217,7 +217,7 @@ Java string, frame, member, and collection validation can also be run independen
 `zig build test-java-cdr-validation`. It checks single-file, named split, and default-package split
 output and runs under the main test step when `java` and `javac` are available.
 
-`zig build test-java-runtime` exercises Java CDR API 1 through the runtime JAR.
+`zig build test-java-runtime` exercises Java CDR APIs 1 and 2 through the runtime JAR.
 `zig build java-runtime` installs the versioned JAR under `zig-out/share/java/`.
 `python3 packages/zidl-cdr-java/test.py --zidl zig-out/bin/zidl` checks JAR
 reproducibility, source rebuilds, and fresh native-free consumption with prebuilt

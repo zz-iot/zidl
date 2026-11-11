@@ -246,39 +246,19 @@ const Generator = struct {
         try self.write(visibility ++ " static void _cdrAlignKey(java.nio.ByteBuffer _buf, int _cdrBase, int _align) { io.zidl.cdr.Cdr.alignKey(_buf, _cdrBase, _align); }\n");
     }
 
-    /// Emit private static CDR helper methods into the outer class body.
-    fn emitWideStringHelpers(self: *Generator, comptime visibility: []const u8) !void {
-        const methods = [_][]const u8{
-            visibility ++ " static void _cdrWriteWstring(java.nio.ByteBuffer _buf, int _cdrBase, String _s) {\n" ++
-                "    if (_s.length() > Integer.MAX_VALUE / 2) throw new IllegalArgumentException(\"wide string length overflow\");\n" ++
-                "    _cdrAlignKey(_buf, _cdrBase, 4); _buf.putInt(_s.length() * 2);\n" ++
-                "    for (int _i = 0; _i < _s.length(); _i++) _buf.putChar(_s.charAt(_i));\n" ++ "}\n",
-            visibility ++ " static int _cdrWstringBytes(java.nio.ByteBuffer _buf, int _cdrBase) {\n" ++
-                "    int _pad = (4 - (_buf.position() - _cdrBase) % 4) % 4;\n" ++
-                "    if (_pad > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n" ++
-                "    _buf.position(_buf.position() + _pad); int _bytes = _buf.getInt();\n" ++
-                "    if ((_bytes & 1) != 0) throw new IllegalArgumentException(\"odd wide string byte count\");\n" ++
-                "    if (_bytes < 0 || _bytes > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n" ++
-                "    return _bytes;\n" ++ "}\n",
-            visibility ++ " static String _cdrReadWstring(java.nio.ByteBuffer _buf, int _cdrBase) {\n" ++
-                "    int _bytes = _cdrWstringBytes(_buf, _cdrBase); char[] _units = new char[_bytes / 2];\n" ++
-                "    for (int _i = 0; _i < _units.length; _i++) _units[_i] = _buf.getChar();\n" ++
-                "    return new String(_units);\n" ++ "}\n",
-            visibility ++ " static void _cdrSkipWstring(java.nio.ByteBuffer _buf, int _cdrBase) {\n" ++
-                "    int _bytes = _cdrWstringBytes(_buf, _cdrBase); _buf.position(_buf.position() + _bytes);\n" ++ "}\n",
-        };
-        for (methods) |method| {
-            var lines = std.mem.splitScalar(u8, method, '\n');
-            while (lines.next()) |line| {
-                if (line.len == 0) continue;
-                try self.ind();
-                try self.print("{s}\n", .{line});
-            }
-        }
+    fn emitWideStringHelpers(self: *Generator, visibility: []const u8) !void {
+        try self.ind();
+        try self.print("{s} static void _cdrWriteWstring(java.nio.ByteBuffer b, int base, String value) {{ io.zidl.cdr.Cdr.writeWstring(b, base, value); }}\n", .{visibility});
+        try self.ind();
+        try self.print("{s} static int _cdrWstringBytes(java.nio.ByteBuffer b, int base) {{ return io.zidl.cdr.Cdr.wstringBytes(b, base); }}\n", .{visibility});
+        try self.ind();
+        try self.print("{s} static String _cdrReadWstring(java.nio.ByteBuffer b, int base) {{ return io.zidl.cdr.Cdr.readWstring(b, base); }}\n", .{visibility});
+        try self.ind();
+        try self.print("{s} static void _cdrSkipWstring(java.nio.ByteBuffer b, int base) {{ io.zidl.cdr.Cdr.skipWstring(b, base); }}\n", .{visibility});
     }
 
     fn emitOptionalHelpers(self: *Generator, visibility: []const u8) !void {
-        const source = "VIS static int _cdrBeginOptionalWrite(java.nio.ByteBuffer b, int base, int version, int id, boolean mu, boolean present) {\n    if (version == 2) { b.put(present ? (byte)1 : (byte)0); return -1; }\n    _cdrAlign(b, base, 4); b.putShort((short)0x7f01); b.putShort((short)8);\n    b.putInt(id | (mu ? 0x40000000 : 0)); int offset = b.position(); b.putInt(0); return offset;\n}\nVIS static void _cdrEndOptionalWrite(java.nio.ByteBuffer b, int offset) {\n    if (offset >= 0) b.putInt(offset, b.position() - offset - 4);\n}\nVIS static final class _CdrOptional {\n    public final java.nio.ByteBuffer buffer;\n    public final int base, limit, end;\n    public final boolean present;\n    _CdrOptional(java.nio.ByteBuffer b, int origin, int parentLimit, int valueEnd, boolean exists) {\n        buffer = b; base = origin; limit = parentLimit; end = valueEnd; present = exists;\n    }\n    public void close() { buffer.limit(limit); if (end >= 0) buffer.position(end); }\n}\nVIS static _CdrOptional _cdrBeginOptionalRead(java.nio.ByteBuffer b, int base, int version, int id) {\n    if (version == 2) {\n        byte flag = b.get(); if (flag != 0 && flag != 1) throw new IllegalArgumentException(\"invalid optional presence\");\n        return new _CdrOptional(b, base, b.limit(), -1, flag != 0);\n    }\n    _cdrAlign(b, base, 4); int pid = Short.toUnsignedInt(b.getShort());\n    long size = Short.toUnsignedInt(b.getShort()); int actual = pid & 0x3fff;\n    if ((pid & 0x8000) != 0) throw new IllegalArgumentException(\"optional implementation extension\");\n    if (actual == 0x3f01) {\n        if (size != 8) throw new IllegalArgumentException(\"invalid optional extended header\");\n        int word = b.getInt(); if ((word & 0x80000000) != 0) throw new IllegalArgumentException(\"optional implementation extension\");\n        actual = word & 0x0fffffff; size = Integer.toUnsignedLong(b.getInt());\n    } else if (actual > 0x3f00) throw new IllegalArgumentException(\"reserved optional member ID\");\n    if (actual != id) throw new IllegalArgumentException(\"unexpected optional member ID\");\n    if (size > b.remaining()) throw new java.nio.BufferUnderflowException();\n    int start = b.position(), end = start + (int)size, limit = b.limit(); b.limit(end);\n    return new _CdrOptional(b, start, limit, end, size != 0);\n}";
+        const source = "VIS static int _cdrBeginOptionalWrite(java.nio.ByteBuffer b, int base, int version, int id, boolean mu, boolean present) { return io.zidl.cdr.Cdr.beginOptionalWrite(b, base, version, id, mu, present); }\nVIS static void _cdrEndOptionalWrite(java.nio.ByteBuffer b, int offset) { io.zidl.cdr.Cdr.endOptionalWrite(b, offset); }\nVIS static final class _CdrOptional {\n    public final java.nio.ByteBuffer buffer;\n    public final int base, limit, end;\n    public final boolean present;\n    _CdrOptional(java.nio.ByteBuffer b, int origin, int parentLimit, int valueEnd, boolean exists) {\n        buffer = b; base = origin; limit = parentLimit; end = valueEnd; present = exists;\n    }\n    public void close() { io.zidl.cdr.Cdr.closeOptional(buffer, limit, end); }\n}\nVIS static _CdrOptional _cdrBeginOptionalRead(java.nio.ByteBuffer b, int base, int version, int id) {\n    io.zidl.cdr.Cdr.OptionalScope scope = io.zidl.cdr.Cdr.beginOptionalRead(b, base, version, id);\n    return new _CdrOptional(scope.buffer, scope.base, scope.limit, scope.end, scope.present);\n}";
         var lines = std.mem.splitScalar(u8, source, '\n');
         while (lines.next()) |line| {
             try self.ind();
@@ -288,7 +268,7 @@ const Generator = struct {
 
     fn openOptionalRead(self: *Generator, m: ir.StructMember, extra: []const u8) !void {
         try self.ind();
-        try self.print("{s}{{ _CdrOptional _optScope = _cdrBeginOptionalRead(_buf, _cdrBase, _xcdrVersion, {d});\n", .{ extra, m.annotations.memberId(0) });
+        try self.print("{s}{{ io.zidl.cdr.Cdr.OptionalScope _optScope = io.zidl.cdr.Cdr.beginOptionalRead(_buf, _cdrBase, _xcdrVersion, {d});\n", .{ extra, m.annotations.memberId(0) });
         try self.ind();
         try self.print("{s}int _parentBase = _cdrBase; _cdrBase = _optScope.base;\n", .{extra});
         try self.ind();
@@ -313,25 +293,7 @@ const Generator = struct {
 
     fn emitCollectionHelpers(self: *Generator, visibility: []const u8) !void {
         try self.ind();
-        try self.print("{s} static int _cdrReadCount(java.nio.ByteBuffer _buf, int _cdrBase, int _bound) {{\n", .{visibility});
-        try self.ind();
-        try self.write("    long _offset = (long)_buf.position() - _cdrBase;\n");
-        try self.ind();
-        try self.write("    if (_offset < 0) throw new IllegalArgumentException(\"invalid CDR base\");\n");
-        try self.ind();
-        try self.write("    int _pad = (int)((4 - _offset % 4) % 4);\n");
-        try self.ind();
-        try self.write("    if (_buf.remaining() < _pad || _buf.remaining() - _pad < 4) throw new java.nio.BufferUnderflowException();\n");
-        try self.ind();
-        try self.write("    _buf.position(_buf.position() + _pad);\n");
-        try self.ind();
-        try self.write("    long _count = Integer.toUnsignedLong(_buf.getInt());\n");
-        try self.ind();
-        try self.write("    if (_count > _bound) throw new IllegalArgumentException(\"CDR collection count exceeds Java or IDL bound\");\n");
-        try self.ind();
-        try self.write("    return (int)_count;\n");
-        try self.ind();
-        try self.write("}\n");
+        try self.print("{s} static int _cdrReadCount(java.nio.ByteBuffer _buf, int _cdrBase, int _bound) {{ return io.zidl.cdr.Cdr.readCount(_buf, _cdrBase, _bound); }}\n", .{visibility});
     }
 
     fn emitCollectionCount(self: *Generator, name: []const u8, bound: ?u64, extra: []const u8) !void {
@@ -341,25 +303,7 @@ const Generator = struct {
 
     fn emitFrameHelpers(self: *Generator, visibility: []const u8) !void {
         try self.ind();
-        try self.print("{s} static int _cdrReadFrameEnd(java.nio.ByteBuffer _buf, int _cdrBase) {{\n", .{visibility});
-        try self.ind();
-        try self.write("    long _offset = (long)_buf.position() - _cdrBase;\n");
-        try self.ind();
-        try self.write("    if (_offset < 0) throw new IllegalArgumentException(\"invalid CDR base\");\n");
-        try self.ind();
-        try self.write("    int _pad = (int)((4 - _offset % 4) % 4);\n");
-        try self.ind();
-        try self.write("    if (_buf.remaining() < _pad || _buf.remaining() - _pad < 4) throw new java.nio.BufferUnderflowException();\n");
-        try self.ind();
-        try self.write("    _buf.position(_buf.position() + _pad);\n");
-        try self.ind();
-        try self.write("    long _size = Integer.toUnsignedLong(_buf.getInt());\n");
-        try self.ind();
-        try self.write("    if (_size > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
-        try self.ind();
-        try self.write("    return _buf.position() + (int)_size;\n");
-        try self.ind();
-        try self.write("}\n");
+        try self.print("{s} static int _cdrReadFrameEnd(java.nio.ByteBuffer _buf, int _cdrBase) {{ return io.zidl.cdr.Cdr.readFrameEnd(_buf, _cdrBase); }}\n", .{visibility});
     }
 
     fn emitAppendableReadBegin(self: *Generator) !void {
@@ -380,49 +324,9 @@ const Generator = struct {
 
     fn emitFixedHelpers(self: *Generator, visibility: []const u8) !void {
         try self.ind();
-        try self.print("{s} static void _cdrWriteFixed(java.nio.ByteBuffer _buf, int _d, int _s, double _v) {{\n", .{visibility});
+        try self.print("{s} static void _cdrWriteFixed(java.nio.ByteBuffer _buf, int _d, int _s, double _v) {{ io.zidl.cdr.Cdr.writeFixed(_buf, _d, _s, _v); }}\n", .{visibility});
         try self.ind();
-        try self.write("    int _n = (_d / 2) + 1; int _n2 = _n * 2; int _pad = _n2 - _d - 1;\n");
-        try self.ind();
-        try self.write("    boolean _neg = _v < 0.0;\n");
-        try self.ind();
-        try self.write("    double _sf = Math.pow(10, _s); long _iv = (long)(Math.abs(_v) * _sf + 0.5);\n");
-        try self.ind();
-        try self.write("    byte[] _dig = new byte[_d];\n");
-        try self.ind();
-        try self.write("    for (int _i = _d - 1; _i >= 0; _i--) { _dig[_i] = (byte)(_iv % 10); _iv /= 10; }\n");
-        try self.ind();
-        try self.write("    byte[] _nib = new byte[_n2];\n");
-        try self.ind();
-        try self.write("    for (int _i = 0; _i < _d; _i++) _nib[_pad + _i] = _dig[_i];\n");
-        try self.ind();
-        try self.write("    _nib[_n2 - 1] = _neg ? (byte)0x0D : (byte)0x0C;\n");
-        try self.ind();
-        try self.write("    byte[] _bcd = new byte[_n];\n");
-        try self.ind();
-        try self.write("    for (int _i = 0; _i < _n; _i++) _bcd[_i] = (byte)((_nib[2*_i] << 4) | _nib[2*_i+1]);\n");
-        try self.ind();
-        try self.write("    _buf.put(_bcd);\n");
-        try self.ind();
-        try self.write("}\n");
-        try self.ind();
-        try self.print("{s} static double _cdrReadFixed(java.nio.ByteBuffer _buf, int _d, int _s) {{\n", .{visibility});
-        try self.ind();
-        try self.write("    int _n = (_d / 2) + 1; int _n2 = _n * 2; int _pad = _n2 - _d - 1;\n");
-        try self.ind();
-        try self.write("    byte[] _bcd = new byte[_n]; _buf.get(_bcd);\n");
-        try self.ind();
-        try self.write("    byte[] _nib = new byte[_n2];\n");
-        try self.ind();
-        try self.write("    for (int _i = 0; _i < _n; _i++) { _nib[2*_i] = (byte)((_bcd[_i]>>4)&0x0F); _nib[2*_i+1] = (byte)(_bcd[_i]&0x0F); }\n");
-        try self.ind();
-        try self.write("    long _iv = 0; for (int _k = 0; _k < _d; _k++) _iv = _iv * 10 + _nib[_pad + _k];\n");
-        try self.ind();
-        try self.write("    boolean _neg = (_nib[_n2-1] == 0x0D || _nib[_n2-1] == 0x0B);\n");
-        try self.ind();
-        try self.write("    double _r = (double)_iv / Math.pow(10, _s); return _neg ? -_r : _r;\n");
-        try self.ind();
-        try self.write("}\n\n");
+        try self.print("{s} static double _cdrReadFixed(java.nio.ByteBuffer _buf, int _d, int _s) {{ return io.zidl.cdr.Cdr.readFixed(_buf, _d, _s); }}\n", .{visibility});
     }
 
     fn emitCdrHelpers(self: *Generator) !void {
@@ -430,65 +334,23 @@ const Generator = struct {
         try self.emitKeyAlignmentHelper("private");
         try self.emitWideStringHelpers("private");
         try self.ind();
-        try self.write("static { io.zidl.cdr.Cdr.requireApi(1); }\n");
+        try self.write("static { io.zidl.cdr.Cdr.requireApi(2); }\n");
         try self.ind();
         try self.write("private static void _cdrAlign(java.nio.ByteBuffer _buf, int _cdrBase, int _align) { io.zidl.cdr.Cdr.align(_buf, _cdrBase, _align); }\n");
         try self.emitStringHelpers("private");
         try self.emitFrameHelpers("private");
         try self.emitCollectionHelpers("private");
         try self.emitFixedHelpers("private");
-        try self.ind();
-        try self.write("private static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf) { return _cdrComputeKeyHash(_buf, false); }\n");
-        try self.ind();
-        try self.write("private static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf, boolean _forceMd5) {\n");
-        try self.ind();
-        try self.write("    int _len = _buf.position();\n");
-        try self.ind();
-        try self.write("    byte[] _key = new byte[_len];\n");
-        try self.ind();
-        try self.write("    _buf.position(0); _buf.get(_key);\n");
-        try self.ind();
-        try self.write("    if (!_forceMd5 && _len <= 16) {\n");
-        try self.ind();
-        try self.write("        byte[] _out = new byte[16];\n");
-        try self.ind();
-        try self.write("        System.arraycopy(_key, 0, _out, 0, _len);\n");
-        try self.ind();
-        try self.write("        return _out;\n");
-        try self.ind();
-        try self.write("    }\n");
-        try self.ind();
-        try self.write("    try { return java.security.MessageDigest.getInstance(\"MD5\").digest(_key); }\n");
-        try self.ind();
-        try self.write("    catch (java.security.NoSuchAlgorithmException _e) { throw new IllegalStateException(_e); }\n");
-        try self.ind();
-        try self.write("}\n\n");
-        try self.emitCdrDetectXcdrHelper();
+        try self.emitFinalizationHelpers("private");
     }
 
-    /// Parses a received sample's own 4-byte CDR encapsulation header to
-    /// determine whether it's XCDR1 or XCDR2, rather than assuming one --
-    /// mirrors zidl_cdr.c's zidl_cdr_reader_init, which does the same from
-    /// the encapsulation id (little-endian ids only: CDR1_LE=0x0001 and the
-    /// XCDR2 CDR2_LE=0x0007, D_CDR2_LE=0x0009 (appendable) and PL_CDR2_LE=0x000b
-    /// (mutable); big-endian and XCDR1 PL_CDR aren't in scope). This is what
-    /// lets a single generated deserializeFrom/skip/take() correctly handle
-    /// samples from a peer that chose either representation, instead of
-    /// hardcoding one (the bug this whole xcdr_version threading fixes).
-    fn emitCdrDetectXcdrHelper(self: *Generator) !void {
+    fn emitFinalizationHelpers(self: *Generator, visibility: []const u8) !void {
         try self.ind();
-        try self.write("private static int _cdrDetectXcdr(byte[] _payload) {\n");
+        try self.print("{s} static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf) {{ return io.zidl.cdr.Cdr.computeKeyHash(_buf, false); }}\n", .{visibility});
         try self.ind();
-        try self.write("    int _id = ((_payload[0] & 0xFF) << 8) | (_payload[1] & 0xFF);\n");
+        try self.print("{s} static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf, boolean _forceMd5) {{ return io.zidl.cdr.Cdr.computeKeyHash(_buf, _forceMd5); }}\n", .{visibility});
         try self.ind();
-        try self.write("    if (_id == 0x0001) return 1;\n");
-        try self.ind();
-        // CDR2 / D_CDR2 (appendable) / PL_CDR2 (mutable), little-endian.
-        try self.write("    if (_id == 0x0007 || _id == 0x0009 || _id == 0x000b) return 2;\n");
-        try self.ind();
-        try self.write("    throw new IllegalArgumentException(\"zidl: unsupported CDR encapsulation id 0x\" + Integer.toHexString(_id));\n");
-        try self.ind();
-        try self.write("}\n\n");
+        try self.print("{s} static int _cdrDetectXcdr(byte[] _payload) {{ return io.zidl.cdr.Cdr.detectXcdr(_payload); }}\n", .{visibility});
     }
 
     // ── Item / declaration emission ───────────────────────────────────────────
@@ -1090,17 +952,11 @@ const Generator = struct {
             try self.write("try { while (_buf.position() < _emEnd) {\n");
             self.depth += 1;
             try self.ind();
-            try self.write("int _pad = (4 - (_buf.position() - _cdrBase) % 4) % 4; if (_pad > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
+            try self.write("long _emMember = io.zidl.cdr.Cdr.readMember(_buf, _cdrBase); if (_emMember == -1) break;\n");
             try self.ind();
-            try self.write("_buf.position(_buf.position() + _pad); if (_buf.position() == _emEnd) break;\n");
+            try self.write("int _emWord = (int)(_emMember >>> 32), _memberId = _emWord & 0x0FFFFFFF;\n");
             try self.ind();
-            try self.write("int _emWord = _buf.getInt(); int _memberId = _emWord & 0x0FFFFFFF;\n");
-            try self.ind();
-            try self.write("int _emLc = (_emWord >>> 28) & 0x7; long _emPayload; if (_emLc < 4) _emPayload = 1L << _emLc; else if (_emLc == 4) _emPayload = Integer.toUnsignedLong(_buf.getInt()); else { if (_buf.remaining() < 4) throw new java.nio.BufferUnderflowException(); long _next = Integer.toUnsignedLong(_buf.getInt(_buf.position())); _emPayload = 4 + _next * (_emLc == 5 ? 1L : _emLc == 6 ? 4L : 8L); }\n");
-            try self.ind();
-            try self.write("if (_emPayload > 0xFFFFFFFFL) throw new IllegalArgumentException(\"EMHEADER size overflow\"); if (_emPayload > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
-            try self.ind();
-            try self.write("int _memberEnd = _buf.position() + (int)_emPayload; _buf.limit(_memberEnd);\n");
+            try self.write("int _memberEnd = (int)_emMember; _buf.limit(_memberEnd);\n");
             try self.ind();
             try self.write("try {\n");
             try self.ind();
@@ -2059,17 +1915,11 @@ const Generator = struct {
             try self.ind();
             try self.write("    try { while (_buf.position() < _emEnd) {\n");
             try self.ind();
-            try self.write("        int _pad = (4 - (_buf.position() - _cdrBase) % 4) % 4; if (_pad > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
+            try self.write("        long _emMember = io.zidl.cdr.Cdr.readMember(_buf, _cdrBase); if (_emMember == -1) break;\n");
             try self.ind();
-            try self.write("        _buf.position(_buf.position() + _pad); if (_buf.position() == _emEnd) break;\n");
+            try self.write("        int _emWord = (int)(_emMember >>> 32), _memberId = _emWord & 0x0FFFFFFF;\n");
             try self.ind();
-            try self.write("        int _emWord = _buf.getInt(); int _memberId = _emWord & 0x0FFFFFFF; int _emLc = (_emWord >>> 28) & 0x7; long _emPayload;\n");
-            try self.ind();
-            try self.write("        if (_emLc < 4) _emPayload = 1L << _emLc; else if (_emLc == 4) _emPayload = Integer.toUnsignedLong(_buf.getInt()); else { if (_buf.remaining() < 4) throw new java.nio.BufferUnderflowException(); long _next = Integer.toUnsignedLong(_buf.getInt(_buf.position())); _emPayload = 4 + _next * (_emLc == 5 ? 1L : _emLc == 6 ? 4L : 8L); }\n");
-            try self.ind();
-            try self.write("        if (_emPayload > 0xFFFFFFFFL) throw new IllegalArgumentException(\"EMHEADER size overflow\"); if (_emPayload > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
-            try self.ind();
-            try self.write("        int _memberEnd = _buf.position() + (int)_emPayload; _buf.limit(_memberEnd);\n");
+            try self.write("        int _memberEnd = (int)_emMember; _buf.limit(_memberEnd);\n");
             try self.ind();
             try self.write("        try { switch (_memberId) {\n");
             for (wire_fields) |field| {
@@ -3948,10 +3798,8 @@ fn emitZzddsDataWriterFile(
         \\    /** Determines XCDR1 vs XCDR2 from the payload's own 4-byte CDR
         \\     * encapsulation header, same as {[c]s}DataReader's own helper. */
         \\    private static int xcdrVersionOf(byte[] payload) {{
-        \\        int _id = ((payload[0] & 0xFF) << 8) | (payload[1] & 0xFF);
-        \\        if (_id == 0x0001) return 1;
-        \\        if (_id == 0x0007 || _id == 0x0009 || _id == 0x000b) return 2;
-        \\        throw new IllegalArgumentException("zidl: unsupported CDR encapsulation id 0x" + Integer.toHexString(_id));
+        \\        io.zidl.cdr.Cdr.requireApi(2);
+        \\        return io.zidl.cdr.Cdr.detectXcdr(payload);
         \\    }}
         \\
         \\    /** Returns the key fields for {{@code handle}}, or null if no alive
@@ -4026,10 +3874,8 @@ fn emitZzddsDataReaderFile(
         \\     * encapsulation header (CDR1_LE=0x0001; CDR2_LE/D_CDR2_LE/PL_CDR2_LE=0x0007/9/b)
         \\     * instead of assuming one -- a peer may choose either. */
         \\    private static int xcdrVersionOf(byte[] payload) {{
-        \\        int _id = ((payload[0] & 0xFF) << 8) | (payload[1] & 0xFF);
-        \\        if (_id == 0x0001) return 1;
-        \\        if (_id == 0x0007 || _id == 0x0009 || _id == 0x000b) return 2;
-        \\        throw new IllegalArgumentException("zidl: unsupported CDR encapsulation id 0x" + Integer.toHexString(_id));
+        \\        io.zidl.cdr.Cdr.requireApi(2);
+        \\        return io.zidl.cdr.Cdr.detectXcdr(payload);
         \\    }}
         \\
         \\    private static byte[] fromByteList(java.util.List<Byte> l) {{
@@ -8951,35 +8797,14 @@ fn generateCdrUtils(
     gen.depth = 1;
     try gen.emitKeyAlignmentHelper("public");
     try gen.emitWideStringHelpers("public");
-    try gen.write("    static { io.zidl.cdr.Cdr.requireApi(1); }\n");
+    try gen.write("    static { io.zidl.cdr.Cdr.requireApi(2); }\n");
     try gen.write("    public static void _cdrAlign(java.nio.ByteBuffer _buf, int _cdrBase, int _align) { io.zidl.cdr.Cdr.align(_buf, _cdrBase, _align); }\n");
     try gen.emitStringHelpers("public");
     try gen.emitFrameHelpers("public");
     try gen.emitCollectionHelpers("public");
     try gen.emitFixedHelpers("public");
     try gen.emitOptionalHelpers("public");
-    try gen.write("    public static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf) { return _cdrComputeKeyHash(_buf, false); }\n");
-    try gen.write("    public static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf, boolean _forceMd5) {\n");
-    try gen.write("        int _len = _buf.position();\n");
-    try gen.write("        byte[] _key = new byte[_len];\n");
-    try gen.write("        _buf.position(0); _buf.get(_key);\n");
-    try gen.write("        if (!_forceMd5 && _len <= 16) {\n");
-    try gen.write("            byte[] _out = new byte[16];\n");
-    try gen.write("            System.arraycopy(_key, 0, _out, 0, _len);\n");
-    try gen.write("            return _out;\n");
-    try gen.write("        }\n");
-    try gen.write("        try { return java.security.MessageDigest.getInstance(\"MD5\").digest(_key); }\n");
-    try gen.write("        catch (java.security.NoSuchAlgorithmException _e) { throw new IllegalStateException(_e); }\n");
-    try gen.write("    }\n");
-    // See emitCdrDetectXcdrHelper's doc comment (single-file mode) for why
-    // this exists: parses a received sample's own encapsulation header
-    // instead of assuming XCDR1 or XCDR2.
-    try gen.write("    public static int _cdrDetectXcdr(byte[] _payload) {\n");
-    try gen.write("        int _id = ((_payload[0] & 0xFF) << 8) | (_payload[1] & 0xFF);\n");
-    try gen.write("        if (_id == 0x0001) return 1;\n");
-    try gen.write("        if (_id == 0x0007 || _id == 0x0009 || _id == 0x000b) return 2;\n");
-    try gen.write("        throw new IllegalArgumentException(\"zidl: unsupported CDR encapsulation id 0x\" + Integer.toHexString(_id));\n");
-    try gen.write("    }\n");
+    try gen.emitFinalizationHelpers("public");
     try gen.write("}\n");
 }
 
@@ -9868,8 +9693,8 @@ test "java: --generate-zzdds-wrappers DataReader auto-detects xcdr version from 
     // assume one -- this is the read-side half of the original bug (Java
     // used to always do `_buf.position(4)` with no idea what it just skipped).
     try testing.expect(std.mem.indexOf(u8, reader_content, "xcdrVersionOf(byte[] payload)") != null);
-    try testing.expect(std.mem.indexOf(u8, reader_content, "if (_id == 0x0001) return 1;") != null);
-    try testing.expect(std.mem.indexOf(u8, reader_content, "if (_id == 0x0007 || _id == 0x0009 || _id == 0x000b) return 2;") != null);
+    try testing.expect(std.mem.indexOf(u8, reader_content, "io.zidl.cdr.Cdr.requireApi(2);") != null);
+    try testing.expect(std.mem.indexOf(u8, reader_content, "io.zidl.cdr.Cdr.detectXcdr(payload)") != null);
     try testing.expect(std.mem.indexOf(u8, reader_content, "int _xcdrVersion = xcdrVersionOf(payload);") != null);
     try testing.expect(std.mem.indexOf(u8, reader_content, "Foo.deserializeSelected(_buf, 4, _xcdrVersion, Foo.KEY_FIELD_MASK)") != null);
 }
@@ -10075,7 +9900,7 @@ test "java: @optional CDR deserialize scopes framing and sets null" {
     // Presence flag read
     try testGen(alloc,
         \\struct Opt { @optional long maybe_x; long y; };
-    , "test", "_cdrBeginOptionalRead(_buf, _cdrBase, _xcdrVersion, 0);");
+    , "test", "io.zidl.cdr.Cdr.beginOptionalRead(_buf, _cdrBase, _xcdrVersion, 0);");
     // Value read on present
     try testGen(alloc,
         \\struct Opt { @optional long maybe_x; long y; };
@@ -11301,7 +11126,7 @@ test "java: @mutable struct deserialize loops over EMHEADERs" {
     // LC decode + payload size
     try testGen(alloc,
         \\@mutable struct S { long x; long y; };
-    , "test", "int _emLc = (_emWord >>> 28) & 0x7;");
+    , "test", "long _emMember = io.zidl.cdr.Cdr.readMember(_buf, _cdrBase);");
     // Switch on member_id
     try testGen(alloc,
         \\@mutable struct S { long x; long y; };
@@ -11677,7 +11502,7 @@ test "java: @mutable key reads peek the NEXTINT for EMHEADER length codes 5-7" {
         \\@bit_bound(8) enum Small { A, B };
         \\@mutable struct K { @key string id; Small e; };
     ;
-    try testGen(alloc, idl, "test", "long _next = Integer.toUnsignedLong(_buf.getInt(_buf.position()));");
+    try testGen(alloc, idl, "test", "io.zidl.cdr.Cdr.readMember(_buf, _cdrBase)");
     // The 1-byte enum member gets EMHEADER LC 0.
     try testGen(alloc, idl, "test", "_buf.putInt(0x00000001);");
 }

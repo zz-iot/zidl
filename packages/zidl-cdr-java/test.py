@@ -38,7 +38,7 @@ def main():
         with zipfile.ZipFile(jar) as archive:
             manifest = archive.read('META-INF/MANIFEST.MF')
             assert b'Implementation-Version: 1.2.3\r\n' in manifest
-            assert b'Zidl-Cdr-Api-Level: 1\r\n' in manifest
+            assert b'Zidl-Cdr-Api-Level: 2\r\n' in manifest
             assert archive.read('META-INF/LICENSE')
             for name in archive.namelist():
                 if name.endswith('.class'):
@@ -46,8 +46,9 @@ def main():
         classes = directory / 'classes'
         run([javac, '--release', '8', '-encoding', 'UTF-8', '-Xlint:-options', '-Xlint:all', '-Werror',
              '-cp', jar, '-d', classes,
-             PACKAGE / 'src/test/java/io/zidl/cdr/CdrTest.java'], env=env)
-        run([java, '-cp', str(classes) + os.pathsep + str(jar), 'io.zidl.cdr.CdrTest'], env=env)
+             *sorted((PACKAGE / 'src/test/java').rglob('*.java'))], env=env)
+        for test in ['CdrTest','HelperTest']:
+            run([java, '-cp', str(classes) + os.pathsep + str(jar), 'io.zidl.cdr.'+test], env=env)
         source = directory / 'source.tar.gz'
         run([sys.executable, PACKAGE / 'build.py', 'source', '--version', '1.2.3', '--output', source])
         with tarfile.open(source) as archive:
@@ -77,7 +78,7 @@ public class Consumer {
 }''', encoding='utf-8')
             older_source = directory / 'older/Cdr.java'
             older_source.parent.mkdir()
-            older_source.write_text('package io.zidl.cdr; public final class Cdr { public static void requireApi(int required) { if(required != 1) throw new AssertionError(); throw new LinkageError("runtime provides 0"); } }', encoding='utf-8')
+            older_source.write_text('package io.zidl.cdr; public final class Cdr { public static void requireApi(int required) { if(required != 2) throw new AssertionError(); throw new LinkageError("runtime provides 1"); } }', encoding='utf-8')
             older_classes = directory / 'older/classes'
             run([javac, '--release', '8', '-Xlint:-options', '-d', older_classes, older_source], env=env)
             for mode in range(3):
@@ -102,7 +103,7 @@ public class Consumer {
                 assert missing.returncode != 0 and b'io/zidl/cdr/Cdr' in missing.stderr
                 older = subprocess.run([java, '-cp', str(target) + os.pathsep + str(older_classes),
                                         'Consumer', prefix], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                assert older.returncode != 0 and b'runtime provides 0' in older.stderr
+                assert older.returncode != 0 and b'runtime provides 1' in older.stderr
     print('Java CDR JAR, source rebuild, API, and native-free checks passed')
 
 

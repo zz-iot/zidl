@@ -140,10 +140,15 @@ pub fn build(b: *std.Build) void {
             const compile_runtime_test = javaCommand(b, &.{ javac, "--release", "8", "-Xlint:-options", "-Xlint:all", "-Werror", "-d" }, java_cdr);
             const runtime_classes = compile_runtime_test.addOutputDirectoryArg("java-runtime-test-classes");
             compile_runtime_test.addFileArg(b.path("packages/zidl-cdr-java/src/test/java/io/zidl/cdr/CdrTest.java"));
+            compile_runtime_test.addFileArg(b.path("packages/zidl-cdr-java/src/test/java/io/zidl/cdr/HelperTest.java"));
             const run_runtime_test = javaCommand(b, &.{ java, "-cp" }, java_cdr);
             run_runtime_test.addDirectoryArg(runtime_classes);
             run_runtime_test.addArg("io.zidl.cdr.CdrTest");
             runtime_tests.dependOn(&run_runtime_test.step);
+            const run_helpers = javaCommand(b, &.{ java, "-cp" }, java_cdr);
+            run_helpers.addDirectoryArg(runtime_classes);
+            run_helpers.addArg("io.zidl.cdr.HelperTest");
+            runtime_tests.dependOn(&run_helpers.step);
             for (0..3) |mode| {
                 const split = mode != 0;
                 const prefix: []const u8 = switch (mode) {

@@ -15,8 +15,9 @@ public final class CdrTest {
 
     public static void main(String[] args) {
         Cdr.requireApi(1);
-        try { Cdr.requireApi(2); throw new AssertionError("accepted newer API"); }
-        catch (LinkageError error) { check(error.getMessage().contains("runtime provides 1")); }
+        Cdr.requireApi(2);
+        try { Cdr.requireApi(3); throw new AssertionError("accepted newer API"); }
+        catch (LinkageError error) { check(error.getMessage().contains("runtime provides 2")); }
         byte[] bytes = new byte[12]; Arrays.fill(bytes, (byte)127);
         ByteBuffer buffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN);
         buffer.position(5); Cdr.align(buffer,4,4);
@@ -59,6 +60,6 @@ public final class CdrTest {
         ByteBuffer surrogate = ByteBuffer.allocate(6).order(ByteOrder.LITTLE_ENDIAN);
         Cdr.writeString(surrogate,0,"\ud800");
         check(Arrays.equals(surrogate.array(),new byte[]{2,0,0,0,63,0}));
-        System.out.println("Java CDR runtime API 1 passed");
+        System.out.println("Java CDR runtime API 2 passed");
     }
 }

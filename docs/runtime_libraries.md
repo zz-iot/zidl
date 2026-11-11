@@ -1,7 +1,7 @@
 # Runtime Libraries Reference
 
 > Native consolidation is implemented; the [shared Java CDR runtime](design/java-cdr-runtime.md)
-> has its first pure-Java extraction. Historical Rust descriptions below are proposals.
+> has shared helper extraction through API 2. Historical Rust descriptions below are proposals.
 
 ## Native package layout
 
@@ -24,7 +24,7 @@ Generated Zig code imports `zidl_cdr` and `zidl_bindings` directly. The
 `zidl_rt` module and `packages/zidl-rt` compatibility package have been removed
 following zzdds migration. See [the Zig build guide](backend_zig.md) to update
 old imports. Java retains generated schema traversal and now shares alignment
-and narrow strings through `zidl-cdr-java`; see its
+and other codec helpers through `zidl-cdr-java`; see its
 [package guide](../packages/zidl-cdr-java/README.md). Rust, Python and C# runtime
 descriptions in older documents are proposals, not implemented backend guarantees.
 

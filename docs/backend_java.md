@@ -85,8 +85,8 @@ public class Model {
 ```
 
 Split-file types are top-level classes and import the public static helpers
-from `<Stem>CdrUtils`. Alignment and narrow-string helpers forward to `io.zidl.cdr.Cdr`; other helpers
-remain generated in this first extraction. Put the matching `zidl-cdr-java` JAR
+from `<Stem>CdrUtils`. Codec helpers forward to `io.zidl.cdr.Cdr`; schema traversal and primitive
+buffer operations remain generated. Put the matching `zidl-cdr-java` JAR
 on both compilation and runtime classpaths. `--no-typesupport` output and older
 inline generated sources remain runtime-free. There are no `ZidlCdrWriter`/`ZidlCdrReader` helper classes.
 
@@ -99,8 +99,8 @@ javac -encoding UTF-8 -cp zidl-cdr-java.jar -d classes generated/*.java MyApp.ja
 java -cp classes:zidl-cdr-java.jar MyApp
 ```
 
-Use `;` in place of `:` on Windows. Generated helpers require Java runtime API 1;
-see the [first extraction checkpoint](design/java-cdr-extraction-1.md).
+Use `;` in place of `:` on Windows. Generated helpers require Java runtime API 2;
+see the [helper extraction checkpoint](design/java-cdr-extraction-2.md).
 
 ## CDR Serialize/Deserialize Signatures
 
