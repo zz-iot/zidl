@@ -1,0 +1,3 @@
+module JavaValidation {
+    @final struct Narrow { @key string text; };
+};

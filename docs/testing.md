@@ -212,3 +212,7 @@ ABI errors, dependency integrity, malformed/bounded samples and full/key-only ke
 The step is included in `zig build test` on Linux. Other platforms are not yet
 qualified for these hosts. See
 [`packages/zidl-typesupport/README.md`](../packages/zidl-typesupport/README.md).
+
+Java narrow-string wire validation can also be run independently with
+`zig build test-java-cdr-validation`. It checks both single-file and split-file
+output and runs under the main test step when `java` and `javac` are available.

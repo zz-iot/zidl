@@ -306,6 +306,71 @@ const Generator = struct {
         try self.print("{s}}} finally {{ _cdrBase = _parentBase; _optScope.close(); }} }}\n", .{extra});
     }
 
+    fn emitStringHelpers(self: *Generator, visibility: []const u8) !void {
+        try self.ind();
+        try self.print("{s} static int _cdrStringEnd(java.nio.ByteBuffer _buf, int _cdrBase) {{\n", .{visibility});
+        try self.ind();
+        try self.write("    long _offset = (long)_buf.position() - _cdrBase;\n");
+        try self.ind();
+        try self.write("    if (_offset < 0) throw new IllegalArgumentException(\"invalid CDR base\");\n");
+        try self.ind();
+        try self.write("    int _pad = (int)((4 - _offset % 4) % 4);\n");
+        try self.ind();
+        try self.write("    if (_buf.remaining() < _pad || _buf.remaining() - _pad < 4) throw new java.nio.BufferUnderflowException();\n");
+        try self.ind();
+        try self.write("    _buf.position(_buf.position() + _pad);\n");
+        try self.ind();
+        try self.write("    long _len = Integer.toUnsignedLong(_buf.getInt());\n");
+        try self.ind();
+        try self.write("    if (_len == 0) throw new IllegalArgumentException(\"zero CDR string length\");\n");
+        try self.ind();
+        try self.write("    if (_len > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
+        try self.ind();
+        try self.write("    int _end = _buf.position() + (int)_len;\n");
+        try self.ind();
+        try self.write("    if (_buf.get(_end - 1) != 0) throw new IllegalArgumentException(\"missing CDR string terminator\");\n");
+        try self.ind();
+        try self.write("    return _end;\n");
+        try self.ind();
+        try self.write("}\n");
+        try self.ind();
+        try self.print("{s} static void _cdrWriteString(java.nio.ByteBuffer _buf, int _cdrBase, String _s) {{\n", .{visibility});
+        try self.ind();
+        try self.write("    long _offset = (long)_buf.position() - _cdrBase;\n");
+        try self.ind();
+        try self.write("    if (_offset < 0) throw new IllegalArgumentException(\"invalid CDR base\");\n");
+        try self.ind();
+        try self.write("    int _pad = (int)((4 - _offset % 4) % 4);\n");
+        try self.ind();
+        try self.write("    byte[] _bytes = _s.getBytes(java.nio.charset.StandardCharsets.UTF_8);\n");
+        try self.ind();
+        try self.write("    if ((long)_pad + 4 + _bytes.length + 1 > _buf.remaining()) throw new java.nio.BufferOverflowException();\n");
+        try self.ind();
+        try self.write("    _buf.position(_buf.position() + _pad);\n");
+        try self.ind();
+        try self.write("    _buf.putInt(_bytes.length + 1); _buf.put(_bytes); _buf.put((byte)0);\n");
+        try self.ind();
+        try self.write("}\n");
+        try self.ind();
+        try self.print("{s} static String _cdrReadString(java.nio.ByteBuffer _buf, int _cdrBase) {{\n", .{visibility});
+        try self.ind();
+        try self.write("    int _end = _cdrStringEnd(_buf, _cdrBase);\n");
+        try self.ind();
+        try self.write("    byte[] _bytes = new byte[_end - _buf.position() - 1];\n");
+        try self.ind();
+        try self.write("    _buf.get(_bytes); _buf.position(_end);\n");
+        try self.ind();
+        try self.write("    return new String(_bytes, java.nio.charset.StandardCharsets.UTF_8);\n");
+        try self.ind();
+        try self.write("}\n");
+        try self.ind();
+        try self.print("{s} static void _cdrSkipString(java.nio.ByteBuffer _buf, int _cdrBase) {{\n", .{visibility});
+        try self.ind();
+        try self.write("    _buf.position(_cdrStringEnd(_buf, _cdrBase));\n");
+        try self.ind();
+        try self.write("}\n");
+    }
+
     fn emitCdrHelpers(self: *Generator) !void {
         try self.emitOptionalHelpers("private");
         try self.emitKeyAlignmentHelper("private");
@@ -320,28 +385,7 @@ const Generator = struct {
         try self.write("    if (_p != 0) _buf.position(_buf.position() + (_align - _p));\n");
         try self.ind();
         try self.write("}\n");
-        try self.ind();
-        try self.write("private static void _cdrWriteString(java.nio.ByteBuffer _buf, int _cdrBase, String _s) {\n");
-        try self.ind();
-        try self.write("    _cdrAlign(_buf, _cdrBase, 4);\n");
-        try self.ind();
-        try self.write("    byte[] _bytes = _s.getBytes(java.nio.charset.StandardCharsets.UTF_8);\n");
-        try self.ind();
-        try self.write("    _buf.putInt(_bytes.length + 1); _buf.put(_bytes); _buf.put((byte)0);\n");
-        try self.ind();
-        try self.write("}\n");
-        try self.ind();
-        try self.write("private static String _cdrReadString(java.nio.ByteBuffer _buf, int _cdrBase) {\n");
-        try self.ind();
-        try self.write("    _cdrAlign(_buf, _cdrBase, 4);\n");
-        try self.ind();
-        try self.write("    int _len = _buf.getInt(); if (_len <= 0) return \"\";\n");
-        try self.ind();
-        try self.write("    byte[] _bytes = new byte[_len - 1]; _buf.get(_bytes); _buf.get();\n");
-        try self.ind();
-        try self.write("    return new String(_bytes, java.nio.charset.StandardCharsets.UTF_8);\n");
-        try self.ind();
-        try self.write("}\n");
+        try self.emitStringHelpers("private");
         try self.ind();
         try self.write("private static void _cdrWriteFixed(java.nio.ByteBuffer _buf, int _d, int _s, double _v) {\n");
         try self.ind();
@@ -2680,7 +2724,7 @@ const Generator = struct {
             },
             .string => {
                 try self.ind();
-                try self.print("{s}_cdrReadString(_buf, _cdrBase);\n", .{extra});
+                try self.print("{s}_cdrSkipString(_buf, _cdrBase);\n", .{extra});
             },
             .sequence => |seq| {
                 const n = try self.collName("_n");
@@ -8956,22 +9000,8 @@ fn generateCdrUtils(
     try gen.write("        int _p = (_buf.position() - _cdrBase) % _align;\n");
     try gen.write("        if (_p != 0) _buf.position(_buf.position() + (_align - _p));\n");
     try gen.write("    }\n");
-    try gen.write("    public static void _cdrWriteString(java.nio.ByteBuffer _buf, int _cdrBase, String _s) {\n");
-    try gen.write("        _cdrAlign(_buf, _cdrBase, 4);\n");
-    try gen.write("        byte[] _b = _s.getBytes(java.nio.charset.StandardCharsets.UTF_8);\n");
-    try gen.write("        _buf.putInt(_b.length + 1);\n");
-    try gen.write("        _buf.put(_b);\n");
-    try gen.write("        _buf.put((byte)0);\n");
-    try gen.write("    }\n");
+    try gen.emitStringHelpers("public");
     try gen.emitOptionalHelpers("public");
-    try gen.write("    public static String _cdrReadString(java.nio.ByteBuffer _buf, int _cdrBase) {\n");
-    try gen.write("        _cdrAlign(_buf, _cdrBase, 4);\n");
-    try gen.write("        int _len = _buf.getInt() - 1;\n");
-    try gen.write("        byte[] _b = new byte[_len];\n");
-    try gen.write("        _buf.get(_b);\n");
-    try gen.write("        _buf.get(); // null terminator\n");
-    try gen.write("        return new String(_b, java.nio.charset.StandardCharsets.UTF_8);\n");
-    try gen.write("    }\n");
     try gen.write("    public static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf) { return _cdrComputeKeyHash(_buf, false); }\n");
     try gen.write("    public static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf, boolean _forceMd5) {\n");
     try gen.write("        int _len = _buf.position();\n");
@@ -9943,7 +9973,7 @@ test "java: appendable struct under XCDR1 falls back to per-member skip" {
     , "test", "} else {");
     try testGen(alloc,
         \\@appendable struct S { long a; string b; };
-    , "test", "_cdrReadString(_buf, _cdrBase);\n");
+    , "test", "_cdrSkipString(_buf, _cdrBase);\n");
 }
 
 test "java: appendable struct with non-leading @key has no UnsupportedOperationException (guard removed)" {

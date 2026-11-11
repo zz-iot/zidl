@@ -69,16 +69,36 @@ public class Types {
         int _p = (_buf.position() - _cdrBase) % _align;
         if (_p != 0) _buf.position(_buf.position() + (_align - _p));
     }
+    private static int _cdrStringEnd(java.nio.ByteBuffer _buf, int _cdrBase) {
+        long _offset = (long)_buf.position() - _cdrBase;
+        if (_offset < 0) throw new IllegalArgumentException("invalid CDR base");
+        int _pad = (int)((4 - _offset % 4) % 4);
+        if (_buf.remaining() < _pad || _buf.remaining() - _pad < 4) throw new java.nio.BufferUnderflowException();
+        _buf.position(_buf.position() + _pad);
+        long _len = Integer.toUnsignedLong(_buf.getInt());
+        if (_len == 0) throw new IllegalArgumentException("zero CDR string length");
+        if (_len > _buf.remaining()) throw new java.nio.BufferUnderflowException();
+        int _end = _buf.position() + (int)_len;
+        if (_buf.get(_end - 1) != 0) throw new IllegalArgumentException("missing CDR string terminator");
+        return _end;
+    }
     private static void _cdrWriteString(java.nio.ByteBuffer _buf, int _cdrBase, String _s) {
-        _cdrAlign(_buf, _cdrBase, 4);
+        long _offset = (long)_buf.position() - _cdrBase;
+        if (_offset < 0) throw new IllegalArgumentException("invalid CDR base");
+        int _pad = (int)((4 - _offset % 4) % 4);
         byte[] _bytes = _s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        if ((long)_pad + 4 + _bytes.length + 1 > _buf.remaining()) throw new java.nio.BufferOverflowException();
+        _buf.position(_buf.position() + _pad);
         _buf.putInt(_bytes.length + 1); _buf.put(_bytes); _buf.put((byte)0);
     }
     private static String _cdrReadString(java.nio.ByteBuffer _buf, int _cdrBase) {
-        _cdrAlign(_buf, _cdrBase, 4);
-        int _len = _buf.getInt(); if (_len <= 0) return "";
-        byte[] _bytes = new byte[_len - 1]; _buf.get(_bytes); _buf.get();
+        int _end = _cdrStringEnd(_buf, _cdrBase);
+        byte[] _bytes = new byte[_end - _buf.position() - 1];
+        _buf.get(_bytes); _buf.position(_end);
         return new String(_bytes, java.nio.charset.StandardCharsets.UTF_8);
+    }
+    private static void _cdrSkipString(java.nio.ByteBuffer _buf, int _cdrBase) {
+        _buf.position(_cdrStringEnd(_buf, _cdrBase));
     }
     private static void _cdrWriteFixed(java.nio.ByteBuffer _buf, int _d, int _s, double _v) {
         int _n = (_d / 2) + 1; int _n2 = _n * 2; int _pad = _n2 - _d - 1;
@@ -403,8 +423,8 @@ public class Types {
             _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _buf.getLong();
             _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
             _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _buf.getLong();
-            _cdrReadString(_buf, _cdrBase);
-            _cdrReadString(_buf, _cdrBase);
+            _cdrSkipString(_buf, _cdrBase);
+            _cdrSkipString(_buf, _cdrBase);
             { _cdrAlign(_buf, _cdrBase, 4); int _n = _buf.getInt();
               for (int _i = 0; _i < _n; _i++) {
                 _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
@@ -565,12 +585,12 @@ public class Types {
             if ((_want & (1L << 11)) != 0) {
                 _out.str = _cdrReadString(_buf, _cdrBase);
             } else {
-                _cdrReadString(_buf, _cdrBase);
+                _cdrSkipString(_buf, _cdrBase);
             }
             if ((_want & (1L << 12)) != 0) {
                 _out.bstr = _cdrReadString(_buf, _cdrBase);
             } else {
-                _cdrReadString(_buf, _cdrBase);
+                _cdrSkipString(_buf, _cdrBase);
             }
             if ((_want & (1L << 13)) != 0) {
                 _cdrAlign(_buf, _cdrBase, 4); int _n__out_nums = _buf.getInt();
@@ -686,7 +706,7 @@ public class Types {
                 _buf.position(_end);
             } else {
                 _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
-                _cdrReadString(_buf, _cdrBase);
+                _cdrSkipString(_buf, _cdrBase);
             }
         }
         public void serializeKeyHolder(java.nio.ByteBuffer _buf, int _cdrBase) {
@@ -771,7 +791,7 @@ public class Types {
                 _buf.position(_end);
             } else {
                 _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
-                _cdrReadString(_buf, _cdrBase);
+                _cdrSkipString(_buf, _cdrBase);
             }
         }
 
@@ -847,7 +867,7 @@ public class Types {
             if ((_want & (1L << 1)) != 0) {
                 _out.payload = _cdrReadString(_buf, _cdrBase);
             } else {
-                _cdrReadString(_buf, _cdrBase);
+                _cdrSkipString(_buf, _cdrBase);
             }
             return _out;
         }

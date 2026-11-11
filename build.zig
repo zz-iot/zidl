@@ -97,6 +97,31 @@ pub fn build(b: *std.Build) void {
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     const test_step = b.step("test", "Run unit tests + Zig integration tests");
+    const java_validation_step = b.step("test-java-cdr-validation", "Test Java CDR string validation");
+    test_step.dependOn(java_validation_step);
+    if (b.findProgram(.{ .names = &.{"javac"} })) |javac| {
+        if (b.findProgram(.{ .names = &.{"java"} })) |java| {
+            for ([_]bool{ false, true }) |split| {
+                const gen = b.addRunArtifact(exe);
+                gen.addArgs(&.{ "-b", "java" });
+                if (split) gen.addArgs(&.{ "--split-files", "--java-package", "javavalidation" });
+                gen.addArg("-o");
+                const generated = gen.addOutputDirectoryArg(if (split) "java-validation-split" else "java-validation-single");
+                gen.addFileArg(b.path("test/integration/java_cdr_validation/validation.idl"));
+                const compile_java = b.addSystemCommand(&.{ javac, "-Xlint:unchecked", "-Werror", "-d" });
+                const classes = compile_java.addOutputDirectoryArg("classes");
+                if (split) {
+                    compile_java.addFileArg(generated.path(b, "ValidationCdrUtils.java"));
+                    compile_java.addFileArg(generated.path(b, "Narrow.java"));
+                } else compile_java.addFileArg(generated.path(b, "Validation.java"));
+                compile_java.addFileArg(b.path("test/integration/java_cdr_validation/ValidationTest.java"));
+                const run = b.addSystemCommand(&.{ java, "-Xmx32m", "-cp" });
+                run.addDirectoryArg(classes);
+                run.addArgs(&.{ "ValidationTest", if (split) "javavalidation." else "Validation$JavaValidation$" });
+                java_validation_step.dependOn(&run.step);
+            }
+        }
+    }
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 

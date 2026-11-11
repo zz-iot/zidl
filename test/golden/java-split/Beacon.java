@@ -76,7 +76,7 @@ public class Beacon implements java.io.Serializable {
             _buf.position(_end);
         } else {
             _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
-            _cdrReadString(_buf, _cdrBase);
+            _cdrSkipString(_buf, _cdrBase);
         }
     }
 
@@ -152,7 +152,7 @@ public class Beacon implements java.io.Serializable {
         if ((_want & (1L << 1)) != 0) {
             _out.payload = _cdrReadString(_buf, _cdrBase);
         } else {
-            _cdrReadString(_buf, _cdrBase);
+            _cdrSkipString(_buf, _cdrBase);
         }
         return _out;
     }

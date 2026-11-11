@@ -233,3 +233,7 @@ and the existing canonical-key, projection, optional-wire and independent XCDR
 vector suites. The selected baseline is not a formal JDK minimum guarantee for
 all generated JNI wrappers. Add explicit runtime compatibility and mismatch
 checks when the first JAR API is implemented.
+
+The first implementation slice is described in
+[Java CDR string validation](java-cdr-string-validation.md). Historical baseline
+measurements above remain the pre-fix audit snapshot.

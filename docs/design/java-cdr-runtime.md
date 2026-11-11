@@ -3,7 +3,8 @@
 Date: 2026-11-02
 
 Status: audit and executable baseline completed; runtime extraction, API and
-delivery implementation pending.
+delivery implementation pending. Narrow-string validation is the first correctness
+slice; see [its buffer and error contract](java-cdr-string-validation.md).
 This document describes planned behavior, not an already available package.
 See the [Java CDR audit](java-cdr-audit.md) for helper inventory, observed buffer
 semantics, correctness gaps, size/performance baseline and first-slice proposal.

@@ -78,7 +78,7 @@ public class Frame implements java.io.Serializable {
             _buf.position(_end);
         } else {
             _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
-            _cdrReadString(_buf, _cdrBase);
+            _cdrSkipString(_buf, _cdrBase);
         }
     }
     public void serializeKeyHolder(java.nio.ByteBuffer _buf, int _cdrBase) {
