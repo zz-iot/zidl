@@ -371,6 +371,34 @@ const Generator = struct {
         try self.write("}\n");
     }
 
+    fn emitCollectionHelpers(self: *Generator, visibility: []const u8) !void {
+        try self.ind();
+        try self.print("{s} static int _cdrReadCount(java.nio.ByteBuffer _buf, int _cdrBase, int _bound) {{\n", .{visibility});
+        try self.ind();
+        try self.write("    long _offset = (long)_buf.position() - _cdrBase;\n");
+        try self.ind();
+        try self.write("    if (_offset < 0) throw new IllegalArgumentException(\"invalid CDR base\");\n");
+        try self.ind();
+        try self.write("    int _pad = (int)((4 - _offset % 4) % 4);\n");
+        try self.ind();
+        try self.write("    if (_buf.remaining() < _pad || _buf.remaining() - _pad < 4) throw new java.nio.BufferUnderflowException();\n");
+        try self.ind();
+        try self.write("    _buf.position(_buf.position() + _pad);\n");
+        try self.ind();
+        try self.write("    long _count = Integer.toUnsignedLong(_buf.getInt());\n");
+        try self.ind();
+        try self.write("    if (_count > _bound) throw new IllegalArgumentException(\"CDR collection count exceeds Java or IDL bound\");\n");
+        try self.ind();
+        try self.write("    return (int)_count;\n");
+        try self.ind();
+        try self.write("}\n");
+    }
+
+    fn emitCollectionCount(self: *Generator, name: []const u8, bound: ?u64, extra: []const u8) !void {
+        try self.ind();
+        try self.print("{s}int {s} = _cdrReadCount(_buf, _cdrBase, {d});\n", .{ extra, name, @min(bound orelse 0x7FFFFFFF, 0x7FFFFFFF) });
+    }
+
     fn emitFrameHelpers(self: *Generator, visibility: []const u8) !void {
         try self.ind();
         try self.print("{s} static int _cdrReadFrameEnd(java.nio.ByteBuffer _buf, int _cdrBase) {{\n", .{visibility});
@@ -426,6 +454,7 @@ const Generator = struct {
         try self.write("}\n");
         try self.emitStringHelpers("private");
         try self.emitFrameHelpers("private");
+        try self.emitCollectionHelpers("private");
         try self.ind();
         try self.write("private static void _cdrWriteFixed(java.nio.ByteBuffer _buf, int _d, int _s, double _v) {\n");
         try self.ind();
@@ -2633,34 +2662,25 @@ const Generator = struct {
         try self.print("{s}if ({s} >= 0) _buf.putInt({s}, _buf.position() - {s} - 4); }}\n", .{ extra, n, n, n });
     }
 
-    fn openKeyReadWindow(self: *Generator, needed: bool, extra: []const u8) !?usize {
-        if (!self.wire_key or !needed) {
-            try self.emitSkipCollectionDheader(needed, extra);
-            return null;
-        }
+    fn openCollectionReadWindow(self: *Generator, needed: bool, extra: []const u8) !?usize {
+        if (!needed) return null;
         const id = self.reader_window_id;
         self.reader_window_id += 1;
         try self.ind();
-        try self.print("{s}{{ int _keyLimit_{d} = _buf.limit(), _keyEnd_{d} = -1;\n", .{ extra, id, id });
+        try self.print("{s}{{ int _collectionLimit_{d} = _buf.limit(), _collectionEnd_{d} = -1;\n", .{ extra, id, id });
         try self.ind();
-        try self.print("{s}if (_xcdrVersion == 2) {{ _cdrAlign(_buf, _cdrBase, 4); int _size = _buf.getInt(); if (_size < 0 || _size > _buf.remaining()) throw new java.nio.BufferUnderflowException(); _keyEnd_{d} = _buf.position() + _size; _buf.limit(_keyEnd_{d}); }}\n", .{ extra, id, id });
+        try self.print("{s}if (_xcdrVersion == 2) {{ _collectionEnd_{d} = _cdrReadFrameEnd(_buf, _cdrBase); _buf.limit(_collectionEnd_{d}); }}\n", .{ extra, id, id });
         try self.ind();
         try self.print("{s}try {{\n", .{extra});
         return id;
     }
 
-    fn closeKeyReadWindow(self: *Generator, window: ?usize, extra: []const u8) !void {
+    fn closeCollectionReadWindow(self: *Generator, window: ?usize, extra: []const u8) !void {
         const id = window orelse return;
         try self.ind();
-        try self.print("{s}}} finally {{ _buf.limit(_keyLimit_{d}); }}\n", .{ extra, id });
+        try self.print("{s}}} finally {{ _buf.limit(_collectionLimit_{d}); }}\n", .{ extra, id });
         try self.ind();
-        try self.print("{s}if (_keyEnd_{d} >= 0) _buf.position(_keyEnd_{d}); }}\n", .{ extra, id, id });
-    }
-
-    fn emitSkipCollectionDheader(self: *Generator, needed: bool, extra: []const u8) !void {
-        if (!needed) return;
-        try self.ind();
-        try self.print("{s}if (_xcdrVersion == 2) {{ _cdrAlign(_buf, _cdrBase, 4); _buf.getInt(); }}\n", .{extra});
+        try self.print("{s}if (_collectionEnd_{d} >= 0) _buf.position(_collectionEnd_{d}); }}\n", .{ extra, id, id });
     }
 
     fn emitSkipArray(
@@ -2670,8 +2690,9 @@ const Generator = struct {
         extra: []const u8,
         depth: usize,
     ) anyerror!void {
-        if (depth == 0) try self.emitSkipCollectionDheader(!cdr_skip.isPrimitiveElement(cdr_skip.arrayInnermost(elem_tr)), extra);
+        const window = if (depth == 0) try self.openCollectionReadWindow(!cdr_skip.isPrimitiveElement(cdr_skip.arrayInnermost(elem_tr)), extra) else null;
         try self.emitSkipArrayDims(elem_tr, dims, extra, depth);
+        try self.closeCollectionReadWindow(window, extra);
     }
 
     fn emitSkipArrayDims(
@@ -2727,9 +2748,10 @@ const Generator = struct {
                 defer self.alloc.free(n);
                 const i = try self.collName("_i");
                 defer self.alloc.free(i);
-                try self.emitSkipCollectionDheader(!cdr_skip.isPrimitiveElement(seq.element.*), extra);
+                const window = try self.openCollectionReadWindow(!cdr_skip.isPrimitiveElement(seq.element.*), extra);
                 try self.ind();
-                try self.print("{s}{{ _cdrAlign(_buf, _cdrBase, 4); int {s} = _buf.getInt();\n", .{ extra, n });
+                try self.print("{s}{{\n", .{extra});
+                try self.emitCollectionCount(n, seq.bound, extra);
                 try self.ind();
                 try self.print("{s}  for (int {s} = 0; {s} < {s}; {s}++) {{\n", .{ extra, i, i, n, i });
                 const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
@@ -2741,15 +2763,17 @@ const Generator = struct {
                 try self.print("{s}  }}\n", .{extra});
                 try self.ind();
                 try self.print("{s}}}\n", .{extra});
+                try self.closeCollectionReadWindow(window, extra);
             },
             .map => |m| {
                 const n = try self.collName("_n");
                 defer self.alloc.free(n);
                 const i = try self.collName("_i");
                 defer self.alloc.free(i);
-                try self.emitSkipCollectionDheader(!(cdr_skip.isPrimitiveElement(m.key.*) and cdr_skip.isPrimitiveElement(m.value.*)), extra);
+                const window = try self.openCollectionReadWindow(!(cdr_skip.isPrimitiveElement(m.key.*) and cdr_skip.isPrimitiveElement(m.value.*)), extra);
                 try self.ind();
-                try self.print("{s}{{ _cdrAlign(_buf, _cdrBase, 4); int {s} = _buf.getInt();\n", .{ extra, n });
+                try self.print("{s}{{\n", .{extra});
+                try self.emitCollectionCount(n, m.bound, extra);
                 try self.ind();
                 try self.print("{s}  for (int {s} = 0; {s} < {s}; {s}++) {{\n", .{ extra, i, i, n, i });
                 const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
@@ -2762,6 +2786,7 @@ const Generator = struct {
                 try self.print("{s}  }}\n", .{extra});
                 try self.ind();
                 try self.print("{s}}}\n", .{extra});
+                try self.closeCollectionReadWindow(window, extra);
             },
             .named => |td| switch (td) {
                 .enum_ => |e| {
@@ -3024,20 +3049,16 @@ const Generator = struct {
                 const i_var = try std.fmt.allocPrint(self.alloc, "_i_{s}", .{safe_name});
                 defer self.alloc.free(i_var);
 
-                const key_window = try self.openKeyReadWindow(!cdr_skip.isPrimitiveElement(seq.element.*), extra);
-                try self.ind();
-                try self.print(
-                    "{s}_cdrAlign(_buf, _cdrBase, 4); int {s} = _buf.getInt();\n",
-                    .{ extra, n_var },
-                );
+                const collection_window = try self.openCollectionReadWindow(!cdr_skip.isPrimitiveElement(seq.element.*), extra);
+                try self.emitCollectionCount(n_var, seq.bound, extra);
 
                 // Determine the element type for the new ArrayList
                 const list_elem = try self.typeRefToJavaElem(seq.element.*);
                 defer self.alloc.free(list_elem);
                 try self.ind();
                 try self.print(
-                    "{s}{s} = new java.util.ArrayList<>({s});\n",
-                    .{ extra, out_expr, n_var },
+                    "{s}{s} = new java.util.ArrayList<>();\n",
+                    .{ extra, out_expr },
                 );
                 try self.ind();
                 try self.print(
@@ -3051,7 +3072,7 @@ const Generator = struct {
                 self.coll_depth -= 1;
                 try self.ind();
                 try self.print("{s}}}\n", .{extra});
-                try self.closeKeyReadWindow(key_window, extra);
+                try self.closeCollectionReadWindow(collection_window, extra);
             },
             .named => |td| switch (td) {
                 .enum_ => |e| {
@@ -3118,11 +3139,10 @@ const Generator = struct {
                 defer self.alloc.free(key_elem);
                 const val_elem = try self.typeRefToJavaElem(m.value.*);
                 defer self.alloc.free(val_elem);
-                try self.emitSkipCollectionDheader(!(cdr_skip.isPrimitiveElement(m.key.*) and cdr_skip.isPrimitiveElement(m.value.*)), extra);
+                const window = try self.openCollectionReadWindow(!(cdr_skip.isPrimitiveElement(m.key.*) and cdr_skip.isPrimitiveElement(m.value.*)), extra);
+                try self.emitCollectionCount(n_var, m.bound, extra);
                 try self.ind();
-                try self.print("{s}_cdrAlign(_buf, _cdrBase, 4); int {s} = _buf.getInt();\n", .{ extra, n_var });
-                try self.ind();
-                try self.print("{s}{s} = new java.util.LinkedHashMap<>({s});\n", .{ extra, out_expr, n_var });
+                try self.print("{s}{s} = new java.util.LinkedHashMap<>();\n", .{ extra, out_expr });
                 try self.ind();
                 try self.print("{s}for (int {s} = 0; {s} < {s}; {s}++) {{\n", .{ extra, i_var, i_var, n_var, i_var });
                 const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
@@ -3137,6 +3157,7 @@ const Generator = struct {
                 try self.print("{s}{s}.put({s}, {s});\n", .{ inner, out_expr, k_var, v_var });
                 try self.ind();
                 try self.print("{s}}}\n", .{extra});
+                try self.closeCollectionReadWindow(window, extra);
             },
         }
     }
@@ -3278,9 +3299,9 @@ const Generator = struct {
         extra: []const u8,
         depth: usize,
     ) anyerror!void {
-        const key_window = if (depth == 0) try self.openKeyReadWindow(!cdr_skip.isPrimitiveElement(cdr_skip.arrayInnermost(elem_tr)), extra) else null;
+        const collection_window = if (depth == 0) try self.openCollectionReadWindow(!cdr_skip.isPrimitiveElement(cdr_skip.arrayInnermost(elem_tr)), extra) else null;
         try self.emitDeserializeArrayDims(elem_tr, base_access, dims, extra, depth);
-        try self.closeKeyReadWindow(key_window, extra);
+        try self.closeCollectionReadWindow(collection_window, extra);
     }
 
     fn emitDeserializeArrayDims(
@@ -8998,6 +9019,7 @@ fn generateCdrUtils(
     try gen.write("    }\n");
     try gen.emitStringHelpers("public");
     try gen.emitFrameHelpers("public");
+    try gen.emitCollectionHelpers("public");
     try gen.emitOptionalHelpers("public");
     try gen.write("    public static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf) { return _cdrComputeKeyHash(_buf, false); }\n");
     try gen.write("    public static byte[] _cdrComputeKeyHash(java.nio.ByteBuffer _buf, boolean _forceMd5) {\n");

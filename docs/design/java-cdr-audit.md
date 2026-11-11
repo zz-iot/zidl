@@ -243,3 +243,6 @@ The next correctness slice bounds appendable struct reads and length-based skips
 
 [Mutable member and union bounds](java-cdr-member-bounds.md) extends checked
 windows to ordinary mutable structs and union decoding.
+
+[Collection bounds and allocation](java-cdr-collection-bounds.md) extends checked
+windows to collection reads/skips and removes eager allocation from wire counts.

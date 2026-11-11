@@ -163,8 +163,8 @@ public class Sample implements java.io.Serializable {
         _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _out.f64_val = _buf.getDouble();
         _out.str = _cdrReadString(_buf, _cdrBase);
         _out.bstr = _cdrReadString(_buf, _cdrBase);
-        _cdrAlign(_buf, _cdrBase, 4); int _n__out_nums = _buf.getInt();
-        _out.nums = new java.util.ArrayList<>(_n__out_nums);
+        int _n__out_nums = _cdrReadCount(_buf, _cdrBase, 2147483647);
+        _out.nums = new java.util.ArrayList<>();
         for (int _i__out_nums = 0; _i__out_nums < _n__out_nums; _i__out_nums++) {
             _cdrAlign(_buf, _cdrBase, 4); _out.nums.add(_buf.getInt());
         }
@@ -203,7 +203,8 @@ public class Sample implements java.io.Serializable {
         _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _buf.getLong();
         _cdrSkipString(_buf, _cdrBase);
         _cdrSkipString(_buf, _cdrBase);
-        { _cdrAlign(_buf, _cdrBase, 4); int _n = _buf.getInt();
+        {
+        int _n = _cdrReadCount(_buf, _cdrBase, 2147483647);
           for (int _i = 0; _i < _n; _i++) {
             _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
           }
@@ -371,13 +372,14 @@ public class Sample implements java.io.Serializable {
             _cdrSkipString(_buf, _cdrBase);
         }
         if ((_want & (1L << 13)) != 0) {
-            _cdrAlign(_buf, _cdrBase, 4); int _n__out_nums = _buf.getInt();
-            _out.nums = new java.util.ArrayList<>(_n__out_nums);
+            int _n__out_nums = _cdrReadCount(_buf, _cdrBase, 2147483647);
+            _out.nums = new java.util.ArrayList<>();
             for (int _i__out_nums = 0; _i__out_nums < _n__out_nums; _i__out_nums++) {
                 _cdrAlign(_buf, _cdrBase, 4); _out.nums.add(_buf.getInt());
             }
         } else {
-            { _cdrAlign(_buf, _cdrBase, 4); int _n = _buf.getInt();
+            {
+            int _n = _cdrReadCount(_buf, _cdrBase, 2147483647);
               for (int _i = 0; _i < _n; _i++) {
                 _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
               }

@@ -110,6 +110,16 @@ public class Types {
         if (_size > _buf.remaining()) throw new java.nio.BufferUnderflowException();
         return _buf.position() + (int)_size;
     }
+    private static int _cdrReadCount(java.nio.ByteBuffer _buf, int _cdrBase, int _bound) {
+        long _offset = (long)_buf.position() - _cdrBase;
+        if (_offset < 0) throw new IllegalArgumentException("invalid CDR base");
+        int _pad = (int)((4 - _offset % 4) % 4);
+        if (_buf.remaining() < _pad || _buf.remaining() - _pad < 4) throw new java.nio.BufferUnderflowException();
+        _buf.position(_buf.position() + _pad);
+        long _count = Integer.toUnsignedLong(_buf.getInt());
+        if (_count > _bound) throw new IllegalArgumentException("CDR collection count exceeds Java or IDL bound");
+        return (int)_count;
+    }
     private static void _cdrWriteFixed(java.nio.ByteBuffer _buf, int _d, int _s, double _v) {
         int _n = (_d / 2) + 1; int _n2 = _n * 2; int _pad = _n2 - _d - 1;
         boolean _neg = _v < 0.0;
@@ -395,8 +405,8 @@ public class Types {
             _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _out.f64_val = _buf.getDouble();
             _out.str = _cdrReadString(_buf, _cdrBase);
             _out.bstr = _cdrReadString(_buf, _cdrBase);
-            _cdrAlign(_buf, _cdrBase, 4); int _n__out_nums = _buf.getInt();
-            _out.nums = new java.util.ArrayList<>(_n__out_nums);
+            int _n__out_nums = _cdrReadCount(_buf, _cdrBase, 2147483647);
+            _out.nums = new java.util.ArrayList<>();
             for (int _i__out_nums = 0; _i__out_nums < _n__out_nums; _i__out_nums++) {
                 _cdrAlign(_buf, _cdrBase, 4); _out.nums.add(_buf.getInt());
             }
@@ -435,7 +445,8 @@ public class Types {
             _cdrAlign(_buf, _cdrBase, _xcdrVersion == 1 ? 8 : 4); _buf.getLong();
             _cdrSkipString(_buf, _cdrBase);
             _cdrSkipString(_buf, _cdrBase);
-            { _cdrAlign(_buf, _cdrBase, 4); int _n = _buf.getInt();
+            {
+            int _n = _cdrReadCount(_buf, _cdrBase, 2147483647);
               for (int _i = 0; _i < _n; _i++) {
                 _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
               }
@@ -603,13 +614,14 @@ public class Types {
                 _cdrSkipString(_buf, _cdrBase);
             }
             if ((_want & (1L << 13)) != 0) {
-                _cdrAlign(_buf, _cdrBase, 4); int _n__out_nums = _buf.getInt();
-                _out.nums = new java.util.ArrayList<>(_n__out_nums);
+                int _n__out_nums = _cdrReadCount(_buf, _cdrBase, 2147483647);
+                _out.nums = new java.util.ArrayList<>();
                 for (int _i__out_nums = 0; _i__out_nums < _n__out_nums; _i__out_nums++) {
                     _cdrAlign(_buf, _cdrBase, 4); _out.nums.add(_buf.getInt());
                 }
             } else {
-                { _cdrAlign(_buf, _cdrBase, 4); int _n = _buf.getInt();
+                {
+                int _n = _cdrReadCount(_buf, _cdrBase, 2147483647);
                   for (int _i = 0; _i < _n; _i++) {
                     _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
                   }

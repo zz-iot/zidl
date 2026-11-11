@@ -72,6 +72,16 @@ public class TypesCdrUtils {
         if (_size > _buf.remaining()) throw new java.nio.BufferUnderflowException();
         return _buf.position() + (int)_size;
     }
+    public static int _cdrReadCount(java.nio.ByteBuffer _buf, int _cdrBase, int _bound) {
+        long _offset = (long)_buf.position() - _cdrBase;
+        if (_offset < 0) throw new IllegalArgumentException("invalid CDR base");
+        int _pad = (int)((4 - _offset % 4) % 4);
+        if (_buf.remaining() < _pad || _buf.remaining() - _pad < 4) throw new java.nio.BufferUnderflowException();
+        _buf.position(_buf.position() + _pad);
+        long _count = Integer.toUnsignedLong(_buf.getInt());
+        if (_count > _bound) throw new IllegalArgumentException("CDR collection count exceeds Java or IDL bound");
+        return (int)_count;
+    }
     public static int _cdrBeginOptionalWrite(java.nio.ByteBuffer b, int base, int version, int id, boolean mu, boolean present) {
         if (version == 2) { b.put(present ? (byte)1 : (byte)0); return -1; }
         _cdrAlign(b, base, 4); b.putShort((short)0x7f01); b.putShort((short)8);

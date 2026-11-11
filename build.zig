@@ -112,13 +112,14 @@ pub fn build(b: *std.Build) void {
                 const classes = compile_java.addOutputDirectoryArg("classes");
                 if (split) {
                     compile_java.addFileArg(generated.path(b, "ValidationCdrUtils.java"));
-                    for ([_][]const u8{ "Narrow", "App", "AppText", "Parent", "Mut", "MutText", "AppChoice", "MutChoice" }) |name| {
+                    for ([_][]const u8{ "Narrow", "App", "AppText", "Parent", "Mut", "MutText", "AppChoice", "MutChoice", "Numbers", "Words", "WordArray", "Dict", "Bounded", "BoundedMap", "Empty", "EmptyValues", "NestedValues" }) |name| {
                         compile_java.addFileArg(generated.path(b, b.fmt("{s}.java", .{name})));
                     }
                 } else compile_java.addFileArg(generated.path(b, "Validation.java"));
                 compile_java.addFileArg(b.path("test/integration/java_cdr_validation/ValidationTest.java"));
                 compile_java.addFileArg(b.path("test/integration/java_cdr_validation/FrameTest.java"));
                 compile_java.addFileArg(b.path("test/integration/java_cdr_validation/MemberTest.java"));
+                compile_java.addFileArg(b.path("test/integration/java_cdr_validation/CollectionTest.java"));
                 const run = b.addSystemCommand(&.{ java, "-Xmx32m", "-cp" });
                 run.addDirectoryArg(classes);
                 run.addArgs(&.{ "ValidationTest", if (split) "javavalidation." else "Validation$JavaValidation$" });
@@ -131,6 +132,10 @@ pub fn build(b: *std.Build) void {
                 members.addDirectoryArg(classes);
                 members.addArgs(&.{ "MemberTest", if (split) "javavalidation." else "Validation$JavaValidation$" });
                 java_validation_step.dependOn(&members.step);
+                const collections = b.addSystemCommand(&.{ java, "-Xmx32m", "-cp" });
+                collections.addDirectoryArg(classes);
+                collections.addArgs(&.{ "CollectionTest", if (split) "javavalidation." else "Validation$JavaValidation$" });
+                java_validation_step.dependOn(&collections.step);
             }
         }
     }

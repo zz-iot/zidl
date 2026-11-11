@@ -126,3 +126,6 @@ remain follow-up work.
 
 The [mutable member and union checkpoint](java-cdr-member-bounds.md) extends
 bounded reading to mutable structs and unions and appendable unions.
+
+The [collection checkpoint](java-cdr-collection-bounds.md) bounds collection
+readers/skips and validates counts before incremental allocation.
