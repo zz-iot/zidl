@@ -2,10 +2,7 @@
 package zidl.generated;
 
 public class TypesCdrUtils {
-    public static void _cdrAlignKey(java.nio.ByteBuffer _buf, int _cdrBase, int _align) {
-        int _padding = (_align - (_buf.position() - _cdrBase) % _align) % _align;
-        for (int _i = 0; _i < _padding; _i++) _buf.put((byte)0);
-    }
+    public static void _cdrAlignKey(java.nio.ByteBuffer _buf, int _cdrBase, int _align) { io.zidl.cdr.Cdr.alignKey(_buf, _cdrBase, _align); }
     public static void _cdrWriteWstring(java.nio.ByteBuffer _buf, int _cdrBase, String _s) {
         if (_s.length() > Integer.MAX_VALUE / 2) throw new IllegalArgumentException("wide string length overflow");
         _cdrAlignKey(_buf, _cdrBase, 4); _buf.putInt(_s.length() * 2);
@@ -27,42 +24,12 @@ public class TypesCdrUtils {
     public static void _cdrSkipWstring(java.nio.ByteBuffer _buf, int _cdrBase) {
         int _bytes = _cdrWstringBytes(_buf, _cdrBase); _buf.position(_buf.position() + _bytes);
     }
-    public static void _cdrAlign(java.nio.ByteBuffer _buf, int _cdrBase, int _align) {
-        if (_align <= 1) return;
-        int _p = (_buf.position() - _cdrBase) % _align;
-        if (_p != 0) _buf.position(_buf.position() + (_align - _p));
-    }
-    public static int _cdrStringEnd(java.nio.ByteBuffer _buf, int _cdrBase) {
-        long _offset = (long)_buf.position() - _cdrBase;
-        if (_offset < 0) throw new IllegalArgumentException("invalid CDR base");
-        int _pad = (int)((4 - _offset % 4) % 4);
-        if (_buf.remaining() < _pad || _buf.remaining() - _pad < 4) throw new java.nio.BufferUnderflowException();
-        _buf.position(_buf.position() + _pad);
-        long _len = Integer.toUnsignedLong(_buf.getInt());
-        if (_len == 0) throw new IllegalArgumentException("zero CDR string length");
-        if (_len > _buf.remaining()) throw new java.nio.BufferUnderflowException();
-        int _end = _buf.position() + (int)_len;
-        if (_buf.get(_end - 1) != 0) throw new IllegalArgumentException("missing CDR string terminator");
-        return _end;
-    }
-    public static void _cdrWriteString(java.nio.ByteBuffer _buf, int _cdrBase, String _s) {
-        long _offset = (long)_buf.position() - _cdrBase;
-        if (_offset < 0) throw new IllegalArgumentException("invalid CDR base");
-        int _pad = (int)((4 - _offset % 4) % 4);
-        byte[] _bytes = _s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        if ((long)_pad + 4 + _bytes.length + 1 > _buf.remaining()) throw new java.nio.BufferOverflowException();
-        _buf.position(_buf.position() + _pad);
-        _buf.putInt(_bytes.length + 1); _buf.put(_bytes); _buf.put((byte)0);
-    }
-    public static String _cdrReadString(java.nio.ByteBuffer _buf, int _cdrBase) {
-        int _end = _cdrStringEnd(_buf, _cdrBase);
-        byte[] _bytes = new byte[_end - _buf.position() - 1];
-        _buf.get(_bytes); _buf.position(_end);
-        return new String(_bytes, java.nio.charset.StandardCharsets.UTF_8);
-    }
-    public static void _cdrSkipString(java.nio.ByteBuffer _buf, int _cdrBase) {
-        _buf.position(_cdrStringEnd(_buf, _cdrBase));
-    }
+    static { io.zidl.cdr.Cdr.requireApi(1); }
+    public static void _cdrAlign(java.nio.ByteBuffer _buf, int _cdrBase, int _align) { io.zidl.cdr.Cdr.align(_buf, _cdrBase, _align); }
+    public static int _cdrStringEnd(java.nio.ByteBuffer _buf, int _cdrBase) { return io.zidl.cdr.Cdr.stringEnd(_buf, _cdrBase); }
+    public static void _cdrWriteString(java.nio.ByteBuffer _buf, int _cdrBase, String _s) { io.zidl.cdr.Cdr.writeString(_buf, _cdrBase, _s); }
+    public static String _cdrReadString(java.nio.ByteBuffer _buf, int _cdrBase) { return io.zidl.cdr.Cdr.readString(_buf, _cdrBase); }
+    public static void _cdrSkipString(java.nio.ByteBuffer _buf, int _cdrBase) { io.zidl.cdr.Cdr.skipString(_buf, _cdrBase); }
     public static int _cdrReadFrameEnd(java.nio.ByteBuffer _buf, int _cdrBase) {
         long _offset = (long)_buf.position() - _cdrBase;
         if (_offset < 0) throw new IllegalArgumentException("invalid CDR base");

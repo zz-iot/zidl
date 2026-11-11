@@ -2,10 +2,10 @@
 
 Date: 2026-11-02
 
-Status: audit and executable baseline completed; runtime extraction, API and
-delivery implementation pending. Narrow-string validation is the first correctness
-slice; see [its buffer and error contract](java-cdr-string-validation.md).
-This document describes planned behavior, not an already available package.
+Status: first extraction implemented for alignment and narrow UTF-8 strings,
+with standalone `zidl-cdr-java` JAR/source builds and runtime API 1. Other helper
+families and zzdds Java delivery remain follow-up work. See the
+[first extraction checkpoint](java-cdr-extraction-1.md).
 See the [Java CDR audit](java-cdr-audit.md) for helper inventory, observed buffer
 semantics, correctness gaps, size/performance baseline and first-slice proposal.
 
@@ -27,8 +27,8 @@ libraries; zzdds Java integration continues to use its native DDS bridge.
 
 ## Current implementation and historical rationale
 
-The codec is maintained primarily as emitted Java source in
-`src/backend/java.zig`. Generated output uses `java.nio.ByteBuffer`, inline CDR
+Schema traversal and remaining helper families are maintained as emitted Java source in
+`src/backend/java.zig`. Generated output uses `java.nio.ByteBuffer`, forwarding/shared and inline CDR
 helpers and per-type methods. It is not implemented in a `zidl_jni` codec library.
 Helpers can repeat across output files, particularly with split generation.
 

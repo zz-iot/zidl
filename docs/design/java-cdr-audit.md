@@ -254,3 +254,7 @@ Additional split compilation follow-up: `--generate-interfaces` interface stubs 
 qualify their interface through the single-file outer class (for example,
 `Types.Greeter`), so those optional stubs do not compile with only split types.
 This is separate from codec helper extraction.
+
+[First shared runtime extraction](java-cdr-extraction-1.md) moves alignment and
+narrow UTF-8 strings into `packages/zidl-cdr-java` with generated forwarding
+helpers, runtime API 1, JAR/source builds and explicit dependency delivery.

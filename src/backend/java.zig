@@ -243,13 +243,7 @@ const Generator = struct {
 
     fn emitKeyAlignmentHelper(self: *Generator, comptime visibility: []const u8) !void {
         try self.ind();
-        try self.write(visibility ++ " static void _cdrAlignKey(java.nio.ByteBuffer _buf, int _cdrBase, int _align) {\n");
-        try self.ind();
-        try self.write("    int _padding = (_align - (_buf.position() - _cdrBase) % _align) % _align;\n");
-        try self.ind();
-        try self.write("    for (int _i = 0; _i < _padding; _i++) _buf.put((byte)0);\n");
-        try self.ind();
-        try self.write("}\n");
+        try self.write(visibility ++ " static void _cdrAlignKey(java.nio.ByteBuffer _buf, int _cdrBase, int _align) { io.zidl.cdr.Cdr.alignKey(_buf, _cdrBase, _align); }\n");
     }
 
     /// Emit private static CDR helper methods into the outer class body.
@@ -308,67 +302,13 @@ const Generator = struct {
 
     fn emitStringHelpers(self: *Generator, visibility: []const u8) !void {
         try self.ind();
-        try self.print("{s} static int _cdrStringEnd(java.nio.ByteBuffer _buf, int _cdrBase) {{\n", .{visibility});
+        try self.print("{s} static int _cdrStringEnd(java.nio.ByteBuffer _buf, int _cdrBase) {{ return io.zidl.cdr.Cdr.stringEnd(_buf, _cdrBase); }}\n", .{visibility});
         try self.ind();
-        try self.write("    long _offset = (long)_buf.position() - _cdrBase;\n");
+        try self.print("{s} static void _cdrWriteString(java.nio.ByteBuffer _buf, int _cdrBase, String _s) {{ io.zidl.cdr.Cdr.writeString(_buf, _cdrBase, _s); }}\n", .{visibility});
         try self.ind();
-        try self.write("    if (_offset < 0) throw new IllegalArgumentException(\"invalid CDR base\");\n");
+        try self.print("{s} static String _cdrReadString(java.nio.ByteBuffer _buf, int _cdrBase) {{ return io.zidl.cdr.Cdr.readString(_buf, _cdrBase); }}\n", .{visibility});
         try self.ind();
-        try self.write("    int _pad = (int)((4 - _offset % 4) % 4);\n");
-        try self.ind();
-        try self.write("    if (_buf.remaining() < _pad || _buf.remaining() - _pad < 4) throw new java.nio.BufferUnderflowException();\n");
-        try self.ind();
-        try self.write("    _buf.position(_buf.position() + _pad);\n");
-        try self.ind();
-        try self.write("    long _len = Integer.toUnsignedLong(_buf.getInt());\n");
-        try self.ind();
-        try self.write("    if (_len == 0) throw new IllegalArgumentException(\"zero CDR string length\");\n");
-        try self.ind();
-        try self.write("    if (_len > _buf.remaining()) throw new java.nio.BufferUnderflowException();\n");
-        try self.ind();
-        try self.write("    int _end = _buf.position() + (int)_len;\n");
-        try self.ind();
-        try self.write("    if (_buf.get(_end - 1) != 0) throw new IllegalArgumentException(\"missing CDR string terminator\");\n");
-        try self.ind();
-        try self.write("    return _end;\n");
-        try self.ind();
-        try self.write("}\n");
-        try self.ind();
-        try self.print("{s} static void _cdrWriteString(java.nio.ByteBuffer _buf, int _cdrBase, String _s) {{\n", .{visibility});
-        try self.ind();
-        try self.write("    long _offset = (long)_buf.position() - _cdrBase;\n");
-        try self.ind();
-        try self.write("    if (_offset < 0) throw new IllegalArgumentException(\"invalid CDR base\");\n");
-        try self.ind();
-        try self.write("    int _pad = (int)((4 - _offset % 4) % 4);\n");
-        try self.ind();
-        try self.write("    byte[] _bytes = _s.getBytes(java.nio.charset.StandardCharsets.UTF_8);\n");
-        try self.ind();
-        try self.write("    if ((long)_pad + 4 + _bytes.length + 1 > _buf.remaining()) throw new java.nio.BufferOverflowException();\n");
-        try self.ind();
-        try self.write("    _buf.position(_buf.position() + _pad);\n");
-        try self.ind();
-        try self.write("    _buf.putInt(_bytes.length + 1); _buf.put(_bytes); _buf.put((byte)0);\n");
-        try self.ind();
-        try self.write("}\n");
-        try self.ind();
-        try self.print("{s} static String _cdrReadString(java.nio.ByteBuffer _buf, int _cdrBase) {{\n", .{visibility});
-        try self.ind();
-        try self.write("    int _end = _cdrStringEnd(_buf, _cdrBase);\n");
-        try self.ind();
-        try self.write("    byte[] _bytes = new byte[_end - _buf.position() - 1];\n");
-        try self.ind();
-        try self.write("    _buf.get(_bytes); _buf.position(_end);\n");
-        try self.ind();
-        try self.write("    return new String(_bytes, java.nio.charset.StandardCharsets.UTF_8);\n");
-        try self.ind();
-        try self.write("}\n");
-        try self.ind();
-        try self.print("{s} static void _cdrSkipString(java.nio.ByteBuffer _buf, int _cdrBase) {{\n", .{visibility});
-        try self.ind();
-        try self.write("    _buf.position(_cdrStringEnd(_buf, _cdrBase));\n");
-        try self.ind();
-        try self.write("}\n");
+        try self.print("{s} static void _cdrSkipString(java.nio.ByteBuffer _buf, int _cdrBase) {{ io.zidl.cdr.Cdr.skipString(_buf, _cdrBase); }}\n", .{visibility});
     }
 
     fn emitCollectionHelpers(self: *Generator, visibility: []const u8) !void {
@@ -490,15 +430,9 @@ const Generator = struct {
         try self.emitKeyAlignmentHelper("private");
         try self.emitWideStringHelpers("private");
         try self.ind();
-        try self.write("private static void _cdrAlign(java.nio.ByteBuffer _buf, int _cdrBase, int _align) {\n");
+        try self.write("static { io.zidl.cdr.Cdr.requireApi(1); }\n");
         try self.ind();
-        try self.write("    if (_align <= 1) return;\n");
-        try self.ind();
-        try self.write("    int _p = (_buf.position() - _cdrBase) % _align;\n");
-        try self.ind();
-        try self.write("    if (_p != 0) _buf.position(_buf.position() + (_align - _p));\n");
-        try self.ind();
-        try self.write("}\n");
+        try self.write("private static void _cdrAlign(java.nio.ByteBuffer _buf, int _cdrBase, int _align) { io.zidl.cdr.Cdr.align(_buf, _cdrBase, _align); }\n");
         try self.emitStringHelpers("private");
         try self.emitFrameHelpers("private");
         try self.emitCollectionHelpers("private");
@@ -9017,12 +8951,8 @@ fn generateCdrUtils(
     gen.depth = 1;
     try gen.emitKeyAlignmentHelper("public");
     try gen.emitWideStringHelpers("public");
-    // Emit CDR helpers as public static (not private static).
-    try gen.write("    public static void _cdrAlign(java.nio.ByteBuffer _buf, int _cdrBase, int _align) {\n");
-    try gen.write("        if (_align <= 1) return;\n");
-    try gen.write("        int _p = (_buf.position() - _cdrBase) % _align;\n");
-    try gen.write("        if (_p != 0) _buf.position(_buf.position() + (_align - _p));\n");
-    try gen.write("    }\n");
+    try gen.write("    static { io.zidl.cdr.Cdr.requireApi(1); }\n");
+    try gen.write("    public static void _cdrAlign(java.nio.ByteBuffer _buf, int _cdrBase, int _align) { io.zidl.cdr.Cdr.align(_buf, _cdrBase, _align); }\n");
     try gen.emitStringHelpers("public");
     try gen.emitFrameHelpers("public");
     try gen.emitCollectionHelpers("public");

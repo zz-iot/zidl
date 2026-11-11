@@ -3,11 +3,13 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import platform
 import re
 import subprocess
 import tempfile
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / 'test/java-cdr-baseline'
@@ -48,7 +50,7 @@ def helper_blocks(source):
     return blocks
 
 
-def measure(zidl, directory, mode, flags):
+def measure(zidl, directory, mode, flags, runtime=None):
     generated = directory / mode
     generated.mkdir()
     run([zidl, '-b', 'java', '--java-package', 'javaaudit.' + mode,
@@ -63,7 +65,9 @@ def measure(zidl, directory, mode, flags):
         return data
     classes = generated / 'classes'
     classes.mkdir()
-    run(['javac', '--release', '8', '-Xlint:-options', '-Xlint:unchecked', '-Werror', '-d', classes, *files])
+    runtime_cp = ['-cp', runtime] if runtime and '--no-typesupport' not in flags else []
+    run(['javac', '--release', '8', '-Xlint:-options', '-Xlint:unchecked', '-Werror', *runtime_cp, '-d', classes, *files])
+    classpath = str(classes) + (os.pathsep + str(runtime) if runtime else '')
     compiled = list(classes.rglob('*.class'))
     data.update(classes=len(compiled), class_bytes=sum(p.stat().st_size for p in compiled))
     if '--no-typesupport' not in flags:
@@ -72,13 +76,13 @@ def measure(zidl, directory, mode, flags):
         imports = '\n'.join(f'import {prefix}.{name};' for name in ['Scalar', 'Text', 'Frame', 'Tagged'])
         benchmark = generated / 'Benchmark.java'
         benchmark.write_text(template.replace('@IMPORTS@', imports))
-        run(['javac', '--release', '8', '-Xlint:-options', '-cp', classes, '-d', classes, benchmark])
+        run(['javac', '--release', '8', '-Xlint:-options', '-cp', classpath, '-d', classes, benchmark])
         probe = generated / 'Probe.java'
         probe.write_text((FIXTURE / 'Probe.java.in').read_text())
         run(['javac', '--release', '8', '-Xlint:-options', '-d', classes, probe])
         helpers = 'javaaudit.' + mode + ('.ModelCdrUtils' if '--split-files' in flags else '.Model')
         data['observations'] = [json.loads(line) for line in
-            run(['java', '-cp', classes, 'Probe', helpers, prefix + ('.Window' if '--split-files' in flags else '$Window')]).splitlines()]
+            run(['java', '-cp', classpath, 'Probe', helpers, prefix + ('.Window' if '--split-files' in flags else '$Window')]).splitlines()]
 
     return data
 
@@ -87,6 +91,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--zidl', required=True, type=Path)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--runtime-jar', type=Path)
     parser.add_argument('--warmup', type=int, default=200_000)
     parser.add_argument('--iterations', type=int, default=500_000)
     parser.add_argument('--forks', type=int, default=3)
@@ -94,11 +99,13 @@ def main():
     if min(args.warmup, args.iterations, args.forks) <= 0:
         parser.error('warmup, iterations and forks must be positive')
     zidl = args.zidl.resolve()
+    runtime = args.runtime_jar.resolve() if args.runtime_jar else None
     args.output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='java-cdr-', dir=args.output) as temp:
         directory = Path(temp)
         report = {'generator': run([zidl, '--version']).strip(),
                   'revision': run(['git', '-C', ROOT, 'rev-parse', 'HEAD']).strip(),
+                  'working_tree_modified': bool(run(['git', '-C', ROOT, 'status', '--porcelain', '--', 'src/backend/java.zig', 'packages/zidl-cdr-java']).strip()),
                   'java': subprocess.run(['java', '-version'], text=True, capture_output=True,
                                          check=True, timeout=30).stderr.strip(),
                   'platform': platform.platform(), 'warmup': args.warmup,
@@ -113,13 +120,13 @@ def main():
                  'single_wrappers': ['--generate-zzdds-wrappers'],
                  'split_wrappers': ['--split-files', '--generate-zzdds-wrappers']}
         for mode, flags in modes.items():
-            report['sizes'][mode] = measure(zidl, directory, mode, flags)
+            report['sizes'][mode] = measure(zidl, directory, mode, flags, runtime)
         for fork in range(args.forks):
             for mode in ['single', 'split']:
                 for shape, versions in [('scalar', [1, 2]), ('frame', [1, 2]), ('tagged', [2]), ('keys', [2])]:
                     for version in versions:
                         result = json.loads(run(['java', '-Xms128m', '-Xmx128m', '-cp',
-                            directory / mode / 'classes', 'Benchmark', shape, version,
+                            str(directory / mode / 'classes') + (os.pathsep + str(runtime) if runtime else ''), 'Benchmark', shape, version,
                             args.warmup, args.iterations]))
                         result.update(mode=mode, fork=fork)
                         report['timings'].append(result)
@@ -134,8 +141,15 @@ def main():
             source.write_text(idl)
             run([zidl, '-b', 'java', '--split-files', *flags, '-o', probe, source])
             result = subprocess.run(['javac', '--release', '8', '-Xlint:-options', '-d', str(probe / 'classes'),
-                *map(str, sorted(probe.glob('*.java')))], text=True, capture_output=True, timeout=120)
+                *(['-cp', str(runtime)] if runtime else []), *map(str, sorted(probe.glob('*.java')))], text=True, capture_output=True, timeout=120)
             report['compilation_probes'][name] = {'returncode': result.returncode, 'diagnostic': result.stderr.replace(str(directory), '<generated>')}
+        if runtime:
+            with zipfile.ZipFile(runtime) as archive:
+                runtime_classes = sum(item.file_size for item in archive.infolist() if item.filename.endswith('.class'))
+            report['runtime_jar'] = {'bytes': runtime.stat().st_size, 'class_bytes': runtime_classes, 'sha256': hashlib.sha256(runtime.read_bytes()).hexdigest()}
+            for mode, data in report['sizes'].items():
+                if data.get('class_bytes') is not None:
+                    data['application_class_bytes'] = data['class_bytes'] + (runtime_classes if 'types' not in mode else 0)
         path = args.output / 'baseline.json'
         path.write_text(json.dumps(report, indent=2) + '\n')
         print(path)

@@ -1,0 +1,728 @@
+{
+  "base_revision": "75bdc0a3de815ff21fe3b4acd2392ae7bada6ca0",
+  "comparison": "Pre-extraction output-parity generator versus uncommitted first shared-runtime extraction. Earlier correctness fixes are present in both. Timings collected during concurrent native test builds; no speed claim.",
+  "before": {
+    "generator": "zidl 0.3.29-zig.0.17.0-dev",
+    "revision": "75bdc0a3de815ff21fe3b4acd2392ae7bada6ca0",
+    "java": "openjdk version \"21.0.13\" 2026-10-20\nOpenJDK Runtime Environment (build 21.0.13+9-1-deb13u2-Debian)\nOpenJDK 64-Bit Server VM (build 21.0.13+9-1-deb13u2-Debian, mixed mode, sharing)",
+    "platform": "Linux-6.12.115+deb13.1-amd64-x86_64-with-glibc2.41",
+    "warmup": 50000,
+    "forks": 1,
+    "sizes": {
+      "single": {
+        "files": 1,
+        "source_bytes": 42866,
+        "helper_declarations": 21,
+        "helper_bytes": 9849,
+        "classes": 7,
+        "class_bytes": 31008,
+        "observations": [
+          {
+            "case": "string_zero",
+            "result": "IllegalArgumentException",
+            "position": 4,
+            "limit": 4
+          },
+          {
+            "case": "string_negative",
+            "result": "BufferUnderflowException",
+            "position": 4,
+            "limit": 4
+          },
+          {
+            "case": "string_nonzero_terminator",
+            "result": "IllegalArgumentException",
+            "position": 4,
+            "limit": 6
+          },
+          {
+            "case": "string_truncated",
+            "result": "BufferUnderflowException",
+            "position": 4,
+            "limit": 5
+          },
+          {
+            "case": "string_invalid_utf8",
+            "result": "units:fffd",
+            "position": 6,
+            "limit": 6
+          },
+          {
+            "case": "wstring_odd",
+            "result": "IllegalArgumentException",
+            "position": 4,
+            "limit": 5
+          },
+          {
+            "case": "wstring_unpaired",
+            "result": "units:d800",
+            "position": 6,
+            "limit": 6
+          },
+          {
+            "case": "wire_align",
+            "result": "7f7f7f7f",
+            "position": 4,
+            "limit": 4
+          },
+          {
+            "case": "key_align",
+            "result": "7f000000",
+            "position": 4,
+            "limit": 4
+          },
+          {
+            "case": "wire_align_readonly",
+            "result": "7f7f7f7f",
+            "position": 4,
+            "limit": 4
+          },
+          {
+            "case": "key_align_readonly",
+            "result": "ReadOnlyBufferException",
+            "position": 1,
+            "limit": 4
+          },
+          {
+            "case": "detect_two_byte_header",
+            "result": "1",
+            "position": 0,
+            "limit": 2
+          },
+          {
+            "case": "appendable_zero_body",
+            "result": "BufferUnderflowException",
+            "position": 4,
+            "limit": 8
+          },
+          {
+            "case": "optional_close_after_underflow",
+            "result": "bounded",
+            "position": 12,
+            "limit": 16
+          }
+        ]
+      },
+      "split": {
+        "files": 6,
+        "source_bytes": 41248,
+        "helper_declarations": 21,
+        "helper_bytes": 9827,
+        "classes": 7,
+        "class_bytes": 29708,
+        "observations": [
+          {
+            "case": "string_zero",
+            "result": "IllegalArgumentException",
+            "position": 4,
+            "limit": 4
+          },
+          {
+            "case": "string_negative",
+            "result": "BufferUnderflowException",
+            "position": 4,
+            "limit": 4
+          },
+          {
+            "case": "string_nonzero_terminator",
+            "result": "IllegalArgumentException",
+            "position": 4,
+            "limit": 6
+          },
+          {
+            "case": "string_truncated",
+            "result": "BufferUnderflowException",
+            "position": 4,
+            "limit": 5
+          },
+          {
+            "case": "string_invalid_utf8",
+            "result": "units:fffd",
+            "position": 6,
+            "limit": 6
+          },
+          {
+            "case": "wstring_odd",
+            "result": "IllegalArgumentException",
+            "position": 4,
+            "limit": 5
+          },
+          {
+            "case": "wstring_unpaired",
+            "result": "units:d800",
+            "position": 6,
+            "limit": 6
+          },
+          {
+            "case": "wire_align",
+            "result": "7f7f7f7f",
+            "position": 4,
+            "limit": 4
+          },
+          {
+            "case": "key_align",
+            "result": "7f000000",
+            "position": 4,
+            "limit": 4
+          },
+          {
+            "case": "wire_align_readonly",
+            "result": "7f7f7f7f",
+            "position": 4,
+            "limit": 4
+          },
+          {
+            "case": "key_align_readonly",
+            "result": "ReadOnlyBufferException",
+            "position": 1,
+            "limit": 4
+          },
+          {
+            "case": "detect_two_byte_header",
+            "result": "1",
+            "position": 0,
+            "limit": 2
+          },
+          {
+            "case": "appendable_zero_body",
+            "result": "BufferUnderflowException",
+            "position": 4,
+            "limit": 8
+          },
+          {
+            "case": "optional_close_after_underflow",
+            "result": "bounded",
+            "position": 12,
+            "limit": 16
+          }
+        ]
+      },
+      "single_types": {
+        "files": 1,
+        "source_bytes": 4619,
+        "helper_declarations": 0,
+        "helper_bytes": 0,
+        "classes": 6,
+        "class_bytes": 6558
+      },
+      "split_types": {
+        "files": 5,
+        "source_bytes": 4664,
+        "helper_declarations": 0,
+        "helper_bytes": 0,
+        "classes": 5,
+        "class_bytes": 5468
+      },
+      "single_wrappers": {
+        "files": 13,
+        "source_bytes": 135849,
+        "helper_declarations": 21,
+        "helper_bytes": 9849,
+        "classes": null
+      },
+      "split_wrappers": {
+        "files": 18,
+        "source_bytes": 133261,
+        "helper_declarations": 21,
+        "helper_bytes": 9827,
+        "classes": null
+      }
+    },
+    "timings": [
+      {
+        "shape": "scalar",
+        "version": 1,
+        "iterations": 100000,
+        "ns_per_roundtrip": 377.403,
+        "checksum": 3997592296,
+        "mode": "single",
+        "fork": 0
+      },
+      {
+        "shape": "scalar",
+        "version": 2,
+        "iterations": 100000,
+        "ns_per_roundtrip": 437.835,
+        "checksum": 3997592296,
+        "mode": "single",
+        "fork": 0
+      },
+      {
+        "shape": "frame",
+        "version": 1,
+        "iterations": 100000,
+        "ns_per_roundtrip": 5306.654,
+        "checksum": 3991892296,
+        "mode": "single",
+        "fork": 0
+      },
+      {
+        "shape": "frame",
+        "version": 2,
+        "iterations": 100000,
+        "ns_per_roundtrip": 7312.586,
+        "checksum": 3991892296,
+        "mode": "single",
+        "fork": 0
+      },
+      {
+        "shape": "tagged",
+        "version": 2,
+        "iterations": 100000,
+        "ns_per_roundtrip": 1921.434,
+        "checksum": 3994142296,
+        "mode": "single",
+        "fork": 0
+      },
+      {
+        "shape": "keys",
+        "version": 2,
+        "iterations": 100000,
+        "ns_per_roundtrip": 19371.707,
+        "checksum": 46260280,
+        "mode": "single",
+        "fork": 0
+      },
+      {
+        "shape": "scalar",
+        "version": 1,
+        "iterations": 100000,
+        "ns_per_roundtrip": 271.867,
+        "checksum": 3997592296,
+        "mode": "split",
+        "fork": 0
+      },
+      {
+        "shape": "scalar",
+        "version": 2,
+        "iterations": 100000,
+        "ns_per_roundtrip": 952.76,
+        "checksum": 3997592296,
+        "mode": "split",
+        "fork": 0
+      },
+      {
+        "shape": "frame",
+        "version": 1,
+        "iterations": 100000,
+        "ns_per_roundtrip": 9161.021,
+        "checksum": 3991892296,
+        "mode": "split",
+        "fork": 0
+      },
+      {
+        "shape": "frame",
+        "version": 2,
+        "iterations": 100000,
+        "ns_per_roundtrip": 9496.759,
+        "checksum": 3991892296,
+        "mode": "split",
+        "fork": 0
+      },
+      {
+        "shape": "tagged",
+        "version": 2,
+        "iterations": 100000,
+        "ns_per_roundtrip": 2005.748,
+        "checksum": 3994142296,
+        "mode": "split",
+        "fork": 0
+      },
+      {
+        "shape": "keys",
+        "version": 2,
+        "iterations": 100000,
+        "ns_per_roundtrip": 3565.797,
+        "checksum": 46260280,
+        "mode": "split",
+        "fork": 0
+      }
+    ],
+    "javac_target": 8,
+    "java_vm_flags": [
+      "-Xms128m",
+      "-Xmx128m"
+    ],
+    "generator_sha256": "3469b3676c825ecb733dc6637db434f600c991cc566e4b8bb3efaf35a13722e6",
+    "fixture_sha256": "06778c681dc06b6de46850a61f856b5dbda00057952c714dfa25eb1482042015",
+    "benchmark_sha256": "55bf06754f6400080bcda83968043329c79d3f34fae2735b33d31228d5e82b17",
+    "compilation_probes": {
+      "split_default_package": {
+        "returncode": 0,
+        "diagnostic": ""
+      },
+      "split_fixed": {
+        "returncode": 0,
+        "diagnostic": ""
+      }
+    },
+    "implementation_state": "Cached pre-extraction output-parity generator; verified generated zidl.generated helper package and no io.zidl.cdr references"
+  },
+  "after": {
+    "generator": "zidl 0.3.29-zig.0.17.0-dev",
+    "revision": "75bdc0a3de815ff21fe3b4acd2392ae7bada6ca0",
+    "java": "openjdk version \"21.0.13\" 2026-10-20\nOpenJDK Runtime Environment (build 21.0.13+9-1-deb13u2-Debian)\nOpenJDK 64-Bit Server VM (build 21.0.13+9-1-deb13u2-Debian, mixed mode, sharing)",
+    "platform": "Linux-6.12.115+deb13.1-amd64-x86_64-with-glibc2.41",
+    "warmup": 50000,
+    "forks": 1,
+    "sizes": {
+      "single": {
+        "files": 1,
+        "source_bytes": 41331,
+        "helper_declarations": 21,
+        "helper_bytes": 8268,
+        "classes": 7,
+        "class_bytes": 30391,
+        "observations": [
+          {
+            "case": "string_zero",
+            "result": "IllegalArgumentException",
+            "position": 4,
+            "limit": 4
+          },
+          {
+            "case": "string_negative",
+            "result": "BufferUnderflowException",
+            "position": 4,
+            "limit": 4
+          },
+          {
+            "case": "string_nonzero_terminator",
+            "result": "IllegalArgumentException",
+            "position": 4,
+            "limit": 6
+          },
+          {
+            "case": "string_truncated",
+            "result": "BufferUnderflowException",
+            "position": 4,
+            "limit": 5
+          },
+          {
+            "case": "string_invalid_utf8",
+            "result": "units:fffd",
+            "position": 6,
+            "limit": 6
+          },
+          {
+            "case": "wstring_odd",
+            "result": "IllegalArgumentException",
+            "position": 4,
+            "limit": 5
+          },
+          {
+            "case": "wstring_unpaired",
+            "result": "units:d800",
+            "position": 6,
+            "limit": 6
+          },
+          {
+            "case": "wire_align",
+            "result": "7f7f7f7f",
+            "position": 4,
+            "limit": 4
+          },
+          {
+            "case": "key_align",
+            "result": "7f000000",
+            "position": 4,
+            "limit": 4
+          },
+          {
+            "case": "wire_align_readonly",
+            "result": "7f7f7f7f",
+            "position": 4,
+            "limit": 4
+          },
+          {
+            "case": "key_align_readonly",
+            "result": "ReadOnlyBufferException",
+            "position": 1,
+            "limit": 4
+          },
+          {
+            "case": "detect_two_byte_header",
+            "result": "1",
+            "position": 0,
+            "limit": 2
+          },
+          {
+            "case": "appendable_zero_body",
+            "result": "BufferUnderflowException",
+            "position": 4,
+            "limit": 8
+          },
+          {
+            "case": "optional_close_after_underflow",
+            "result": "bounded",
+            "position": 12,
+            "limit": 16
+          }
+        ],
+        "application_class_bytes": 32666
+      },
+      "split": {
+        "files": 6,
+        "source_bytes": 39713,
+        "helper_declarations": 21,
+        "helper_bytes": 8246,
+        "classes": 7,
+        "class_bytes": 29091,
+        "observations": [
+          {
+            "case": "string_zero",
+            "result": "IllegalArgumentException",
+            "position": 4,
+            "limit": 4
+          },
+          {
+            "case": "string_negative",
+            "result": "BufferUnderflowException",
+            "position": 4,
+            "limit": 4
+          },
+          {
+            "case": "string_nonzero_terminator",
+            "result": "IllegalArgumentException",
+            "position": 4,
+            "limit": 6
+          },
+          {
+            "case": "string_truncated",
+            "result": "BufferUnderflowException",
+            "position": 4,
+            "limit": 5
+          },
+          {
+            "case": "string_invalid_utf8",
+            "result": "units:fffd",
+            "position": 6,
+            "limit": 6
+          },
+          {
+            "case": "wstring_odd",
+            "result": "IllegalArgumentException",
+            "position": 4,
+            "limit": 5
+          },
+          {
+            "case": "wstring_unpaired",
+            "result": "units:d800",
+            "position": 6,
+            "limit": 6
+          },
+          {
+            "case": "wire_align",
+            "result": "7f7f7f7f",
+            "position": 4,
+            "limit": 4
+          },
+          {
+            "case": "key_align",
+            "result": "7f000000",
+            "position": 4,
+            "limit": 4
+          },
+          {
+            "case": "wire_align_readonly",
+            "result": "7f7f7f7f",
+            "position": 4,
+            "limit": 4
+          },
+          {
+            "case": "key_align_readonly",
+            "result": "ReadOnlyBufferException",
+            "position": 1,
+            "limit": 4
+          },
+          {
+            "case": "detect_two_byte_header",
+            "result": "1",
+            "position": 0,
+            "limit": 2
+          },
+          {
+            "case": "appendable_zero_body",
+            "result": "BufferUnderflowException",
+            "position": 4,
+            "limit": 8
+          },
+          {
+            "case": "optional_close_after_underflow",
+            "result": "bounded",
+            "position": 12,
+            "limit": 16
+          }
+        ],
+        "application_class_bytes": 31366
+      },
+      "single_types": {
+        "files": 1,
+        "source_bytes": 4619,
+        "helper_declarations": 0,
+        "helper_bytes": 0,
+        "classes": 6,
+        "class_bytes": 6558,
+        "application_class_bytes": 6558
+      },
+      "split_types": {
+        "files": 5,
+        "source_bytes": 4664,
+        "helper_declarations": 0,
+        "helper_bytes": 0,
+        "classes": 5,
+        "class_bytes": 5468,
+        "application_class_bytes": 5468
+      },
+      "single_wrappers": {
+        "files": 13,
+        "source_bytes": 134314,
+        "helper_declarations": 21,
+        "helper_bytes": 8268,
+        "classes": null
+      },
+      "split_wrappers": {
+        "files": 18,
+        "source_bytes": 131726,
+        "helper_declarations": 21,
+        "helper_bytes": 8246,
+        "classes": null
+      }
+    },
+    "timings": [
+      {
+        "shape": "scalar",
+        "version": 1,
+        "iterations": 100000,
+        "ns_per_roundtrip": 282.531,
+        "checksum": 3997592296,
+        "mode": "single",
+        "fork": 0
+      },
+      {
+        "shape": "scalar",
+        "version": 2,
+        "iterations": 100000,
+        "ns_per_roundtrip": 313.5,
+        "checksum": 3997592296,
+        "mode": "single",
+        "fork": 0
+      },
+      {
+        "shape": "frame",
+        "version": 1,
+        "iterations": 100000,
+        "ns_per_roundtrip": 7718.521,
+        "checksum": 3991892296,
+        "mode": "single",
+        "fork": 0
+      },
+      {
+        "shape": "frame",
+        "version": 2,
+        "iterations": 100000,
+        "ns_per_roundtrip": 7878.436,
+        "checksum": 3991892296,
+        "mode": "single",
+        "fork": 0
+      },
+      {
+        "shape": "tagged",
+        "version": 2,
+        "iterations": 100000,
+        "ns_per_roundtrip": 1169.129,
+        "checksum": 3994142296,
+        "mode": "single",
+        "fork": 0
+      },
+      {
+        "shape": "keys",
+        "version": 2,
+        "iterations": 100000,
+        "ns_per_roundtrip": 4017.673,
+        "checksum": 46260280,
+        "mode": "single",
+        "fork": 0
+      },
+      {
+        "shape": "scalar",
+        "version": 1,
+        "iterations": 100000,
+        "ns_per_roundtrip": 389.517,
+        "checksum": 3997592296,
+        "mode": "split",
+        "fork": 0
+      },
+      {
+        "shape": "scalar",
+        "version": 2,
+        "iterations": 100000,
+        "ns_per_roundtrip": 364.051,
+        "checksum": 3997592296,
+        "mode": "split",
+        "fork": 0
+      },
+      {
+        "shape": "frame",
+        "version": 1,
+        "iterations": 100000,
+        "ns_per_roundtrip": 5550.185,
+        "checksum": 3991892296,
+        "mode": "split",
+        "fork": 0
+      },
+      {
+        "shape": "frame",
+        "version": 2,
+        "iterations": 100000,
+        "ns_per_roundtrip": 7195.861,
+        "checksum": 3991892296,
+        "mode": "split",
+        "fork": 0
+      },
+      {
+        "shape": "tagged",
+        "version": 2,
+        "iterations": 100000,
+        "ns_per_roundtrip": 1749.968,
+        "checksum": 3994142296,
+        "mode": "split",
+        "fork": 0
+      },
+      {
+        "shape": "keys",
+        "version": 2,
+        "iterations": 100000,
+        "ns_per_roundtrip": 2770.727,
+        "checksum": 46260280,
+        "mode": "split",
+        "fork": 0
+      }
+    ],
+    "javac_target": 8,
+    "java_vm_flags": [
+      "-Xms128m",
+      "-Xmx128m"
+    ],
+    "generator_sha256": "5b4a574d35256c79b4c746c308127d7df4849bc09751105debdce34a86ee100b",
+    "fixture_sha256": "06778c681dc06b6de46850a61f856b5dbda00057952c714dfa25eb1482042015",
+    "benchmark_sha256": "55bf06754f6400080bcda83968043329c79d3f34fae2735b33d31228d5e82b17",
+    "compilation_probes": {
+      "split_default_package": {
+        "returncode": 0,
+        "diagnostic": ""
+      },
+      "split_fixed": {
+        "returncode": 0,
+        "diagnostic": ""
+      }
+    },
+    "runtime_jar": {
+      "bytes": 5678,
+      "class_bytes": 2275,
+      "sha256": "b85a9c83225e488c33e3aa7bf479e5e8cce59286127f957e681215b5238c38a4"
+    },
+    "working_tree_modified": true,
+    "implementation_state": "First-extraction working tree based on 75bdc0a3de815ff21fe3b4acd2392ae7bada6ca0"
+  }
+}

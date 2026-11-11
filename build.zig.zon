@@ -39,6 +39,7 @@
         "src",
         "packages/zidl-bindings",
         "packages/zidl-cdr",
+        "packages/zidl-cdr-java",
         "packages/zidl-xtypes",
         "packages/zidl-typesupport",
         "test/integration/typesupport_library",
