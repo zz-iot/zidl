@@ -1,7 +1,7 @@
 # Runtime Libraries Reference
 
 > Native consolidation is implemented; the [shared Java CDR runtime](design/java-cdr-runtime.md)
-> remains planned. Historical Rust descriptions below are proposals.
+> has shared helper extraction through API 2. Historical Rust descriptions below are proposals.
 
 ## Native package layout
 
@@ -15,6 +15,7 @@ the original extraction boundary.
 | `packages/zidl-bindings/` | Allocators, owned values, entity boxes and authoring support |
 | `packages/zidl-cdr/c-api/` | C ABI validation and temporary C reference comparison |
 | `packages/zidl-xtypes/` | Zig XTypes constants |
+| `packages/zidl-cdr-java/` | Standalone Java codec helpers and JAR build |
 
 Generated C/C++ code uses the stable C ABI backed by the canonical native codec.
 The independent C reference is test-only; building the production archive from
@@ -22,9 +23,10 @@ source requires Zig. Prebuilt archives can be linked by C/C++ toolchains.
 Generated Zig code imports `zidl_cdr` and `zidl_bindings` directly. The
 `zidl_rt` module and `packages/zidl-rt` compatibility package have been removed
 following zzdds migration. See [the Zig build guide](backend_zig.md) to update
-old imports. Java currently generates its codec inline; its shared runtime
-migration is planned separately. Rust, Python and C# runtime descriptions in
-older documents are proposals, not implemented backend guarantees.
+old imports. Java retains generated schema traversal and now shares alignment
+and other codec helpers through `zidl-cdr-java`; see its
+[package guide](../packages/zidl-cdr-java/README.md). Rust, Python and C# runtime
+descriptions in older documents are proposals, not implemented backend guarantees.
 
 ---
 

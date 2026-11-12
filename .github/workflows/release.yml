@@ -82,6 +82,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
@@ -103,6 +114,11 @@ jobs:
 
       - name: Test (main)
         run: zig build test
+
+      - name: Test standalone Java CDR consumer
+        run: |
+          zig build
+          python packages/zidl-cdr-java/test.py --zidl zig-out/bin/zidl
 
       - name: Test (TSan)
         if: matrix.os == 'ubuntu-latest'
@@ -202,6 +218,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
@@ -240,6 +267,15 @@ jobs:
           tar czf "zidl-${TAG}-linux-aarch64.tar.gz" -C linux-aarch64/bin zidl
           tar czf "zidl-${TAG}-macos-aarch64.tar.gz" -C macos-aarch64/bin zidl
           zip -j  "zidl-${TAG}-windows-x86_64.zip"   windows-x86_64/bin/zidl.exe
+
+      - name: Build Java CDR runtime and source package
+        env:
+          FULL_VERSION: ${{ needs.prepare.outputs.full_version }}
+        run: |
+          zig build java-runtime --prefix dist/java
+          cp "dist/java/share/java/zidl-cdr-java-${FULL_VERSION}.jar" dist/
+          python packages/zidl-cdr-java/build.py source --version "${FULL_VERSION}" \
+            --output "dist/zidl-cdr-java-${FULL_VERSION}-sources.tar.gz"
 
       - name: Package zidl-cdr source
         env:
@@ -352,12 +388,16 @@ jobs:
           ## Zig compatibility
           Built with and requires Zig \`${ZIG_VERSION}\`.
 
+          ## Java CDR runtime
+          The standalone Java runtime JAR targets Java 8 and requires no native codec. Newly generated Java codecs need it on compile and execution classpaths.
+
           ## Using zidl as a Zig package
           \`\`\`
           zig fetch --save https://github.com/\${{ github.repository }}/archive/refs/tags/${TAG}.tar.gz
           \`\`\`" \
             dist/zidl-*.tar.gz \
-            dist/zidl-*.zip
+            dist/zidl-*.zip \
+            dist/zidl-*.jar
 
       - name: Bump to post-release dev version
         env:

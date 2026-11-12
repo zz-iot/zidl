@@ -1,0 +1,369 @@
+{
+  "generator": "zidl 0.3.29-zig.0.17.0-dev",
+  "revision": "ced1a59614bc9c6c352f2894999971c43c4d9536",
+  "working_tree_modified": true,
+  "java": "openjdk version \"21.0.13\" 2026-10-20\nOpenJDK Runtime Environment (build 21.0.13+9-1-deb13u2-Debian)\nOpenJDK 64-Bit Server VM (build 21.0.13+9-1-deb13u2-Debian, mixed mode, sharing)",
+  "platform": "Linux-6.12.115+deb13.1-amd64-x86_64-with-glibc2.41",
+  "warmup": 50000,
+  "forks": 1,
+  "sizes": {
+    "single": {
+      "files": 1,
+      "source_bytes": 34961,
+      "helper_declarations": 21,
+      "helper_bytes": 3373,
+      "classes": 7,
+      "class_bytes": 26269,
+      "observations": [
+        {
+          "case": "string_zero",
+          "result": "IllegalArgumentException",
+          "position": 4,
+          "limit": 4
+        },
+        {
+          "case": "string_negative",
+          "result": "BufferUnderflowException",
+          "position": 4,
+          "limit": 4
+        },
+        {
+          "case": "string_nonzero_terminator",
+          "result": "IllegalArgumentException",
+          "position": 4,
+          "limit": 6
+        },
+        {
+          "case": "string_truncated",
+          "result": "BufferUnderflowException",
+          "position": 4,
+          "limit": 5
+        },
+        {
+          "case": "string_invalid_utf8",
+          "result": "units:fffd",
+          "position": 6,
+          "limit": 6
+        },
+        {
+          "case": "wstring_odd",
+          "result": "IllegalArgumentException",
+          "position": 4,
+          "limit": 5
+        },
+        {
+          "case": "wstring_unpaired",
+          "result": "units:d800",
+          "position": 6,
+          "limit": 6
+        },
+        {
+          "case": "wire_align",
+          "result": "7f7f7f7f",
+          "position": 4,
+          "limit": 4
+        },
+        {
+          "case": "key_align",
+          "result": "7f000000",
+          "position": 4,
+          "limit": 4
+        },
+        {
+          "case": "wire_align_readonly",
+          "result": "7f7f7f7f",
+          "position": 4,
+          "limit": 4
+        },
+        {
+          "case": "key_align_readonly",
+          "result": "ReadOnlyBufferException",
+          "position": 1,
+          "limit": 4
+        },
+        {
+          "case": "detect_two_byte_header",
+          "result": "1",
+          "position": 0,
+          "limit": 2
+        },
+        {
+          "case": "appendable_zero_body",
+          "result": "BufferUnderflowException",
+          "position": 4,
+          "limit": 8
+        },
+        {
+          "case": "optional_close_after_underflow",
+          "result": "bounded",
+          "position": 12,
+          "limit": 16
+        }
+      ],
+      "application_class_bytes": 33723
+    },
+    "split": {
+      "files": 6,
+      "source_bytes": 33369,
+      "helper_declarations": 21,
+      "helper_bytes": 3352,
+      "classes": 7,
+      "class_bytes": 24939,
+      "observations": [
+        {
+          "case": "string_zero",
+          "result": "IllegalArgumentException",
+          "position": 4,
+          "limit": 4
+        },
+        {
+          "case": "string_negative",
+          "result": "BufferUnderflowException",
+          "position": 4,
+          "limit": 4
+        },
+        {
+          "case": "string_nonzero_terminator",
+          "result": "IllegalArgumentException",
+          "position": 4,
+          "limit": 6
+        },
+        {
+          "case": "string_truncated",
+          "result": "BufferUnderflowException",
+          "position": 4,
+          "limit": 5
+        },
+        {
+          "case": "string_invalid_utf8",
+          "result": "units:fffd",
+          "position": 6,
+          "limit": 6
+        },
+        {
+          "case": "wstring_odd",
+          "result": "IllegalArgumentException",
+          "position": 4,
+          "limit": 5
+        },
+        {
+          "case": "wstring_unpaired",
+          "result": "units:d800",
+          "position": 6,
+          "limit": 6
+        },
+        {
+          "case": "wire_align",
+          "result": "7f7f7f7f",
+          "position": 4,
+          "limit": 4
+        },
+        {
+          "case": "key_align",
+          "result": "7f000000",
+          "position": 4,
+          "limit": 4
+        },
+        {
+          "case": "wire_align_readonly",
+          "result": "7f7f7f7f",
+          "position": 4,
+          "limit": 4
+        },
+        {
+          "case": "key_align_readonly",
+          "result": "ReadOnlyBufferException",
+          "position": 1,
+          "limit": 4
+        },
+        {
+          "case": "detect_two_byte_header",
+          "result": "1",
+          "position": 0,
+          "limit": 2
+        },
+        {
+          "case": "appendable_zero_body",
+          "result": "BufferUnderflowException",
+          "position": 4,
+          "limit": 8
+        },
+        {
+          "case": "optional_close_after_underflow",
+          "result": "bounded",
+          "position": 12,
+          "limit": 16
+        }
+      ],
+      "application_class_bytes": 32393
+    },
+    "single_types": {
+      "files": 1,
+      "source_bytes": 4619,
+      "helper_declarations": 0,
+      "helper_bytes": 0,
+      "classes": 6,
+      "class_bytes": 6558,
+      "application_class_bytes": 6558
+    },
+    "split_types": {
+      "files": 5,
+      "source_bytes": 4664,
+      "helper_declarations": 0,
+      "helper_bytes": 0,
+      "classes": 5,
+      "class_bytes": 5468,
+      "application_class_bytes": 5468
+    },
+    "single_wrappers": {
+      "files": 13,
+      "source_bytes": 126336,
+      "helper_declarations": 21,
+      "helper_bytes": 3373,
+      "classes": null
+    },
+    "split_wrappers": {
+      "files": 18,
+      "source_bytes": 123774,
+      "helper_declarations": 21,
+      "helper_bytes": 3352,
+      "classes": null
+    }
+  },
+  "timings": [
+    {
+      "shape": "scalar",
+      "version": 1,
+      "iterations": 100000,
+      "ns_per_roundtrip": 440.042,
+      "checksum": 3997592296,
+      "mode": "single",
+      "fork": 0
+    },
+    {
+      "shape": "scalar",
+      "version": 2,
+      "iterations": 100000,
+      "ns_per_roundtrip": 325.39,
+      "checksum": 3997592296,
+      "mode": "single",
+      "fork": 0
+    },
+    {
+      "shape": "frame",
+      "version": 1,
+      "iterations": 100000,
+      "ns_per_roundtrip": 7423.217,
+      "checksum": 3991892296,
+      "mode": "single",
+      "fork": 0
+    },
+    {
+      "shape": "frame",
+      "version": 2,
+      "iterations": 100000,
+      "ns_per_roundtrip": 7234.656,
+      "checksum": 3991892296,
+      "mode": "single",
+      "fork": 0
+    },
+    {
+      "shape": "tagged",
+      "version": 2,
+      "iterations": 100000,
+      "ns_per_roundtrip": 2611.415,
+      "checksum": 3994142296,
+      "mode": "single",
+      "fork": 0
+    },
+    {
+      "shape": "keys",
+      "version": 2,
+      "iterations": 100000,
+      "ns_per_roundtrip": 5223.148,
+      "checksum": 46260280,
+      "mode": "single",
+      "fork": 0
+    },
+    {
+      "shape": "scalar",
+      "version": 1,
+      "iterations": 100000,
+      "ns_per_roundtrip": 508.26,
+      "checksum": 3997592296,
+      "mode": "split",
+      "fork": 0
+    },
+    {
+      "shape": "scalar",
+      "version": 2,
+      "iterations": 100000,
+      "ns_per_roundtrip": 463.663,
+      "checksum": 3997592296,
+      "mode": "split",
+      "fork": 0
+    },
+    {
+      "shape": "frame",
+      "version": 1,
+      "iterations": 100000,
+      "ns_per_roundtrip": 8295.913,
+      "checksum": 3991892296,
+      "mode": "split",
+      "fork": 0
+    },
+    {
+      "shape": "frame",
+      "version": 2,
+      "iterations": 100000,
+      "ns_per_roundtrip": 9905.562,
+      "checksum": 3991892296,
+      "mode": "split",
+      "fork": 0
+    },
+    {
+      "shape": "tagged",
+      "version": 2,
+      "iterations": 100000,
+      "ns_per_roundtrip": 2626.296,
+      "checksum": 3994142296,
+      "mode": "split",
+      "fork": 0
+    },
+    {
+      "shape": "keys",
+      "version": 2,
+      "iterations": 100000,
+      "ns_per_roundtrip": 4633.511,
+      "checksum": 46260280,
+      "mode": "split",
+      "fork": 0
+    }
+  ],
+  "javac_target": 8,
+  "java_vm_flags": [
+    "-Xms128m",
+    "-Xmx128m"
+  ],
+  "generator_sha256": "a4c523b98268222dd2c381c2ec6e21c526b9da71a663d0967b7fe5f8c006fe00",
+  "fixture_sha256": "06778c681dc06b6de46850a61f856b5dbda00057952c714dfa25eb1482042015",
+  "benchmark_sha256": "55bf06754f6400080bcda83968043329c79d3f34fae2735b33d31228d5e82b17",
+  "compilation_probes": {
+    "split_default_package": {
+      "returncode": 0,
+      "diagnostic": ""
+    },
+    "split_fixed": {
+      "returncode": 0,
+      "diagnostic": ""
+    }
+  },
+  "runtime_jar": {
+    "bytes": 8524,
+    "class_bytes": 7454,
+    "sha256": "4133b1cbf6e7aa2b40116affed35fa8acf4370f0e2f072dc17c9202c3779beb9"
+  },
+  "runtime_api": 2,
+  "comparison_base": "extraction-1.json:after",
+  "measurement_note": "One fork during concurrent full/integration builds; static sizes are useful, timings establish no speed claim."
+}

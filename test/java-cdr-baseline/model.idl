@@ -1,0 +1,20 @@
+@final struct Scalar {
+    @key unsigned long id;
+    long value;
+    double measurement;
+};
+@final struct Text {
+    @key string<32> label;
+    wstring<16> wide;
+    sequence<long, 8> values;
+};
+@appendable struct Frame {
+    Scalar tag;
+    sequence<Text, 4> entries;
+};
+@mutable struct Tagged {
+    @id(1) long code;
+    @id(2) @optional long optional_value;
+    @id(3) string label;
+};
+@appendable struct Window { long value; };

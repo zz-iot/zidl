@@ -2,8 +2,12 @@
 
 Date: 2026-11-02
 
-Status: agreed architectural direction; API, packaging and migration pending.
-This document describes planned behavior, not an already available package.
+Status: shared helper extraction is implemented through runtime API 2, with
+standalone `zidl-cdr-java` JAR/source builds. Schema traversal and primitive
+operations remain generated; zzdds Java delivery is follow-up work. See the
+[helper extraction checkpoint](java-cdr-extraction-2.md).
+See the [Java CDR audit](java-cdr-audit.md) for helper inventory, observed buffer
+semantics, correctness gaps, size/performance baseline and first-slice proposal.
 
 The [Java canonical key checkpoint](java-cdr-key-slice.md) corrects generated
 holder traversal and hash policy without introducing the planned shared runtime.
@@ -23,8 +27,8 @@ libraries; zzdds Java integration continues to use its native DDS bridge.
 
 ## Current implementation and historical rationale
 
-The codec is maintained primarily as emitted Java source in
-`src/backend/java.zig`. Generated output uses `java.nio.ByteBuffer`, inline CDR
+Schema traversal and remaining helper families are maintained as emitted Java source in
+`src/backend/java.zig`. Generated output uses `java.nio.ByteBuffer`, forwarding/shared and inline CDR
 helpers and per-type methods. It is not implemented in a `zidl_jni` codec library.
 Helpers can repeat across output files, particularly with split generation.
 
@@ -115,3 +119,20 @@ The efforts can proceed separately. Coordinate shared vectors, expected canonica
 key behavior and intentional validation changes, rather than introducing a Java
 dependency on the native codec. Native serialization, FFM/JNI migration, a new
 Java object model and broader DDS ownership changes are outside this effort.
+
+The [appendable struct frame checkpoint](java-cdr-frame-bounds.md) bounds Java
+readers before shared-runtime extraction; mutable member and union decoding
+remain follow-up work.
+
+The [mutable member and union checkpoint](java-cdr-member-bounds.md) extends
+bounded reading to mutable structs and unions and appendable unions.
+
+The [collection checkpoint](java-cdr-collection-bounds.md) bounds collection
+readers/skips and validates counts before incremental allocation.
+
+The [output-mode checkpoint](java-cdr-output-parity.md) closes the audited split
+compilation gaps. All standalone codec validation fixtures now run in three
+output modes before runtime extraction.
+
+The [API 2 helper checkpoint](java-cdr-extraction-2.md) moves the remaining helper
+families and shared mutable-member header parsing into the runtime.

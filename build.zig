@@ -38,6 +38,38 @@ fn versionFromZon(comptime zon: []const u8) []const u8 {
     return zon[idx..end];
 }
 
+const JavaCdrRuntime = struct {
+    jar: std.Build.LazyPath,
+    python: []const u8,
+};
+
+fn addJavaCdrRuntime(b: *std.Build) JavaCdrRuntime {
+    const python = b.findProgram(.{ .names = &.{ "python3", "python" } }) orelse "python3";
+    const javac = b.findProgram(.{ .names = &.{"javac"} }) orelse "javac";
+    const version = comptime versionFromZon(@embedFile("build.zig.zon"));
+    const name = b.fmt("zidl-cdr-java-{s}.jar", .{version});
+    const builder = b.addSystemCommand(&.{python});
+    builder.addFileArg(b.path("packages/zidl-cdr-java/build.py"));
+    builder.addArgs(&.{ "build", "--javac", javac, "--version", version, "--output" });
+    const jar = builder.addOutputFileArg(name);
+    builder.addFileInput(b.path("packages/zidl-cdr-java/src/main/java/io/zidl/cdr/Cdr.java"));
+    builder.addFileInput(b.path("LICENSE"));
+    const install = b.addInstallFile(jar, b.fmt("share/java/{s}", .{name}));
+    b.step("java-runtime", "Build and install the standalone Java CDR JAR").dependOn(&install.step);
+    return .{ .jar = jar, .python = python };
+}
+
+fn javaCommand(b: *std.Build, args: []const []const u8, runtime: JavaCdrRuntime) *std.Build.Step.Run {
+    const run = b.addSystemCommand(&.{runtime.python});
+    run.addFileArg(b.path("packages/zidl-cdr-java/build.py"));
+    run.addArg("run");
+    run.addArg("--runtime");
+    run.addFileArg(runtime.jar);
+    run.addArg("--");
+    run.addArgs(args);
+    return run;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -82,6 +114,8 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    const java_cdr = addJavaCdrRuntime(b);
+
     // ── run ───────────────────────────────────────────────────────────────────
     const run_step = b.step("run", "Run the app");
     const run_cmd = b.addRunArtifact(exe);
@@ -97,6 +131,74 @@ pub fn build(b: *std.Build) void {
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     const test_step = b.step("test", "Run unit tests + Zig integration tests");
+    const java_validation_step = b.step("test-java-cdr-validation", "Test Java CDR validation and output modes");
+    test_step.dependOn(java_validation_step);
+    if (b.findProgram(.{ .names = &.{"javac"} })) |javac| {
+        if (b.findProgram(.{ .names = &.{"java"} })) |java| {
+            const runtime_tests = b.step("test-java-runtime", "Test standalone Java CDR API");
+            test_step.dependOn(runtime_tests);
+            const compile_runtime_test = javaCommand(b, &.{ javac, "--release", "8", "-Xlint:-options", "-Xlint:all", "-Werror", "-d" }, java_cdr);
+            const runtime_classes = compile_runtime_test.addOutputDirectoryArg("java-runtime-test-classes");
+            compile_runtime_test.addFileArg(b.path("packages/zidl-cdr-java/src/test/java/io/zidl/cdr/CdrTest.java"));
+            compile_runtime_test.addFileArg(b.path("packages/zidl-cdr-java/src/test/java/io/zidl/cdr/HelperTest.java"));
+            const run_runtime_test = javaCommand(b, &.{ java, "-cp" }, java_cdr);
+            run_runtime_test.addDirectoryArg(runtime_classes);
+            run_runtime_test.addArg("io.zidl.cdr.CdrTest");
+            runtime_tests.dependOn(&run_runtime_test.step);
+            const run_helpers = javaCommand(b, &.{ java, "-cp" }, java_cdr);
+            run_helpers.addDirectoryArg(runtime_classes);
+            run_helpers.addArg("io.zidl.cdr.HelperTest");
+            runtime_tests.dependOn(&run_helpers.step);
+            for (0..3) |mode| {
+                const split = mode != 0;
+                const prefix: []const u8 = switch (mode) {
+                    0 => "Validation$JavaValidation$",
+                    1 => "javavalidation.",
+                    else => "",
+                };
+                const gen = b.addRunArtifact(exe);
+                gen.addArgs(&.{ "-b", "java" });
+                if (split) gen.addArg("--split-files");
+                if (mode == 1) gen.addArgs(&.{ "--java-package", "javavalidation" });
+                gen.addArg("-o");
+                const generated = gen.addOutputDirectoryArg(b.fmt("java-validation-{d}", .{mode}));
+                gen.addFileArg(b.path("test/integration/java_cdr_validation/validation.idl"));
+                const compile_java = javaCommand(b, &.{ javac, "-Xlint:unchecked", "-Werror", "-d" }, java_cdr);
+                const classes = compile_java.addOutputDirectoryArg("classes");
+                if (split) {
+                    compile_java.addFileArg(generated.path(b, "ValidationCdrUtils.java"));
+                    for ([_][]const u8{ "Narrow", "App", "AppText", "Parent", "Mut", "MutText", "AppChoice", "MutChoice", "Numbers", "Words", "WordArray", "Dict", "Bounded", "BoundedMap", "Empty", "EmptyValues", "NestedValues", "FixedValues", "Flags", "OptionalValues" }) |name| {
+                        compile_java.addFileArg(generated.path(b, b.fmt("{s}.java", .{name})));
+                    }
+                } else compile_java.addFileArg(generated.path(b, "Validation.java"));
+                compile_java.addFileArg(b.path("test/integration/java_cdr_validation/ValidationTest.java"));
+                compile_java.addFileArg(b.path("test/integration/java_cdr_validation/FrameTest.java"));
+                compile_java.addFileArg(b.path("test/integration/java_cdr_validation/MemberTest.java"));
+                compile_java.addFileArg(b.path("test/integration/java_cdr_validation/CollectionTest.java"));
+                compile_java.addFileArg(b.path("test/integration/java_cdr_validation/ParityTest.java"));
+                const run = javaCommand(b, &.{ java, "-Xmx32m", "-cp" }, java_cdr);
+                run.addDirectoryArg(classes);
+                run.addArgs(&.{ "ValidationTest", prefix });
+                java_validation_step.dependOn(&run.step);
+                const frames = javaCommand(b, &.{ java, "-Xmx32m", "-cp" }, java_cdr);
+                frames.addDirectoryArg(classes);
+                frames.addArgs(&.{ "FrameTest", prefix });
+                java_validation_step.dependOn(&frames.step);
+                const members = javaCommand(b, &.{ java, "-Xmx32m", "-cp" }, java_cdr);
+                members.addDirectoryArg(classes);
+                members.addArgs(&.{ "MemberTest", prefix });
+                java_validation_step.dependOn(&members.step);
+                const collections = javaCommand(b, &.{ java, "-Xmx32m", "-cp" }, java_cdr);
+                collections.addDirectoryArg(classes);
+                collections.addArgs(&.{ "CollectionTest", prefix });
+                java_validation_step.dependOn(&collections.step);
+                const parity = javaCommand(b, &.{ java, "-Xmx32m", "-cp" }, java_cdr);
+                parity.addDirectoryArg(classes);
+                parity.addArgs(&.{ "ParityTest", prefix });
+                java_validation_step.dependOn(&parity.step);
+            }
+        }
+    }
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
@@ -581,7 +683,7 @@ pub fn build(b: *std.Build) void {
                 gen.addArg("-o");
                 const generated = gen.addOutputDirectoryArg(if (split) "canonical-keys-java-split" else "canonical-keys-java");
                 gen.addFileArg(b.path(dir ++ "keys.idl"));
-                const compile_java = b.addSystemCommand(&.{ maybe_javac.?, "-Xlint:unchecked", "-Werror", "-d" });
+                const compile_java = javaCommand(b, &.{ maybe_javac.?, "-Xlint:unchecked", "-Werror", "-d" }, java_cdr);
                 const classes = compile_java.addOutputDirectoryArg(if (split) "canonical-keys-java-split-classes" else "canonical-keys-java-classes");
                 if (split) {
                     for ([_][]const u8{ "KeysCdrUtils", "Align", "Nested", "Example", "Bounded16", "Bounded17", "Unbounded", "Seq16", "Seq17", "InnerNoKeys", "UnkeyedNested", "ArrayKey", "SeqAgg", "Choice", "UnionKey", "Wide16", "Wide17", "Base", "Derived", "Sequential", "Hashed", "AutoBase", "AutoDerived", "IdChoice", "UnionDefault", "WideSeq", "SelectedInner", "SelectedOuter" }) |name| {
@@ -589,7 +691,7 @@ pub fn build(b: *std.Build) void {
                     }
                 } else compile_java.addFileArg(generated.path(b, "Keys.java"));
                 compile_java.addFileArg(b.path(dir ++ "KeysTest.java"));
-                const run = b.addSystemCommand(&.{ maybe_java.?, "-cp" });
+                const run = javaCommand(b, &.{ maybe_java.?, "-cp" }, java_cdr);
                 run.addDirectoryArg(classes);
                 run.addArg("KeysTest");
                 run.addFileArg(b.path(dir ++ "vectors.txt"));
@@ -711,7 +813,7 @@ pub fn build(b: *std.Build) void {
                 gen.addArg("-o");
                 const generated = gen.addOutputDirectoryArg(if (split) "key-projection-java-split" else "key-projection-java");
                 gen.addFileArg(b.path(dir ++ "shapes.idl"));
-                const compile_java = b.addSystemCommand(&.{ maybe_javac.?, "-Xlint:unchecked", "-Werror", "-d" });
+                const compile_java = javaCommand(b, &.{ maybe_javac.?, "-Xlint:unchecked", "-Werror", "-d" }, java_cdr);
                 const classes = compile_java.addOutputDirectoryArg(if (split) "key-projection-java-split-classes" else "key-projection-java-classes");
                 if (split) {
                     for ([_][]const u8{ "ShapesCdrUtils", "FBase", "FMid", "FDerived", "ABase", "ADerived", "MBase", "MDerived", "Bridge", "RootBridge", "PlainBase", "InheritedBridge", "RootInherited", "MutBridge", "RootMut", "AppBridge", "RootArray", "RootSeq" }) |name| {
@@ -719,7 +821,7 @@ pub fn build(b: *std.Build) void {
                     }
                 } else compile_java.addFileArg(generated.path(b, "Shapes.java"));
                 compile_java.addFileArg(b.path(dir ++ "ProjectionTest.java"));
-                const run = b.addSystemCommand(&.{ maybe_java.?, "-cp" });
+                const run = javaCommand(b, &.{ maybe_java.?, "-cp" }, java_cdr);
                 run.addDirectoryArg(classes);
                 run.addArg("ProjectionTest");
                 run.addFileArg(b.path(dir ++ "vectors.txt"));
@@ -779,7 +881,7 @@ pub fn build(b: *std.Build) void {
                 gen.addArg("-o");
                 const generated = gen.addOutputDirectoryArg(if (split) "optional-wire-java-split" else "optional-wire-java");
                 gen.addFileArg(b.path(dir ++ "shapes.idl"));
-                const compile_java = b.addSystemCommand(&.{ maybe_javac.?, "-Xlint:unchecked", "-Werror", "-d" });
+                const compile_java = javaCommand(b, &.{ maybe_javac.?, "-Xlint:unchecked", "-Werror", "-d" }, java_cdr);
                 const classes = compile_java.addOutputDirectoryArg(if (split) "optional-wire-java-split-classes" else "optional-wire-java-classes");
                 if (split) {
                     for ([_][]const u8{ "ShapesCdrUtils", "Pair", "Values", "Inner", "Base", "Derived" }) |name| {
@@ -787,7 +889,7 @@ pub fn build(b: *std.Build) void {
                     }
                 } else compile_java.addFileArg(generated.path(b, "Shapes.java"));
                 compile_java.addFileArg(b.path(dir ++ "OptionalTest.java"));
-                const run = b.addSystemCommand(&.{ maybe_java.?, "-cp" });
+                const run = javaCommand(b, &.{ maybe_java.?, "-cp" }, java_cdr);
                 run.addDirectoryArg(classes);
                 run.addArg("OptionalTest");
                 run.addFileArg(b.path(dir ++ "vectors.txt"));
@@ -905,11 +1007,11 @@ pub fn build(b: *std.Build) void {
             gen_java.addArgs(&.{ "-b", "java", "-o" });
             const java_dir = gen_java.addOutputDirectoryArg("xcdr-known-answer-java");
             gen_java.addFileArg(ka_idl);
-            const compile_java = b.addSystemCommand(&.{ maybe_javac.?, "-Xlint:unchecked", "-Werror", "-d" });
+            const compile_java = javaCommand(b, &.{ maybe_javac.?, "-Xlint:unchecked", "-Werror", "-d" }, java_cdr);
             const java_classes = compile_java.addOutputDirectoryArg("xcdr-known-answer-java-classes");
             compile_java.addFileArg(java_dir.path(b, "Ka.java"));
             compile_java.addFileArg(b.path("test/integration/xcdr_known_answer/KaTest.java"));
-            const run_java = b.addSystemCommand(&.{ maybe_java.?, "-cp" });
+            const run_java = javaCommand(b, &.{ maybe_java.?, "-cp" }, java_cdr);
             run_java.addDirectoryArg(java_classes);
             run_java.addArg("KaTest");
             run_java.addFileArg(vectors);
@@ -1171,14 +1273,14 @@ pub fn build(b: *std.Build) void {
             const javac = maybe_javac.?;
             const java = maybe_java.?;
             const java_out = "build-tmp/integ-java";
-            const compile_java = b.addSystemCommand(&.{
+            const compile_java = javaCommand(b, &.{
                 javac,
                 "-d",
                 java_out,
                 "test/golden/java/Types.java",
                 "test/integration/java/Test.java",
-            });
-            const run_java = b.addSystemCommand(&.{ java, "-cp", java_out, "Test" });
+            }, java_cdr);
+            const run_java = javaCommand(b, &.{ java, "-cp", java_out, "Test" }, java_cdr);
             run_java.step.dependOn(&compile_java.step);
             integ_step.dependOn(&run_java.step);
 
@@ -1232,7 +1334,7 @@ pub fn build(b: *std.Build) void {
                     .root_module = entity_jni_mod,
                 });
 
-                const compile_entity_java = b.addSystemCommand(&.{ javac, "-d", "build-tmp/integ-java-entity" });
+                const compile_entity_java = javaCommand(b, &.{ javac, "-d", "build-tmp/integ-java-entity" }, java_cdr);
                 compile_entity_java.addArgs(&.{"test/integration/java/EntityTest.java"});
                 // The generated .java files live in a fresh per-run output
                 // directory (a `LazyPath`) — pass each as its own file arg so
@@ -1242,7 +1344,7 @@ pub fn build(b: *std.Build) void {
                     compile_entity_java.addFileArg(gen_entity_java_dir.path(b, f));
                 }
 
-                const run_entity_java = b.addSystemCommand(&.{ java, "-cp", "build-tmp/integ-java-entity" });
+                const run_entity_java = javaCommand(b, &.{ java, "-cp", "build-tmp/integ-java-entity" }, java_cdr);
                 run_entity_java.addPrefixedDirectoryArg("-Djava.library.path=", entity_jni_lib.getEmittedBinDirectory());
                 run_entity_java.addArg("EntityTest");
                 run_entity_java.step.dependOn(&compile_entity_java.step);
@@ -1283,7 +1385,7 @@ pub fn build(b: *std.Build) void {
                 xfw_jni_mod.addIncludePath(.{ .cwd_relative = jni_inc.platform });
                 const xfw_jni_lib = b.addLibrary(.{ .name = "xfw_jni", .linkage = .dynamic, .root_module = xfw_jni_mod });
 
-                const compile_xfw_java = b.addSystemCommand(&.{ javac, "-d", "build-tmp/integ-java-xfw" });
+                const compile_xfw_java = javaCommand(b, &.{ javac, "-d", "build-tmp/integ-java-xfw" }, java_cdr);
                 compile_xfw_java.addArg(xfw_dir ++ "/CrossFileTest.java");
                 for (&[_][]const u8{ "Core.java", "TopicDescriptionImpl.java", "TopicImpl.java", "ContentFilteredTopicImpl.java", "FactoryImpl.java" }) |f| {
                     compile_xfw_java.addFileArg(xfw_java_base_dir.path(b, f));
@@ -1291,7 +1393,7 @@ pub fn build(b: *std.Build) void {
                 for (&[_][]const u8{ "Plugin.java", "ReaderImpl.java" }) |f| {
                     compile_xfw_java.addFileArg(xfw_java_ext_dir.path(b, f));
                 }
-                const run_xfw_java = b.addSystemCommand(&.{ java, "-cp", "build-tmp/integ-java-xfw" });
+                const run_xfw_java = javaCommand(b, &.{ java, "-cp", "build-tmp/integ-java-xfw" }, java_cdr);
                 run_xfw_java.addPrefixedDirectoryArg("-Djava.library.path=", xfw_jni_lib.getEmittedBinDirectory());
                 run_xfw_java.addArg("CrossFileTest");
                 run_xfw_java.step.dependOn(&compile_xfw_java.step);

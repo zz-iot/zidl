@@ -1,0 +1,32 @@
+module JavaValidation {
+    @final struct Narrow { @key string text; };
+};
+module JavaValidation {
+    @appendable struct App { @key long value; };
+    @appendable struct AppText { @key string text; long tail; };
+    @final struct Parent { App inner; long tail; };
+    @mutable struct Mut { long value; };
+};
+module JavaValidation {
+    @mutable struct MutText { @key string text; };
+    @appendable union AppChoice switch(long) { case 0: long value; };
+    @mutable union MutChoice switch(long) { case 0: long value; };
+};
+module JavaValidation {
+    @final struct Numbers { @key sequence<long> values; long tail; };
+    @final struct Words { @key sequence<string> values; long tail; };
+    @final struct WordArray { @key string values[1]; long tail; };
+    @final struct Dict { map<string,long> values; long tail; };
+    @final struct Bounded { @key sequence<long,2> values; };
+    @final struct BoundedMap { map<long,long,2> values; };
+    @final struct Empty {};
+    @final struct EmptyValues { sequence<Empty> values; long tail; };
+    @final struct NestedValues { sequence<sequence<long>> values; long tail; };
+};
+module JavaValidation {
+    @final struct FixedValues { fixed<5,2> small; fixed<8,2> large; long tail; };
+    bitset Flags { bitfield<12> value; };
+};
+module JavaValidation {
+    @final struct OptionalValues { @optional long value; long tail; };
+};
