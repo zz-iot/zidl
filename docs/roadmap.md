@@ -387,33 +387,20 @@ CDR + inline `CdrWriter`/`CdrReader`; (3) appendable/mutable/sequences/arrays/ma
 
 ### Rust backend (`-b rust`)
 
-Two modes via `--rust-runtime`:
+Status: design reopened after native CDR consolidation and Java runtime delivery;
+no Rust backend or companion crate is implemented. The earlier pure/zig-ffi
+mode list is superseded by the [Rust CDR proposal](design/rust-cdr-plan.md).
 
-- **`pure` (default)** — idiomatic Rust (`Vec<T>`, `String`, `HashMap`); CDR via a `zidl-rs`
-  companion crate (`no_std + alloc`). For desktop/server projects wanting a pure-Rust dep
-  graph.
-- **`zig-ffi`** — zero-copy FFI into a Zig DDS runtime; sequences/strings as
-  `ZidlSlice<T>`/`ZidlString` (`#[repr(C)]`); lifetime-annotated borrows;
-  `--rust-types-crate <crate>` redirects the import source (default `zidl_types`). For
-  embedded / high-performance consumers.
+Proposed first path: generate ordinary owned Rust values and schema traversal
+that calls the shared `zidl-cdr` C ABI through a small safe wrapper. Raw DDS
+loans and typed owned decoding have separate lifetime contracts. A pure Rust
+codec, `no_std`, custom collection allocators and zero-copy typed views require
+separate evidence and scope; they are not promised initial modes.
 
-No OMG spec. No TypeObject.
-
-**Type mapping**: `struct` → named-field struct; `enum` → unit-variant enum
-(`#[repr(i32)]`); `union` → enum with associated data (discriminant serialized separately);
-`sequence<T>` → `Vec<T>` / `ZidlSlice<T>`; `T[N]` → `[T; N]`; `map<K,V>` → `HashMap<K,V>`;
-`string`/`wstring` → `String` / `ZidlString`; `@optional` → `Option<T>`; `typedef` → `type`
-alias or newtype; module → `mod`; `@key` → `serialize_key()`/`deserialize_key()`/
-`compute_key_hash()`; `#[repr(C)]` in zig-ffi mode where layout permits.
-
-**Steps**: (1) `packages/zidl-types-rs/` (`ZidlSlice<T>`, `ZidlString`, `#[repr(C)]`,
-`no_std + alloc`); (2) `src/backend/rust.zig` declarations + both runtime modes +
-`--rust-types-crate`; (3) `packages/zidl-rs/` pure CDR runtime (XCDR1/2, alignment,
-DHEADER/EMHEADER, `no_std + alloc`); (4) pure-mode `@final` CDR; (5) pure-mode appendable/
-mutable/sequences/arrays/maps; (6) pure-mode `@key`/`deserialize_key`/`compute_key_hash`/
-`@optional`/wstring/fixed-pt; (7) zig-ffi zero-copy path (`ZidlSlice`/`ZidlString`, FFI
-serialization, lifetime-annotated borrows); (8) `--split-files` + `--rust-types-crate`
-wiring + tests + golden; (9) compile + roundtrip via `cargo test`.
+Start with an ABI/layout and codec wrapper experiment before implementing
+`-b rust`. Preserve unknown enum values, wire endianness, malformed-input errors,
+allocator pairing and canonical key semantics. TypeObject support and DDS
+wrappers must be scoped explicitly rather than inferred from codec roundtrips.
 
 ### Haskell backend (`-b haskell`) — future consideration, not scheduled
 

@@ -4,7 +4,9 @@ Date: 2026-11-02
 
 Status: shared helper extraction is implemented through runtime API 2, with
 standalone `zidl-cdr-java` JAR/source builds. Schema traversal and primitive
-operations remain generated; zzdds Java delivery is follow-up work. See the
+operations remain generated. Delivery is complete in zidl 0.3.30 and
+[zzdds #150](https://github.com/zz-iot/zzdds/pull/150), including the matching
+SDK JAR and release-bundle validation. See the
 [helper extraction checkpoint](java-cdr-extraction-2.md).
 See the [Java CDR audit](java-cdr-audit.md) for helper inventory, observed buffer
 semantics, correctness gaps, size/performance baseline and first-slice proposal.
@@ -27,15 +29,15 @@ libraries; zzdds Java integration continues to use its native DDS bridge.
 
 ## Current implementation and historical rationale
 
-Schema traversal and remaining helper families are maintained as emitted Java source in
-`src/backend/java.zig`. Generated output uses `java.nio.ByteBuffer`, forwarding/shared and inline CDR
-helpers and per-type methods. It is not implemented in a `zidl_jni` codec library.
-Helpers can repeat across output files, particularly with split generation.
+Schema traversal and primitive operations remain emitted Java in
+`src/backend/java.zig`. Reusable helper bodies live in `io.zidl.cdr.Cdr`; generated
+entry points delegate to runtime API 2. Older inline output still works without
+the JAR. Neither path uses a `zidl_jni` codec library.
 
-`docs/runtime_libraries.md`, including its initial-commit version, explicitly
+Earlier versions of `docs/runtime_libraries.md` explicitly
 favored inline Java serialization to avoid distributing/versioning a companion
-runtime and a platform-specific native-library matrix. `docs/backend_java.md`
-also describes the no-companion-runtime approach. Generator comments describe
+runtime and a platform-specific native-library matrix. The old Java backend
+documentation also described the no-companion-runtime approach. Generator comments describe
 incoming key hashing without a companion native implementation.
 
 The documentation sweep found a deployment rationale, not a recorded performance
