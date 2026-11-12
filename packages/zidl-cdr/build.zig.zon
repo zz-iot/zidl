@@ -1,6 +1,6 @@
 .{
     .name = .zidl_cdr,
-    .version = "0.3.30-zig.0.17.0",
+    .version = "0.3.30-zig.0.17.0-dev",
     .minimum_zig_version = "0.15.1",
     .fingerprint = 0xef5e58396fb63df9,
     .paths = .{ "README.md", "build.zig", "build.zig.zon", "c_api_build.zig", "src", "include", "test", "c-api/build.zig", "c-api/build.zig.zon" },
