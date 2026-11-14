@@ -5221,6 +5221,8 @@ pub fn generateSplitFiles(
     opts: interface.Options,
 ) !void {
     if (itemsHaveMaps(spec.items) and (opts.generate_interfaces or opts.generate_zzdds_wrappers)) return error.UnsupportedCMapBindings;
+
+    if (!opts.no_typesupport) try @import("codec_validation.zig").validate(alloc, spec);
     // Collect all named type declarations in source order.
     var type_decls = std.ArrayListUnmanaged(ir.TypeDecl).empty;
     defer type_decls.deinit(alloc);
@@ -7440,4 +7442,37 @@ test "native codecs reject dynamic and opaque fields before output" {
     var declarations = try testGenFullOpts("native Handle; struct S { any value; Handle handle; };", "opaque", .{ .no_typesupport = true });
     defer declarations.deinit(testing.allocator);
     try testing.expect(has(declarations.items, "void *value;"));
+}
+
+test "codecs reject long double without writing partial output" {
+    const backends = @import("root.zig");
+    const sources = [_][]const u8{
+        "struct S { long double value; };",
+        "typedef long double Wide; struct S { sequence<Wide> values; };",
+        "union U switch(long) { case 0: long number; default: long double value; };",
+        "struct S { map<long, long double> values; };",
+    };
+    for (sources) |source| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var parser = parser_mod.Parser.init(source, arena.allocator());
+        const ast_spec = try parser.parseSpecification();
+        var analyzer = try semantic_mod.Analyzer.init(testing.allocator);
+        defer analyzer.deinit();
+        try analyzer.analyze(&ast_spec);
+        var spec = try ir.build(testing.allocator, &ast_spec, analyzer.global_scope, &.{});
+        defer spec.deinit();
+        inline for (.{ generateHeader, generateCdrSource, backends.cpp.generateHeader, backends.cpp.generateCdrSource, backends.zig.generateFile, backends.java.generateFile }) |generate| {
+            var out: std.ArrayList(u8) = .empty;
+            defer out.deinit(testing.allocator);
+            try testing.expectError(error.UnsupportedLongDoubleCdrValue, generate(testing.allocator, &spec, .{ .input_stem = "unsupported" }, &out));
+            try testing.expectEqual(@as(usize, 0), out.items.len);
+        }
+        if (std.mem.indexOf(u8, source, "map<") == null) inline for (.{ generateHeader, backends.cpp.generateHeader, backends.zig.generateFile, backends.java.generateFile }) |generate| {
+            var out: std.ArrayList(u8) = .empty;
+            defer out.deinit(testing.allocator);
+            try generate(testing.allocator, &spec, .{ .input_stem = "declarations", .no_typesupport = true }, &out);
+            try testing.expect(out.items.len != 0);
+        };
+    }
 }

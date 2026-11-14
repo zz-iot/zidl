@@ -79,6 +79,8 @@ pub const JavaBackend = struct {
         opts: interface.Options,
     ) anyerror!void {
         const self: *JavaBackend = @ptrCast(@alignCast(ctx));
+
+        if (!opts.no_typesupport) try @import("codec_validation.zig").validateWithOptions(self.alloc, spec, .{ .reject_dynamic = false });
         const io = std.Io.Threaded.global_single_threaded.io();
 
         if (opts.split_files) {
@@ -139,6 +141,8 @@ pub fn generateFile(
     opts: interface.Options,
     out: *std.ArrayList(u8),
 ) !void {
+    if (!opts.no_typesupport) try @import("codec_validation.zig").validateWithOptions(alloc, spec, .{ .reject_dynamic = false });
+
     var cross_file = try CrossFileResolver.build(alloc, spec, opts);
     defer cross_file.deinit(alloc);
     var gen = Generator{ .alloc = alloc, .opts = opts, .out = out, .cross_file = cross_file };
@@ -8881,6 +8885,8 @@ pub fn generateSplitFiles(
     spec: *const ir.Spec,
     opts: interface.Options,
 ) !void {
+    if (!opts.no_typesupport) try @import("codec_validation.zig").validateWithOptions(alloc, spec, .{ .reject_dynamic = false });
+
     const class_name = try stemToClassName(alloc, opts.input_stem);
     defer alloc.free(class_name);
 

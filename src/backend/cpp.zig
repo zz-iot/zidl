@@ -7615,6 +7615,7 @@ pub fn generateSplitFiles(
     spec: *const ir.Spec,
     opts: interface.Options,
 ) !void {
+    if (!opts.no_typesupport) try @import("codec_validation.zig").validate(alloc, spec);
     var type_decls = std.ArrayListUnmanaged(ir.TypeDecl).empty;
     defer type_decls.deinit(alloc);
     try collectTypeDeclsFlat(alloc, spec.items, &type_decls);

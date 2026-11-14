@@ -1270,6 +1270,15 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    {
+        const step = b.step("test-codec-diagnostics", "Check unsupported codecs fail before single/split output");
+        test_step.dependOn(step);
+        const run = b.addSystemCommand(&.{"python3"});
+        run.addFileArg(b.path("test/integration/codec_diagnostics/test.py"));
+        run.addArtifactArg(exe);
+        step.dependOn(&run.step);
+    }
+
     // ── XCDR known-answer checks ──────────────────────────────────────────────
     // test/integration/xcdr_known_answer/ka.idl covers every collection kind
     // (primitive / non-primitive / nested / array-typedef elements, multi-

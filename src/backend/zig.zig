@@ -68,7 +68,7 @@ pub const ZigBackend = struct {
         opts: interface.Options,
     ) anyerror!void {
         const self: *ZigBackend = @ptrCast(@alignCast(ctx));
-        if (!opts.no_typesupport) try @import("codec_validation.zig").validate(self.alloc, spec);
+        try validateCodecMapping(self.alloc, spec, opts);
         try @import("typesupport_library.zig").validateOptions(opts);
         const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -113,7 +113,7 @@ pub fn generateFile(
     opts: interface.Options,
     out: *std.ArrayList(u8),
 ) !void {
-    if (!opts.no_typesupport) try @import("codec_validation.zig").validate(alloc, spec);
+    try validateCodecMapping(alloc, spec, opts);
     var gen = Generator{ .alloc = alloc, .opts = opts, .out = out };
     defer gen.deinit();
     try gen.emitFile(spec);
@@ -158,6 +158,7 @@ pub fn generateSplitFiles(
     spec: *const ir.Spec,
     opts: interface.Options,
 ) !void {
+    try validateCodecMapping(alloc, spec, opts);
     // Collect names of non-empty top-level modules and emit their files.
     var module_names = std.ArrayListUnmanaged([]const u8).empty;
     defer module_names.deinit(alloc);
@@ -11926,4 +11927,25 @@ fn booleanLabelsExhaustive(discriminant: ir.TypeRef, cases: []const ir.UnionCase
         if (label == .boolean) labels |= if (label.boolean) @as(u2, 2) else 1;
     };
     return labels == 3;
+}
+
+fn validateCodecMapping(alloc: std.mem.Allocator, spec: *const ir.Spec, opts: interface.Options) !void {
+    try @import("codec_validation.zig").validateWithOptions(alloc, spec, .{
+        .reject_dynamic = !opts.no_typesupport,
+        .reject_long_double = !opts.no_typesupport,
+        .zig_map_keys = true,
+    });
+}
+
+test "zig_backend: unsupported map keys fail before output even without codecs" {
+    const sources = [_][]const u8{
+        "struct S { map<string<4>, long> values; };",
+        "typedef wstring Key; struct S { map<Key, long> values; };",
+        "struct S { map<wstring<4>, long> values; };",
+    };
+    for (sources) |source| {
+        for ([_]bool{ false, true }) |no_typesupport| {
+            try testing.expectError(error.UnsupportedZigMapKey, testGenOpts(source, "unsupported", .{ .no_typesupport = no_typesupport }));
+        }
+    }
 }
