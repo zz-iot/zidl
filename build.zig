@@ -1040,6 +1040,24 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    {
+        const admission_step = b.step("test-native-union-admission", "Check native mutable union member admission and ownership");
+        test_step.dependOn(admission_step);
+        const gen = b.addRunArtifact(exe);
+        gen.addArgs(&.{ "-b", "c", "-o" });
+        const generated = gen.addOutputDirectoryArg("union-admission-c");
+        gen.addFileArg(b.path("test/integration/native_union_admission/shapes.idl"));
+        const consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true });
+        const flags = &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" };
+        consumer.addCSourceFile(.{ .file = b.path("test/integration/native_union_admission/test.c"), .flags = flags });
+        consumer.addCSourceFile(.{ .file = generated.path(b, "shapes_cdr.c"), .flags = flags });
+        consumer.addIncludePath(generated);
+        consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
+        linkCdr(consumer, cdr_library);
+        const app = b.addExecutable(.{ .name = "union-admission-c", .root_module = consumer });
+        admission_step.dependOn(&b.addRunArtifact(app).step);
+    }
+
     // ── XCDR known-answer checks ──────────────────────────────────────────────
     // test/integration/xcdr_known_answer/ka.idl covers every collection kind
     // (primitive / non-primitive / nested / array-typedef elements, multi-

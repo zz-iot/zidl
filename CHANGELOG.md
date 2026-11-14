@@ -18,6 +18,12 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- **C mutable-union admission.** Dispatch by member ID, check agreement with
+  the discriminator, reject duplicate/reordered known members and incorrect
+  extents, require a discriminator and honor unknown MU members. Never change
+  the published discriminator on a late malformed parameter; partial owning
+  output remains freeable by the caller. Omitted payloads retain safe C defaults.
+
 - **Mutable union discriminator flags across backends.** C, C++ and Java now set
   the discriminator must-understand flag, matching Zig and XTypes 1.3. The shared
   independent wire-ID fixture now checks the same bit in every backend. Canonical
