@@ -78,6 +78,13 @@ pub fn build(b: *std.Build) void {
     const verbose_tests = b.option(bool, "verbose-tests", "Show successful integration test output") orelse false;
     const runtimes = @import("build/runtime.zig").add(b, b.path("."), target, optimize, sanitize_thread);
     const cdr_library = @import("packages/zidl-cdr/c_api_build.zig").add(b, b.path("packages/zidl-cdr"), runtimes.codec, target, .Debug, sanitize_thread, true);
+    // Allocation failpoint executables replace global new/delete. TSan defines
+    // those same symbols; keep these single-threaded tests and their archive
+    // unsanitized, while the normal runtime/consumer tests retain TSan coverage.
+    const allocation_cdr_library = if (sanitize_thread) blk: {
+        const uninstrumented = @import("build/runtime.zig").add(b, b.path("."), target, .Debug, false);
+        break :blk @import("packages/zidl-cdr/c_api_build.zig").add(b, b.path("packages/zidl-cdr"), uninstrumented.codec, target, .Debug, false, true);
+    } else cdr_library;
     b.modules.put(b.allocator, "zidl_cdr", runtimes.codec) catch @panic("OOM");
     b.modules.put(b.allocator, "zidl_bindings", runtimes.bindings) catch @panic("OOM");
 
@@ -702,9 +709,9 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-    // Generated-code validation: patch errors and allocation-free wide spans.
+    // Generated-code validation: patch errors and allocation-free span/sequence checks.
     {
-        const validation_step = b.step("test-cdr-validation", "Check generated patch error propagation and wide-string validation");
+        const validation_step = b.step("test-cdr-validation", "Check generated patch errors, wide strings and sequence allocation validation");
         test_step.dependOn(validation_step);
         const fixture_dir = "test/integration/cdr_validation/";
         const gen_zig = b.addRunArtifact(exe);
@@ -734,6 +741,7 @@ pub fn build(b: *std.Build) void {
             gen.addArgs(&.{ "-b", lang, "-o" });
             const dir = gen.addOutputDirectoryArg(b.fmt("cdr-validation-{s}", .{lang}));
             gen.addFileArg(b.path(fixture_dir ++ "validation.idl"));
+            gen.addFileArg(b.path(fixture_dir ++ "sequences.idl"));
             const validation_mod = b.createModule(.{
                 .root_source_file = null,
                 .target = target,
@@ -756,11 +764,114 @@ pub fn build(b: *std.Build) void {
                 .file = dir.path(b, if (cpp) "validation_cdr.cpp" else "validation_cdr.c"),
                 .flags = generated_flags,
             });
-            linkCdr(validation_mod, cdr_library);
+            validation_mod.addCSourceFile(.{
+                .file = dir.path(b, if (cpp) "sequences_cdr.cpp" else "sequences_cdr.c"),
+                .flags = flags,
+            });
+            linkCdr(validation_mod, if (cpp) allocation_cdr_library else cdr_library);
             validation_mod.addIncludePath(dir);
             validation_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
             const validation_exe = b.addExecutable(.{ .name = b.fmt("zidl-cdr-validation-{s}", .{lang}), .root_module = validation_mod });
             validation_step.dependOn(&b.addRunArtifact(validation_exe).step);
+        }
+    }
+
+    // C bounded string aliases must remain inline storage in C and C++ consumers.
+    {
+        const step = b.step("test-c-bounded-typedefs", "Check bounded string typedef storage and decoding");
+        test_step.dependOn(step);
+        const fixture = "test/integration/c_bounded_typedefs/";
+        const gen = b.addRunArtifact(exe);
+        gen.addArgs(&.{ "-b", "c", "-o" });
+        const dir = gen.addOutputDirectoryArg("c-bounded-typedefs");
+        gen.addFileArg(b.path(fixture ++ "types.idl"));
+        for ([_]bool{ false, true }) |cpp| {
+            const consumer_mod = b.createModule(.{
+                .root_source_file = null,
+                .target = target,
+                .optimize = .Debug,
+                .link_libc = true,
+                .link_libcpp = cpp,
+            });
+            consumer_mod.addCSourceFile(.{ .file = b.path(if (cpp) fixture ++ "test.cpp" else fixture ++ "test.c"), .flags = if (cpp)
+                &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror", "-fno-exceptions", "-fno-rtti" }
+            else
+                &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" } });
+            consumer_mod.addCSourceFile(.{ .file = dir.path(b, "types_cdr.c"), .flags = &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" } });
+            consumer_mod.addIncludePath(dir);
+            consumer_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+            linkCdr(consumer_mod, cdr_library);
+            const check = b.addExecutable(.{ .name = if (cpp) "bounded-typedefs-cpp" else "bounded-typedefs-c", .root_module = consumer_mod });
+            step.dependOn(&b.addRunArtifact(check).step);
+        }
+    }
+
+    {
+        const step = b.step("test-cpp-split-namespaces", "Compile and link C++ module namespaces in split output");
+        test_step.dependOn(step);
+        for (0..4) |mode| {
+            const split = mode >= 2;
+            const gen = b.addRunArtifact(exe);
+            gen.addArgs(&.{ "-b", "cpp" });
+            if (mode % 2 == 1) gen.addArg("--cpp-pmr-containers");
+            if (split) gen.addArg("--split-files");
+            gen.addArg("-o");
+            const dir = gen.addOutputDirectoryArg(b.fmt("cpp-split-namespaces-{d}", .{mode}));
+            gen.addFileArg(b.path("test/integration/cpp_split_namespaces/shapes.idl"));
+            const m = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = true });
+            const flags: []const []const u8 = if (split) &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror", "-DSPLIT" } else &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" };
+            m.addCSourceFile(.{ .file = b.path("test/integration/cpp_split_namespaces/test.cpp"), .flags = flags });
+            if (split) {
+                for ([_][]const u8{ "Top", "First_Nested_Data", "First_Nested_Value", "First_Nested_Packet", "Second_Nested_Data", "Second_Nested_Packet" }) |name| m.addCSourceFile(.{ .file = dir.path(b, b.fmt("{s}_cdr.cpp", .{name})), .flags = flags });
+            } else m.addCSourceFile(.{ .file = dir.path(b, "shapes_cdr.cpp"), .flags = flags });
+            m.addIncludePath(dir);
+            m.addIncludePath(b.path("packages/zidl-cdr/include"));
+            linkCdr(m, cdr_library);
+            const app = b.addExecutable(.{ .name = b.fmt("cpp-split-namespaces-{d}", .{mode}), .root_module = m });
+            step.dependOn(&b.addRunArtifact(app).step);
+        }
+    }
+
+    // STL storage failures must stay inside generated C++ codec entry points.
+    {
+        const allocation_step = b.step("test-cpp-codec-allocation", "Inject C++ codec allocation failures");
+        test_step.dependOn(allocation_step);
+        for ([_]bool{ false, true }) |pmr| {
+            const gen = b.addRunArtifact(exe);
+            gen.addArgs(&.{ "-b", "cpp", "-o" });
+            const dir = gen.addOutputDirectoryArg(if (pmr) "allocation-pmr" else "allocation-stl");
+            if (pmr) gen.addArg("--cpp-pmr-containers");
+            gen.addFileArg(b.path("test/integration/cpp_allocation/fixture.idl"));
+            const allocation_mod = b.createModule(.{
+                .root_source_file = null,
+                .target = target,
+                .optimize = .Debug,
+                .link_libc = true,
+                .link_libcpp = true,
+            });
+            const flags: []const []const u8 = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" };
+            allocation_mod.addCSourceFile(.{ .file = b.path("test/integration/cpp_allocation/test.cpp"), .flags = flags });
+            allocation_mod.addCSourceFile(.{ .file = dir.path(b, "fixture_cdr.cpp"), .flags = flags });
+            allocation_mod.addIncludePath(dir);
+            allocation_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+            linkCdr(allocation_mod, allocation_cdr_library);
+            const allocation_exe = b.addExecutable(.{ .name = if (pmr) "cpp-codec-allocation-pmr" else "cpp-codec-allocation-stl", .root_module = allocation_mod });
+            allocation_step.dependOn(&b.addRunArtifact(allocation_exe).step);
+            const no_exceptions_mod = b.createModule(.{
+                .root_source_file = null,
+                .target = target,
+                .optimize = .Debug,
+                .link_libc = true,
+                .link_libcpp = true,
+            });
+            const no_exceptions_flags: []const []const u8 = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror", "-fno-exceptions", "-fno-rtti" };
+            no_exceptions_mod.addCSourceFile(.{ .file = b.path("test/integration/cpp_allocation/no_exceptions.cpp"), .flags = no_exceptions_flags });
+            no_exceptions_mod.addCSourceFile(.{ .file = dir.path(b, "fixture_cdr.cpp"), .flags = no_exceptions_flags });
+            no_exceptions_mod.addIncludePath(dir);
+            no_exceptions_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+            linkCdr(no_exceptions_mod, cdr_library);
+            const no_exceptions_exe = b.addExecutable(.{ .name = if (pmr) "cpp-codec-no-exceptions-pmr" else "cpp-codec-no-exceptions-stl", .root_module = no_exceptions_mod });
+            allocation_step.dependOn(&b.addRunArtifact(no_exceptions_exe).step);
         }
     }
 
@@ -896,6 +1007,28 @@ pub fn build(b: *std.Build) void {
                 run.addArg(if (split) "optionalwire." else "Shapes$OptionalWire$");
                 projection_step.dependOn(&run.step);
             }
+        }
+    }
+
+    {
+        const array_step = b.step("test-cpp-optional-arrays", "Compile and exercise C++ optional arrays");
+        test_step.dependOn(array_step);
+        for ([_]bool{ false, true }) |pmr| {
+            const gen = b.addRunArtifact(exe);
+            gen.addArgs(&.{ "-b", "cpp" });
+            if (pmr) gen.addArg("--cpp-pmr-containers");
+            gen.addArg("-o");
+            const generated = gen.addOutputDirectoryArg(if (pmr) "optional-arrays-pmr" else "optional-arrays-stl");
+            gen.addFileArg(b.path("test/integration/cpp_optional_arrays/shapes.idl"));
+            const consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = true });
+            const flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" };
+            consumer.addCSourceFile(.{ .file = b.path("test/integration/cpp_optional_arrays/test.cpp"), .flags = flags });
+            consumer.addCSourceFile(.{ .file = generated.path(b, "shapes_cdr.cpp"), .flags = flags });
+            consumer.addIncludePath(generated);
+            consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
+            linkCdr(consumer, cdr_library);
+            const app = b.addExecutable(.{ .name = if (pmr) "optional-arrays-pmr" else "optional-arrays-stl", .root_module = consumer });
+            array_step.dependOn(&b.addRunArtifact(app).step);
         }
     }
 

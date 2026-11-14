@@ -19,3 +19,7 @@ module Validation {
     @mutable struct Narrow { Small first; Medium second; long tail; };
     @mutable struct NarrowLast { Small only; };
 };
+
+module Validation {
+    struct BoundedArrays { string<4> words[2]; wstring<2> wide[2][2]; };
+};

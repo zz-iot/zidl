@@ -18,6 +18,45 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Preserve nested key-only sequence projections during allocation-free native preflight.
+- Contain allocating C++ hash-callback defaults and preserve valid union arms when construction fails, including partial arrays.
+
+- Preserve IDL module namespaces and codec C linkage in per-type C++ split
+  headers, including cross-module dependencies and owning union lifecycles.
+
+- **C++ mutable optional reuse.** Clear optional fields in the active decode
+  projection before reading mutable parameters, so omitted fields cannot retain
+  values from a previous sample. Include inherited fields and optional arrays;
+  key-only decoding preserves non-key state. Compiled STL/PMR regressions exercise
+  present/absent/re-present samples and inherited projections in both byte orders.
+
+- **C++ optional arrays compile and round-trip.** Direct optional arrays use
+  `std::optional<std::array<...>>`, including multidimensional arrays and arrays
+  of array typedefs. Existing optional typedefs keep their alias types. Generated
+  CDR indexing works for these wrappers in STL and PMR modes; ordinary member
+  arrays retain their existing representation. Compiled checks cover both CDR
+  versions, byte orders, present/absent values, counting writers and truncation.
+
+- C declarations put bounded string/wstring capacity after member array
+  dimensions, matching codec indexing. Regenerate affected C bindings together;
+  native array strides change even though total storage size is unchanged.
+
+- C++ decoder entry points translate `std::bad_alloc` and `std::length_error`
+  into `ZIDL_CDR_OVERFLOW` when exceptions are enabled. Failed decodes leave
+  destructible, potentially partial output and bounded reader progress. Fault
+  injection checks STL/PMR cleanup, retry and hash-output preservation. Generated
+  codecs still compile without exceptions; C++ consumers requiring exception-free
+  checked allocation failure should use generated C values/codecs. STL/PMR remains
+  the C++ mapping. See `docs/design/cpp-codec-allocation.md`.
+
+- C/C++ decoders validate sequence counts against declared bounds and probe the
+  complete wire extent before allocating a sequence container. Primitive spans use
+  a bulk check; variable-size and nested elements use an allocation-free skip walk
+  respecting XCDR2 collection/member boundaries. Skip traversal also rejects counts
+  above sequence bounds. Compiled regressions cover both XCDR versions and byte orders,
+  rejected-input allocation counts, nested typedef/struct elements, and cleanup.
+  Valid samples can still encounter ordinary allocator/STL allocation failures.
+
 - Remove the transitional `zidl-rt` package and `zidl_rt` module export after
   zidl and zzdds migrated. Import codec APIs from `zidl_cdr` and ownership,
   allocator, entity and authoring support from `zidl_bindings`.

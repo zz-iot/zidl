@@ -291,7 +291,7 @@ const Generator = struct {
         if (self.opts.generate_interfaces) try self.write("#include <atomic>\n#include <memory>\n");
         if (needs.map) try self.write("#include <map>\n");
         if (needs.optional) try self.write("#include <optional>\n");
-        if (needs.union_arrays) try self.write("#include <cstring>\n");
+        if (needs.union_arrays) try self.write("#include <cstring>\n#include <new>\n#include <stdexcept>\n");
         if (needs.union_lifetime) try self.write("#include <new>\n");
         try self.write("#include <array>\n");
         try self.write("#include <stdexcept>\n");
@@ -431,6 +431,7 @@ const Generator = struct {
         try self.print("{s}{s}int {s}_serialize_key_holder(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         try self.print("{s}{s}int {s}_serialize_key_value(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         try self.print("{s}{s}int {s}_deserialize_key_value(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
+        try self.print("{s}{s}int {s}_skip_key_value(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         // Keyless structs still get these prototypes when wrappers were
@@ -776,6 +777,7 @@ const Generator = struct {
         if (needs_lifetime) {
             try self.write("    void _destroy_active() noexcept;\n");
             try self.write("    void _construct_default();\n");
+            try self.print("    {s}({s} v, int);\n", .{ u.name, disc_cpp });
             try self.print("    void _copy_construct_from(const {s} &other);\n", .{u.name});
             // Shared by the move ctor, move assignment, and operator=(const&)'s
             // temporary-to-*this step.
@@ -1307,7 +1309,7 @@ const Generator = struct {
 
     /// Emit a single member/field declaration.
     /// Arrays use C-style `Type name[D1][D2];`.
-    /// Optional (non-array) members use `std::optional<Type> name{};`.
+    /// Optional arrays wrap nested std::array storage in std::optional.
     /// Plain scalar members use `Type name{};` for default-zero initialisation.
     fn emitMemberDecl(
         self: *Generator,
@@ -1321,7 +1323,11 @@ const Generator = struct {
         const cpp_type = try self.typeRefToCpp(type_ref);
         defer self.alloc.free(cpp_type);
 
-        if (dims.len > 0) {
+        if (is_optional and dims.len > 0) {
+            const array_type = try self.makeArrayType(cpp_type, dims);
+            defer self.alloc.free(array_type);
+            try self.print("{s}std::optional<{s}> {s}{{}};\n", .{ indent, array_type, name });
+        } else if (dims.len > 0) {
             try self.print("{s}{s} {s}", .{ indent, cpp_type, name });
             for (dims) |d| {
                 try self.print("[{d}]", .{d});
@@ -1569,6 +1575,8 @@ const CdrGenerator = struct {
     /// suffixes loop locals so nested loops never shadow (see cdr_skip.collName).
     coll_depth: u32 = 0,
     reader_window_id: usize = 0,
+    /// Temporary error target for allocation-free sequence probes.
+    goto_label: ?[]const u8 = null,
     canonical_key: bool = false,
     wire_key: bool = false,
     alloc: std.mem.Allocator,
@@ -1607,6 +1615,39 @@ const CdrGenerator = struct {
         const s = try std.fmt.allocPrint(self.alloc, fmt, args);
         defer self.alloc.free(s);
         try self.out.appendSlice(self.alloc, s);
+    }
+
+    /// Keep STL storage failures inside the integer-returning codec boundary.
+    /// The caller publishes the bounded reader's cursor after either outcome.
+    pub fn emitReadCall(self: *CdrGenerator, name: []const u8, args: []const u8) !void {
+        try self.writeI("int _rc;\n");
+        try self.write("#if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)\n");
+        try self.writeI("try {\n");
+        self.indent_depth += 1;
+        try self.printI("_rc = {s}_bounded_impl({s});\n", .{ name, args });
+        self.indent_depth -= 1;
+        try self.writeI("} catch (const std::bad_alloc&) {\n");
+        try self.writeI("    _rc = ZIDL_CDR_OVERFLOW;\n");
+        try self.writeI("} catch (const std::length_error&) {\n");
+        try self.writeI("    _rc = ZIDL_CDR_OVERFLOW;\n");
+        try self.writeI("}\n");
+        try self.write("#else\n");
+        try self.printI("_rc = {s}_bounded_impl({s});\n", .{ name, args });
+        try self.write("#endif\n");
+    }
+
+    fn emitAllocationTry(self: *CdrGenerator) !void {
+        try self.write("#if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)\n");
+        try self.writeI("try {\n");
+        try self.write("#endif\n");
+        self.indent_depth += 1;
+    }
+
+    fn emitAllocationCatch(self: *CdrGenerator) !void {
+        self.indent_depth -= 1;
+        try self.write("#if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)\n");
+        try self.writeI("} catch (const std::bad_alloc&) {\n    return ZIDL_CDR_OVERFLOW;\n} catch (const std::length_error&) {\n    return ZIDL_CDR_OVERFLOW;\n}\n");
+        try self.write("#endif\n");
     }
 
     /// Return the C++ type string suitable for declaring a local variable of this type
@@ -1887,6 +1928,15 @@ const CdrGenerator = struct {
             try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_em_end);\n");
             try self.writeI("if (_rc) return _rc;\n");
             try cdr_skip.limitReader(self, "_em_end");
+            // Mutable absence is encoded by omission. Clear only fields in
+            // this projection so reused outputs cannot retain stale optionals.
+            for (wire_fields) |field| {
+                if (!field.member.annotations.is_optional) continue;
+                try self.openWireField(field, false, true);
+                try self.printI("_v->{s}.reset();\n", .{field.member.name});
+                try self.closeWireField(field, true);
+            }
+
             try self.writeI("for (size_t _frame_limit = _r->data_len, _member_end = _r->pos; zidl_cdr_mutable_has_more(_r, _em_end); _r->pos = _member_end, _r->data_len = _frame_limit) {\n");
             self.indent_depth += 1;
             try self.writeI("ZidlEmHeader _emh;\n");
@@ -1991,6 +2041,7 @@ const CdrGenerator = struct {
 
         try self.emitStructValueFns(s, c_name, cpp_qname, false);
         try self.emitStructValueFns(s, c_name, cpp_qname, true);
+        try cdr_skip.emitKeyValueSkip(self, s, c_name);
 
         // ── skip ─────────────────────────────────────────────────────────────
 
@@ -2057,6 +2108,7 @@ const CdrGenerator = struct {
             try self.write("}\n\n");
 
             try self.print("int {s}_compute_key_hash_from_cdr_key_only(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {{\n", .{c_name});
+            try self.emitAllocationTry();
             try self.writeI("ZidlCdrReader _reader;\n");
             try self.writeI("int _rc = zidl_cdr_reader_init(&_reader, _payload, _len);\n");
             try self.writeI("if (_rc) return _rc;\n");
@@ -2064,9 +2116,11 @@ const CdrGenerator = struct {
             try self.printI("_rc = {s}_deserialize_key_value(&_reader, &_value);\n", .{c_name});
             try self.printI("if (!_rc) _rc = {s}_compute_key_hash(&_value, _hash);\n", .{c_name});
             try self.writeI("return _rc;\n");
+            try self.emitAllocationCatch();
             try self.write("}\n\n");
 
             try self.print("int {s}_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {{\n", .{c_name});
+            try self.emitAllocationTry();
             try self.writeI("ZidlCdrReader _r_data;\n");
             try self.writeI("int _rc = zidl_cdr_reader_init(&_r_data, _payload, _len);\n");
             try self.writeI("if (_rc) return _rc;\n");
@@ -2074,6 +2128,7 @@ const CdrGenerator = struct {
             try self.printI("_rc = {s}_deserialize(&_r_data, &_v_data);\n", .{c_name});
             try self.writeI("if (_rc) return _rc;\n");
             try self.printI("return {s}_compute_key_hash(&_v_data, _hash);\n", .{c_name});
+            try self.emitAllocationCatch();
             try self.write("}\n\n");
         } else if (self.opts.generate_zzdds_wrappers and isZzddsTopicStructCpp(s)) {
             // Keyless topic type but --generate-zzdds-wrappers was requested:
@@ -2864,6 +2919,7 @@ const CdrGenerator = struct {
                 if (isDefaultUnionCase(cas)) has_default_m = true;
                 const case_member_id: u32 = cas.annotations.memberId(@intCast(cas_idx + 1));
                 try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
+                try self.writeI("{\n");
                 self.indent_depth += 1;
                 if (cas.dimensions.len > 0) {
                     const access = try std.fmt.allocPrint(self.alloc, "_v->{s}()", .{cas.name});
@@ -2896,6 +2952,7 @@ const CdrGenerator = struct {
                 }
                 try self.writeI("break;\n");
                 self.indent_depth -= 1;
+                try self.writeI("}\n");
             }
             if (!has_default_m) {
                 try self.writeI("default: break;\n");
@@ -2920,6 +2977,7 @@ const CdrGenerator = struct {
             for (u.cases) |cas| {
                 if (isDefaultUnionCase(cas)) has_default = true;
                 try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
+                try self.writeI("{\n");
                 self.indent_depth += 1;
                 if (cas.dimensions.len > 0) {
                     const access = try std.fmt.allocPrint(self.alloc, "_v->{s}()", .{cas.name});
@@ -2932,6 +2990,7 @@ const CdrGenerator = struct {
                 }
                 try self.writeI("break;\n");
                 self.indent_depth -= 1;
+                try self.writeI("}\n");
             }
             if (!has_default) {
                 try self.writeI("default:\n");
@@ -3274,7 +3333,6 @@ const CdrGenerator = struct {
                 try self.printI("{{ using _LT = {s}; ({s}).~_LT(); }}\n", .{ cpp_type, dst_access });
             },
             .construct_default => {
-                if (!non_trivial) return;
                 const cpp_type = try cppTypeStr(self.alloc, self.opts, tr);
                 defer self.alloc.free(cpp_type);
                 try self.printI("new (&({s})) {s}();\n", .{ dst_access, cpp_type });
@@ -3343,10 +3401,16 @@ const CdrGenerator = struct {
     /// switch (discriminant already selects `_disc`'s own case; no source
     /// value involved).
     fn emitUnionCaseSelfOp(self: *CdrGenerator, op: UnionLifecycleOp, cas: ir.UnionCase) anyerror!void {
-        if (!typeRefIsCppNonTrivial(cas.type_ref)) return;
+        if (!typeRefIsCppNonTrivial(cas.type_ref) and op != .construct_default) return;
         const access = try std.fmt.allocPrint(self.alloc, "_u._{s}", .{cas.name});
         defer self.alloc.free(access);
-        if (cas.dimensions.len > 0) {
+        if (cas.dimensions.len > 0 and op == .construct_default) {
+            const cpp_type = try cppTypeStr(self.alloc, self.opts, cas.type_ref);
+            defer self.alloc.free(cpp_type);
+            const dims = try cArrayDimsStr(self.alloc, cas.dimensions);
+            defer self.alloc.free(dims);
+            try self.printI("{{ using _Array = {s}{s}; new (&({s})) _Array(); }}\n", .{ cpp_type, dims, access });
+        } else if (cas.dimensions.len > 0) {
             try self.emitUnionArrayLifecycleOp(op, cas.type_ref, access, access, cas.dimensions, 0);
         } else {
             try self.emitUnionLifecycleLeaf(op, cas.type_ref, access, access);
@@ -3463,6 +3527,12 @@ const CdrGenerator = struct {
         self.indent_depth -= 1;
         try self.write("}\n\n");
 
+        try self.print("{s}::{s}({s} v, int) : _disc(v) {{\n", .{ cpp_qname, u.name, disc_cpp });
+        self.indent_depth += 1;
+        try self.writeI("_construct_default();\n");
+        self.indent_depth -= 1;
+        try self.write("}\n\n");
+
         try self.print("{s}::{s}(const {s} &other) : _disc(other._disc) {{\n", .{ cpp_qname, u.name, cpp_qname });
         self.indent_depth += 1;
         try self.writeI("_copy_construct_from(other);\n");
@@ -3526,9 +3596,8 @@ const CdrGenerator = struct {
         self.indent_depth += 1;
         try self.writeI("if (v != _disc) {\n");
         self.indent_depth += 1;
-        try self.writeI("_destroy_active();\n");
-        try self.writeI("_disc = v;\n");
-        try self.writeI("_construct_default();\n");
+        try self.printI("{s} tmp(v, 0);\n", .{cpp_qname});
+        try self.writeI("*this = std::move(tmp);\n");
         self.indent_depth -= 1;
         try self.writeI("}\n");
         self.indent_depth -= 1;
@@ -3868,6 +3937,7 @@ const CdrGenerator = struct {
                 try self.writeI("}\n");
             },
             .sequence => |seq| {
+                try cdr_skip.preflightSequence(self, tr);
                 const window = try cdr_skip.openReadWindow(self, !cdr_skip.isPrimitiveElement(seq.element.*));
                 const sl = try cdr_skip.collName(self.alloc, "_sl", self.coll_depth);
                 defer self.alloc.free(sl);
@@ -7416,6 +7486,7 @@ fn generateTypeHeader(
     if (opts.generate_interfaces and needs.memory) try gen.write("#include <atomic>\n#include <memory>\n");
     if (needs.map) try gen.write("#include <map>\n");
     if (needs.optional) try gen.write("#include <optional>\n");
+    if (needs.union_arrays) try gen.write("#include <cstring>\n");
     if (needs.union_lifetime) try gen.write("#include <new>\n");
     try gen.write("#include <array>\n");
     try gen.write("#include <stdexcept>\n");
@@ -7443,7 +7514,19 @@ fn generateTypeHeader(
         try gen.print("namespace {s} {{\n\n", .{opts.cpp_namespace});
     }
 
+    // Dependencies stay at file scope; only the IDL declaration belongs in
+    // its enclosing modules. CDR entry points retain global C linkage.
+    var namespace_depth: usize = 0;
+    if (std.mem.lastIndexOf(u8, qname, "::")) |end| {
+        var scopes = std.mem.splitSequence(u8, qname[0..end], "::");
+        while (scopes.next()) |scope| {
+            if (scope.len == 0) continue;
+            try gen.print("namespace {s} {{\n", .{scope});
+            namespace_depth += 1;
+        }
+    }
     try gen.emitTypeDecl(td);
+    for (0..namespace_depth) |_| try gen.write("} // IDL namespace\n");
 
     if (opts.generate_zzdds_wrappers and !opts.no_typesupport) {
         switch (td) {
@@ -7457,12 +7540,15 @@ fn generateTypeHeader(
     }
 
     if (!opts.no_typesupport) {
+        const has_cdr = td == .struct_ or td == .exception or td == .union_;
+        if (has_cdr) try gen.write("extern \"C\" {\n");
         switch (td) {
             .struct_ => |s| try gen.emitStructCdrProtos(s),
             .exception => |e| try gen.emitExceptionCdrProtos(e),
             .union_ => |u| try gen.emitUnionCdrProtos(u),
             else => {},
         }
+        if (has_cdr) try gen.write("} // extern C\n");
     }
 
     if (opts.cpp_namespace.len > 0) {

@@ -1,0 +1,12 @@
+module Validation {
+    typedef long ScalarAlias;
+    typedef sequence<ScalarAlias, 2> BoundedValues;
+    struct SeqBounded { BoundedValues values; };
+    struct SeqUnbounded { sequence<long long> values; };
+    struct SeqStrings { sequence<string, 2> values; };
+    struct SeqNested { sequence<BoundedValues, 2> values; };
+    struct SeqStructs { sequence<SeqBounded, 2> values; };
+    struct KeyElement { @key long id; long other; };
+    struct KeySequence { @key sequence<KeyElement, 2> values; };
+    struct SeqCleanup { @key string prefix; @key BoundedValues values; };
+};

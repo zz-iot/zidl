@@ -247,7 +247,9 @@ static void key_cleanup(void) {
     KeyStats stats={0}; ZidlAllocator a={&stats,key_alloc,key_resize,key_free};
     zidl_cdr_set_allocator(&a);
     assert(Canonical_SeqAgg_compute_key_hash_from_cdr_key_only(bytes,v->len,hash)!=0);
-    assert(stats.calls==1 && stats.frees==1);
+    /* The sequence probe now rejects this malformed aggregate before its
+     * container allocates, rather than allocating and cleaning up afterwards. */
+    assert(stats.calls==0 && stats.frees==0);
     zidl_cdr_set_allocator(NULL);
 }
 #endif

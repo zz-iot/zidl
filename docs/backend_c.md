@@ -54,6 +54,16 @@ for its `_free`, unless `--c-no-free` is set.
 | `union` | `typedef struct { int32_t _d; union { ... } _u; } Foo;` |
 | IDL module | C name prefix (e.g. `Ns_Foo`) |
 
+Bounded string typedefs retain inline storage: `typedef string<4> Text;` emits
+`typedef char Text[5];`, and `typedef string<4> Row[2];` emits
+`typedef char Row[2][5];`. Alias chains and sequence elements preserve this
+layout. Optional array-backed fields have presence helpers but no scalar setter.
+Bounded string defaults copy into the inline buffer without allocating.
+
+This corrects older generated pointer typedefs whose layout disagreed with the
+codec. Regenerate and rebuild C consumers together; the generated C ABI changes
+for affected types. The serialized representation is unchanged.
+
 Struct inheritance: base members are inlined as a first field named `_base`
 (type `Base`), not via C inheritance.
 
@@ -260,6 +270,16 @@ Use `@optional @default(v)` together, or switch to the C++/Zig/Java backends
 which emit inline field initializers for non-optional defaults.
 
 ---
+
+## Exception-free use from C++
+
+Generated C values and codecs are the alternative for C++ applications requiring
+exception-free checked allocation failure. Use the C representation directly and
+follow its initialization and cleanup contracts. The CDR allocator reports
+allocation failure through the existing integer status API; an allocator supplied
+by C++ must honor the C ABI and return failure without throwing. This does not
+promise allocation-free execution or complete IDL coverage. Current gaps, including
+`map<K,V>`, are listed below and remain targets for C coverage improvements.
 
 ## Known Limitations
 

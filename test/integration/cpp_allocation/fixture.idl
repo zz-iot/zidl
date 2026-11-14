@@ -1,0 +1,12 @@
+module Allocation {
+    struct Sample { @key sequence<string> values; long tail; };
+    @mutable struct Optional { @optional sequence<string> values; };
+    union Choice switch (long) { case 0: string text; default: long number; };
+    struct Nested { Choice payload; };
+    struct MapValue { map<long, string> values; };
+    struct DefaultValue { @key long id; @default("A default string long enough to allocate in both standard library implementations.") string text; @default("Another constructor default longer than small string storage for rollback tests.") string extra; };
+    union DefaultChoice switch(long) { case 0: long number; case 1: DefaultValue value; case 2: DefaultValue values[2]; default: long other; };
+    @mutable union DefaultMutableChoice switch(long) { case 0: long number; case 1: DefaultValue value; default: long other; };
+    union ScalarChoice switch(long) { case 0: boolean flag; case 1: long numbers[2]; default: string text; };
+    exception Failure { sequence<string> values; };
+};

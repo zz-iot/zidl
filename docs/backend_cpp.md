@@ -45,6 +45,7 @@ the companion source file.
 | `wstring` | `std::wstring` |
 | `sequence<T>` | `std::vector<T>` |
 | `T[N]` | `std::array<T, N>` |
+| `@optional T[N]` | `std::optional<std::array<T, N>>` (nested arrays for multiple dimensions) |
 | `map<K,V>` | `std::map<K, V>` |
 | `@optional T` | `std::optional<T>` |
 | `enum` | `enum class Foo : uint32_t { ... }` |
@@ -55,6 +56,13 @@ the companion source file.
 | IDL module | C++ namespace |
 
 ---
+
+When decoding a mutable struct into a reused value, optionals included in the
+wire projection are reset before its parameters are read. Omitted optional fields
+therefore become disengaged. This includes inherited fields and optional arrays.
+Key-value decoding resets only projected fields, preserving non-key fields.
+Malformed initial framing fails before these resets; errors later in the body
+may leave partially decoded, destructible values.
 
 ## Generated File Structure
 
@@ -194,3 +202,18 @@ references.
 | `@verbatim` annotations | Parsed and stored in IR but not yet injected into generated output — see [`@verbatim` Injection](#verbatim-injection-not-yet-implemented) above |
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
 | `--generate-interfaces`: complex-type adaptation | Primitive and string operation signatures are adapted; richer signatures emit `/* TODO: adapt C++ types */` stubs |
+
+## Decoder allocation failures
+
+With exceptions enabled, generated decoder entry points return
+`ZIDL_CDR_OVERFLOW` for `std::bad_alloc` and `std::length_error`. Output can be
+partially decoded, but remains destructible and reusable. Reader limits are
+preserved; reset the reader before retrying. Key-hash callbacks leave their hash
+output unchanged when decoding fails.
+
+Compiling with `-fno-exceptions` is supported, but allocation exhaustion can still
+terminate through STL/PMR. C++ applications requiring exception-free checked
+allocation failure should use generated C values and codecs directly. C coverage
+is being improved; unsupported features such as `map<K,V>` remain explicit gaps.
+C++ retains STL/PMR; alternative containers are outside this hardening series.
+See [C++ codec allocation failures](design/cpp-codec-allocation.md).

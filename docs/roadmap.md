@@ -34,11 +34,6 @@ Features*.
 - **XCDR1 `@mutable` data is not PL_CDR.** Peers expect a ParameterList (PL_CDR)
   encoding for XCDR1 samples of mutable types; zidl writes plain CDR1 framing with a
   CDR1 identifier. XCDR2 mutable types are correct (PL_CDR2, EMHEADERs).
-- **Decoders do not bound-check untrusted lengths.** The C and C++ decoders accept a
-  `sequence<T, N>` count above `N`, and the C++ decoder calls `resize()` with an
-  unchecked wire count, so a hostile length can throw `std::bad_alloc` out of an
-  `extern "C"` function (terminating the process). Reject counts above the bound and
-  counts that cannot fit in the remaining input before allocating.
 - **TypeObjects are minimal-only and struct-only as emitted constants.** zidl emits a
   struct's minimal TypeObject and its hash (checked against reference hashes by
   `test/integration/xcdr_known_answer/`); unions, enums and aliases are encoded only
@@ -100,10 +95,20 @@ Features*.
 
 ### C backend
 
+The generated C representation and codecs are also the exception-free alternative
+for C++ consumers requiring checked allocation failure. Improve IDL coverage here;
+keep STL/PMR as the C++ mapping. Alternate C++ containers are outside this hardening
+series and require a separate consumer-driven investigation. See
+[backend policy](decisions.md#backend-policy).
+
 - **`map<K,V>`** — hard `error.MapTypeNotSupportedInCBackend` at codegen; the CDR generator
   additionally has `/* TODO: map write/read */` stub arms. (C++/Java/Zig CDR paths do
   marshal maps.) `c.zig:116`. In interface/callback parameter position it must become a
-  named hard error — see the C-ABI type-coverage design doc.
+  named hard error — see the C-ABI type-coverage design doc. Scope C map value
+  support as its own small series: define typed storage and duplicate-key semantics,
+  implement CDR read/write and cleanup, and test bounds, allocation failures and
+  nested owning keys/values with compiled C and C++ consumers. Interface/callback
+  adaptation is a separate slice; do not claim it from value-codec support alone.
 - **`@optional` `_set_` macro** is not emitted for array-backed members (fixed arrays,
   bounded strings/wstrings) — callers do direct assignment + manual `_present` bit update.
   No memcpy-based shape-aware setter. `backend_c.md`.
@@ -115,15 +120,6 @@ Features*.
   `std::pmr`) is a deliberately deferred option; not built.
 
 ### C++ backend
-
-- **Direct `@optional` array members generate invalid C++.** For example,
-  `@optional long values[2]` declares a bare array while its codec calls
-  `.has_value()` / `.emplace()`. This predates native CDR consolidation; it is a
-  generator bug, not an intentional language restriction. Add an optional-capable
-  array representation (for example `std::optional<std::array<T, N>>`), including
-  multidimensional arrays and array typedefs, and compile/roundtrip tests for both CDR versions.
-  Arrays inside an optional aggregate work. See the
-  [optional-wire checkpoint](design/native-cdr-optional-wire-slice.md).
 
 - **`--generate-c-api` complex-type adapter (`ConcreteImplGenerator`)** — the largest single
   gap. Non-adaptable parameter/return types (bare/nested sequences, complex QoS structs,

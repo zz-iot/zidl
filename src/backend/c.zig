@@ -572,11 +572,7 @@ const Generator = struct {
                 );
                 // _set_ macros use scalar assignment; skip for array-backed fields
                 // (fixed-length arrays and bounded strings/wstrings).
-                const is_array_backed = m.dimensions.len > 0 or switch (m.type_ref) {
-                    .string => |b| b != null,
-                    .wstring => |b| b != null,
-                    else => false,
-                };
+                const is_array_backed = m.dimensions.len > 0 or typeRefIsArrayBacked(m.type_ref);
                 if (!is_array_backed) {
                     const ct = try self.typeRefToC(m.type_ref);
                     defer self.alloc.free(ct);
@@ -639,6 +635,7 @@ const Generator = struct {
         try self.print("{s}{s}int {s}_serialize_key_holder(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, c_name });
         try self.print("{s}{s}int {s}_serialize_key_value(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, c_name });
         try self.print("{s}{s}int {s}_deserialize_key_value(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, c_name });
+        try self.print("{s}{s}int {s}_skip_key_value(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, c_name });
         try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         // Keyless structs still get these prototypes when wrappers were
@@ -861,27 +858,10 @@ const Generator = struct {
             else => {},
         }
 
-        const c_type = try self.typeRefToC(t.type_ref);
-        defer self.alloc.free(c_type);
-
-        // A typedef used as a sequence's element already had this exact line
-        // emitted early by `emitForwardDeclIfAlias`
-        // (see there) -- skip re-emitting it here; re-emitting an identical
-        // typedef is illegal under this project's `-std=c99 -Werror`. The
-        // `_free` declaration below is independent and must still run.
-        const already_forward_typedef = self.forward_decl_emitted.get(c_name) != null;
-
-        if (!already_forward_typedef) {
-            if (t.dimensions.len == 0) {
-                try self.print("typedef {s}{s}{s};\n\n", .{ c_type, ptrSep(c_type), c_name });
-            } else {
-                // Array typedef: `typedef int32_t Matrix[2][4];`
-                try self.print("typedef {s}{s}{s}", .{ c_type, ptrSep(c_type), c_name });
-                for (t.dimensions) |d| {
-                    try self.print("[{d}]", .{d});
-                }
-                try self.write(";\n\n");
-            }
+        // Sequence element aliases may already have been emitted by the pre-scan.
+        if (self.forward_decl_emitted.get(c_name) == null) {
+            try self.emitMemberDecl(t.type_ref, c_name, t.dimensions, "typedef ");
+            try self.write("\n");
         }
 
         // Unbounded sequence typedefs need a _free declaration so C++ bindings
@@ -1151,11 +1131,8 @@ const Generator = struct {
         errdefer self.alloc.free(k);
         try self.forward_decl_emitted.put(self.alloc, k, {});
 
-        const c_type = try self.typeRefToC(t.type_ref);
-        defer self.alloc.free(c_type);
-        try self.print("typedef {s}{s}{s}", .{ c_type, ptrSep(c_type), c_name });
-        for (t.dimensions) |d| try self.print("[{d}]", .{d}); // array typedef element
-        try self.write(";\n\n");
+        try self.emitMemberDecl(t.type_ref, c_name, t.dimensions, "typedef ");
+        try self.write("\n");
     }
 
     /// Pre-scan pass 2: emit full callback struct definitions for listener interfaces.
@@ -1349,15 +1326,15 @@ const Generator = struct {
         // Bounded string / wstring → C fixed-length char array.
         switch (type_ref) {
             .string => |bound| if (bound) |n| {
-                try self.print("{s}char {s}[{d}]", .{ indent, name, n + 1 });
+                try self.print("{s}char {s}", .{ indent, name });
                 for (dims) |d| try self.print("[{d}]", .{d});
-                try self.write(";\n");
+                try self.print("[{d}];\n", .{n + 1});
                 return;
             },
             .wstring => |bound| if (bound) |n| {
-                try self.print("{s}uint16_t {s}[{d}]", .{ indent, name, n + 1 });
+                try self.print("{s}uint16_t {s}", .{ indent, name });
                 for (dims) |d| try self.print("[{d}]", .{d});
-                try self.write(";\n");
+                try self.print("[{d}];\n", .{n + 1});
                 return;
             },
             else => {},
@@ -1433,6 +1410,19 @@ fn seqElemKeyC(alloc: std.mem.Allocator, type_prefix: []const u8, elem: ir.TypeR
         .wstring => |b| if (b) |n| std.fmt.allocPrint(alloc, "wstring{d}", .{n}) else alloc.dupe(u8, "wstring"),
         .fixed_pt => alloc.dupe(u8, "fixed_pt"),
         .map => alloc.dupe(u8, "map"),
+    };
+}
+
+/// Whether a named alias carries C array storage (which cannot be assigned).
+fn typeRefIsArrayBacked(tr: ir.TypeRef) bool {
+    return switch (tr) {
+        .string => |b| b != null,
+        .wstring => |b| b != null,
+        .named => |td| switch (td) {
+            .typedef => |t| t.dimensions.len > 0 or typeRefIsArrayBacked(t.type_ref),
+            else => false,
+        },
+        else => false,
     };
 }
 
@@ -2354,6 +2344,7 @@ const CdrGenerator = struct {
 
         try self.emitStructValueFns(s, c_name, false);
         try self.emitStructValueFns(s, c_name, true);
+        try cdr_skip.emitKeyValueSkip(self, s, c_name);
 
         // ── skip ─────────────────────────────────────────────────────────────
 
@@ -3975,8 +3966,8 @@ const CdrGenerator = struct {
                 }
             },
             .sequence => |seq| {
+                try cdr_skip.preflightSequence(self, tr);
                 const window = try cdr_skip.openReadWindow(self, !cdr_skip.isPrimitiveElement(seq.element.*));
-                _ = seq.bound;
                 const sl = try cdr_skip.collName(self.alloc, "_sl", self.coll_depth);
                 defer self.alloc.free(sl);
                 const si = try cdr_skip.collName(self.alloc, "_si", self.coll_depth);
@@ -4413,6 +4404,48 @@ const CdrGenerator = struct {
             .string => true,
             else => false,
         };
+        if (is_string) {
+            if (boundedStringElem(m.type_ref)) |bound| {
+                if (m.annotations.is_optional and !from_default_ctor) {
+                    const bit = optBitIdxForMember(s.*, idx);
+                    try self.printI("if (!(_v->_present & (1ULL << {d}u))) {{\n", .{bit});
+                    self.indent_depth += 1;
+                }
+                // Inline storage owns no allocation. Use an initializer so wide
+                // strings have uint16_t units independent of host wchar_t size.
+                try self.printI("{{ const {s} _default[] = {{", .{if (bound.wide) "uint16_t" else "char"});
+                const text = dv.string;
+                var i: usize = 0;
+                var units: u64 = 0;
+                while (i < text.len) {
+                    if (bound.wide) {
+                        const len = try std.unicode.utf8ByteSequenceLength(text[i]);
+                        const cp = try std.unicode.utf8Decode(text[i..][0..len]);
+                        if (cp <= 0xffff) {
+                            try self.print("{d}, ", .{cp});
+                        } else {
+                            try self.print("{d}, {d}, ", .{ 0xd800 + ((cp - 0x10000) >> 10), 0xdc00 + ((cp - 0x10000) & 0x3ff) });
+                        }
+                        units += if (cp <= 0xffff) @as(u64, 1) else 2;
+                        i += len;
+                    } else {
+                        try self.print("(char){d}, ", .{text[i]});
+                        units += 1;
+                        i += 1;
+                    }
+                }
+                if (units > bound.n) return error.DefaultStringTooLong;
+                try self.print("0}}; memcpy(_v->{s}, _default, sizeof _default); }}\n", .{m.name});
+                if (m.annotations.is_optional) {
+                    try self.printI("_v->_present |= (1ULL << {d}u);\n", .{optBitIdxForMember(s.*, idx)});
+                    if (!from_default_ctor) {
+                        self.indent_depth -= 1;
+                        try self.writeI("}\n");
+                    }
+                }
+                return;
+            }
+        }
         const dv_str = try self.defaultValueToC(dv, m.type_ref);
         defer self.alloc.free(dv_str);
 
@@ -7111,4 +7144,15 @@ test "c_backend: sequences of bounded strings are inline; nested sequences named
     try testing.expect(has(c.items, "_v->s._buffer = (char (*)[6])zidl_cdr_alloc(_sl * sizeof(char[6]));"));
     try testing.expect(has(c.items, "(uint16_t (*)[4])zidl_cdr_alloc(_sl * sizeof(uint16_t[4]))"));
     try testing.expect(has(c.items, "(string_seq *)zidl_cdr_alloc(_sl * sizeof(string_seq))"));
+}
+
+test "c_backend cdr: bounded defaults reject storage overflow through aliases" {
+    try testing.expectError(error.DefaultStringTooLong, testGenCdr(
+        \\typedef string<2> Text;
+        \\struct Sample { @default("abc") Text value; };
+    , "defaults"));
+    try testing.expectError(error.DefaultStringTooLong, testGenCdr(
+        \\typedef wstring<1> Text;
+        \\struct Sample { @default("😀") Text value; };
+    , "defaults"));
 }

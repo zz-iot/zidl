@@ -17,12 +17,14 @@ struct Beacon {
     static Beacon default_value() { return Beacon{}; }
 }; // struct Beacon
 
+extern "C" {
 #define Beacon_has_key 1
 #define Beacon_KEY_HASH_FORCE_MD5 0
 int Beacon_serialize(ZidlCdrWriter *_w, const ::Beacon *_v);
 int Beacon_serialize_key_holder(ZidlCdrWriter *_w, const ::Beacon *_v);
 int Beacon_serialize_key_value(ZidlCdrWriter *_w, const ::Beacon *_v);
 int Beacon_deserialize_key_value(ZidlCdrReader *_r, ::Beacon *_v);
+int Beacon_skip_key_value(ZidlCdrReader *_r);
 int Beacon_deserialize(ZidlCdrReader *_r, ::Beacon *_v);
 int Beacon_skip(ZidlCdrReader *_r);
 int Beacon_serialize_key(ZidlCdrWriter *_w, const ::Beacon *_v);
@@ -31,4 +33,5 @@ int Beacon_compute_key_hash(const ::Beacon *_v, uint8_t _hash[16]);
 int Beacon_compute_key_hash_from_cdr_key_only(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);
 int Beacon_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);
 
+} // extern C
 #endif // BEACON_HPP

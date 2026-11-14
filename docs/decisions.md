@@ -43,6 +43,18 @@ scalar, and cheap enough that per-type alignment tracking isn't worth it.
 
 ## Backend policy
 
+**Generated C++ retains STL/PMR containers; generated C is the exception-free
+alternative for C++ applications.** Keep the existing C++ language mapping and
+custom-allocation support through PMR. Codecs translate the documented storage
+exceptions into integer errors when exceptions are enabled; compiling without
+exceptions does not make STL/PMR exhaustion recoverable. Applications requiring
+exception-free checked allocation failure should use generated C values and
+codecs directly from C++. Improve C coverage of IDL features (including the
+currently unsupported `map<K,V>`) as part of correctness and robustness work.
+Custom or external C++ containers, and a preallocated-only C++ mapping, are outside
+this series. Investigate a different mapping separately only for an actual
+consumer requirement. See the [codec contract](design/cpp-codec-allocation.md).
+
 **IDL `interface`/`impl` policy is not baked into zidl core — until a plugin architecture
 exists, it lands as blind mechanism-only flags.** `--cpp-impl-override` / `--cpp-impl-include`
 substitute a concrete class name without zidl parsing or validating a second IDL file.
