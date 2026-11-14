@@ -291,7 +291,7 @@ const Generator = struct {
         if (self.opts.generate_interfaces) try self.write("#include <atomic>\n#include <memory>\n");
         if (needs.map) try self.write("#include <map>\n");
         if (needs.optional) try self.write("#include <optional>\n");
-        if (needs.union_arrays) try self.write("#include <cstring>\n");
+        if (needs.union_arrays) try self.write("#include <cstring>\n#include <new>\n#include <stdexcept>\n");
         if (needs.union_lifetime) try self.write("#include <new>\n");
         try self.write("#include <array>\n");
         try self.write("#include <stdexcept>\n");
@@ -1609,6 +1609,25 @@ const CdrGenerator = struct {
         const s = try std.fmt.allocPrint(self.alloc, fmt, args);
         defer self.alloc.free(s);
         try self.out.appendSlice(self.alloc, s);
+    }
+
+    /// Keep STL storage failures inside the integer-returning codec boundary.
+    /// The caller publishes the bounded reader's cursor after either outcome.
+    pub fn emitReadCall(self: *CdrGenerator, name: []const u8, args: []const u8) !void {
+        try self.writeI("int _rc;\n");
+        try self.write("#if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)\n");
+        try self.writeI("try {\n");
+        self.indent_depth += 1;
+        try self.printI("_rc = {s}_bounded_impl({s});\n", .{ name, args });
+        self.indent_depth -= 1;
+        try self.writeI("} catch (const std::bad_alloc&) {\n");
+        try self.writeI("    _rc = ZIDL_CDR_OVERFLOW;\n");
+        try self.writeI("} catch (const std::length_error&) {\n");
+        try self.writeI("    _rc = ZIDL_CDR_OVERFLOW;\n");
+        try self.writeI("}\n");
+        try self.write("#else\n");
+        try self.printI("_rc = {s}_bounded_impl({s});\n", .{ name, args });
+        try self.write("#endif\n");
     }
 
     /// Return the C++ type string suitable for declaring a local variable of this type

@@ -769,6 +769,49 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    // STL storage failures must stay inside generated C++ codec entry points.
+    {
+        const allocation_step = b.step("test-cpp-codec-allocation", "Inject C++ codec allocation failures");
+        test_step.dependOn(allocation_step);
+        for ([_]bool{ false, true }) |pmr| {
+            const gen = b.addRunArtifact(exe);
+            gen.addArgs(&.{ "-b", "cpp", "-o" });
+            const dir = gen.addOutputDirectoryArg(if (pmr) "allocation-pmr" else "allocation-stl");
+            if (pmr) gen.addArg("--cpp-pmr-containers");
+            gen.addFileArg(b.path("test/integration/cpp_allocation/fixture.idl"));
+            const allocation_mod = b.createModule(.{
+                .root_source_file = null,
+                .target = target,
+                .optimize = .Debug,
+                .link_libc = true,
+                .link_libcpp = true,
+            });
+            const flags: []const []const u8 = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" };
+            allocation_mod.addCSourceFile(.{ .file = b.path("test/integration/cpp_allocation/test.cpp"), .flags = flags });
+            allocation_mod.addCSourceFile(.{ .file = dir.path(b, "fixture_cdr.cpp"), .flags = flags });
+            allocation_mod.addIncludePath(dir);
+            allocation_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+            linkCdr(allocation_mod, cdr_library);
+            const allocation_exe = b.addExecutable(.{ .name = if (pmr) "cpp-codec-allocation-pmr" else "cpp-codec-allocation-stl", .root_module = allocation_mod });
+            allocation_step.dependOn(&b.addRunArtifact(allocation_exe).step);
+            const no_exceptions_mod = b.createModule(.{
+                .root_source_file = null,
+                .target = target,
+                .optimize = .Debug,
+                .link_libc = true,
+                .link_libcpp = true,
+            });
+            const no_exceptions_flags: []const []const u8 = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror", "-fno-exceptions", "-fno-rtti" };
+            no_exceptions_mod.addCSourceFile(.{ .file = b.path("test/integration/cpp_allocation/no_exceptions.cpp"), .flags = no_exceptions_flags });
+            no_exceptions_mod.addCSourceFile(.{ .file = dir.path(b, "fixture_cdr.cpp"), .flags = no_exceptions_flags });
+            no_exceptions_mod.addIncludePath(dir);
+            no_exceptions_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+            linkCdr(no_exceptions_mod, cdr_library);
+            const no_exceptions_exe = b.addExecutable(.{ .name = if (pmr) "cpp-codec-no-exceptions-pmr" else "cpp-codec-no-exceptions-stl", .root_module = no_exceptions_mod });
+            allocation_step.dependOn(&b.addRunArtifact(no_exceptions_exe).step);
+        }
+    }
+
     // Inherited wire frames and recursive key-value projection.
     {
         const projection_step = b.step("test-key-projection", "Check inherited frames and recursive key-only values");

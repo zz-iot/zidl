@@ -18,6 +18,13 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- C++ decoder entry points translate `std::bad_alloc` and `std::length_error`
+  into `ZIDL_CDR_OVERFLOW` when exceptions are enabled. Failed decodes leave
+  destructible, potentially partial output and bounded reader progress. Fault
+  injection checks STL/PMR cleanup, retry and hash-output preservation. Generated
+  codecs still compile without exceptions; recoverable OOM in that mode requires
+  a separate storage contract. See `docs/design/cpp-codec-allocation.md`.
+
 - C/C++ decoders validate sequence counts against declared bounds and probe the
   complete wire extent before allocating a sequence container. Primitive spans use
   a bulk check; variable-size and nested elements use an allocation-free skip walk

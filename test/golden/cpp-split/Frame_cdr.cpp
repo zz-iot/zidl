@@ -31,7 +31,18 @@ int Frame_serialize(ZidlCdrWriter *_w, const ::Frame *_v) {
 static int Frame_deserialize_bounded_impl(ZidlCdrReader *_r, ::Frame *_v);
 int Frame_deserialize(ZidlCdrReader *_r, ::Frame *_v) {
     ZidlCdrReader _local = *_r;
-    int _rc = Frame_deserialize_bounded_impl(&_local, _v);
+    int _rc;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)
+    try {
+        _rc = Frame_deserialize_bounded_impl(&_local, _v);
+    } catch (const std::bad_alloc&) {
+        _rc = ZIDL_CDR_OVERFLOW;
+    } catch (const std::length_error&) {
+        _rc = ZIDL_CDR_OVERFLOW;
+    }
+#else
+    _rc = Frame_deserialize_bounded_impl(&_local, _v);
+#endif
     _r->pos = !_rc && (_r->xcdr_version == ZIDL_XCDR2) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
     return _rc;
 }
@@ -71,7 +82,18 @@ int Frame_serialize_key_value(ZidlCdrWriter *_w, const ::Frame *_v) {
 static int Frame_deserialize_key_value_bounded_impl(ZidlCdrReader *_r, ::Frame *_v);
 int Frame_deserialize_key_value(ZidlCdrReader *_r, ::Frame *_v) {
     ZidlCdrReader _local = *_r;
-    int _rc = Frame_deserialize_key_value_bounded_impl(&_local, _v);
+    int _rc;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)
+    try {
+        _rc = Frame_deserialize_key_value_bounded_impl(&_local, _v);
+    } catch (const std::bad_alloc&) {
+        _rc = ZIDL_CDR_OVERFLOW;
+    } catch (const std::length_error&) {
+        _rc = ZIDL_CDR_OVERFLOW;
+    }
+#else
+    _rc = Frame_deserialize_key_value_bounded_impl(&_local, _v);
+#endif
     _r->pos = !_rc && (_r->xcdr_version == ZIDL_XCDR2) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
     return _rc;
 }

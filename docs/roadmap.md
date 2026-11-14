@@ -111,10 +111,11 @@ Features*.
 
 ### C++ backend
 
-- **Allocation failure policy at the codec C ABI.** Sequence lengths are now checked
-  against schema bounds and available wire data before allocation, but a valid large
-  sample can still exhaust memory in STL containers. Define how generated C++ codec
-  entry points report allocation failures, including builds without exceptions.
+- **Recoverable codec allocation failure without exceptions.** Exception-enabled
+  C++ decoder entry points translate STL storage exceptions into `ZIDL_CDR_OVERFLOW`
+  with destructible partial output. Exception-free builds still need an explicit
+  preallocated or fallible-container mapping; STL/PMR allocators cannot return null
+  to report failure. See the [contract and storage choices](design/cpp-codec-allocation.md).
 
 - **Direct `@optional` array members generate invalid C++.** For example,
   `@optional long values[2]` declares a bare array while its codec calls

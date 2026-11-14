@@ -194,3 +194,15 @@ references.
 | `@verbatim` annotations | Parsed and stored in IR but not yet injected into generated output — see [`@verbatim` Injection](#verbatim-injection-not-yet-implemented) above |
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
 | `--generate-interfaces`: complex-type adaptation | Primitive and string operation signatures are adapted; richer signatures emit `/* TODO: adapt C++ types */` stubs |
+
+## Decoder allocation failures
+
+With exceptions enabled, generated decoder entry points return
+`ZIDL_CDR_OVERFLOW` for `std::bad_alloc` and `std::length_error`. Output can be
+partially decoded, but remains destructible and reusable. Reader limits are
+preserved; reset the reader before retrying. Key-hash callbacks leave their hash
+output unchanged when decoding fails.
+
+Compiling with `-fno-exceptions` is supported, but allocation exhaustion can still
+terminate through STL/PMR. Preallocated/fallible storage requires a separate
+contract; see [C++ codec allocation failures](design/cpp-codec-allocation.md).

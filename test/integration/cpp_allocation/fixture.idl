@@ -1,0 +1,8 @@
+module Allocation {
+    struct Sample { @key sequence<string> values; long tail; };
+    @mutable struct Optional { @optional sequence<string> values; };
+    union Choice switch (long) { case 0: string text; default: long number; };
+    struct Nested { Choice payload; };
+    struct MapValue { map<long, string> values; };
+    exception Failure { sequence<string> values; };
+};

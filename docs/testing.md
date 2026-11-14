@@ -96,6 +96,14 @@ STL allocations, including nested sequences, struct elements, truncated strings,
 and XCDR2 collection boundaries. The suite also checks partial-decode cleanup,
 wide-string spans, and patch error propagation. It is included in `zig build test`.
 
+### C++ codec allocation failures
+
+`zig build test-cpp-codec-allocation` injects `std::bad_alloc` and
+`std::length_error` into valid STL and PMR decodes. It checks error translation,
+cleanup, reader limits, hash-output preservation and retry after failure, and
+compiles/runs a separate smoke test with exceptions and RTTI disabled. Included
+in `zig build test`. See the [contract](design/cpp-codec-allocation.md).
+
 ### CDR interop tests
 
 ```sh

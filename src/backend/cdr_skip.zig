@@ -421,7 +421,15 @@ pub fn emitReadFunction(self: anytype, name: []const u8, value_type: ?[]const u8
     try self.print("static int {s}_bounded_impl({s});\n", .{ name, args });
     try self.print("int {s}({s}) {{\n", .{ name, args });
     try self.writeI("ZidlCdrReader _local = *_r;\n");
-    try self.printI("int _rc = {s}_bounded_impl({s});\n", .{ name, call_args });
+    if (comptime @hasDecl(@TypeOf(self.*), "emitReadCall")) {
+        if (value_type != null) {
+            try self.emitReadCall(name, call_args);
+        } else {
+            try self.printI("int _rc = {s}_bounded_impl({s});\n", .{ name, call_args });
+        }
+    } else {
+        try self.printI("int _rc = {s}_bounded_impl({s});\n", .{ name, call_args });
+    }
     try self.printI("_r->pos = !_rc && ({s}) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);\n", .{complete_frame});
     try self.writeI("return _rc;\n");
     try self.write("}\n\n");
