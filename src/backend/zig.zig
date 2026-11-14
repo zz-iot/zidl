@@ -6848,7 +6848,9 @@ const Generator = struct {
                 const key_zig = try self.typeRefToZig(m.key.*);
                 defer self.alloc.free(key_zig);
                 try self.ind();
-                try self.print("{s}var {s}: {s} = undefined;\n", .{ iii, mk, key_zig });
+                const key_default = try self.defaultForTypeRef(m.key.*);
+                defer self.alloc.free(key_default);
+                try self.print("{s}var {s}: {s} = {s};\n", .{ iii, mk, key_zig, key_default });
                 try self.emitReadForTypeRef(m.key.*, mk, iii);
                 if (self.typeOwnsHeap(m.key.*)) {
                     try self.ind();
@@ -6857,7 +6859,9 @@ const Generator = struct {
                 const val_zig = try self.typeRefToZig(m.value.*);
                 defer self.alloc.free(val_zig);
                 try self.ind();
-                try self.print("{s}var {s}: {s} = undefined;\n", .{ iii, mv, val_zig });
+                const val_default = try self.defaultForTypeRef(m.value.*);
+                defer self.alloc.free(val_default);
+                try self.print("{s}var {s}: {s} = {s};\n", .{ iii, mv, val_zig, val_default });
                 try self.emitReadForTypeRef(m.value.*, mv, iii);
                 try self.ind();
                 if (self.typeOwnsHeap(m.value.*)) {
@@ -8521,8 +8525,8 @@ test "zig_backend: map cdr read" {
     const s = out.items;
     try testing.expect(has(s, "const _mn = try reader.readU32();"));
     try testing.expect(has(s, "try out.m.ensureTotalCapacity(allocator, _mn);"));
-    try testing.expect(has(s, "var _mk: i32 = undefined;"));
-    try testing.expect(has(s, "var _mv: i32 = undefined;"));
+    try testing.expect(has(s, "var _mk: i32 = 0;"));
+    try testing.expect(has(s, "var _mv: i32 = 0;"));
     try testing.expect(has(s, "if (out.m.contains(_mk)) return error.DuplicateMapKey;"));
 }
 

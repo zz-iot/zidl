@@ -21,3 +21,5 @@ module Maps {
     struct Choices { map<long, Choice, 2> values; };
     struct Lists { map<long, sequence<string>, 2> values; };
 };
+
+module Maps { struct DirectMapSequence { sequence<map<long, long, 2>, 2> values; }; };

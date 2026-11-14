@@ -98,3 +98,28 @@ test "primitive map no delimiter and big endian owning map" {
     }
     try decode(t.allocator, &be);
 }
+
+fn decodeHolders(alloc: std.mem.Allocator, bytes: []const u8) !void {
+    var reader = try cdr.CdrReader.init(bytes);
+    var out: M.Holders = .{};
+    try M.Holders.deserializeInto(&out, &reader, alloc);
+    defer out.deinit(alloc);
+    try t.expectEqualStrings("a", out.values.get(7).?.a.get(1).?);
+    try t.expectEqualStrings("b", out.values.get(7).?.b.get(2).?);
+}
+
+test "aggregate map values initialize untouched owning fields before failure" {
+    var value: M.Holders = .{};
+    defer value.deinit(t.allocator);
+    var holder: M.Holder = .{};
+    try holder.a.put(t.allocator, 1, try t.allocator.dupe(u8, "a"));
+    try holder.b.put(t.allocator, 2, try t.allocator.dupe(u8, "b"));
+    try value.values.put(t.allocator, 7, holder);
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(t.allocator);
+    var writer = cdr.CdrWriter(.xcdr2).init(&bytes, t.allocator);
+    try writer.writeEncapHeader();
+    try M.Holders.serialize(&writer, value);
+    try decodeHolders(t.allocator, bytes.items);
+    try t.checkAllAllocationFailures(t.allocator, decodeHolders, .{bytes.items});
+}

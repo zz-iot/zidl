@@ -5,3 +5,8 @@ module MapAudit {
     typedef map<Key, string, 2> Inner;
     @final struct Nested { map<long, Inner, 2> values; };
 };
+
+module MapAudit {
+    struct Holder { map<long, string, 2> a; map<long, string, 2> b; };
+    struct Holders { map<long, Holder, 2> values; };
+};

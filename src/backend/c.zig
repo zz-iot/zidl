@@ -467,8 +467,10 @@ const Generator = struct {
         try self.scanTypeRefForSeqs(m.value.*);
         const name = try seqElemKeyC(self.alloc, self.opts.type_prefix, tr);
         defer self.alloc.free(name);
-        if (self.seq_emitted.contains(name)) return;
-        try self.seq_emitted.put(self.alloc, try self.alloc.dupe(u8, name), {});
+        const map_key = try std.fmt.allocPrint(self.alloc, "map:{s}", .{name});
+        defer self.alloc.free(map_key);
+        if (self.seq_emitted.contains(map_key)) return;
+        try self.seq_emitted.put(self.alloc, try self.alloc.dupe(u8, map_key), {});
         try self.maps.append(self.alloc, tr);
         try self.print("#ifndef {s}_DEFINED\n#define {s}_DEFINED\n", .{ name, name });
         try self.print("typedef struct {s}_entry_s {s}_entry;\n", .{ name, name });
