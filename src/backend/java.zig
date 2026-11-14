@@ -844,6 +844,8 @@ const Generator = struct {
         try self.write("_buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
 
         if (mutable) {
+            try self.ind();
+            try self.write("if (_xcdrVersion != 2) throw new IllegalArgumentException(\"mutable encoding requires XCDR2\");\n");
             // @mutable union: DHEADER + EMHEADER(0) for discriminant + EMHEADER(N) per case.
             try self.ind();
             try self.write("_cdrAlign(_buf, _cdrBase, 4); int _dhPos = _buf.position(); _buf.putInt(0);\n");
@@ -1001,6 +1003,8 @@ const Generator = struct {
         try self.ind();
         try self.print("{s}{s} _out = new {s}{s}();\n", .{ pfx, u.name, pfx, u.name });
         if (mutable) {
+            try self.ind();
+            try self.write("if (_xcdrVersion != 2) throw new IllegalArgumentException(\"mutable encoding requires XCDR2\");\n");
             // @mutable union: read DHEADER, then EMHEADER loop.
             // member_id=0 is the discriminant; other IDs are case values.
             try self.ind();
@@ -1754,10 +1758,6 @@ const Generator = struct {
         const previous = self.wire_key;
         self.wire_key = key_only;
         defer self.wire_key = previous;
-        if (key_only) {
-            try self.ind();
-            try self.write("    if (_xcdrVersion != 2) throw new IllegalArgumentException(\"mutable key requires XCDR2\");\n");
-        }
         // @mutable: DHEADER + per-member EMHEADER framing.
         try self.ind();
         try self.write("    _cdrAlign(_buf, _cdrBase, 4);\n");
@@ -1862,6 +1862,8 @@ const Generator = struct {
         try self.write("    _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
 
         if (mutable) {
+            try self.ind();
+            try self.write("if (_xcdrVersion != 2) throw new IllegalArgumentException(\"mutable encoding requires XCDR2\");\n");
             try self.emitMutableStructWrite(s, projection);
         } else {
             if (appendable) {
@@ -1921,6 +1923,8 @@ const Generator = struct {
         try self.print("    {s}{s} _out = new {s}{s}();\n", .{ self.opts.type_prefix, s.name, self.opts.type_prefix, s.name });
 
         if (mutable) {
+            try self.ind();
+            try self.write("if (_xcdrVersion != 2) throw new IllegalArgumentException(\"mutable encoding requires XCDR2\");\n");
             if (projection) {
                 try self.ind();
                 try self.write("    if (_xcdrVersion != 2) throw new IllegalArgumentException(\"mutable key requires XCDR2\");\n");
@@ -1989,6 +1993,8 @@ const Generator = struct {
         try self.ind();
         try self.write("    _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
         if (mutable) {
+            try self.ind();
+            try self.write("if (_xcdrVersion != 2) throw new IllegalArgumentException(\"mutable encoding requires XCDR2\");\n");
             try self.ind();
             try self.write("    int _end = _cdrReadFrameEnd(_buf, _cdrBase);\n");
             try self.ind();

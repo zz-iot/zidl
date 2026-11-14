@@ -141,7 +141,7 @@ test "FinalStrUnion: successful decode of the string case still round-trips and 
 // the discriminant (or even the DHEADER) has been read even once -- would,
 // without the fix, free that undefined memory.
 
-const encap_header_only = [_]u8{ 0x00, 0x03, 0x00, 0x00 };
+const encap_header_only = [_]u8{ 0x00, 0x07, 0x00, 0x00 };
 
 test "OwningDefaultUnion: a failure before the discriminant is ever read leaves the untouched default owning arm alone" {
     var reader = try zidl_cdr.CdrReader.init(&encap_header_only);

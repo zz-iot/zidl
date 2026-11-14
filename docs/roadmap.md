@@ -435,3 +435,11 @@ C/C++/Zig reject dynamic (`any`, `Object`, `ValueBase`) and opaque payload value
 with `UnsupportedDynamicCdrValue` / `UnsupportedOpaqueCdrValue`. Declarations-only
 mode is available when no wire codec is requested. This is a focused diagnostics
 slice, not a claim that every unsupported type family or backend is audited.
+
+### Ordinary XCDR1 mutable encoding
+
+Native mandatory DHEADER operations now reject XCDR1 (`UnsupportedEncoding` in
+Zig, `ZIDL_CDR_INVALID` in C/C++). Java mutable codecs similarly reject version 1.
+The previous DHEADER/EMHEADER output was not PL_CDR and must not be advertised as
+XCDR1 mutable support. Appendable XCDR1 and the discovery-specific PL_CDR helpers
+remain supported. Implementing ordinary PL_CDR mutable codecs is a separate feature.

@@ -25,6 +25,12 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   valid default-arm discriminators in setters, and allocate decoded array arms.
   Include boolean default arms in ordinary union codecs.
 
+- **Reject unsupported ordinary XCDR1 mutable framing.** Mandatory native
+  DHEADER operations reject XCDR1 before advancing the cursor or writing bytes;
+  generated Java mutable methods reject version 1 too. This replaces non-standard
+  DHEADER/EMHEADER output masquerading as XCDR1. Appendable XCDR1, XCDR2 and the
+  separate discovery PL_CDR helpers keep their existing framing contracts.
+
 - **Native codec diagnostics.** C, C++ and Zig reject `any`, `Object`,
   `ValueBase` and opaque native/interface payload fields before emitting codec
   output, including aliases and nested collections. These families previously
