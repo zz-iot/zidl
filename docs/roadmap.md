@@ -428,3 +428,10 @@ scalable policy if consumers require very large maps. C++/Java/Zig map framing,
 bounds, duplicate rejection and recursive ownership are covered by the
 [map codec audit](design/map-codec-hardening.md), including independent wire
 witnesses for non-primitive XCDR2 maps.
+
+### Unsupported native codec values
+
+C/C++/Zig reject dynamic (`any`, `Object`, `ValueBase`) and opaque payload values
+with `UnsupportedDynamicCdrValue` / `UnsupportedOpaqueCdrValue`. Declarations-only
+mode is available when no wire codec is requested. This is a focused diagnostics
+slice, not a claim that every unsupported type family or backend is audited.

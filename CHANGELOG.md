@@ -25,6 +25,12 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   valid default-arm discriminators in setters, and allocate decoded array arms.
   Include boolean default arms in ordinary union codecs.
 
+- **Native codec diagnostics.** C, C++ and Zig reject `any`, `Object`,
+  `ValueBase` and opaque native/interface payload fields before emitting codec
+  output, including aliases and nested collections. These families previously
+  emitted unsupported comments or silently omitted wire data. Declarations-only
+  output and opaque interface binding declarations remain available.
+
 - **Owning/non-primitive C maps.** Add narrow/wide string keys, ordinary aggregate
   and collection values, nested maps and content-based duplicate checks. XCDR2
   non-primitive maps use DHEADER + count + pairs (OMG DDSXTY14-72).

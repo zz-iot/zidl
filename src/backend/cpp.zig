@@ -83,6 +83,7 @@ pub const CppBackend = struct {
         opts: interface.Options,
     ) anyerror!void {
         const self: *CppBackend = @ptrCast(@alignCast(ctx));
+        if (!opts.no_typesupport) try @import("codec_validation.zig").validate(self.alloc, spec);
         const io = std.Io.Threaded.global_single_threaded.io();
 
         if (opts.split_files) {
@@ -155,6 +156,7 @@ pub fn generateHeader(
     opts: interface.Options,
     out: *std.ArrayList(u8),
 ) !void {
+    if (!opts.no_typesupport) try @import("codec_validation.zig").validate(alloc, spec);
     var gen = Generator{ .alloc = alloc, .opts = opts, .out = out };
     defer gen.entity_base_ifaces.deinit(alloc);
     try gen.emitHeader(spec);
@@ -171,6 +173,7 @@ pub fn generateCdrSource(
     opts: interface.Options,
     out: *std.ArrayList(u8),
 ) !void {
+    if (!opts.no_typesupport) try @import("codec_validation.zig").validate(alloc, spec);
     var gen = CdrGenerator{ .alloc = alloc, .opts = opts, .out = out };
     try gen.emitSource(spec);
 }

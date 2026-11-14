@@ -68,6 +68,7 @@ pub const ZigBackend = struct {
         opts: interface.Options,
     ) anyerror!void {
         const self: *ZigBackend = @ptrCast(@alignCast(ctx));
+        if (!opts.no_typesupport) try @import("codec_validation.zig").validate(self.alloc, spec);
         try @import("typesupport_library.zig").validateOptions(opts);
         const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -112,6 +113,7 @@ pub fn generateFile(
     opts: interface.Options,
     out: *std.ArrayList(u8),
 ) !void {
+    if (!opts.no_typesupport) try @import("codec_validation.zig").validate(alloc, spec);
     var gen = Generator{ .alloc = alloc, .opts = opts, .out = out };
     defer gen.deinit();
     try gen.emitFile(spec);

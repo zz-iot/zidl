@@ -69,6 +69,7 @@ pub const CBackend = struct {
         opts: interface.Options,
     ) anyerror!void {
         const self: *CBackend = @ptrCast(@alignCast(ctx));
+        if (!opts.no_typesupport) try @import("codec_validation.zig").validate(self.alloc, spec);
         const io = std.Io.Threaded.global_single_threaded.io();
 
         if (opts.split_files) {
@@ -117,6 +118,8 @@ pub fn generateHeader(
     out: *std.ArrayList(u8),
 ) !void {
     if (itemsHaveMaps(spec.items) and (opts.generate_interfaces or opts.generate_zzdds_wrappers)) return error.UnsupportedCMapBindings;
+
+    if (!opts.no_typesupport) try @import("codec_validation.zig").validate(alloc, spec);
     var gen = Generator{
         .alloc = alloc,
         .opts = opts,
@@ -2004,6 +2007,8 @@ pub fn generateCdrSource(
     out: *std.ArrayList(u8),
 ) !void {
     if (itemsHaveMaps(spec.items) and (opts.generate_interfaces or opts.generate_zzdds_wrappers)) return error.UnsupportedCMapBindings;
+
+    if (!opts.no_typesupport) try @import("codec_validation.zig").validate(alloc, spec);
     var gen = CdrGenerator{
         .alloc = alloc,
         .opts = opts,
@@ -7405,4 +7410,34 @@ test "c_backend cdr: bounded defaults reject storage overflow through aliases" {
         \\typedef wstring<1> Text;
         \\struct Sample { @default("😀") Text value; };
     , "defaults"));
+}
+
+test "native codecs reject dynamic and opaque fields before output" {
+    const backends = @import("root.zig");
+    const sources = [_][]const u8{
+        "struct S { any value; };",
+        "typedef any Dynamic; struct S { sequence<Dynamic> values; };",
+        "native Handle; struct S { Handle value; };",
+    };
+    for (sources) |source| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var parser = parser_mod.Parser.init(source, arena.allocator());
+        const ast_spec = try parser.parseSpecification();
+        var analyzer = try semantic_mod.Analyzer.init(testing.allocator);
+        defer analyzer.deinit();
+        try analyzer.analyze(&ast_spec);
+        var spec = try ir.build(testing.allocator, &ast_spec, analyzer.global_scope, &.{});
+        defer spec.deinit();
+        inline for (.{ generateHeader, generateCdrSource, backends.cpp.generateHeader, backends.cpp.generateCdrSource, backends.zig.generateFile }) |generate| {
+            var out: std.ArrayList(u8) = .empty;
+            defer out.deinit(testing.allocator);
+            const expected = if (std.mem.startsWith(u8, source, "native")) error.UnsupportedOpaqueCdrValue else error.UnsupportedDynamicCdrValue;
+            try testing.expectError(expected, generate(testing.allocator, &spec, .{ .input_stem = "unsupported" }, &out));
+            try testing.expectEqual(@as(usize, 0), out.items.len);
+        }
+    }
+    var declarations = try testGenFullOpts("native Handle; struct S { any value; Handle handle; };", "opaque", .{ .no_typesupport = true });
+    defer declarations.deinit(testing.allocator);
+    try testing.expect(has(declarations.items, "void *value;"));
 }
