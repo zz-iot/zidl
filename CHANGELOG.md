@@ -25,6 +25,20 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   valid default-arm discriminators in setters, and allocate decoded array arms.
   Include boolean default arms in ordinary union codecs.
 
+- **Owning/non-primitive C maps.** Add narrow/wide string keys, ordinary aggregate
+  and collection values, nested maps and content-based duplicate checks. XCDR2
+  non-primitive maps use DHEADER + count + pairs (OMG DDSXTY14-72).
+  Preflight precedes allocation and zero-initialized entries make every partial
+  owning decode freeable. Single/split headers defer entry definitions until their
+  field types are complete. Binding adapters remain explicitly unsupported.
+
+- **Initial generated C map coverage.** Primitive-key/value maps use typed entry
+  buffers with explicit ownership, bound/extent preflight and duplicate-key
+  rejection. Compiled tests cover XCDR1/XCDR2 byte witnesses, both byte orders,
+  empty maps, nested sequences, allocation failure and exception-disabled C++
+  consumers. The following owning-map change extends this to non-primitive
+  values; binding adapters remain explicit errors.
+
 - **C++ mutable-union admission.** Validate IDs, discriminator agreement,
   order, duplicates, presence, lengths and unknown MU fields. Decode into a local
   RAII candidate before committing, so failed or allocation-exhausted reads leave

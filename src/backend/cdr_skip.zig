@@ -209,18 +209,20 @@ pub fn emitSkipMember(self: anytype, m: ir.StructMember) anyerror!void {
 }
 
 pub fn emitSkipArray(self: anytype, elem_tr: ir.TypeRef, dims: []const u64, dim_idx: usize) anyerror!void {
+    // Enums and bitmasks have a fixed wire width, but their XCDR2 arrays
+    // still have a DHEADER. Open the window before taking the bulk shortcut.
+    const window = try openReadWindow(self, dim_idx == 0 and !isPrimitiveElement(arrayInnermost(elem_tr)));
     if (dim_idx == 0) {
-        // XCDR2: one DHEADER covers the whole (flattened) array.
-        // Fixed-size primitive element with all dims known → one bulk advance.
+        // Fixed-size elements with all dims known → one bulk advance.
         if (typeRefPrimWireSize(elem_tr)) |sz| {
             var total: u64 = 1;
             for (dims) |d| total *= d;
             try self.printI("_rc = zidl_cdr_skip_primitives(_r, {d}u, {d});\n", .{ total, sz });
             try readRcCheck(self);
+            try closeReadWindow(self, window);
             return;
         }
     }
-    const window = try openReadWindow(self, dim_idx == 0 and !isPrimitiveElement(arrayInnermost(elem_tr)));
     try emitSkipArrayDims(self, elem_tr, dims, dim_idx);
     try closeReadWindow(self, window);
 }
@@ -300,6 +302,7 @@ pub fn emitSkipForTypeRef(self: anytype, tr: ir.TypeRef) anyerror!void {
             try closeReadWindow(self, window);
         },
         .map => |m| {
+            if (comptime @hasDecl(@TypeOf(self.*), "emitSkipMap")) return self.emitSkipMap(tr);
             const window = try openReadWindow(self, !(isPrimitiveElement(m.key.*) and isPrimitiveElement(m.value.*)));
             const ml = try collName(self.alloc, "_ml", self.coll_depth);
             defer self.alloc.free(ml);
@@ -309,6 +312,13 @@ pub fn emitSkipForTypeRef(self: anytype, tr: ir.TypeRef) anyerror!void {
             self.indent_depth += 1;
             try self.printI("_rc = zidl_cdr_read_u32(_r, &{s});\n", .{ml});
             try readRcCheck(self);
+            if (m.bound) |bound| {
+                try self.printI("if ({s} > {d}u) {{\n", .{ ml, bound });
+                self.indent_depth += 1;
+                try invalidRead(self);
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            }
             try self.printI("for (uint32_t {s} = 0; {s} < {s}; {s}++) {{\n", .{ mi, mi, ml, mi });
             self.indent_depth += 1;
             self.coll_depth += 1;

@@ -95,14 +95,9 @@ keep STL/PMR as the C++ mapping. Alternate C++ containers are outside this harde
 series and require a separate consumer-driven investigation. See
 [backend policy](decisions.md#backend-policy).
 
-- **`map<K,V>`** — hard `error.MapTypeNotSupportedInCBackend` at codegen; the CDR generator
-  additionally has `/* TODO: map write/read */` stub arms. (C++/Java/Zig CDR paths do
-  marshal maps.) `c.zig:116`. In interface/callback parameter position it must become a
-  named hard error — see the C-ABI type-coverage design doc. Scope C map value
-  support as its own small series: define typed storage and duplicate-key semantics,
-  implement CDR read/write and cleanup, and test bounds, allocation failures and
-  nested owning keys/values with compiled C and C++ consumers. Interface/callback
-  adaptation is a separate slice; do not claim it from value-codec support alone.
+- **C map binding adapters** — typed primitive/non-primitive map value codecs
+  are implemented. Interface/callback and middleware wrapper adapters remain
+  explicitly rejected; they need a separate ownership/conversion slice.
 - **`@optional` `_set_` macro** is not emitted for array-backed members (fixed arrays,
   bounded strings/wstrings) — callers do direct assignment + manual `_present` bit update.
   No memcpy-based shape-aware setter. `backend_c.md`.
@@ -423,3 +418,13 @@ Discriminator MU flags and member admission are corrected across C/C++/Java/Zig.
 The [mutable union audit](design/mutable-union-audit.md) records validation,
 ownership and evolution-default contracts. Generic skip paths remain structural
 traversal; they do not establish complete-message admission.
+
+### C map coverage follow-up
+
+Typed C value/codec maps now cover primitive and non-primitive framing, string
+keys, owning values and nested collections. Interface/middleware binding adapters
+remain separate, as planned. Quadratic duplicate validation may need a more
+scalable policy if consumers require very large maps. C++/Java/Zig map framing,
+bounds, duplicate rejection and recursive ownership are covered by the
+[map codec audit](design/map-codec-hardening.md), including independent wire
+witnesses for non-primitive XCDR2 maps.

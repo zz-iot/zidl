@@ -1,0 +1,43 @@
+module Maps {
+    typedef map<long, long, 3> Table;
+    struct Sample { Table values; unsigned long tail; };
+    struct Nested { sequence<Table> values; };
+    struct Mixed { map<octet, unsigned long long, 2> values; };
+};
+module Maps {
+    typedef map<string, long, 3> DictionaryTable;
+    struct Dictionary { DictionaryTable values; long tail; };
+    struct Owned { map<string, string, 2> values; };
+    struct WideOwned { map<wstring, string, 2> values; };
+    struct Bounded { map<string<4>, wstring<2>, 2> values; };
+    struct Person { string name; };
+    struct People { map<long, Person, 2> values; };
+    struct NestedOwned { map<long, DictionaryTable, 2> values; };
+};
+module Maps {
+    typedef long Row[2];
+    struct Rows { map<long, Row, 2> values; };
+    union Choice switch(long) { case 0: string text; default: long number; };
+    struct Choices { map<long, Choice, 2> values; };
+    struct Lists { map<long, sequence<string>, 2> values; };
+};
+
+module Maps { struct DirectMapSequence { sequence<map<long, long, 2>, 2> values; }; };
+
+module Maps {
+    struct MapOfLists { map<string, sequence<long>> values; };
+    struct ListOfMaps { sequence<map<string, long>> values; };
+    enum Tag { FIRST, SECOND };
+    typedef Tag EnumRow[2];
+    struct EnumRows { map<long, EnumRow> values; };
+};
+
+module Maps {
+    @bit_bound(8) bitmask Flags { LOW, HIGH };
+    typedef Flags FlagRow[2];
+    typedef FlagRow FlagGrid[2];
+    struct FlagRows { map<long, FlagGrid> values; };
+    typedef Tag TagAlias;
+    typedef TagAlias AliasRow[2];
+    struct AliasRows { map<long, AliasRow> values; };
+};

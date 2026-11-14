@@ -925,6 +925,42 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+
+    {
+        const map_step = b.step("test-c-maps", "Check primitive C map storage, wire bytes and allocation failures");
+        test_step.dependOn(map_step);
+        const gen = b.addRunArtifact(exe);
+        gen.addArgs(&.{ "-b", "c", "-o" });
+        const generated = gen.addOutputDirectoryArg("c-maps");
+        gen.addFileArg(b.path("test/integration/c_maps/maps.idl"));
+        const consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true });
+        const flags = &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" };
+        consumer.addCSourceFile(.{ .file = b.path("test/integration/c_maps/test.c"), .flags = flags });
+        consumer.addCSourceFile(.{ .file = generated.path(b, "maps_cdr.c"), .flags = flags });
+        consumer.addIncludePath(generated);
+        consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
+        linkCdr(consumer, cdr_library);
+        const app = b.addExecutable(.{ .name = "c-maps", .root_module = consumer });
+        map_step.dependOn(&b.addRunArtifact(app).step);
+        const owning = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true });
+        owning.addCSourceFile(.{ .file = b.path("test/integration/c_maps/nonprimitive.c"), .flags = flags });
+        owning.addCSourceFile(.{ .file = generated.path(b, "maps_cdr.c"), .flags = flags });
+        owning.addIncludePath(generated);
+        owning.addIncludePath(b.path("packages/zidl-cdr/include"));
+        linkCdr(owning, cdr_library);
+        const owning_app = b.addExecutable(.{ .name = "c-maps-owning", .root_module = owning });
+        map_step.dependOn(&b.addRunArtifact(owning_app).step);
+        const cpp_consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = true });
+        cpp_consumer.addCSourceFile(.{ .file = b.path("test/integration/c_maps/test.cpp"), .flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror", "-fno-exceptions", "-fno-rtti" } });
+        cpp_consumer.addCSourceFile(.{ .file = generated.path(b, "maps_cdr.c"), .flags = flags });
+        cpp_consumer.addIncludePath(generated);
+        cpp_consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
+        linkCdr(cpp_consumer, cdr_library);
+        const cpp_app = b.addExecutable(.{ .name = "c-maps-cpp", .root_module = cpp_consumer });
+        map_step.dependOn(&b.addRunArtifact(cpp_app).step);
+    }
+
+
     // STL storage failures must stay inside generated C++ codec entry points.
     {
         const allocation_step = b.step("test-cpp-codec-allocation", "Inject C++ codec allocation failures");
@@ -1186,6 +1222,52 @@ pub fn build(b: *std.Build) void {
             run.addArg(if (mode == 0) "Java_shapes$Admission$" else if (mode == 1) "admission." else "");
             step.dependOn(&run.step);
         };
+    }
+
+    {
+        const step = b.step("test-map-admission", "Check map wire framing and admission across C++, Java and Zig");
+        test_step.dependOn(step);
+        const dir = "test/integration/map_admission/";
+        const gen = b.addRunArtifact(exe);
+        gen.addArgs(&.{ "-b", "zig", "-o" });
+        const generated = gen.addOutputDirectoryArg("map-admission-zig");
+        gen.addFileArg(b.path(dir ++ "shapes.idl"));
+        const fixture = b.createModule(.{ .root_source_file = generated.path(b, "shapes.zig"), .target = target, .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings } } });
+        const tests = b.addTest(.{ .name = "map-admission", .root_module = b.createModule(.{ .root_source_file = b.path(dir ++ "test.zig"), .target = target, .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "fixture", .module = fixture } } }) });
+        step.dependOn(&b.addRunArtifact(tests).step);
+        for ([_]bool{ false, true }) |pmr| {
+            const g = b.addRunArtifact(exe);
+            g.addArgs(&.{ "-b", "cpp" });
+            if (pmr) g.addArg("--cpp-pmr-containers");
+            g.addArg("-o");
+            const out = g.addOutputDirectoryArg(if (pmr) "map-admission-pmr" else "map-admission-stl");
+            g.addFileArg(b.path(dir ++ "shapes.idl"));
+            const m = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = true });
+            const flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" };
+            m.addCSourceFile(.{ .file = b.path(dir ++ "test.cpp"), .flags = flags });
+            m.addCSourceFile(.{ .file = out.path(b, "shapes_cdr.cpp"), .flags = flags });
+            m.addIncludePath(out);
+            m.addIncludePath(b.path("packages/zidl-cdr/include"));
+            linkCdr(m, allocation_cdr_library);
+            const app = b.addExecutable(.{ .name = if (pmr) "map-pmr" else "map-stl", .root_module = m });
+            step.dependOn(&b.addRunArtifact(app).step);
+        }
+        const javac = b.findProgram(.{ .names = &.{"javac"} });
+        const java = b.findProgram(.{ .names = &.{"java"} });
+        if (javac != null and java != null) {
+            const g = b.addRunArtifact(exe);
+            g.addArgs(&.{ "-b", "java", "-o" });
+            const out = g.addOutputDirectoryArg("map-admission-java");
+            g.addFileArg(b.path(dir ++ "shapes.idl"));
+            const compile = javaCommand(b, &.{ javac.?, "-Xlint:unchecked", "-Werror", "-d" }, java_cdr);
+            const classes = compile.addOutputDirectoryArg("classes");
+            compile.addFileArg(out.path(b, "Shapes.java"));
+            compile.addFileArg(b.path(dir ++ "MapTest.java"));
+            const run = javaCommand(b, &.{ java.?, "-cp" }, java_cdr);
+            run.addDirectoryArg(classes);
+            run.addArg("MapTest");
+            step.dependOn(&run.step);
+        }
     }
 
     // ── XCDR known-answer checks ──────────────────────────────────────────────
