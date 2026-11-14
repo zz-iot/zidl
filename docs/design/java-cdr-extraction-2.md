@@ -42,9 +42,12 @@ independent BCD bytes, padded and independently checked MD5 hashes, and supporte
 encapsulation IDs. The existing generated fixtures, independent wire vectors,
 Java 8-targeted three-mode consumption and JNI integration remain the gates.
 
-The next delivery step is migrating zzdds Java SDK installation, examples and
-smoke/loan checks to the matching JAR when its zidl pin advances. The separately
-recorded split interface/JNI implementation naming issue remains independent.
+Delivery completed in zidl 0.3.30 and
+[zzdds #150](https://github.com/zz-iot/zzdds/pull/150): the SDK installs the
+matching JAR and examples/smoke/loan consumers use it. The
+[release dry run](https://github.com/zz-iot/zzdds/actions/runs/43303145293) passed
+all platform and bundle checks. The separately recorded split interface/JNI
+implementation naming issue remains independent.
 
 ## Measurement checkpoint
 

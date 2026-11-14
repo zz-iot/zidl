@@ -5,8 +5,9 @@ Date: 2026-11-02
 Status: native consolidation, package split and production switch implemented;
 zzdds migration merged in [zzdds #141](https://github.com/zz-iot/zzdds/pull/141). The transitional `zidl-rt` package and module
 are removed. The checkpoints below record the implementation sequence and
-superseded intermediate states. Rust binding work remains deferred; Java shared
-runtime extraction is separate. This effort does not authorize publishing a release.
+superseded intermediate states. Native consolidation and shared Java runtime
+delivery are complete; see the [closeout](#consolidation-closeout) below. Rust
+bindings are a separate proposed follow-up, not an implemented backend.
 
 The [native capability/dependency audit](native-cdr-audit.md) records the
 2026-11-03 code inventory, independently checked key semantics, compatibility
@@ -90,6 +91,9 @@ Java retains a separate Java codec under the companion
 not a requirement that every language serialize through native calls.
 
 ## Audit baseline and required capabilities
+
+The following inventory describes the pre-consolidation baseline, not the
+current package layout. The checkpoints and closeout record the delivered state.
 
 At the audit baseline, `packages/zidl-rt/src/cdr.zig` implemented the native Zig codec as well as some
 binding helpers. `packages/zidl-cdr/src/zidl_cdr.c` independently implements the
@@ -188,6 +192,9 @@ from exposing a C ABI.
 
 ## Implementation sequence and acceptance
 
+This sequence is complete. Preserve it as the rationale and acceptance record,
+not an outstanding task list.
+
 1. Audit both APIs, tests, generated accesses, source-build consumers and required
    targets. Record compatibility constraints and capability differences.
 2. Propose core/dependency boundaries and demonstrate both interfaces using the
@@ -230,3 +237,23 @@ The zzdds migration merged in [zzdds #141](https://github.com/zz-iot/zzdds/pull/
 module export are removed along with their compatibility tests and build/release
 wiring. There is no extended deprecation period. The independent old C codec
 remains a test reference and is not part of the production dependency graph.
+
+## Consolidation closeout
+
+Completed on 2026-11-12. The native core, C ABI adapter, generator adoption,
+package split, zzdds/rmw_zzdds consumer audit and `zidl-rt` retirement are done.
+The old independent C implementation remains test-only. Shared Java helpers
+remain Java and are delivered separately as `zidl-cdr-java` runtime API 2.
+
+[zidl #73](https://github.com/zz-iot/zidl/pull/73) shipped in
+[v0.3.30-zig.0.17.0](https://github.com/zz-iot/zidl/releases/tag/v0.3.30-zig.0.17.0).
+[zzdds #150](https://github.com/zz-iot/zzdds/pull/150) pins that release and
+installs the matching JAR, updates Java build/run classpaths and packages the
+Java SDK. Its [Release dry run](https://github.com/zz-iot/zzdds/actions/runs/43303145293)
+passed all four platform test jobs, self-interop and all four relocated bundle
+checks. Publishing was skipped.
+
+This closes the consolidation prerequisite for [Rust design](rust-cdr-plan.md).
+It is not a claim of complete XTypes support or a measured speed improvement.
+Direct optional C++ arrays and split Java interface implementation qualification
+remain separate documented limitations; neither is part of this closeout.
