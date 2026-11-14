@@ -27,8 +27,8 @@ static const Vector *lookup(const char *name) {
     for (size_t i=0; i<vector_count; i++) if (!strcmp(name,vectors[i].name)) return &vectors[i];
     abort();
 }
-static void load(const char *path) {
-    FILE *file=fopen(path,"r"); assert(file);
+static void load_file(FILE *file) {
+    assert(file);
     char name[64],bytes[1025],digest[33]; unsigned force;
     while (fscanf(file,"%63s %1024s %32s %u",name,bytes,digest,&force)==4) {
         assert(vector_count<32);
@@ -265,8 +265,14 @@ static void unexpected_free(void *ctx,void *p,size_t n,size_t alignment) {
     (void)ctx; (void)p; (void)n; (void)alignment; abort();
 }
 
+#include "array_values.h"
+
 int main(int argc,char **argv) {
-    assert(argc==2); load(argv[1]); load_wire(argv[1]); load_key(argv[1]);
+    assert(argc==2);
+    load_file(fopen(argv[1], "r"));
+    load_file(open_sibling(argv[1], "array_vectors.txt"));
+    array_key_values();
+    load_wire(argv[1]); load_key(argv[1]);
     TYPE(Sequential) sequential=INIT;
     sequential.a=0xaa; sequential.b=0x05060708; sequential.c=0xcc; sequential.d=0x01020304;
     CHECK(Sequential,sequential,"Sequential",2,0);
@@ -394,6 +400,14 @@ int main(int argc,char **argv) {
     assert(Canonical_Align_serialize_key_holder(&fixed_writer,&align)==0);
     zidl_cdr_compute_key_hash_for_type(fixed_writer.buf,fixed_writer.len,Canonical_Align_KEY_HASH_FORCE_MD5,hash);
     assert(!memcmp(hash,lookup("Align")->hash,16) && denied_allocations==0);
+    TYPE(EnumArray20) enum_fixed=INIT;
+    enum_fixed.values[1]=enum_fixed.values[3]=(TYPE(ArrayEnum))1;
+    uint8_t enum_buffer[20];
+    zidl_cdr_writer_init_fixed(&fixed_writer,enum_buffer,sizeof enum_buffer,ZIDL_XCDR2);
+    zidl_cdr_writer_set_byte_order(&fixed_writer,ZIDL_CDR_BE);
+    assert(Canonical_EnumArray20_serialize_key_holder(&fixed_writer,&enum_fixed)==0);
+    zidl_cdr_compute_key_hash_for_type(fixed_writer.buf,fixed_writer.len,Canonical_EnumArray20_KEY_HASH_FORCE_MD5,hash);
+    assert(!memcmp(hash,lookup("EnumArray20")->hash,16) && denied_allocations==0);
     memset(hash,0xee,sizeof hash);
     assert(Canonical_Align_compute_key_hash(&align,hash)==ZIDL_CDR_OVERFLOW);
     assert(denied_allocations>0);

@@ -7,7 +7,11 @@ The production runtime switch and final package move remain pending.
 
 Generated C, C++ and Zig key hashes now use a separate canonical key-holder
 serializer: big endian PLAIN_CDR2, maximum alignment four, zero padding and no
-encapsulation, member headers or collection DHEADERs. The shared generator plan
+encapsulation, aggregate extensibility headers or member headers. Collection
+DHEADERs are a separate rule: this initial checkpoint incorrectly suppressed all
+of them. The [array-key correction](native-cdr-array-keys.md) fixes enum/bitmask
+arrays; other non-primitive collection keys remain open in the roadmap.
+The shared generator plan
 projects nested aggregates recursively and orders members by their resolved IDs.
 A nested structure without marked keys contributes all its members. Union
 holders include the discriminator and active arm.

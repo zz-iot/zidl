@@ -516,8 +516,9 @@ pub const KeyHashWriter = struct {
         try keys.writeWstring(self, v);
     }
 
-    /// No-op: key hash spec (RTPS §9.6.4.8) excludes the DHEADER from the
-    /// hash computation even for @appendable types.
+    /// No-op for aggregate framing: canonical key holders use FINAL aggregates.
+    /// Collection DHEADERs are separate; enum/bitmask array codegen writes their
+    /// known payload size directly, since an MD5 stream cannot be back-patched.
     pub fn reserveDheaderMaybe(self: *KeyHashWriter) !?usize {
         _ = self;
         return null;

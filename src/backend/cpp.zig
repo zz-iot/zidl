@@ -3765,6 +3765,12 @@ const CdrGenerator = struct {
         dims: []const u64,
         dim_idx: usize,
     ) anyerror!void {
+        if (self.canonical_key and dim_idx == 0) {
+            if (try canonical.fixedArrayDelimiterSize(elem_tr, dims)) |size| {
+                try self.printI("_rc = zidl_cdr_write_u32(_w, {d}u);\n", .{size});
+                try self.writeI("if (_rc) return _rc;\n");
+            }
+        }
         const dh = try self.openCollectionDheader(dim_idx == 0 and !cdr_skip.isPrimitiveElement(cdr_skip.arrayInnermost(elem_tr)));
         try self.emitWriteArrayDims(elem_tr, access, dims, dim_idx);
         try self.closeCollectionDheader(dh);

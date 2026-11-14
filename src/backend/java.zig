@@ -3042,6 +3042,13 @@ const Generator = struct {
         extra: []const u8,
         depth: usize,
     ) anyerror!void {
+        if (self.canonical_key and depth == 0) {
+            if (try canonical.fixedArrayDelimiterSize(elem_tr, dims)) |size| {
+                try self.ind();
+                try self.writeAlignCall(.unsigned_long, extra);
+                try self.print("_buf.putInt((int){d}L);\n", .{size});
+            }
+        }
         const cdh = try self.openCollectionDheader(depth == 0 and !cdr_skip.isPrimitiveElement(cdr_skip.arrayInnermost(elem_tr)), extra);
         try self.emitSerializeArrayDims(elem_tr, access, dims, extra, depth);
         try self.closeCollectionDheader(cdh, extra);
@@ -7612,6 +7619,9 @@ fn structOwnsHeapMemory(s: *const ir.Struct) bool {
 const JavaFilterFieldKind = enum { skip, int_like, float_like, string_like };
 
 fn classifyFilterFieldKindJava(tr: ir.TypeRef) JavaFilterFieldKind {
+    // Typedef dimensions belong to the value just like member dimensions.
+    // Resolving to the scalar element would emit scalar access on an array.
+    if (cdr_skip.arrayTypedefOf(tr) != null) return .skip;
     return switch (resolveMemberShape(tr)) {
         .string_ => .string_like,
         .enum_ => .int_like,

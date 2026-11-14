@@ -70,3 +70,31 @@ reference LC=5, unknown/MU members and LC 4–7 size overflow. A C tracking allo
 checks cleanup after a sequence buffer is allocated and a nested key read fails.
 Java checks parent-limit restoration; native Zig checks reader-bound restoration.
 Sidecar wire files are explicit C/Java run-cache inputs.
+
+The [array-key checkpoint](../../../docs/design/native-cdr-array-keys.md) adds
+`array_keys.idl` and nine canonical witnesses in `array_vectors.txt`. Regenerate
+those bytes and hashes with `python3 make_array_key_vectors.py`; the script uses
+only standard Python packing/hashlib and explicit XTypes rules. The normal key
+suite checks all four backends, including Java single/split output, and fixed,
+counting, dynamic and native streaming paths. Enum/bitmask widths, nested array
+typedefs, alignment, and schema maxima at 16/17/20 bytes are covered. A denied CDR
+allocator verifies the fixed array-holder plus MD5 path remains allocation-free.
+
+Optionally check an independent implementation without networking or packet
+capture:
+
+```sh
+python3 check_cyclone_arrays.py --cyclone /path/to/cyclonedds
+```
+
+This uses an already built Cyclone tree (`build/bin/idlc`, `build/lib/libddsc`)
+and a system C compiler. It generates types from the same IDL and extracts
+XCDR2 BE keys in explicit `DDS_CDR_KEY_SERIALIZATION_KEYHASH` mode. All fields in
+these FINAL fixtures are keys, so the input native sample is also a key-only
+sample. It compares bytes and the schema-based fixed-key/MD5 flag with the
+independent Python witnesses. No Cyclone dependency is added to normal CI.
+
+The earlier aggregate/string collection vectors remain regression witnesses for
+the existing implementation. Their missing collection DHEADERs and maximum-size
+policy need a separate correction; do not treat them as independent conformance
+evidence for those shapes. Enum/bitmask arrays are the corrected subset here.

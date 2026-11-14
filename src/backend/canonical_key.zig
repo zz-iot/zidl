@@ -121,6 +121,30 @@ pub fn supported(alloc: std.mem.Allocator, tr: ir.TypeRef) !bool {
     };
 }
 
+/// XCDR2 enum/bitmask arrays retain their collection DHEADER in a FINAL
+/// canonical key holder. Flatten member dimensions and array typedefs into
+/// one extent; the streaming hash writer must know the payload size up front.
+/// Other non-primitive collections require a separate variable-size plan.
+pub fn fixedArrayDelimiterSize(tr: ir.TypeRef, dims: []const u64) !?u32 {
+    if (dims.len == 0 and wire.arrayTypedefOf(tr) == null) return null;
+    const element = wire.arrayInnermost(tr);
+    const width = switch (element) {
+        .named => |td| switch (td) {
+            .enum_, .bitmask => wire.typeRefPrimWireSize(element).?,
+            else => return null,
+        },
+        else => return null,
+    };
+    var size: u64 = width;
+    for (dims) |dim| size = std.math.mul(u64, size, dim) catch return error.CanonicalArrayExtentOverflow;
+    var current = tr;
+    while (wire.arrayTypedefOf(current)) |array| {
+        for (array.dimensions) |dim| size = std.math.mul(u64, size, dim) catch return error.CanonicalArrayExtentOverflow;
+        current = array.type_ref;
+    }
+    return std.math.cast(u32, size) orelse error.CanonicalArrayExtentOverflow;
+}
+
 // Saturation at 17 is sufficient for the <=16 policy. Avoid usize arithmetic
 // overflow, huge bound loops, and guessing from the currently supplied value.
 const Maximum = struct {
@@ -145,6 +169,7 @@ const Maximum = struct {
         return pos;
     }
     fn array(self: *Maximum, tr: ir.TypeRef, dims: []const u64, pos: usize) anyerror!usize {
+        if (try fixedArrayDelimiterSize(tr, dims)) |size| return add(primitive(pos, 4), size);
         if (dims.len != 0) return self.repeat(tr, dims[1..], dims[0], pos);
         return self.value(tr, pos);
     }
@@ -314,4 +339,24 @@ test "key-holder projection sorts IDs and includes unannotated nested members re
     try testing.expect(!try forceMd5(testing.allocator, &derived));
     base.members = &.{ .{ .name = "a", .span = undefined, .type_ref = .{ .base = .octet }, .dimensions = &.{}, .annotations = .{} }, .{ .name = "b", .span = undefined, .type_ref = .{ .base = .unsigned_long_long }, .dimensions = &.{}, .annotations = .{} } };
     try testing.expect(!try forceMd5(testing.allocator, &base));
+}
+
+test "array key delimiters flatten typedefs, affect MD5 policy and reject overflow" {
+    const testing = std.testing;
+    var enumeration = ir.Enum{ .name = "E", .qualified_name = "E", .span = undefined, .enumerators = &.{}, .annotations = .{} };
+    const element: ir.TypeRef = .{ .named = .{ .enum_ = &enumeration } };
+    var row = ir.Typedef{ .name = "Row", .qualified_name = "Row", .span = undefined, .type_ref = element, .dimensions = &.{2}, .raw = &.{} };
+    var alias = ir.Typedef{ .name = "Alias", .qualified_name = "Alias", .span = undefined, .type_ref = .{ .named = .{ .typedef = &row } }, .dimensions = &.{}, .raw = &.{} };
+    const alias_ref: ir.TypeRef = .{ .named = .{ .typedef = &alias } };
+    try testing.expectEqual(@as(?u32, 16), try fixedArrayDelimiterSize(alias_ref, &.{2}));
+    try testing.expectEqual(@as(?u32, 8), try fixedArrayDelimiterSize(alias_ref, &.{}));
+    try testing.expectEqual(@as(?u32, null), try fixedArrayDelimiterSize(element, &.{}));
+    try testing.expectEqual(@as(?u32, null), try fixedArrayDelimiterSize(.{ .base = .unsigned_long }, &.{ 2, 2 }));
+    try testing.expectError(error.CanonicalArrayExtentOverflow, fixedArrayDelimiterSize(element, &.{1073741824}));
+    try testing.expectError(error.CanonicalArrayExtentOverflow, fixedArrayDelimiterSize(element, &.{ std.math.maxInt(u64), 2 }));
+    var members = [_]ir.StructMember{.{ .name = "key", .span = undefined, .type_ref = element, .dimensions = &.{3}, .annotations = .{ .is_key = true } }};
+    const holder = ir.Struct{ .name = "S", .qualified_name = "S", .span = undefined, .members = &members, .annotations = .{} };
+    try testing.expect(!try forceMd5(testing.allocator, &holder)); // 4 + 3*4 = 16
+    members[0].dimensions = &.{4};
+    try testing.expect(try forceMd5(testing.allocator, &holder)); // 4 + 4*4 = 20
 }

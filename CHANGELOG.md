@@ -18,6 +18,17 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- **Key-hash compatibility:** C, C++, Java and Zig canonical key holders now
+  include the XCDR2 collection DHEADER for arrays of enums/bitmasks, including
+  multidimensional arrays and array typedef chains. The delimiter contributes
+  to the schema maximum and can change the padded-key/MD5 decision. Regenerate
+  affected participants together; old and corrected hashes identify different
+  instances. Primitive arrays are unchanged. Nine independent byte/hash witnesses
+  agree with Cyclone DDS key-hash extraction. Other non-primitive collection key
+  framing remains open; see `docs/design/native-cdr-array-keys.md`.
+- Java scalar field filtering skips array typedefs, avoiding invalid `.getValue()`
+  calls on enum arrays in generated single-file and split output.
+
 - Preserve nested key-only sequence projections during allocation-free native preflight.
 - Contain allocating C++ hash-callback defaults and preserve valid union arms when construction fails, including partial arrays.
 

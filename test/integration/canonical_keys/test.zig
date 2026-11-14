@@ -5,7 +5,7 @@ const testing = std.testing;
 
 const Vector = struct { bytes: []u8, hash: [16]u8, force: bool };
 fn vector(name: []const u8) !Vector {
-    var lines = std.mem.tokenizeScalar(u8, @embedFile("vectors.txt"), '\n');
+    var lines = std.mem.tokenizeScalar(u8, @embedFile("vectors.txt") ++ @embedFile("array_vectors.txt"), '\n');
     while (lines.next()) |line| {
         var parts = std.mem.tokenizeScalar(u8, line, ' ');
         if (!std.mem.eql(u8, parts.next().?, name)) continue;
@@ -297,4 +297,35 @@ test "key-only mutable reader windows, future tails, MU and EMHEADER overflow" {
         std.mem.writeInt(u32, data[52..56], 0xffffffff, .little);
         if (lc == 4) try testing.expectError(error.EndOfStream, decodeKeyExample(data[0..56])) else try testing.expectError(error.InvalidEmheader, decodeKeyExample(data[0..56]));
     }
+}
+
+test "enum and bitmask array collection headers, typedef flattening and MD5 boundary" {
+    var e16: C.EnumArray16 = .{};
+    e16.values[1] = .ARRAY_ONE;
+    try check(C.EnumArray16, e16, "EnumArray16", .final, true);
+    var e20: C.EnumArray20 = .{};
+    e20.values[1] = .ARRAY_ONE;
+    e20.values[3] = .ARRAY_ONE;
+    try check(C.EnumArray20, e20, "EnumArray20", .final, true);
+    var grid: C.EnumGrid = .{};
+    grid.values[0][1] = .ARRAY_ONE;
+    grid.values[1][0] = .ARRAY_ONE;
+    try check(C.EnumGrid, grid, "EnumGrid", .final, true);
+    var m16: C.MaskArray16 = .{};
+    var m17: C.MaskArray17 = .{};
+    for (0..12) |i| {
+        m16.values[i] = if (i % 2 == 0) 1 else 2;
+        m17.values[i] = m16.values[i];
+    }
+    m17.values[12] = 1;
+    try check(C.MaskArray16, m16, "MaskArray16", .final, true);
+    try check(C.MaskArray17, m17, "MaskArray17", .final, true);
+    var narrow: C.NarrowArray = .{ .lead = 0xaa, .tail = 0xbb };
+    narrow.values[1] = .NARROW_ONE;
+    try check(C.NarrowArray, narrow, "NarrowArray", .final, true);
+    var medium: C.Enum16Array = .{};
+    medium.values[1] = .MEDIUM_ONE;
+    try check(C.Enum16Array, medium, "Enum16Array", .final, true);
+    try check(C.Mask64Array, .{ .values = .{ 1, 2 } }, "Mask64Array", .final, true);
+    try check(C.PrimitiveGrid, .{ .values = .{ .{ 1, 2 }, .{ 3, 4 } } }, "PrimitiveGrid", .final, true);
 }

@@ -6960,6 +6960,12 @@ const Generator = struct {
     /// array, so a single DHEADER covers the whole array when its innermost
     /// element type is non-primitive.
     fn emitWriteArray(self: *Generator, elem_tr: ir.TypeRef, access: []const u8, dims: []const u64, extra: []const u8, depth: usize) anyerror!void {
+        if (self.canonical_key and depth == 0) {
+            if (try canonical.fixedArrayDelimiterSize(elem_tr, dims)) |size| {
+                try self.ind();
+                try self.print("{s}try writer.writeU32({d});\n", .{ extra, size });
+            }
+        }
         const cdh = try self.openCollectionDheader(depth == 0 and !isPrimitiveElement(arrayInnermost(elem_tr)), extra);
         const body = if (cdh != null) try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra}) else try self.alloc.dupe(u8, extra);
         defer self.alloc.free(body);

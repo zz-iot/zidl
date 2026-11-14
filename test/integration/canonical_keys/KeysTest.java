@@ -106,13 +106,47 @@ public final class KeysTest {
             check(buf.position()==buf.limit() && Arrays.equals(hash(key),expected),"nested key-only extent/hash");
         }
     }
+    static Object enumValue(String name, int number) throws Exception {
+        return type(name).getMethod("valueOf", int.class).invoke(null, number);
+    }
+    static void arrayKeys() throws Exception {
+        Object zero = enumValue("ArrayEnum", 0), one = enumValue("ArrayEnum", 1);
+        Object e16 = value("EnumArray16"); set(e16, "values", array("ArrayEnum", zero, one, zero));
+        Object e20 = value("EnumArray20"); set(e20, "values", array("ArrayEnum", zero, one, zero, one));
+        Object grid = value("EnumGrid");
+        Object rows = Array.newInstance(type("ArrayEnum"), 2, 2);
+        Array.set(rows, 0, array("ArrayEnum", zero, one));
+        Array.set(rows, 1, array("ArrayEnum", one, zero));
+        set(grid, "values", rows);
+        Object m16 = value("MaskArray16"), m17 = value("MaskArray17");
+        int[] bytes16 = new int[12], bytes17 = new int[13];
+        for (int i = 0; i < 12; i++) bytes16[i] = bytes17[i] = (i % 2 == 0 ? 1 : 2);
+        bytes17[12] = 1;
+        set(m16, "values", bytes16); set(m17, "values", bytes17);
+        Object narrow = value("NarrowArray"); set(narrow, "lead", (byte)0xaa); set(narrow, "tail", (byte)0xbb);
+        set(narrow, "values", array("ArrayEnum8", enumValue("ArrayEnum8", 0), enumValue("ArrayEnum8", 1), enumValue("ArrayEnum8", 0)));
+        Object medium = value("Enum16Array");
+        set(medium, "values", array("ArrayEnum16", enumValue("ArrayEnum16", 0), enumValue("ArrayEnum16", 1)));
+        Object wide = value("Mask64Array"); set(wide, "values", new long[]{1, 2});
+        Object primitive = value("PrimitiveGrid"); set(primitive, "values", new int[][]{{1, 2}, {3, 4}});
+        String[] names = {"EnumArray16", "EnumArray20", "EnumGrid", "MaskArray16", "MaskArray17", "NarrowArray", "Enum16Array", "Mask64Array", "PrimitiveGrid"};
+        Object[] values = {e16, e20, grid, m16, m17, narrow, medium, wide, primitive};
+        for (int i = 0; i < names.length; i++) {
+            witness(names[i], values[i]);
+            fromWire(values[i], 1, 1, names[i]);
+            fromWire(values[i], 2, 7, names[i]);
+        }
+    }
     public static void main(String[] args) throws Exception {
         prefix = args[1];
         selectedNestedKeys();
-        for (String line : Files.readAllLines(Paths.get(args[0]))) {
+        List<String> allVectors = new java.util.ArrayList<>(Files.readAllLines(Paths.get(args[0])));
+        allVectors.addAll(Files.readAllLines(Paths.get(args[0]).resolveSibling("array_vectors.txt")));
+        for (String line : allVectors) {
             String[] parts = line.trim().split(" +");
             if (parts.length == 4) vectors.put(parts[0], parts);
         }
+        arrayKeys();
         Object align = value("Align"); set(align,"a",(byte)0xaa); set(align,"b",0x0102030405060708L); witness("Align",align);
         Object nested = value("Nested"); set(nested,"m_long",0x12345678); set(nested,"u",99); set(nested,"w",88);
         Object example = value("Example"); set(example,"label","BLUE"); set(example,"m_nested",nested); witness("Example",example);
