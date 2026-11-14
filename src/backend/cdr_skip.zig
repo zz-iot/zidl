@@ -144,7 +144,7 @@ pub fn emitSkipMember(self: anytype, m: ir.StructMember) anyerror!void {
         self.indent_depth += 1;
         try self.writeI("ZidlCdrOptionalRead _scope;\n");
         try self.printI("_rc = zidl_cdr_begin_optional_read(_r, {d}, &_scope, &_present);\n", .{m.annotations.memberId(0)});
-        try self.writeI("if (_rc) return _rc;\n");
+        try readRcCheck(self);
         try self.writeI("if (_r->xcdr_version != ZIDL_XCDR2) {\n");
         self.indent_depth += 1;
         try self.writeI("zidl_cdr_end_optional_read(_r, &_scope);\n");
@@ -176,7 +176,8 @@ pub fn emitSkipArray(self: anytype, elem_tr: ir.TypeRef, dims: []const u64, dim_
         if (typeRefPrimWireSize(elem_tr)) |sz| {
             var total: u64 = 1;
             for (dims) |d| total *= d;
-            try self.printI("_rc = zidl_cdr_skip_primitives(_r, {d}u, {d}); if (_rc) return _rc;\n", .{ total, sz });
+            try self.printI("_rc = zidl_cdr_skip_primitives(_r, {d}u, {d});\n", .{ total, sz });
+            try readRcCheck(self);
             return;
         }
     }
@@ -211,16 +212,20 @@ pub fn emitSkipForTypeRef(self: anytype, tr: ir.TypeRef) anyerror!void {
             const fn_name = baseCReadFn(b);
             const c_type = baseCType(b);
             if (std.mem.startsWith(u8, fn_name, "//")) {
-                try self.writeI("return ZIDL_CDR_INVALID;\n");
+                try invalidRead(self);
             } else {
-                try self.printI("{{ {s} _tmp; _rc = {s}(_r, &_tmp); if (_rc) return _rc; }}\n", .{ c_type, fn_name });
+                try self.printI("{{ {s} _tmp; _rc = {s}(_r, &_tmp); }}\n", .{ c_type, fn_name });
+                try readRcCheck(self);
             }
         },
         .string => {
-            try self.writeI("{ const char *_sp; uint32_t _sl; _rc = zidl_cdr_read_string_zerocopy(_r, &_sp, &_sl); if (_rc) return _rc; }\n");
+            try self.writeI("{ const char *_sp; uint32_t _sl; _rc = zidl_cdr_read_string_zerocopy(_r, &_sp, &_sl);\n");
+            try readRcCheck(self);
+            try self.writeI("}\n");
         },
         .wstring => {
-            try self.writeI("_rc = zidl_cdr_skip_wstring(_r); if (_rc) return _rc;\n");
+            try self.writeI("_rc = zidl_cdr_skip_wstring(_r);\n");
+            try readRcCheck(self);
         },
         .sequence => |seq| {
             const window = try openReadWindow(self, !isPrimitiveElement(seq.element.*));
@@ -231,9 +236,17 @@ pub fn emitSkipForTypeRef(self: anytype, tr: ir.TypeRef) anyerror!void {
             try self.printI("{{ uint32_t {s};\n", .{sl});
             self.indent_depth += 1;
             try self.printI("_rc = zidl_cdr_read_u32(_r, &{s});\n", .{sl});
-            try self.writeI("if (_rc) return _rc;\n");
-            if (typeRefPrimWireSize(seq.element.*)) |sz| {
-                try self.printI("_rc = zidl_cdr_skip_primitives(_r, {s}, {d}); if (_rc) return _rc;\n", .{ sl, sz });
+            try readRcCheck(self);
+            if (seq.bound) |bound| {
+                try self.printI("if ({s} > {d}u) {{\n", .{ sl, bound });
+                self.indent_depth += 1;
+                try invalidRead(self);
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            }
+            if (typeRefPrimWireSize(resolveAlias(seq.element.*))) |sz| {
+                try self.printI("_rc = zidl_cdr_skip_primitives(_r, {s}, {d});\n", .{ sl, sz });
+                try readRcCheck(self);
             } else {
                 try self.printI("for (uint32_t {s} = 0; {s} < {s}; {s}++) {{\n", .{ si, si, sl, si });
                 self.indent_depth += 1;
@@ -256,7 +269,7 @@ pub fn emitSkipForTypeRef(self: anytype, tr: ir.TypeRef) anyerror!void {
             try self.printI("{{ uint32_t {s};\n", .{ml});
             self.indent_depth += 1;
             try self.printI("_rc = zidl_cdr_read_u32(_r, &{s});\n", .{ml});
-            try self.writeI("if (_rc) return _rc;\n");
+            try readRcCheck(self);
             try self.printI("for (uint32_t {s} = 0; {s} < {s}; {s}++) {{\n", .{ mi, mi, ml, mi });
             self.indent_depth += 1;
             self.coll_depth += 1;
@@ -273,12 +286,14 @@ pub fn emitSkipForTypeRef(self: anytype, tr: ir.TypeRef) anyerror!void {
             .enum_ => |e| {
                 const suffix = enumCdrSuffix(e.annotations.bit_bound);
                 const ctype = enumCdrType(e.annotations.bit_bound);
-                try self.printI("{{ {s} _tmp; _rc = zidl_cdr_read_{s}(_r, &_tmp); if (_rc) return _rc; }}\n", .{ ctype, suffix });
+                try self.printI("{{ {s} _tmp; _rc = zidl_cdr_read_{s}(_r, &_tmp); }}\n", .{ ctype, suffix });
+                try readRcCheck(self);
             },
             .bitmask => |bm| {
                 const suffix = enumCdrSuffix(bm.annotations.bit_bound);
                 const ctype = enumCdrType(bm.annotations.bit_bound);
-                try self.printI("{{ {s} _tmp; _rc = zidl_cdr_read_{s}(_r, &_tmp); if (_rc) return _rc; }}\n", .{ ctype, suffix });
+                try self.printI("{{ {s} _tmp; _rc = zidl_cdr_read_{s}(_r, &_tmp); }}\n", .{ ctype, suffix });
+                try readRcCheck(self);
             },
             .typedef => |t| {
                 if (t.dimensions.len > 0) {
@@ -291,21 +306,58 @@ pub fn emitSkipForTypeRef(self: anytype, tr: ir.TypeRef) anyerror!void {
                 const c_type = try self.prefixedCName(ir.typeDeclQualifiedName(td));
                 defer self.alloc.free(c_type);
                 try self.printI("_rc = {s}_skip(_r);\n", .{c_type});
-                try self.writeI("if (_rc) return _rc;\n");
+                try readRcCheck(self);
             },
             .bitset => |bs| {
                 var total: u32 = 0;
                 for (bs.fields) |f| total += f.bits;
                 const ctype = if (total <= 8) "uint8_t" else if (total <= 16) "uint16_t" else if (total <= 32) "uint32_t" else "uint64_t";
                 const suffix = if (total <= 8) "u8" else if (total <= 16) "u16" else if (total <= 32) "u32" else "u64";
-                try self.printI("{{ {s} _tmp; _rc = zidl_cdr_read_{s}(_r, &_tmp); if (_rc) return _rc; }}\n", .{ ctype, suffix });
+                try self.printI("{{ {s} _tmp; _rc = zidl_cdr_read_{s}(_r, &_tmp); }}\n", .{ ctype, suffix });
+                try readRcCheck(self);
             },
-            else => try self.writeI("return ZIDL_CDR_INVALID;\n"),
+            else => try invalidRead(self),
         },
         .fixed_pt => |fp| {
-            try self.printI("{{ double _tmp; _rc = zidl_cdr_read_fixed(_r, {d}, {d}, &_tmp); if (_rc) return _rc; }}\n", .{ fp.digits, fp.scale });
+            try self.printI("{{ double _tmp; _rc = zidl_cdr_read_fixed(_r, {d}, {d}, &_tmp); }}\n", .{ fp.digits, fp.scale });
+            try readRcCheck(self);
         },
     }
+}
+
+/// Validate a complete sequence on a stack reader before allocating its native
+/// container. Primitive elements use a bulk span check; variable-size elements
+/// use the same bounded skip traversal as the public skip API.
+pub fn preflightSequence(self: anytype, tr: ir.TypeRef) !void {
+    const id = self.reader_window_id;
+    self.reader_window_id += 1;
+    const label = try std.fmt.allocPrint(self.alloc, "_sequence_probe_end_{d}", .{id});
+    defer self.alloc.free(label);
+    try self.writeI("{\n");
+    self.indent_depth += 1;
+    try self.writeI("ZidlCdrReader *_sequence_reader = _r;\n");
+    try self.writeI("ZidlCdrReader _sequence_probe = *_r;\n");
+    try self.writeI("{\n");
+    self.indent_depth += 1;
+    try self.writeI("ZidlCdrReader *_r = &_sequence_probe;\n");
+    const previous_label = self.goto_label;
+    self.goto_label = label;
+    defer self.goto_label = previous_label;
+    try emitSkipForTypeRef(self, tr);
+    self.goto_label = previous_label;
+    self.indent_depth -= 1;
+    try self.writeI("}\n");
+    try self.printI("{s}:\n", .{label});
+    // Preserve useful failure progress, without advancing the real reader on success.
+    try self.writeI("if (_rc) _sequence_reader->pos = _sequence_probe.pos;\n");
+    try readRcCheck(self);
+    self.indent_depth -= 1;
+    try self.writeI("}\n");
+}
+
+fn invalidRead(self: anytype) !void {
+    try self.writeI("_rc = ZIDL_CDR_INVALID;\n");
+    try readRcCheck(self);
 }
 
 // ── Private C-language constant tables (identical in the C and C++

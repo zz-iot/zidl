@@ -18,6 +18,14 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- C/C++ decoders validate sequence counts against declared bounds and probe the
+  complete wire extent before allocating a sequence container. Primitive spans use
+  a bulk check; variable-size and nested elements use an allocation-free skip walk
+  respecting XCDR2 collection/member boundaries. Skip traversal also rejects counts
+  above sequence bounds. Compiled regressions cover both XCDR versions and byte orders,
+  rejected-input allocation counts, nested typedef/struct elements, and cleanup.
+  Valid samples can still encounter ordinary allocator/STL allocation failures.
+
 - Remove the transitional `zidl-rt` package and `zidl_rt` module export after
   zidl and zzdds migrated. Import codec APIs from `zidl_cdr` and ownership,
   allocator, entity and authoring support from `zidl_bindings`.

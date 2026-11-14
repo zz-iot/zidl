@@ -1569,6 +1569,8 @@ const CdrGenerator = struct {
     /// suffixes loop locals so nested loops never shadow (see cdr_skip.collName).
     coll_depth: u32 = 0,
     reader_window_id: usize = 0,
+    /// Temporary error target for allocation-free sequence probes.
+    goto_label: ?[]const u8 = null,
     canonical_key: bool = false,
     wire_key: bool = false,
     alloc: std.mem.Allocator,
@@ -3868,6 +3870,7 @@ const CdrGenerator = struct {
                 try self.writeI("}\n");
             },
             .sequence => |seq| {
+                try cdr_skip.preflightSequence(self, tr);
                 const window = try cdr_skip.openReadWindow(self, !cdr_skip.isPrimitiveElement(seq.element.*));
                 const sl = try cdr_skip.collName(self.alloc, "_sl", self.coll_depth);
                 defer self.alloc.free(sl);

@@ -3975,8 +3975,8 @@ const CdrGenerator = struct {
                 }
             },
             .sequence => |seq| {
+                try cdr_skip.preflightSequence(self, tr);
                 const window = try cdr_skip.openReadWindow(self, !cdr_skip.isPrimitiveElement(seq.element.*));
-                _ = seq.bound;
                 const sl = try cdr_skip.collName(self.alloc, "_sl", self.coll_depth);
                 defer self.alloc.free(sl);
                 const si = try cdr_skip.collName(self.alloc, "_si", self.coll_depth);

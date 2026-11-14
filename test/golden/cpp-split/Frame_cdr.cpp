@@ -111,8 +111,11 @@ static int Frame_skip_bounded_impl(ZidlCdrReader *_r) {
         if (_rc) return _rc;
         return zidl_cdr_skip(_r, _size);
     }
-    { uint32_t _tmp; _rc = zidl_cdr_read_u32(_r, &_tmp); if (_rc) return _rc; }
-    { const char *_sp; uint32_t _sl; _rc = zidl_cdr_read_string_zerocopy(_r, &_sp, &_sl); if (_rc) return _rc; }
+    { uint32_t _tmp; _rc = zidl_cdr_read_u32(_r, &_tmp); }
+    if (_rc) return _rc;
+    { const char *_sp; uint32_t _sl; _rc = zidl_cdr_read_string_zerocopy(_r, &_sp, &_sl);
+    if (_rc) return _rc;
+    }
     return ZIDL_CDR_OK;
 }
 

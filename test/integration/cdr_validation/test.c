@@ -5,11 +5,13 @@
 #include <stdlib.h>
 #ifdef __cplusplus
 #include "validation.hpp"
+#include "sequences.hpp"
 typedef Validation::App App;
 typedef Validation::Mut Mut;
 typedef Validation::Collections Collections;
 #else
 #include "validation.h"
+#include "sequences.h"
 typedef Validation_App App;
 typedef Validation_Mut Mut;
 typedef Validation_Collections Collections;
@@ -123,9 +125,10 @@ typedef Validation_UnionParent UnionParent;
 
 /* Track exact C allocation/free sizes across malformed nested frames. */
 static struct { void *p; size_t n; } live_blocks[16];
-static size_t live_count;
+static size_t live_count, allocation_calls;
 static void *tracked_alloc(void *ctx, size_t n, size_t alignment) {
     (void)ctx; (void)alignment;
+    allocation_calls++;
     assert(live_count < 16);
     void *p = malloc(n);
     assert(p);
@@ -286,7 +289,10 @@ static void narrow_enums(void) {
     }
 }
 
+#include "sequence_validation.h"
+
 int main(void) {
+    sequence_validation();
     narrow_enums();
     patches();
     wide_strings();

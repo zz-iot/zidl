@@ -34,11 +34,6 @@ Features*.
 - **XCDR1 `@mutable` data is not PL_CDR.** Peers expect a ParameterList (PL_CDR)
   encoding for XCDR1 samples of mutable types; zidl writes plain CDR1 framing with a
   CDR1 identifier. XCDR2 mutable types are correct (PL_CDR2, EMHEADERs).
-- **Decoders do not bound-check untrusted lengths.** The C and C++ decoders accept a
-  `sequence<T, N>` count above `N`, and the C++ decoder calls `resize()` with an
-  unchecked wire count, so a hostile length can throw `std::bad_alloc` out of an
-  `extern "C"` function (terminating the process). Reject counts above the bound and
-  counts that cannot fit in the remaining input before allocating.
 - **TypeObjects are minimal-only and struct-only as emitted constants.** zidl emits a
   struct's minimal TypeObject and its hash (checked against reference hashes by
   `test/integration/xcdr_known_answer/`); unions, enums and aliases are encoded only
@@ -115,6 +110,11 @@ Features*.
   `std::pmr`) is a deliberately deferred option; not built.
 
 ### C++ backend
+
+- **Allocation failure policy at the codec C ABI.** Sequence lengths are now checked
+  against schema bounds and available wire data before allocation, but a valid large
+  sample can still exhaust memory in STL containers. Define how generated C++ codec
+  entry points report allocation failures, including builds without exceptions.
 
 - **Direct `@optional` array members generate invalid C++.** For example,
   `@optional long values[2]` declares a bare array while its codec calls

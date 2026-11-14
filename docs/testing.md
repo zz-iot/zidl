@@ -87,6 +87,15 @@ Compiles and runs the generated C, C++, and Java code against the committed gold
 - **C++**: links `test/golden/cpp/types_cdr.cpp` with the shared native `libzidl_cdr.a`, compiles with `-std=c++17` using Zig's bundled clang++. No external toolchain needed.
 - **Java**: compiles `test/golden/java/Types.java` + `test/integration/java/Test.java` with `javac`, then runs with `java`. Recorded as a skip step if `javac`/`java` is not on `PATH`.
 
+### Decoder allocation validation
+
+`zig build test-cdr-validation` compiles generated C and C++ codecs and checks
+sequence schema bounds and wire extents before container allocation, using both
+XCDR versions and byte orders. Rejected-input checks count C allocator and C++
+STL allocations, including nested sequences, struct elements, truncated strings,
+and XCDR2 collection boundaries. The suite also checks partial-decode cleanup,
+wide-string spans, and patch error propagation. It is included in `zig build test`.
+
 ### CDR interop tests
 
 ```sh

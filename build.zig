@@ -702,9 +702,9 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-    // Generated-code validation: patch errors and allocation-free wide spans.
+    // Generated-code validation: patch errors and allocation-free span/sequence checks.
     {
-        const validation_step = b.step("test-cdr-validation", "Check generated patch error propagation and wide-string validation");
+        const validation_step = b.step("test-cdr-validation", "Check generated patch errors, wide strings and sequence allocation validation");
         test_step.dependOn(validation_step);
         const fixture_dir = "test/integration/cdr_validation/";
         const gen_zig = b.addRunArtifact(exe);
@@ -734,6 +734,7 @@ pub fn build(b: *std.Build) void {
             gen.addArgs(&.{ "-b", lang, "-o" });
             const dir = gen.addOutputDirectoryArg(b.fmt("cdr-validation-{s}", .{lang}));
             gen.addFileArg(b.path(fixture_dir ++ "validation.idl"));
+            gen.addFileArg(b.path(fixture_dir ++ "sequences.idl"));
             const validation_mod = b.createModule(.{
                 .root_source_file = null,
                 .target = target,
@@ -755,6 +756,10 @@ pub fn build(b: *std.Build) void {
             validation_mod.addCSourceFile(.{
                 .file = dir.path(b, if (cpp) "validation_cdr.cpp" else "validation_cdr.c"),
                 .flags = generated_flags,
+            });
+            validation_mod.addCSourceFile(.{
+                .file = dir.path(b, if (cpp) "sequences_cdr.cpp" else "sequences_cdr.c"),
+                .flags = flags,
             });
             linkCdr(validation_mod, cdr_library);
             validation_mod.addIncludePath(dir);

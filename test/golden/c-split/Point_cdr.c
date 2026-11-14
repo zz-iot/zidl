@@ -76,8 +76,10 @@ int Point_skip(ZidlCdrReader *_r) {
 
 static int Point_skip_bounded_impl(ZidlCdrReader *_r) {
     int _rc;
-    { int32_t _tmp; _rc = zidl_cdr_read_i32(_r, &_tmp); if (_rc) return _rc; }
-    { int32_t _tmp; _rc = zidl_cdr_read_i32(_r, &_tmp); if (_rc) return _rc; }
+    { int32_t _tmp; _rc = zidl_cdr_read_i32(_r, &_tmp); }
+    if (_rc) return _rc;
+    { int32_t _tmp; _rc = zidl_cdr_read_i32(_r, &_tmp); }
+    if (_rc) return _rc;
     return ZIDL_CDR_OK;
 }
 

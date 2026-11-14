@@ -102,6 +102,22 @@ static int Sample_deserialize_bounded_impl(ZidlCdrReader *_r, Sample *_v) {
         memcpy(_v->bstr, _sp, _sl);
         _v->bstr[_sl] = '\0';
     }
+    {
+        ZidlCdrReader *_sequence_reader = _r;
+        ZidlCdrReader _sequence_probe = *_r;
+        {
+            ZidlCdrReader *_r = &_sequence_probe;
+            { uint32_t _sl;
+                _rc = zidl_cdr_read_u32(_r, &_sl);
+                if (_rc) goto _sequence_probe_end_0;
+                _rc = zidl_cdr_skip_primitives(_r, _sl, 4);
+                if (_rc) goto _sequence_probe_end_0;
+            }
+        }
+        _sequence_probe_end_0:
+        if (_rc) _sequence_reader->pos = _sequence_probe.pos;
+        if (_rc) return _rc;
+    }
     { uint32_t _sl;
         _rc = zidl_cdr_read_u32(_r, &_sl);
         if (_rc) return _rc;
@@ -170,26 +186,44 @@ int Sample_skip(ZidlCdrReader *_r) {
 
 static int Sample_skip_bounded_impl(ZidlCdrReader *_r) {
     int _rc;
-    { uint32_t _tmp; _rc = zidl_cdr_read_u32(_r, &_tmp); if (_rc) return _rc; }
-    { bool _tmp; _rc = zidl_cdr_read_bool(_r, &_tmp); if (_rc) return _rc; }
-    { uint8_t _tmp; _rc = zidl_cdr_read_u8(_r, &_tmp); if (_rc) return _rc; }
-    { int16_t _tmp; _rc = zidl_cdr_read_i16(_r, &_tmp); if (_rc) return _rc; }
-    { uint16_t _tmp; _rc = zidl_cdr_read_u16(_r, &_tmp); if (_rc) return _rc; }
-    { int32_t _tmp; _rc = zidl_cdr_read_i32(_r, &_tmp); if (_rc) return _rc; }
-    { uint32_t _tmp; _rc = zidl_cdr_read_u32(_r, &_tmp); if (_rc) return _rc; }
-    { int64_t _tmp; _rc = zidl_cdr_read_i64(_r, &_tmp); if (_rc) return _rc; }
-    { uint64_t _tmp; _rc = zidl_cdr_read_u64(_r, &_tmp); if (_rc) return _rc; }
-    { float _tmp; _rc = zidl_cdr_read_f32(_r, &_tmp); if (_rc) return _rc; }
-    { double _tmp; _rc = zidl_cdr_read_f64(_r, &_tmp); if (_rc) return _rc; }
-    { const char *_sp; uint32_t _sl; _rc = zidl_cdr_read_string_zerocopy(_r, &_sp, &_sl); if (_rc) return _rc; }
-    { const char *_sp; uint32_t _sl; _rc = zidl_cdr_read_string_zerocopy(_r, &_sp, &_sl); if (_rc) return _rc; }
+    { uint32_t _tmp; _rc = zidl_cdr_read_u32(_r, &_tmp); }
+    if (_rc) return _rc;
+    { bool _tmp; _rc = zidl_cdr_read_bool(_r, &_tmp); }
+    if (_rc) return _rc;
+    { uint8_t _tmp; _rc = zidl_cdr_read_u8(_r, &_tmp); }
+    if (_rc) return _rc;
+    { int16_t _tmp; _rc = zidl_cdr_read_i16(_r, &_tmp); }
+    if (_rc) return _rc;
+    { uint16_t _tmp; _rc = zidl_cdr_read_u16(_r, &_tmp); }
+    if (_rc) return _rc;
+    { int32_t _tmp; _rc = zidl_cdr_read_i32(_r, &_tmp); }
+    if (_rc) return _rc;
+    { uint32_t _tmp; _rc = zidl_cdr_read_u32(_r, &_tmp); }
+    if (_rc) return _rc;
+    { int64_t _tmp; _rc = zidl_cdr_read_i64(_r, &_tmp); }
+    if (_rc) return _rc;
+    { uint64_t _tmp; _rc = zidl_cdr_read_u64(_r, &_tmp); }
+    if (_rc) return _rc;
+    { float _tmp; _rc = zidl_cdr_read_f32(_r, &_tmp); }
+    if (_rc) return _rc;
+    { double _tmp; _rc = zidl_cdr_read_f64(_r, &_tmp); }
+    if (_rc) return _rc;
+    { const char *_sp; uint32_t _sl; _rc = zidl_cdr_read_string_zerocopy(_r, &_sp, &_sl);
+    if (_rc) return _rc;
+    }
+    { const char *_sp; uint32_t _sl; _rc = zidl_cdr_read_string_zerocopy(_r, &_sp, &_sl);
+    if (_rc) return _rc;
+    }
     { uint32_t _sl;
         _rc = zidl_cdr_read_u32(_r, &_sl);
         if (_rc) return _rc;
-        _rc = zidl_cdr_skip_primitives(_r, _sl, 4); if (_rc) return _rc;
+        _rc = zidl_cdr_skip_primitives(_r, _sl, 4);
+        if (_rc) return _rc;
     }
-    _rc = zidl_cdr_skip_primitives(_r, 3u, 4); if (_rc) return _rc;
-    { uint32_t _tmp; _rc = zidl_cdr_read_u32(_r, &_tmp); if (_rc) return _rc; }
+    _rc = zidl_cdr_skip_primitives(_r, 3u, 4);
+    if (_rc) return _rc;
+    { uint32_t _tmp; _rc = zidl_cdr_read_u32(_r, &_tmp); }
+    if (_rc) return _rc;
     _rc = Point_skip(_r);
     if (_rc) return _rc;
     return ZIDL_CDR_OK;
