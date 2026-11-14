@@ -1248,7 +1248,7 @@ pub fn build(b: *std.Build) void {
             m.addCSourceFile(.{ .file = out.path(b, "shapes_cdr.cpp"), .flags = flags });
             m.addIncludePath(out);
             m.addIncludePath(b.path("packages/zidl-cdr/include"));
-            linkCdr(m, cdr_library);
+            linkCdr(m, allocation_cdr_library);
             const app = b.addExecutable(.{ .name = if (pmr) "map-pmr" else "map-stl", .root_module = m });
             step.dependOn(&b.addRunArtifact(app).step);
         }
