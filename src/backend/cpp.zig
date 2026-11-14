@@ -1912,6 +1912,15 @@ const CdrGenerator = struct {
             try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_em_end);\n");
             try self.writeI("if (_rc) return _rc;\n");
             try cdr_skip.limitReader(self, "_em_end");
+            // Mutable absence is encoded by omission. Clear only fields in
+            // this projection so reused outputs cannot retain stale optionals.
+            for (wire_fields) |field| {
+                if (!field.member.annotations.is_optional) continue;
+                try self.openWireField(field, false, true);
+                try self.printI("_v->{s}.reset();\n", .{field.member.name});
+                try self.closeWireField(field, true);
+            }
+
             try self.writeI("for (size_t _frame_limit = _r->data_len, _member_end = _r->pos; zidl_cdr_mutable_has_more(_r, _em_end); _r->pos = _member_end, _r->data_len = _frame_limit) {\n");
             self.indent_depth += 1;
             try self.writeI("ZidlEmHeader _emh;\n");

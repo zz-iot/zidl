@@ -57,6 +57,13 @@ the companion source file.
 
 ---
 
+When decoding a mutable struct into a reused value, optionals included in the
+wire projection are reset before its parameters are read. Omitted optional fields
+therefore become disengaged. This includes inherited fields and optional arrays.
+Key-value decoding resets only projected fields, preserving non-key fields.
+Malformed initial framing fails before these resets; errors later in the body
+may leave partially decoded, destructible values.
+
 ## Generated File Structure
 
 ```cpp

@@ -121,12 +121,6 @@ series and require a separate consumer-driven investigation. See
 
 ### C++ backend
 
-- **Mutable decoding retains stale omitted optionals on reused C++ values.**
-  Mutable encodings omit absent optional fields; the reader currently leaves any
-  previous value engaged. Reset the projected optional fields before reading a
-  new mutable sample, including inherited fields and array typedefs, and cover
-  full/key/selected reads with present/absent/re-present reuse tests.
-
 - **`--generate-c-api` complex-type adapter (`ConcreteImplGenerator`)** — the largest single
   gap. Non-adaptable parameter/return types (bare/nested sequences, complex QoS structs,
   array-typedef fields, unnamed sequence params, `wstring`, `map`, callback interfaces)

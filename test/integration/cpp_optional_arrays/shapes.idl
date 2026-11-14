@@ -17,5 +17,9 @@ module Arrays {
         @id(14) @optional Row rows[2];
         @id(17) @optional string words[2];
         unsigned long tail;
+        @id(20) @optional long number;
+        @id(21) @optional string text;
     };
+    @mutable struct Base { @optional long baseNumber; @optional string baseText; };
+    @mutable struct Derived : Base { @optional long own[2]; @key long id; };
 };

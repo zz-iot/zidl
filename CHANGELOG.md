@@ -18,6 +18,12 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- **C++ mutable optional reuse.** Clear optional fields in the active decode
+  projection before reading mutable parameters, so omitted fields cannot retain
+  values from a previous sample. Include inherited fields and optional arrays;
+  key-only decoding preserves non-key state. Compiled STL/PMR regressions exercise
+  present/absent/re-present samples and inherited projections in both byte orders.
+
 - **C++ optional arrays compile and round-trip.** Direct optional arrays use
   `std::optional<std::array<...>>`, including multidimensional arrays and arrays
   of array typedefs. Existing optional typedefs keep their alias types. Generated
