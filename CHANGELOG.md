@@ -18,6 +18,10 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Initialize Java union discriminators and selected payloads consistently, select
+  valid default-arm discriminators in setters, and allocate decoded array arms.
+  Include boolean default arms in ordinary union codecs.
+
 - **C++ mutable-union admission.** Validate IDs, discriminator agreement,
   order, duplicates, presence, lengths and unknown MU fields. Decode into a local
   RAII candidate before committing, so failed or allocation-exhausted reads leave

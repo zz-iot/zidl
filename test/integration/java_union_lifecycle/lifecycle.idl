@@ -1,0 +1,20 @@
+module Tags {
+    enum Kind { First, Second, Third };
+    typedef Kind Tag;
+};
+module Life {
+    struct Leaf { string name; };
+    @mutable union EnumValue switch(Tags::Tag) { case Tags::First: string text; case Tags::Second: long number; default: sequence<string> words; };
+    @final union DefaultValue switch(long) { case 1: long number; default: string text; };
+    @mutable union LeafDefault switch(long) { case 1: long number; default: Leaf member; };
+    @mutable union NoDefault switch(long) { case 5: string text; };
+    @final union BooleanFinal switch(boolean) { case FALSE: long number; default: string text; };
+    @appendable union BooleanAppendable switch(boolean) { case FALSE: long number; default: string text; };
+    @mutable union BooleanMutable switch(boolean) { case FALSE: long number; default: string text; };
+    @final union WideValue switch(long long) { case 4294967296: long number; default: string text; };
+    typedef string TextRow[2];
+    @mutable union ArrayValue switch(long) { case 0: TextRow texts[2]; default: Leaf leaves[2]; };
+    @mutable union EnumArray switch(long) { case 0: Tags::Tag tag_values[2]; default: long number; };
+    @mutable union Recursive switch(long) { case 0: sequence<Recursive> children; default: Leaf node_value; };
+    struct Holder { EnumValue enum_value; ArrayValue array_value; Recursive tree; };
+};

@@ -532,7 +532,28 @@ const Generator = struct {
 
         try self.write("\n");
         try self.ind();
-        try self.print("public {s}{s}() {{}}\n", .{ pfx, u.name });
+        try self.write("@SuppressWarnings(\"unchecked\")\n");
+        try self.ind();
+        try self.print("public {s}{s}() {{\n", .{ pfx, u.name });
+        self.depth += 1;
+        const initial_disc = try self.defaultForTypeRef(u.discriminant);
+        defer self.alloc.free(initial_disc);
+        try self.ind();
+        try self.print("_discriminator = {s};\n", .{initial_disc});
+        for (u.cases) |cas| {
+            const condition = try self.unionCaseCondition(u, cas, "_discriminator");
+            defer self.alloc.free(condition);
+            try self.ind();
+            try self.print("if ({s}) {{\n", .{condition});
+            self.depth += 1;
+            try self.emitUnionPayloadDefault(cas, "this.");
+            self.depth -= 1;
+            try self.ind();
+            try self.write("}\n");
+        }
+        self.depth -= 1;
+        try self.ind();
+        try self.write("}\n");
         try self.write("\n");
         try self.ind();
         try self.print(
@@ -550,7 +571,7 @@ const Generator = struct {
                 .{ java_type, cas.name, cas.name },
             );
             // Setter with discriminant assignment
-            const label_str = try self.unionLabelExpr(u.discriminant, cas.labels);
+            const label_str = try self.unionSetterLabel(u, cas);
             defer self.alloc.free(label_str);
             try self.ind();
             if (label_str.len > 0) {
@@ -560,8 +581,8 @@ const Generator = struct {
                 );
             } else {
                 try self.print(
-                    "public void set_{s}({s} _v) {{ {s} = _v; }}\n",
-                    .{ cas.name, java_type, cas.name },
+                    "public void set_{s}({s} _v) {{ throw new IllegalStateException(\"union arm has no discriminator value\"); }}\n",
+                    .{ cas.name, java_type },
                 );
             }
         }
@@ -669,6 +690,112 @@ const Generator = struct {
         try self.ind();
         try self.write("}\n");
         self.depth += 1;
+    }
+
+    /// Initialize only the selected payload, including reference array elements.
+    fn emitUnionPayloadRead(self: *Generator, cas: ir.UnionCase, access: []const u8) !void {
+        if (cas.dimensions.len > 0 or cdr_skip.arrayTypedefOf(cas.type_ref) != null) {
+            const array = try self.makeJavaNewArray(cas.type_ref, cas.dimensions);
+            defer self.alloc.free(array);
+            try self.ind();
+            try self.print("{s} = {s};\n", .{ access, array });
+        }
+        if (cas.dimensions.len > 0) try self.emitDeserializeArray(cas.type_ref, access, cas.dimensions, "", 0) else try self.emitDeserializeForTypeRef(cas.type_ref, access, "");
+    }
+
+    fn emitUnionPayloadDefault(self: *Generator, cas: ir.UnionCase, prefix: []const u8) !void {
+        const initial = try self.defaultForMember(cas.type_ref, cas.dimensions);
+        defer self.alloc.free(initial);
+        try self.ind();
+        try self.print("{s}{s} = {s};\n", .{ prefix, cas.name, initial });
+        var dims: std.ArrayList(u64) = .empty;
+        defer dims.deinit(self.alloc);
+        try dims.appendSlice(self.alloc, cas.dimensions);
+        var elem = cas.type_ref;
+        while (cdr_skip.arrayTypedefOf(elem)) |td| {
+            try dims.appendSlice(self.alloc, td.dimensions);
+            elem = td.type_ref;
+        }
+        elem = cdr_skip.resolveAlias(elem);
+        if (dims.items.len == 0 or elem == .base or elem == .fixed_pt) return;
+        var access: std.ArrayList(u8) = .empty;
+        defer access.deinit(self.alloc);
+        try access.appendSlice(self.alloc, prefix);
+        try access.appendSlice(self.alloc, cas.name);
+        for (dims.items, 0..) |dim, i| {
+            try self.ind();
+            try self.print("for (int _init{d}=0; _init{d}<{d}; ++_init{d}) {{\n", .{ i, i, dim, i });
+            self.depth += 1;
+            const subscript = try std.fmt.allocPrint(self.alloc, "[_init{d}]", .{i});
+            defer self.alloc.free(subscript);
+            try access.appendSlice(self.alloc, subscript);
+        }
+        const value = try self.defaultForTypeRef(elem);
+        defer self.alloc.free(value);
+        try self.ind();
+        try self.print("{s} = {s};\n", .{ access.items, value });
+        for (dims.items) |_| {
+            self.depth -= 1;
+            try self.ind();
+            try self.write("}\n");
+        }
+    }
+
+    fn unionLabelUsed(u: *const ir.Union, candidate: ir.UnionLabel) bool {
+        for (u.cases) |cas| for (cas.labels) |label| {
+            if (std.meta.activeTag(label) != std.meta.activeTag(candidate)) continue;
+            const matches = switch (candidate) {
+                .integer => |v| label.integer == v,
+                .boolean => |v| label.boolean == v,
+                .enumerator => |v| std.mem.eql(u8, label.enumerator, v),
+                .default => false,
+            };
+            if (matches) return true;
+        };
+        return false;
+    }
+
+    /// Explicit arms use their first label; a default-only arm needs an unused
+    /// value in the discriminator's actual domain, not a sentinel or enum ordinal.
+    fn unionSetterLabel(self: *Generator, u: *const ir.Union, cas: ir.UnionCase) ![]u8 {
+        const explicit = try self.unionLabelExpr(u.discriminant, cas.labels);
+        if (explicit.len > 0 or !isDefaultUnionCase(cas)) return explicit;
+        self.alloc.free(explicit);
+        const resolved = cdr_skip.resolveAlias(u.discriminant);
+        if (resolved == .named and resolved.named == .enum_) {
+            for (resolved.named.enum_.enumerators) |en| {
+                const label: ir.UnionLabel = .{ .enumerator = en.name };
+                if (!unionLabelUsed(u, label)) return self.unionLabelExpr(u.discriminant, &.{label});
+            }
+        } else if (resolved == .base and resolved.base == .boolean) {
+            for ([_]bool{ false, true }) |v| {
+                const label: ir.UnionLabel = .{ .boolean = v };
+                if (!unionLabelUsed(u, label)) return self.unionLabelExpr(u.discriminant, &.{label});
+            }
+        } else if (resolved == .base) {
+            const max: i64 = switch (resolved.base) {
+                .int8 => 127,
+                .octet, .uint8, .char => 255,
+                .short, .int16 => 32767,
+                .unsigned_short, .uint16, .wchar => 65535,
+                .long, .int32 => 2147483647,
+                .unsigned_long, .uint32 => 4294967295,
+                else => std.math.maxInt(i64),
+            };
+            const signed = switch (resolved.base) {
+                .int8, .short, .int16, .long, .int32, .long_long, .int64 => true,
+                else => false,
+            };
+            var labels: usize = 0;
+            for (u.cases) |c| labels += c.labels.len;
+            for (0..labels + 1) |n| {
+                const value: i64 = @intCast(n);
+                if (value <= max and !unionLabelUsed(u, .{ .integer = value })) return self.unionLabelExpr(u.discriminant, &.{.{ .integer = value }});
+                const negative = -value - 1;
+                if (signed and negative >= -max - 1 and !unionLabelUsed(u, .{ .integer = negative })) return self.unionLabelExpr(u.discriminant, &.{.{ .integer = negative }});
+            }
+        }
+        return self.alloc.dupe(u8, "");
     }
 
     fn unionCaseCondition(self: *Generator, u: *const ir.Union, cas: ir.UnionCase, disc: []const u8) ![]u8 {
@@ -829,74 +956,15 @@ const Generator = struct {
                     },
                 }
             }
-            // Switch on discriminant
-            if (disc_is_bool) {
-                // Java can't switch on boolean — use if/else
-                for (u.cases) |cas| {
-                    if (isDefaultUnionCase(cas)) continue;
-                    for (cas.labels) |lbl| {
-                        if (lbl == .boolean) {
-                            const bval = lbl.boolean;
-                            try self.ind();
-                            try self.print("if (_discriminator == {s}) {{\n", .{if (bval) "true" else "false"});
-                            self.depth += 1;
-                            const access = try std.fmt.allocPrint(self.alloc, "this.{s}", .{cas.name});
-                            defer self.alloc.free(access);
-                            if (cas.dimensions.len > 0) {
-                                try self.emitSerializeArray(cas.type_ref, access, cas.dimensions, "", 0);
-                            } else {
-                                try self.emitSerializeForTypeRef(cas.type_ref, access, "");
-                            }
-                            self.depth -= 1;
-                            try self.ind();
-                            try self.write("}\n");
-                        }
-                    }
-                }
-            } else {
+            for (u.cases) |cas| {
+                const condition = try self.unionCaseCondition(u, cas, "_discriminator");
+                defer self.alloc.free(condition);
                 try self.ind();
-                try self.write("switch (_discriminator) {\n");
+                try self.print("if ({s}) {{\n", .{condition});
                 self.depth += 1;
-                var has_default = false;
-                for (u.cases) |cas| {
-                    if (isDefaultUnionCase(cas)) {
-                        has_default = true;
-                        continue;
-                    }
-                    try self.emitJavaUnionCaseLabelLines(u.discriminant, cas);
-                    const access_ser = try std.fmt.allocPrint(self.alloc, "this.{s}", .{cas.name});
-                    defer self.alloc.free(access_ser);
-                    if (cas.dimensions.len > 0) {
-                        try self.emitSerializeArray(cas.type_ref, access_ser, cas.dimensions, "", 0);
-                    } else {
-                        try self.emitSerializeForTypeRef(cas.type_ref, access_ser, "");
-                    }
-                    try self.ind();
-                    try self.write("break;\n");
-                }
-                // default arm
-                const default_case: ?ir.UnionCase = blk: {
-                    for (u.cases) |cas| {
-                        if (isDefaultUnionCase(cas)) break :blk cas;
-                    }
-                    break :blk null;
-                };
-                if (default_case) |dc| {
-                    try self.ind();
-                    try self.write("default:\n");
-                    const dc_access = try std.fmt.allocPrint(self.alloc, "this.{s}", .{dc.name});
-                    defer self.alloc.free(dc_access);
-                    if (dc.dimensions.len > 0) {
-                        try self.emitSerializeArray(dc.type_ref, dc_access, dc.dimensions, "", 0);
-                    } else {
-                        try self.emitSerializeForTypeRef(dc.type_ref, dc_access, "");
-                    }
-                    try self.ind();
-                    try self.write("break;\n");
-                } else if (!has_default) {
-                    try self.ind();
-                    try self.write("default: break;\n");
-                }
+                const access = try std.fmt.allocPrint(self.alloc, "this.{s}", .{cas.name});
+                defer self.alloc.free(access);
+                try self.emitCanonicalValue(cas.type_ref, cas.dimensions, access);
                 self.depth -= 1;
                 try self.ind();
                 try self.write("}\n");
@@ -987,7 +1055,7 @@ const Generator = struct {
                 try self.print("if (!_seenDisc || _seenValue || !({s})) throw new IllegalArgumentException(\"invalid union member selection/order/duplicate\");\n", .{condition});
                 const out_expr = try std.fmt.allocPrint(self.alloc, "_out.{s}", .{cas.name});
                 defer self.alloc.free(out_expr);
-                if (cas.dimensions.len > 0) try self.emitDeserializeArray(cas.type_ref, out_expr, cas.dimensions, "", 0) else try self.emitDeserializeForTypeRef(cas.type_ref, out_expr, "");
+                try self.emitUnionPayloadRead(cas, out_expr);
                 try self.ind();
                 try self.write("_seenValue=true; if (_buf.position()!=_memberEnd) throw new IllegalArgumentException(\"invalid union member length\"); break; }\n");
             }
@@ -1015,10 +1083,13 @@ const Generator = struct {
             for (u.cases) |cas| {
                 const condition = try self.unionCaseCondition(u, cas, "_out._discriminator");
                 defer self.alloc.free(condition);
-                const initial = try self.defaultForMember(cas.type_ref, cas.dimensions);
-                defer self.alloc.free(initial);
                 try self.ind();
-                try self.print("if ({s}) _out.{s}={s};\n", .{ condition, cas.name, initial });
+                try self.print("if ({s}) {{\n", .{condition});
+                self.depth += 1;
+                try self.emitUnionPayloadDefault(cas, "_out.");
+                self.depth -= 1;
+                try self.ind();
+                try self.write("}\n");
             }
             try self.ind();
             try self.write("}\n");
@@ -1047,68 +1118,15 @@ const Generator = struct {
                     },
                 }
             }
-            // Switch on discriminant to read member
-            if (disc_is_bool) {
-                for (u.cases) |cas| {
-                    if (isDefaultUnionCase(cas)) continue;
-                    for (cas.labels) |lbl| {
-                        if (lbl == .boolean) {
-                            const bval = lbl.boolean;
-                            try self.ind();
-                            try self.print("if (_out._discriminator == {s}) {{\n", .{if (bval) "true" else "false"});
-                            self.depth += 1;
-                            const out_expr = try std.fmt.allocPrint(self.alloc, "_out.{s}", .{cas.name});
-                            defer self.alloc.free(out_expr);
-                            if (cas.dimensions.len > 0) {
-                                try self.emitDeserializeArray(cas.type_ref, out_expr, cas.dimensions, "", 0);
-                            } else {
-                                try self.emitDeserializeForTypeRef(cas.type_ref, out_expr, "");
-                            }
-                            self.depth -= 1;
-                            try self.ind();
-                            try self.write("}\n");
-                        }
-                    }
-                }
-            } else {
+            for (u.cases) |cas| {
+                const condition = try self.unionCaseCondition(u, cas, "_out._discriminator");
+                defer self.alloc.free(condition);
                 try self.ind();
-                try self.write("switch (_out._discriminator) {\n");
+                try self.print("if ({s}) {{\n", .{condition});
                 self.depth += 1;
-                for (u.cases) |cas| {
-                    if (isDefaultUnionCase(cas)) continue;
-                    try self.emitJavaUnionCaseLabelLines(u.discriminant, cas);
-                    const out_expr = try std.fmt.allocPrint(self.alloc, "_out.{s}", .{cas.name});
-                    defer self.alloc.free(out_expr);
-                    if (cas.dimensions.len > 0) {
-                        try self.emitDeserializeArray(cas.type_ref, out_expr, cas.dimensions, "", 0);
-                    } else {
-                        try self.emitDeserializeForTypeRef(cas.type_ref, out_expr, "");
-                    }
-                    try self.ind();
-                    try self.write("break;\n");
-                }
-                const default_case2: ?ir.UnionCase = blk: {
-                    for (u.cases) |cas| {
-                        if (isDefaultUnionCase(cas)) break :blk cas;
-                    }
-                    break :blk null;
-                };
-                if (default_case2) |dc| {
-                    try self.ind();
-                    try self.write("default:\n");
-                    const out_expr = try std.fmt.allocPrint(self.alloc, "_out.{s}", .{dc.name});
-                    defer self.alloc.free(out_expr);
-                    if (dc.dimensions.len > 0) {
-                        try self.emitDeserializeArray(dc.type_ref, out_expr, dc.dimensions, "", 0);
-                    } else {
-                        try self.emitDeserializeForTypeRef(dc.type_ref, out_expr, "");
-                    }
-                    try self.ind();
-                    try self.write("break;\n");
-                } else {
-                    try self.ind();
-                    try self.write("default: break;\n");
-                }
+                const access = try std.fmt.allocPrint(self.alloc, "_out.{s}", .{cas.name});
+                defer self.alloc.free(access);
+                try self.emitUnionPayloadRead(cas, access);
                 self.depth -= 1;
                 try self.ind();
                 try self.write("}\n");
@@ -3298,10 +3316,12 @@ const Generator = struct {
                     if (t.dimensions.len > 0) break :blk try self.makeJavaNewArray(t.type_ref, t.dimensions);
                     break :blk try self.defaultForTypeRef(t.type_ref);
                 },
-                .enum_ => |e| if (e.enumerators.len > 0)
-                    std.fmt.allocPrint(self.alloc, "{s}{s}.values()[0]", .{ self.opts.type_prefix, e.name })
-                else
-                    self.alloc.dupe(u8, "null"),
+                .enum_ => |e| blk: {
+                    if (e.enumerators.len == 0) break :blk self.alloc.dupe(u8, "null");
+                    const name = try self.qualNameToJava(e.qualified_name);
+                    defer self.alloc.free(name);
+                    break :blk std.fmt.allocPrint(self.alloc, "{s}.values()[0]", .{name});
+                },
                 .bitmask => self.alloc.dupe(u8, "0"),
                 .native, .interface => self.alloc.dupe(u8, "null"),
                 .bitset => blk: {
@@ -10002,7 +10022,7 @@ test "java: union CDR switch on discriminant" {
     const alloc = testing.allocator;
     try testGen(alloc,
         \\union Var switch (long) { case 0: long i; case 1: double d; };
-    , "var", "switch (_discriminator) {");
+    , "var", "if ((false || (_discriminator == 0))) {");
 }
 
 test "java: FooImpl file basic structure" {

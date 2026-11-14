@@ -840,6 +840,41 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+
+    {
+        const step = b.step("test-java-union-lifecycle", "Check Java union construction and arm selection");
+        test_step.dependOn(step);
+        const javac = b.findProgram(.{ .names = &.{"javac"} });
+        const java = b.findProgram(.{ .names = &.{"java"} });
+        if (javac != null and java != null) for (0..6) |mode| {
+            const split = mode % 3 != 0;
+            const packaged = mode % 3 == 1;
+            const codecs = mode < 3;
+            const gen = b.addRunArtifact(exe);
+            gen.addArgs(&.{ "-b", "java" });
+            if (split) gen.addArg("--split-files");
+            if (packaged) gen.addArgs(&.{ "--java-package", "lifecycle" });
+            if (!codecs) gen.addArg("--no-typesupport");
+            gen.addArg("-o");
+            const dir = gen.addOutputDirectoryArg(b.fmt("java-union-lifecycle-{d}", .{mode}));
+            gen.addFileArg(b.path("test/integration/java_union_lifecycle/lifecycle.idl"));
+            const compile = javaCommand(b, &.{ javac.?, "-Xlint:unchecked", "-Werror", "-d" }, java_cdr);
+            const classes = compile.addOutputDirectoryArg("classes");
+            if (!split) compile.addFileArg(dir.path(b, "Lifecycle.java")) else {
+                if (codecs) compile.addFileArg(dir.path(b, "LifecycleCdrUtils.java"));
+                for ([_][]const u8{ "Kind", "Leaf", "EnumValue", "DefaultValue", "LeafDefault", "NoDefault", "BooleanFinal", "BooleanAppendable", "BooleanMutable", "WideValue", "ArrayValue", "EnumArray", "Recursive", "Holder" }) |name| compile.addFileArg(dir.path(b, b.fmt("{s}.java", .{name})));
+            }
+            compile.addFileArg(b.path("test/integration/java_union_lifecycle/LifecycleTest.java"));
+            const run = javaCommand(b, &.{ java.?, "-cp" }, java_cdr);
+            run.addDirectoryArg(classes);
+            run.addArg("LifecycleTest");
+            run.addArg(if (!split) "Lifecycle$Life$" else if (packaged) "lifecycle." else "");
+            run.addArg(if (codecs) "true" else "false");
+            step.dependOn(&run.step);
+        };
+    }
+
+
     // STL storage failures must stay inside generated C++ codec entry points.
     {
         const allocation_step = b.step("test-cpp-codec-allocation", "Inject C++ codec allocation failures");
