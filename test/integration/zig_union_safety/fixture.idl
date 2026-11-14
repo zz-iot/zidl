@@ -72,3 +72,6 @@ union ArrayOwner switch (long) { case 0: DefaultOwning values[2][2]; default: lo
 struct OptionalOwner { @optional Nested value; };
 enum Disc { One, Two };
 union EnumOwner switch (Disc) { case One: string text; default: long number; };
+
+typedef boolean BooleanAlias;
+union ExhaustiveBool switch(BooleanAlias) { case FALSE: long no; case TRUE: long yes; };

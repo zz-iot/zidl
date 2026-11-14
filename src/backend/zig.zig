@@ -591,7 +591,7 @@ const Generator = struct {
             defer self.alloc.free(initial);
             try self.print(" => .{{ .{s} = {s} }},\n", .{ cas.name, initial });
         }
-        if (!has_default) try self.write("        else => undefined,\n");
+        if (!has_default and !unionLabelsExhaustive(u)) try self.write("        else => undefined,\n");
         try self.write("    },\n");
 
         if (!self.opts.no_typesupport) {
@@ -756,7 +756,7 @@ const Generator = struct {
                 }
                 try self.ind();
                 try self.write("            },\n");
-            } else {
+            } else if (!unionLabelsExhaustive(u)) {
                 try self.ind();
                 try self.write("            else => {},\n");
             }
@@ -804,7 +804,7 @@ const Generator = struct {
                 }
                 try self.ind();
                 try self.write("            },\n");
-            } else {
+            } else if (!unionLabelsExhaustive(u)) {
                 try self.ind();
                 try self.write("            else => {},\n");
             }
@@ -938,7 +938,7 @@ const Generator = struct {
                 const initial = try self.defaultForArrayRef(cas.type_ref, cas.dimensions);
                 defer self.alloc.free(initial);
                 try self.print("                else => {{ out._u = .{{ .{s} = {s} }}; out._d = _d; }},\n", .{ cas.name, initial });
-            } else {
+            } else if (!unionLabelsExhaustive(u)) {
                 try self.write("                else => out._d = _d,\n");
             }
             try self.write("            }\n        }\n");
@@ -977,7 +977,7 @@ const Generator = struct {
                 }
                 try self.ind();
                 try self.write("            },\n");
-            } else {
+            } else if (!unionLabelsExhaustive(u)) {
                 try self.ind();
                 try self.write("            else => {},\n");
             }
@@ -1038,7 +1038,7 @@ const Generator = struct {
                 }
                 try self.ind();
                 try self.write("            },\n");
-            } else {
+            } else if (!unionLabelsExhaustive(u)) {
                 try self.ind();
                 try self.write("            else => {},\n");
             }
@@ -1051,7 +1051,7 @@ const Generator = struct {
 
     /// Emit the discriminant write statement for Zig.
     fn emitDiscWriteZig(self: *Generator, disc: ir.TypeRef, access: []const u8, extra: []const u8) anyerror!void {
-        switch (disc) {
+        switch (resolveAlias(disc)) {
             .base => |b| {
                 const method = baseWriteMethod(b);
                 try self.ind();
@@ -1091,7 +1091,7 @@ const Generator = struct {
 
     /// Emit the discriminant read statement for Zig.
     fn emitDiscReadZig(self: *Generator, disc: ir.TypeRef, out_expr: []const u8, extra: []const u8) anyerror!void {
-        switch (disc) {
+        switch (resolveAlias(disc)) {
             .base => |b| {
                 const method = baseReadMethod(b);
                 try self.ind();
@@ -3687,7 +3687,7 @@ const Generator = struct {
                 }
                 try self.ind();
                 try self.write("            },\n");
-            } else {
+            } else if (!unionLabelsExhaustive(u)) {
                 try self.ind();
                 try self.write("            else => {},\n");
             }
@@ -11837,4 +11837,14 @@ test "zig_backend: unresolved mutable default IDs use declaration indices" {
     try gen.emitUnionCdr(&u);
     try testing.expect(has(out.items, "reserveEmheader(2, false)"));
     try testing.expect(!has(out.items, "4294967295"));
+}
+
+fn unionLabelsExhaustive(u: *const ir.Union) bool {
+    const disc = resolveAlias(u.discriminant);
+    if (disc != .base or disc.base != .boolean) return false;
+    var labels: u2 = 0;
+    for (u.cases) |cas| for (cas.labels) |label| {
+        if (label == .boolean) labels |= if (label.boolean) @as(u2, 2) else 1;
+    };
+    return labels == 3;
 }

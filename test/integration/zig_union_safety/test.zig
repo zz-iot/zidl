@@ -437,3 +437,22 @@ test "optional nested owning union failure cleanup starts from initialized paylo
         value.deinit(testing.allocator);
     }
 }
+
+test "exhaustive boolean union has a valid fresh payload" {
+    const value: fixture.ExhaustiveBool = .{};
+    try testing.expectEqual(false, value._d);
+    try testing.expectEqual(@as(i32, 0), value._u.no);
+}
+
+test "exhaustive boolean union aliases round-trip ordinary codecs" {
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(testing.allocator);
+    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&bytes, testing.allocator);
+    try writer.writeEncapHeader();
+    try fixture.ExhaustiveBool.serialize(&writer, .{ ._d = true, ._u = .{ .yes = 17 } });
+    var reader = try zidl_cdr.CdrReader.init(bytes.items);
+    var result: fixture.ExhaustiveBool = .{};
+    try fixture.ExhaustiveBool.deserializeInto(&result, &reader, testing.allocator);
+    try testing.expect(result._d);
+    try testing.expectEqual(@as(i32, 17), result._u.yes);
+}
