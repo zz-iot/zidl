@@ -184,7 +184,7 @@ pub fn generateSplitFiles(
             .{opts.input_stem},
         );
         try gen.write("const std = @import(\"std\");\n");
-        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_authoring or opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(m.items)) {
+        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_authoring or opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(m.items) or gen.itemsNeedLifecycleRuntime(m.items)) {
             try gen.write("const zidl_cdr = @import(\"zidl_cdr\");\nconst zidl_bindings = @import(\"zidl_bindings\");\n");
         }
         if (opts.generate_zzdds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(m.items)) {
@@ -240,7 +240,7 @@ pub fn generateSplitFiles(
     if (non_module.items.len > 0) {
         if (module_names.items.len > 0) try gen.write("\n");
         try gen.write("const std = @import(\"std\");\n");
-        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_authoring or opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(non_module.items)) {
+        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_authoring or opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(non_module.items) or gen.itemsNeedLifecycleRuntime(non_module.items)) {
             try gen.write("const zidl_cdr = @import(\"zidl_cdr\");\nconst zidl_bindings = @import(\"zidl_bindings\");\n");
         }
         if (opts.generate_zzdds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(non_module.items)) {
@@ -322,6 +322,20 @@ const Generator = struct {
         while (i < self.depth) : (i += 1) try self.write("    ");
     }
 
+    fn itemsNeedLifecycleRuntime(self: *Generator, items: []const ir.ModuleItem) bool {
+        for (items) |item| switch (item) {
+            .module => |m| if (self.itemsNeedLifecycleRuntime(m.items)) return true,
+            .type_decl => |td| switch (td) {
+                .struct_ => |v| if (self.structNeedsCleanup(v)) return true,
+                .union_ => |v| if (self.unionNeedsCleanup(v)) return true,
+                .typedef => |v| if (self.typeOwnsHeap(v.type_ref)) return true,
+                else => {},
+            },
+            else => {},
+        };
+        return false;
+    }
+
     // ── Top-level file emission ───────────────────────────────────────────────
 
     fn emitFile(self: *Generator, spec: *const ir.Spec) !void {
@@ -333,7 +347,7 @@ const Generator = struct {
             try self.print("// Zig output target: {s}\n\n", .{self.opts.zig_version.label()});
         }
         try self.write("const std = @import(\"std\");\n");
-        if (!self.opts.no_typesupport or self.opts.pl_cdr or self.opts.zig_generate_authoring or self.opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(spec.items)) {
+        if (!self.opts.no_typesupport or self.opts.pl_cdr or self.opts.zig_generate_authoring or self.opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(spec.items) or self.itemsNeedLifecycleRuntime(spec.items)) {
             try self.write("const zidl_cdr = @import(\"zidl_cdr\");\nconst zidl_bindings = @import(\"zidl_bindings\");\n");
         }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveTopicTypes(spec.items)) {

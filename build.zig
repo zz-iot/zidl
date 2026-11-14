@@ -498,7 +498,30 @@ pub fn build(b: *std.Build) void {
         const run_union_safety = b.addRunArtifact(union_safety_tests);
         test_step.dependOn(&run_union_safety.step);
         const union_safety_step = b.step("test-zig-union-safety", "Compile and exercise Zig union codecs and cleanup");
+        test_step.dependOn(union_safety_step);
         union_safety_step.dependOn(&run_union_safety.step);
+        // Lifecycle/default construction is also emitted without wire codecs.
+        for ([_]bool{ false, true }) |split| {
+            const declarations = b.addRunArtifact(exe);
+            declarations.addArgs(&.{ "-b", "zig", "--no-typesupport", "--no-typeobject-support" });
+            if (split) declarations.addArg("--split-files");
+            declarations.addArg("-o");
+            const dir = declarations.addOutputDirectoryArg(if (split) "union-declarations-split" else "union-declarations");
+            declarations.addFileArg(b.path("test/integration/zig_union_safety/fixture.idl"));
+            const fixture_mod = b.createModule(.{
+                .root_source_file = dir.path(b, "fixture.zig"),
+                .target = target,
+                .sanitize_thread = sanitize_thread,
+                .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings } },
+            });
+            const tests = b.addTest(.{ .root_module = b.createModule(.{
+                .root_source_file = b.path("test/integration/zig_union_safety/construction.zig"),
+                .target = target,
+                .sanitize_thread = sanitize_thread,
+                .imports = &.{.{ .name = "fixture", .module = fixture_mod }},
+            }) });
+            union_safety_step.dependOn(&b.addRunArtifact(tests).step);
+        }
     }
 
     // ── Sequence-element compile-and-run checks (Zig, C, C++) ───────────────
@@ -840,7 +863,6 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-
     {
         const step = b.step("test-java-union-lifecycle", "Check Java union construction and arm selection");
         test_step.dependOn(step);
@@ -874,7 +896,6 @@ pub fn build(b: *std.Build) void {
         };
     }
 
-
     {
         const step = b.step("test-native-boolean-union", "Check warning-clean boolean union dispatch and lifecycle");
         test_step.dependOn(step);
@@ -903,7 +924,6 @@ pub fn build(b: *std.Build) void {
             step.dependOn(&b.addRunArtifact(app).step);
         }
     }
-
 
     // STL storage failures must stay inside generated C++ codec entry points.
     {
