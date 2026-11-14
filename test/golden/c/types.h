@@ -42,7 +42,10 @@ int Point_serialize_key_value(ZidlCdrWriter *_w, const Point *_v);
 int Point_deserialize_key_value(ZidlCdrReader *_r, Point *_v);
 int Point_skip_key_value(ZidlCdrReader *_r);
 int Point_deserialize(ZidlCdrReader *_r, Point *_v);
+/* Structural traversal only; success is not sample admission. */
 int Point_skip(ZidlCdrReader *_r);
+/* Checked ordinary decode and hash; output is untouched on failure. */
+int Point_process_sample_from_cdr(const uint8_t *, size_t, int key_only, uint8_t hash[16]);
 
 /* Initialize uninitialized storage using IDL defaults and zero values. */
 void Point_default(Point *_v);
@@ -75,7 +78,10 @@ int Sample_serialize_key_value(ZidlCdrWriter *_w, const Sample *_v);
 int Sample_deserialize_key_value(ZidlCdrReader *_r, Sample *_v);
 int Sample_skip_key_value(ZidlCdrReader *_r);
 int Sample_deserialize(ZidlCdrReader *_r, Sample *_v);
+/* Structural traversal only; success is not sample admission. */
 int Sample_skip(ZidlCdrReader *_r);
+/* Checked ordinary decode and hash; output is untouched on failure. */
+int Sample_process_sample_from_cdr(const uint8_t *, size_t, int key_only, uint8_t hash[16]);
 int Sample_serialize_key(ZidlCdrWriter *_w, const Sample *_v);
 int Sample_deserialize_key(ZidlCdrReader *_r, Sample *_v);
 int Sample_compute_key_hash(const Sample *_v, uint8_t _hash[16]);
@@ -99,7 +105,10 @@ int Frame_serialize_key_value(ZidlCdrWriter *_w, const Frame *_v);
 int Frame_deserialize_key_value(ZidlCdrReader *_r, Frame *_v);
 int Frame_skip_key_value(ZidlCdrReader *_r);
 int Frame_deserialize(ZidlCdrReader *_r, Frame *_v);
+/* Structural traversal only; success is not sample admission. */
 int Frame_skip(ZidlCdrReader *_r);
+/* Checked ordinary decode and hash; output is untouched on failure. */
+int Frame_process_sample_from_cdr(const uint8_t *, size_t, int key_only, uint8_t hash[16]);
 
 /* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. */
 void Frame_default(Frame *_v);
@@ -119,7 +128,10 @@ int Beacon_serialize_key_value(ZidlCdrWriter *_w, const Beacon *_v);
 int Beacon_deserialize_key_value(ZidlCdrReader *_r, Beacon *_v);
 int Beacon_skip_key_value(ZidlCdrReader *_r);
 int Beacon_deserialize(ZidlCdrReader *_r, Beacon *_v);
+/* Structural traversal only; success is not sample admission. */
 int Beacon_skip(ZidlCdrReader *_r);
+/* Checked ordinary decode and hash; output is untouched on failure. */
+int Beacon_process_sample_from_cdr(const uint8_t *, size_t, int key_only, uint8_t hash[16]);
 int Beacon_serialize_key(ZidlCdrWriter *_w, const Beacon *_v);
 int Beacon_deserialize_key(ZidlCdrReader *_r, Beacon *_v);
 int Beacon_compute_key_hash(const Beacon *_v, uint8_t _hash[16]);

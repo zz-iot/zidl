@@ -43,7 +43,10 @@ int Sample_serialize_key_value(ZidlCdrWriter *_w, const ::Sample *_v);
 int Sample_deserialize_key_value(ZidlCdrReader *_r, ::Sample *_v);
 int Sample_skip_key_value(ZidlCdrReader *_r);
 int Sample_deserialize(ZidlCdrReader *_r, ::Sample *_v);
+/* Structural traversal only; success is not sample admission. */
 int Sample_skip(ZidlCdrReader *_r);
+/* Checked ordinary decode and hash; output is untouched on failure. */
+int Sample_process_sample_from_cdr(const uint8_t *, size_t, int key_only, uint8_t hash[16]);
 int Sample_serialize_key(ZidlCdrWriter *_w, const ::Sample *_v);
 int Sample_deserialize_key(ZidlCdrReader *_r, ::Sample *_v);
 int Sample_compute_key_hash(const ::Sample *_v, uint8_t _hash[16]);

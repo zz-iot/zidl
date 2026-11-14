@@ -69,6 +69,7 @@ pub const CBackend = struct {
         opts: interface.Options,
     ) anyerror!void {
         const self: *CBackend = @ptrCast(@alignCast(ctx));
+        if (!opts.no_typesupport) try @import("codec_validation.zig").validate(self.alloc, spec);
         const io = std.Io.Threaded.global_single_threaded.io();
 
         if (opts.split_files) {
@@ -117,6 +118,8 @@ pub fn generateHeader(
     out: *std.ArrayList(u8),
 ) !void {
     if (itemsHaveMaps(spec.items) and (opts.generate_interfaces or opts.generate_zzdds_wrappers)) return error.UnsupportedCMapBindings;
+
+    if (!opts.no_typesupport) try @import("codec_validation.zig").validate(alloc, spec);
     var gen = Generator{
         .alloc = alloc,
         .opts = opts,
@@ -672,10 +675,15 @@ const Generator = struct {
         try self.print("{s}{s}int {s}_deserialize_key_value(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, c_name });
         try self.print("{s}{s}int {s}_skip_key_value(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, c_name });
+        try self.write("/* Structural traversal only; success is not sample admission. */\n");
         try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         // Keyless structs still get these prototypes when wrappers were
         // requested -- see the matching `else if` in emitStructFns, which
         // emits trivial (constant-zero-hash) bodies for them.
+        if (!self.opts.c_no_free or !structHasSequenceFields(s)) {
+            try self.write("/* Checked ordinary decode and hash; output is untouched on failure. */\n");
+            try self.print("{s}{s}int {s}_process_sample_from_cdr(const uint8_t *, size_t, int key_only, uint8_t hash[16]);\n", .{ em, sp, c_name });
+        }
         if (has_key or (self.opts.generate_zzdds_wrappers and isZzddsTopicStructC(s))) {
             try self.print("{s}{s}int {s}_serialize_key(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, c_name });
             try self.print("{s}{s}int {s}_deserialize_key(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, c_name });
@@ -705,6 +713,7 @@ const Generator = struct {
             if (first_k) try self.write("0");
             try self.write("))\n");
             try self.print("{s}{s}bool {s}_field_index(const char *_name, size_t _name_len, uint32_t *_out_idx);\n", .{ em, sp, c_name });
+            try self.write("/* Field projection only; skipped content is not validated. */\n");
             try self.print("{s}{s}int {s}_deserialize_selected(ZidlCdrReader *_r, uint64_t _want, {s} *_v);\n", .{ em, sp, c_name, c_name });
             try self.print("{s}{s}void {s}_deinit_selected({s} *_v, uint64_t _want);\n", .{ em, sp, c_name, c_name });
         }
@@ -814,6 +823,7 @@ const Generator = struct {
         try self.print("{s}{s}int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, c_name });
         try self.print("{s}{s}int {s}_serialize_key_holder(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, c_name });
         try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, c_name });
+        try self.write("/* Structural traversal only; success is not sample admission. */\n");
         try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         try self.write("\n");
     }
@@ -2004,6 +2014,8 @@ pub fn generateCdrSource(
     out: *std.ArrayList(u8),
 ) !void {
     if (itemsHaveMaps(spec.items) and (opts.generate_interfaces or opts.generate_zzdds_wrappers)) return error.UnsupportedCMapBindings;
+
+    if (!opts.no_typesupport) try @import("codec_validation.zig").validate(alloc, spec);
     var gen = CdrGenerator{
         .alloc = alloc,
         .opts = opts,
@@ -2454,6 +2466,8 @@ const CdrGenerator = struct {
         try self.emitStructValueFns(s, c_name, false);
         try self.emitStructValueFns(s, c_name, true);
         try cdr_skip.emitKeyValueSkip(self, s, c_name);
+
+        if (!self.opts.c_no_free or !structHasSequenceFields(s)) try @import("sample_processing.zig").emit(self, c_name, c_name, has_key, structHasSequenceFields(s), appendable, mutable, false);
 
         // ── skip ─────────────────────────────────────────────────────────────
 
@@ -5216,6 +5230,8 @@ pub fn generateSplitFiles(
     opts: interface.Options,
 ) !void {
     if (itemsHaveMaps(spec.items) and (opts.generate_interfaces or opts.generate_zzdds_wrappers)) return error.UnsupportedCMapBindings;
+
+    if (!opts.no_typesupport) try @import("codec_validation.zig").validate(alloc, spec);
     // Collect all named type declarations in source order.
     var type_decls = std.ArrayListUnmanaged(ir.TypeDecl).empty;
     defer type_decls.deinit(alloc);
@@ -5950,7 +5966,7 @@ test "c_backend cdr: unbounded wstring read uses zidl_cdr_read_wstring" {
     defer src.deinit(testing.allocator);
     try testing.expect(has(src.items, "zidl_cdr_read_wstring"));
     // Unbounded: assigns directly into the field pointer, no memcpy.
-    try testing.expect(!has(src.items, "memcpy"));
+    try testing.expect(!has(src.items, "memcpy(_v->ws"));
 }
 
 // ── CDR generation tests ──────────────────────────────────────────────────────
@@ -7405,4 +7421,67 @@ test "c_backend cdr: bounded defaults reject storage overflow through aliases" {
         \\typedef wstring<1> Text;
         \\struct Sample { @default("😀") Text value; };
     , "defaults"));
+}
+
+test "native codecs reject dynamic and opaque fields before output" {
+    const backends = @import("root.zig");
+    const sources = [_][]const u8{
+        "struct S { any value; };",
+        "typedef any Dynamic; struct S { sequence<Dynamic> values; };",
+        "native Handle; struct S { Handle value; };",
+    };
+    for (sources) |source| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var parser = parser_mod.Parser.init(source, arena.allocator());
+        const ast_spec = try parser.parseSpecification();
+        var analyzer = try semantic_mod.Analyzer.init(testing.allocator);
+        defer analyzer.deinit();
+        try analyzer.analyze(&ast_spec);
+        var spec = try ir.build(testing.allocator, &ast_spec, analyzer.global_scope, &.{});
+        defer spec.deinit();
+        inline for (.{ generateHeader, generateCdrSource, backends.cpp.generateHeader, backends.cpp.generateCdrSource, backends.zig.generateFile }) |generate| {
+            var out: std.ArrayList(u8) = .empty;
+            defer out.deinit(testing.allocator);
+            const expected = if (std.mem.startsWith(u8, source, "native")) error.UnsupportedOpaqueCdrValue else error.UnsupportedDynamicCdrValue;
+            try testing.expectError(expected, generate(testing.allocator, &spec, .{ .input_stem = "unsupported" }, &out));
+            try testing.expectEqual(@as(usize, 0), out.items.len);
+        }
+    }
+    var declarations = try testGenFullOpts("native Handle; struct S { any value; Handle handle; };", "opaque", .{ .no_typesupport = true });
+    defer declarations.deinit(testing.allocator);
+    try testing.expect(has(declarations.items, "void *value;"));
+}
+
+test "codecs reject long double without writing partial output" {
+    const backends = @import("root.zig");
+    const sources = [_][]const u8{
+        "struct S { long double value; };",
+        "typedef long double Wide; struct S { sequence<Wide> values; };",
+        "union U switch(long) { case 0: long number; default: long double value; };",
+        "struct S { map<long, long double> values; };",
+    };
+    for (sources) |source| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var parser = parser_mod.Parser.init(source, arena.allocator());
+        const ast_spec = try parser.parseSpecification();
+        var analyzer = try semantic_mod.Analyzer.init(testing.allocator);
+        defer analyzer.deinit();
+        try analyzer.analyze(&ast_spec);
+        var spec = try ir.build(testing.allocator, &ast_spec, analyzer.global_scope, &.{});
+        defer spec.deinit();
+        inline for (.{ generateHeader, generateCdrSource, backends.cpp.generateHeader, backends.cpp.generateCdrSource, backends.zig.generateFile, backends.java.generateFile }) |generate| {
+            var out: std.ArrayList(u8) = .empty;
+            defer out.deinit(testing.allocator);
+            try testing.expectError(error.UnsupportedLongDoubleCdrValue, generate(testing.allocator, &spec, .{ .input_stem = "unsupported" }, &out));
+            try testing.expectEqual(@as(usize, 0), out.items.len);
+        }
+        if (std.mem.indexOf(u8, source, "map<") == null) inline for (.{ generateHeader, backends.cpp.generateHeader, backends.zig.generateFile, backends.java.generateFile }) |generate| {
+            var out: std.ArrayList(u8) = .empty;
+            defer out.deinit(testing.allocator);
+            try generate(testing.allocator, &spec, .{ .input_stem = "declarations", .no_typesupport = true }, &out);
+            try testing.expect(out.items.len != 0);
+        };
+    }
 }

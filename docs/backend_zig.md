@@ -321,6 +321,19 @@ If mutable type evolution omits a locally selected payload, decoding initializes
 that arm to its mapping default. A missing discriminator remains invalid.
 Generic skip traversal and XCDR1 mutable framing are separate contracts.
 
+`deserializeValidated(out, reader, allocator)` is the opt-in complete-message
+admission API for structs and unions. It propagates strict checks into nested
+values, requires every non-optional mutable field and rejects trailing bytes or
+incorrect known-member lengths. Known duplicate mutable members are rejected in
+ordinary decoding too, before a second owning value can replace the first.
+Ordinary decoding still supplies evolution defaults for omitted members.
+
+Pass a fresh initialized output and a reader bounded to exactly one message.
+On success the reader advances and its prior validation mode is restored. On
+failure its cursor and extent remain unchanged; owning output is cleaned up and
+remains safe to deinitialize. Output values are not rolled back to their original
+contents. This API does not turn generic skip traversal into validated admission.
+
 ### Enum
 Non-exhaustive Zig enum (allows unknown wire values for DDS evolution):
 ```zig
@@ -608,3 +621,10 @@ e.g. `DDS::Duration_t` → `DDS.<pfx>Duration_t`.
 - Decoding an unbounded sequence of heap-owning elements starts every element at its
   default value before reading, so a decode that fails part-way leaves an owner whose
   `deinit` is safe to call.
+
+Unbounded narrow-string fields with nonempty IDL defaults retain a stable named
+borrowed literal. Generated cleanup preserves that literal and releases decoded
+or cloned replacements. This includes optional fields and aliases. Such structs
+now expose `deinit`/`clone` even when their only owning state comes from decoding
+those fields; failed exact-message validation releases that state. No hidden
+ownership field is added to the value layout.

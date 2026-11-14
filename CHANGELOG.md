@@ -18,12 +18,43 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Release decoded/cloned Zig literal-default strings on cleanup and rejected
+  validated messages while preserving untouched borrowed default literals.
+
+- Document structural skip/projection contracts and add malformed-wire regression
+  checks separating traversal, key/field extraction and validated admission.
+
 - Make boolean union dispatch warning-clean in C/C++, including aliases,
   canonical-key codecs and owning lifecycle helpers.
 
 - Initialize Java union discriminators and selected payloads consistently, select
   valid default-arm discriminators in setters, and allocate decoded array arms.
   Include boolean default arms in ordinary union codecs.
+
+- Add native checked sample-processing callbacks that decode ordinary/key-only
+  values and publish hashes only on success, including keyless ALIVE data and
+  allocation-failure cleanup. Existing registration remains explicit opt-in.
+- Keep binding-only aliases separate from encoded-value diagnostic roots, so
+  interface sequences can coexist with ordinary codecs.
+
+- **Zig validated message admission.** Generated structs/unions expose
+  `deserializeValidated` for exact message extent, required mutable members and
+  strict known-member lengths. Validation propagates to nested values. Duplicate
+  known mutable fields are rejected before replacing owning storage, in both
+  ordinary and validated decoding. Failures retain the caller reader's state and
+  clean owning output; ordinary decoding retains omitted-member evolution defaults.
+
+- **Reject unsupported ordinary XCDR1 mutable framing.** Mandatory native
+  DHEADER operations reject XCDR1 before advancing the cursor or writing bytes;
+  generated Java mutable methods reject version 1 too. This replaces non-standard
+  DHEADER/EMHEADER output masquerading as XCDR1. Appendable XCDR1, XCDR2 and the
+  separate discovery PL_CDR helpers keep their existing framing contracts.
+
+- **Native codec diagnostics.** C, C++ and Zig reject `any`, `Object`,
+  `ValueBase` and opaque native/interface payload fields before emitting codec
+  output, including aliases and nested collections. These families previously
+  emitted unsupported comments or silently omitted wire data. Declarations-only
+  output and opaque interface binding declarations remain available.
 
 - **Owning/non-primitive C maps.** Add narrow/wide string keys, ordinary aggregate
   and collection values, nested maps and content-based duplicate checks. XCDR2

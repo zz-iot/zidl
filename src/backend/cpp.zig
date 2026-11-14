@@ -83,6 +83,7 @@ pub const CppBackend = struct {
         opts: interface.Options,
     ) anyerror!void {
         const self: *CppBackend = @ptrCast(@alignCast(ctx));
+        if (!opts.no_typesupport) try @import("codec_validation.zig").validate(self.alloc, spec);
         const io = std.Io.Threaded.global_single_threaded.io();
 
         if (opts.split_files) {
@@ -155,6 +156,7 @@ pub fn generateHeader(
     opts: interface.Options,
     out: *std.ArrayList(u8),
 ) !void {
+    if (!opts.no_typesupport) try @import("codec_validation.zig").validate(alloc, spec);
     var gen = Generator{ .alloc = alloc, .opts = opts, .out = out };
     defer gen.entity_base_ifaces.deinit(alloc);
     try gen.emitHeader(spec);
@@ -171,6 +173,7 @@ pub fn generateCdrSource(
     opts: interface.Options,
     out: *std.ArrayList(u8),
 ) !void {
+    if (!opts.no_typesupport) try @import("codec_validation.zig").validate(alloc, spec);
     var gen = CdrGenerator{ .alloc = alloc, .opts = opts, .out = out };
     try gen.emitSource(spec);
 }
@@ -433,7 +436,12 @@ const Generator = struct {
         try self.print("{s}{s}int {s}_deserialize_key_value(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         try self.print("{s}{s}int {s}_skip_key_value(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
+        try self.write("/* Structural traversal only; success is not sample admission. */\n");
         try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
+        if (true) {
+            try self.write("/* Checked ordinary decode and hash; output is untouched on failure. */\n");
+            try self.print("{s}{s}int {s}_process_sample_from_cdr(const uint8_t *, size_t, int key_only, uint8_t hash[16]);\n", .{ em, sp, c_name });
+        }
         // Keyless structs still get these prototypes when wrappers were
         // requested -- see the matching `else if` in the CDR generator's
         // struct-fns emission, which emits trivial (constant-zero-hash)
@@ -471,6 +479,7 @@ const Generator = struct {
             if (first_k) try self.write("0");
             try self.write("))\n");
             try self.print("{s}{s}bool {s}_field_index(const char *_name, size_t _name_len, uint32_t *_out_idx);\n", .{ em, sp, c_name });
+            try self.write("/* Field projection only; skipped content is not validated. */\n");
             try self.print("{s}{s}int {s}_deserialize_selected(ZidlCdrReader *_r, uint64_t _want, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         }
         try self.write("\n");
@@ -620,6 +629,7 @@ const Generator = struct {
         try self.print("{s}{s}int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         try self.print("{s}{s}int {s}_serialize_key_holder(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
+        try self.write("/* Structural traversal only; success is not sample admission. */\n");
         try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         try self.write("\n");
     }
@@ -2042,6 +2052,8 @@ const CdrGenerator = struct {
         try self.emitStructValueFns(s, c_name, cpp_qname, false);
         try self.emitStructValueFns(s, c_name, cpp_qname, true);
         try cdr_skip.emitKeyValueSkip(self, s, c_name);
+
+        try @import("sample_processing.zig").emit(self, c_name, cpp_qname, has_key, false, appendable, mutable, true);
 
         // ── skip ─────────────────────────────────────────────────────────────
 
@@ -7612,6 +7624,7 @@ pub fn generateSplitFiles(
     spec: *const ir.Spec,
     opts: interface.Options,
 ) !void {
+    if (!opts.no_typesupport) try @import("codec_validation.zig").validate(alloc, spec);
     var type_decls = std.ArrayListUnmanaged(ir.TypeDecl).empty;
     defer type_decls.deinit(alloc);
     try collectTypeDeclsFlat(alloc, spec.items, &type_decls);

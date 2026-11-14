@@ -78,3 +78,15 @@ union ExhaustiveBool switch(BooleanAlias) { case FALSE: long no; case TRUE: long
 
 @mutable union GroupedBool switch(boolean) { @id(10) case FALSE: case TRUE: long value; };
 @mutable union GroupedBoolOwned switch(boolean) { @id(10) case FALSE: case TRUE: string text; };
+@mutable struct StrictPayload { @id(2) string text; @id(3) @optional long extra; };
+struct StrictEnvelope { StrictPayload inner; long tail; };
+struct StrictFinal { long value; };
+
+struct LiteralDefault { @default("literal") string text; };
+struct LiteralPair { @default("first") string first; @default("second") string second; };
+struct LiteralEnvelope { LiteralPair inner; long tail; };
+@mutable struct LiteralOptional { @default("optional") @optional string text; };
+struct LiteralCollision { @default("literal") string text; long _zidl_default_0; };
+
+typedef string LiteralText;
+struct LiteralAlias { @default("alias") LiteralText text; };

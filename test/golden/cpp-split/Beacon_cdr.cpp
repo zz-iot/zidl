@@ -128,6 +128,40 @@ _rc = zidl_cdr_read_dheader(_r, &_size);
     return ZIDL_CDR_OK;
 }
 
+static int Beacon_process_sample_from_cdr_bounded_impl(const uint8_t *_payload, size_t _len, int _key_only, uint8_t _hash[16]);
+int Beacon_process_sample_from_cdr(const uint8_t *_payload, size_t _len, int _key_only, uint8_t _hash[16]) {
+    int _rc;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)
+    try {
+        _rc = Beacon_process_sample_from_cdr_bounded_impl(_payload, _len, _key_only, _hash);
+    } catch (const std::bad_alloc&) {
+        _rc = ZIDL_CDR_OVERFLOW;
+    } catch (const std::length_error&) {
+        _rc = ZIDL_CDR_OVERFLOW;
+    }
+#else
+    _rc = Beacon_process_sample_from_cdr_bounded_impl(_payload, _len, _key_only, _hash);
+#endif
+    return _rc;
+}
+static int Beacon_process_sample_from_cdr_bounded_impl(const uint8_t *_payload, size_t _len, int _key_only, uint8_t _hash[16]) {
+    if (!_payload || !_hash || (_key_only != 0 && _key_only != 1)) return ZIDL_CDR_INVALID;
+    ZidlCdrReader _reader;
+int _rc = zidl_cdr_reader_init(&_reader, _payload, _len);
+if (_rc) return _rc;
+    ::Beacon _value{};
+    uint8_t _result[16] = {0};
+    _rc = _key_only ? Beacon_deserialize_key_value(&_reader, &_value) : Beacon_deserialize(&_reader, &_value);
+    if (!_rc && _reader.pos != _len) {
+        size_t _left = _len - _reader.pos;
+        if (_left > 3 || (_len & 3u)) _rc = ZIDL_CDR_INVALID;
+        else for (size_t _i = _reader.pos; _i < _len; ++_i) if (_payload[_i] != 0) { _rc = ZIDL_CDR_INVALID; break; }
+    }
+    if (!_rc) _rc = Beacon_compute_key_hash(&_value, _result);
+    if (!_rc) std::memcpy(_hash, _result, 16);
+    return _rc;
+}
+
 static int Beacon_skip_bounded_impl(ZidlCdrReader *_r);
 int Beacon_skip(ZidlCdrReader *_r) {
     ZidlCdrReader _local = *_r;

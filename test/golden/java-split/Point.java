@@ -59,6 +59,7 @@ public class Point implements java.io.Serializable {
         return _out;
     }
 
+    /** Structural traversal only; success is not sample admission. */
     public static void skip(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {
         _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
         _cdrAlign(_buf, _cdrBase, 4); _buf.getInt();
