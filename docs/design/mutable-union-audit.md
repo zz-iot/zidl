@@ -13,7 +13,7 @@ The remaining audit findings are separate from this flag correction:
 |---|---|---|
 | Zig union `deserializeInto` | Dispatches by normalized ID; checks selection, duplicate/order/discriminator presence, known extents and unknown MU members | Keep ordinary omitted-arm evolution defaults and opt-in complete-message validation distinct |
 | C union `emitUnionFns` reader | Dispatches by ID and checks discriminator agreement, duplicate/order/presence, extents and unknown MU members | Caller supplies initialized output and frees partial owning results; release prior owning output before reuse |
-| C++ union `emitUnionFns` reader | Every nonzero ID switches on `_d()` | Same admission checks; ensure setters/discriminator transitions retain RAII safety |
+| C++ union `emitUnionFns` reader | Dispatches by ID and validates selection/order/duplicates/presence/extents/MU | A local RAII candidate keeps reused output unchanged on rejected or allocation-failed reads |
 | Java union `emitUnionCdr` reader | Already dispatches by member ID | Add discriminator agreement, duplicate/order/presence and known extent checks; GC does not supply logical admission |
 | Mutable aggregate/union fast skip (native) | Trusts DHEADER for structural extent and advances to its end | This is structural traversal, not validated admission; do not use it to authorize untrusted messages |
 | Java union | No public generic `skip` method | Audit callers which deserialize while skipping rather than assume a missing API provides validation |
@@ -36,3 +36,9 @@ constructed LE/BE parameters, owning strings and sequences, late failures,
 allocation failpoints, enum/default-first cases and all truncated prefixes.
 C output must be initialized and prior owned contents released before decoding;
 the decoder preserves the established caller-free partial-output contract.
+
+C++ admission uses the same independent parameter records as C. A local candidate
+publishes only after complete validation; its destructor releases temporary owning
+payloads on returns or exceptions. Tests exhaust each allocation in both STL and
+PMR modes and retain a pre-existing owning output on failure. The public checked
+allocation status boundary remains unchanged.

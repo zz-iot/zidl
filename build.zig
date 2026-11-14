@@ -1056,6 +1056,23 @@ pub fn build(b: *std.Build) void {
         linkCdr(consumer, cdr_library);
         const app = b.addExecutable(.{ .name = "union-admission-c", .root_module = consumer });
         admission_step.dependOn(&b.addRunArtifact(app).step);
+        for ([_]bool{ false, true }) |pmr| {
+            const cpp_gen = b.addRunArtifact(exe);
+            cpp_gen.addArgs(&.{ "-b", "cpp" });
+            if (pmr) cpp_gen.addArg("--cpp-pmr-containers");
+            cpp_gen.addArg("-o");
+            const dir = cpp_gen.addOutputDirectoryArg(if (pmr) "union-admission-pmr" else "union-admission-stl");
+            cpp_gen.addFileArg(b.path("test/integration/native_union_admission/shapes.idl"));
+            const cpp_consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = true });
+            const cpp_flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" };
+            cpp_consumer.addCSourceFile(.{ .file = b.path("test/integration/native_union_admission/test.cpp"), .flags = cpp_flags });
+            cpp_consumer.addCSourceFile(.{ .file = dir.path(b, "shapes_cdr.cpp"), .flags = cpp_flags });
+            cpp_consumer.addIncludePath(dir);
+            cpp_consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
+            linkCdr(cpp_consumer, cdr_library);
+            const cpp_app = b.addExecutable(.{ .name = if (pmr) "union-admission-pmr" else "union-admission-stl", .root_module = cpp_consumer });
+            admission_step.dependOn(&b.addRunArtifact(cpp_app).step);
+        }
     }
 
     // ── XCDR known-answer checks ──────────────────────────────────────────────

@@ -18,6 +18,12 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- **C++ mutable-union admission.** Validate IDs, discriminator agreement,
+  order, duplicates, presence, lengths and unknown MU fields. Decode into a local
+  RAII candidate before committing, so failed or allocation-exhausted reads leave
+  reused output unchanged. STL and PMR failpoint tests cover owning strings and
+  sequences, late failures, default-first and enum arms in both byte orders.
+
 - **C mutable-union admission.** Dispatch by member ID, check agreement with
   the discriminator, reject duplicate/reordered known members and incorrect
   extents, require a discriminator and honor unknown MU members. Never change
