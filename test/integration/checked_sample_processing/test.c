@@ -108,6 +108,13 @@ int main(void) {
       assert(zidl_cdr_write_encap_kind(&lifecycle_writer, ZIDL_EXT_APPENDABLE) == 0);
       assert(Processing_KeylessAppendable_serialize(&lifecycle_writer, &ordinary) == 0);
       run(Processing_KeylessAppendable_process_sample_from_cdr, lifecycle, lifecycle_writer.len, 0, 0);
+      if (version == ZIDL_XCDR1) {
+        const uint8_t unsupported_mutable[8] = {0, (uint8_t)(le ? 1 : 0), 0, 0, 0, 0, 0, 0};
+        for (int key_only = 0; key_only < 2; ++key_only) {
+          run(Processing_Evolving_process_sample_from_cdr, unsupported_mutable, 4, key_only, ZIDL_CDR_INVALID);
+          run(Processing_Evolving_process_sample_from_cdr, unsupported_mutable, 8, key_only, ZIDL_CDR_INVALID);
+        }
+      }
       uint8_t bytes[128] = {0};
       bytes[1] = (uint8_t)(version == 2 ? (le ? 7 : 6) : (le ? 1 : 0));
       word(bytes + 4, 0, le);

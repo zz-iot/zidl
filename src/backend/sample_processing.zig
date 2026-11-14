@@ -2,7 +2,7 @@
 //! helper; independent of any middleware header or registration ABI.
 const std = @import("std");
 
-pub fn emit(self: anytype, name: []const u8, value_type: []const u8, has_key: bool, owns: bool, framed_key: bool, comptime cpp: bool) !void {
+pub fn emit(self: anytype, name: []const u8, value_type: []const u8, has_key: bool, owns: bool, framed_key: bool, mutable: bool, comptime cpp: bool) !void {
     const fn_name = try std.fmt.allocPrint(self.alloc, "{s}_process_sample_from_cdr", .{name});
     defer self.alloc.free(fn_name);
     const args = "const uint8_t *_payload, size_t _len, int _key_only, uint8_t _hash[16]";
@@ -14,6 +14,7 @@ pub fn emit(self: anytype, name: []const u8, value_type: []const u8, has_key: bo
     try self.print("static int {s}_bounded_impl({s}) {{\n", .{ fn_name, args });
     try self.writeI("if (!_payload || !_hash || (_key_only != 0 && _key_only != 1)) return ZIDL_CDR_INVALID;\n");
     try self.writeI("ZidlCdrReader _reader;\nint _rc = zidl_cdr_reader_init(&_reader, _payload, _len);\nif (_rc) return _rc;\n");
+    if (mutable) try self.writeI("if (_reader.xcdr_version != ZIDL_XCDR2) return ZIDL_CDR_INVALID;\n");
     if (cpp) try self.printI("{s} _value{{}};\n", .{value_type}) else try self.printI("{s} _value; memset(&_value, 0, sizeof _value);\n", .{value_type});
     try self.writeI("uint8_t _result[16] = {0};\n");
     if (has_key) {

@@ -2467,7 +2467,7 @@ const CdrGenerator = struct {
         try self.emitStructValueFns(s, c_name, true);
         try cdr_skip.emitKeyValueSkip(self, s, c_name);
 
-        if (!self.opts.c_no_free or !structHasSequenceFields(s)) try @import("sample_processing.zig").emit(self, c_name, c_name, has_key, structHasSequenceFields(s), appendable, false);
+        if (!self.opts.c_no_free or !structHasSequenceFields(s)) try @import("sample_processing.zig").emit(self, c_name, c_name, has_key, structHasSequenceFields(s), appendable, mutable, false);
 
         // ── skip ─────────────────────────────────────────────────────────────
 
