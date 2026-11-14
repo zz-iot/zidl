@@ -1,0 +1,60 @@
+name: Rust CDR experiment
+
+on:
+  push:
+    paths:
+      - 'experiments/rust-cdr/**'
+      - 'packages/zidl-cdr/**'
+      - '.github/workflows/rust-cdr-experiment.yml'
+  pull_request:
+    paths:
+      - 'experiments/rust-cdr/**'
+      - 'packages/zidl-cdr/**'
+      - '.github/workflows/rust-cdr-experiment.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-cdr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  rust-cdr-experiment:
+    name: Rust CDR experiment (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+    env:
+      RUSTUP_TOOLCHAIN: '1.85.1'
+      ZIDL_CDR_PREFIX: ${{ github.workspace }}/build-tmp/rust-cdr-sdk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: '0.17.0'
+      - name: Install experiment Rust toolchain
+        run: rustup toolchain install 1.85.1 --profile minimal --no-self-update
+      - name: Build native archive (Unix)
+        if: runner.os != 'Windows'
+        working-directory: packages/zidl-cdr
+        run: zig build install --prefix "$ZIDL_CDR_PREFIX"
+      - name: Verify Rust consumer (Unix)
+        if: runner.os != 'Windows'
+        run: python experiments/rust-cdr/verify.py --prefix "$ZIDL_CDR_PREFIX"
+      - name: Build and verify Rust consumer (MSVC)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+          call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          cd packages\zidl-cdr
+          zig build install -Dtarget=x86_64-windows-msvc --prefix "%ZIDL_CDR_PREFIX%" || exit /b 1
+          cd ..\..
+          python experiments/rust-cdr/verify.py --prefix "%ZIDL_CDR_PREFIX%" --cc cl || exit /b 1
