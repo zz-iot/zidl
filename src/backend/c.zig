@@ -1449,7 +1449,9 @@ fn seqElemKeyC(alloc: std.mem.Allocator, type_prefix: []const u8, elem: ir.TypeR
             defer alloc.free(key);
             const value = try seqElemKeyC(alloc, type_prefix, m.value.*);
             defer alloc.free(value);
-            break :blk std.fmt.allocPrint(alloc, "zidl_map_{s}_{s}", .{ key, value });
+            // A closing map marker distinguishes map<K, sequence<V>> from
+            // sequence<map<K, V>> when recursive collection names are composed.
+            break :blk std.fmt.allocPrint(alloc, "zidl_map_{s}_{s}_map", .{ key, value });
         },
     };
 }

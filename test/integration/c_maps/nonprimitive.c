@@ -20,23 +20,34 @@ static void release(void *c,void *p,size_t n,size_t a) {(void)c;(void)n;(void)a;
 
 int main(void){
     const ZidlAllocator alloc={NULL,allocate,resize,release};zidl_cdr_set_allocator(&alloc);
-    zidl_map_string_int32_t_entry dictEntries[]={{(char*)"A",11},{(char*)"B",22}};
+    zidl_map_string_int32_t_map_entry dictEntries[]={{(char*)"A",11},{(char*)"B",22}};
     Maps_Dictionary dictionary={{2,2,dictEntries,false},42};
-    zidl_map_string_string_entry ownedEntries[]={{(char*)"key",(char*)"value"},{(char*)"two",(char*)"other"}};
+    zidl_map_string_string_map_entry ownedEntries[]={{(char*)"key",(char*)"value"},{(char*)"two",(char*)"other"}};
     Maps_Owned owned={{2,2,ownedEntries,false}};
     uint16_t wideKeys[][2]={{0x1234,0},{0x4567,0}};
-    zidl_map_wstring_string_entry wideEntries[]={{wideKeys[0],(char*)"value"},{wideKeys[1],(char*)"other"}};
+    zidl_map_wstring_string_map_entry wideEntries[]={{wideKeys[0],(char*)"value"},{wideKeys[1],(char*)"other"}};
     Maps_WideOwned wide={{2,2,wideEntries,false}};
-    zidl_map_string4_wstring2_entry boundedEntries[]={{{'A',0},{0x1234,0}},{ {'B',0},{0x4567,0}}};
+    zidl_map_string4_wstring2_map_entry boundedEntries[]={{{'A',0},{0x1234,0}},{ {'B',0},{0x4567,0}}};
     Maps_Bounded bounded={{2,2,boundedEntries,false}};
-    zidl_map_int32_t_Maps_Person_entry peopleEntries[]={{1,{(char*)"name"}}};
+    zidl_map_int32_t_Maps_Person_map_entry peopleEntries[]={{1,{(char*)"name"}}};
     Maps_People people={{1,1,peopleEntries,false}};
-    zidl_map_int32_t_Maps_DictionaryTable_entry nestedEntries[]={{7,{2,2,dictEntries,false}}};
+    zidl_map_int32_t_Maps_DictionaryTable_map_entry nestedEntries[]={{7,{2,2,dictEntries,false}}};
     Maps_NestedOwned nested={{1,1,nestedEntries,false}};
-    zidl_map_int32_t_Maps_Row_entry rowEntries[]={{7,{11,22}}};Maps_Rows rows={{1,1,rowEntries,false}};
-    zidl_map_int32_t_Maps_Choice_entry choiceEntries[]={{7,{0,{.text=(char*)"choice"}}}};Maps_Choices choices={{1,1,choiceEntries,false}};
+    zidl_map_int32_t_Maps_Row_map_entry rowEntries[]={{7,{11,22}}};Maps_Rows rows={{1,1,rowEntries,false}};
+    zidl_map_int32_t_Maps_Choice_map_entry choiceEntries[]={{7,{0,{.text=(char*)"choice"}}}};Maps_Choices choices={{1,1,choiceEntries,false}};
     char *items[]={(char*)"first",(char*)"second"};
-    zidl_map_int32_t_string_seq_entry listEntries[]={{7,{2,2,items,false}}};Maps_Lists lists={{1,1,listEntries,false}};
+    zidl_map_int32_t_string_seq_map_entry listEntries[]={{7,{2,2,items,false}}};Maps_Lists lists={{1,1,listEntries,false}};
+    int32_t numbers[]={11,22};
+    zidl_map_string_int32_t_seq_map_entry mapListEntries[]={{(char*)"key",{2,2,numbers,false}}};
+    Maps_MapOfLists mapLists={{1,1,mapListEntries,false}};
+    zidl_map_string_int32_t_map mapItems[]={{2,2,dictEntries,false}};
+    Maps_ListOfMaps listMaps={{1,1,mapItems,false}};
+    zidl_map_int32_t_Maps_EnumRow_map_entry enumEntries[]={{7,{Maps_Tag_FIRST,Maps_Tag_SECOND}}};
+    Maps_EnumRows enumRows={{1,1,enumEntries,false}};
+    zidl_map_int32_t_Maps_FlagGrid_map_entry flagEntries[]={{7,{{1,2},{2,1}}}};
+    Maps_FlagRows flagRows={{1,1,flagEntries,false}};
+    zidl_map_int32_t_Maps_AliasRow_map_entry aliasEntries[]={{7,{Maps_Tag_FIRST,Maps_Tag_SECOND}}};
+    Maps_AliasRows aliasRows={{1,1,aliasEntries,false}};
     for(int version=ZIDL_XCDR1;version<=ZIDL_XCDR2;version++)for(int order=ZIDL_CDR_LE;order<=ZIDL_CDR_BE;order++){
         uint8_t bytes[128];ZidlCdrWriter w;zidl_cdr_writer_init_fixed(&w,bytes,sizeof bytes,version);zidl_cdr_writer_set_byte_order(&w,order);
         assert(zidl_cdr_write_encap(&w)==0 && Maps_Dictionary_serialize(&w,&dictionary)==0 && w.len==(version==ZIDL_XCDR2?40u:36u));
@@ -63,6 +74,11 @@ int main(void){
             assert(zidl_cdr_reader_init(&r,bytes,w.len)==0 && Maps_Owned_deserialize(&r,&duplicate)!=0);
             assert(attempts==before);Maps_Owned_free(&duplicate);assert(!live);
         }
+        CHECK(Maps_MapOfLists,mapLists,0,assert(out.values._buffer[0].value._buffer[1]==22));
+        CHECK(Maps_ListOfMaps,listMaps,0,assert(!strcmp(out.values._buffer[0]._buffer[1].key,"B")));
+        CHECK(Maps_EnumRows,enumRows,0,assert(out.values._buffer[0].value[1]==Maps_Tag_SECOND));
+        CHECK(Maps_FlagRows,flagRows,0,assert(out.values._buffer[0].value[1][0]==2));
+        CHECK(Maps_AliasRows,aliasRows,0,assert(out.values._buffer[0].value[1]==Maps_Tag_SECOND));
         CHECK(Maps_Rows,rows,0,assert(out.values._length==1 && out.values._buffer[0].value[1]==22));
         CHECK(Maps_Choices,choices,0,assert(out.values._length==1 && !strcmp(out.values._buffer[0].value._u.text,"choice")));
         CHECK(Maps_Lists,lists,0,assert(out.values._length==1 && out.values._buffer[0].value._length==2));

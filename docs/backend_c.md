@@ -295,7 +295,7 @@ promise allocation-free execution or complete IDL coverage. Current gaps, includ
 
 ## Map storage and codecs
 
-A supported map uses a generated `zidl_map_<key>_<value>_entry` (`key`, `value`)
+A supported map uses a generated `zidl_map_<key>_<value>_map_entry` (`key`, `value`)
 and a sequence-shaped owner with `_maximum`, `_length`, `_buffer`, `_release`.
 It is a logical unique-key collection; iteration follows buffer order. Decoding
 allocates the entry array with the configured `ZidlAllocator`; free the enclosing

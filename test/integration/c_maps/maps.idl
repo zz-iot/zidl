@@ -23,3 +23,21 @@ module Maps {
 };
 
 module Maps { struct DirectMapSequence { sequence<map<long, long, 2>, 2> values; }; };
+
+module Maps {
+    struct MapOfLists { map<string, sequence<long>> values; };
+    struct ListOfMaps { sequence<map<string, long>> values; };
+    enum Tag { FIRST, SECOND };
+    typedef Tag EnumRow[2];
+    struct EnumRows { map<long, EnumRow> values; };
+};
+
+module Maps {
+    @bit_bound(8) bitmask Flags { LOW, HIGH };
+    typedef Flags FlagRow[2];
+    typedef FlagRow FlagGrid[2];
+    struct FlagRows { map<long, FlagGrid> values; };
+    typedef Tag TagAlias;
+    typedef TagAlias AliasRow[2];
+    struct AliasRows { map<long, AliasRow> values; };
+};

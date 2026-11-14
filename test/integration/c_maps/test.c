@@ -9,7 +9,7 @@ static bool resize(void *ctx,void *p,size_t a,size_t b,size_t c) { (void)ctx;(vo
 static void release(void *ctx,void *p,size_t n,size_t a) { (void)ctx;(void)n;(void)a; if(p) {assert(live);live--;free(p);} }
 int main(void) {
     ZidlAllocator alloc={NULL,allocate,resize,release}; zidl_cdr_set_allocator(&alloc);
-    zidl_map_int32_t_int32_t_entry entries[]={{1,11},{2,22}};
+    zidl_map_int32_t_int32_t_map_entry entries[]={{1,11},{2,22}};
     Maps_Sample value={{2,2,entries,false},42};
     for(int version=ZIDL_XCDR1;version<=ZIDL_XCDR2;version++) for(int order=ZIDL_CDR_LE;order<=ZIDL_CDR_BE;order++) {
         uint8_t bytes[128]; ZidlCdrWriter w;
@@ -45,7 +45,7 @@ int main(void) {
         assert(calls==before && out.values._length==0 && out.tail==42);Maps_Sample_free(&out);value.values._length=2;
     }
     for(int version=ZIDL_XCDR1;version<=ZIDL_XCDR2;version++) for(int order=ZIDL_CDR_LE;order<=ZIDL_CDR_BE;order++) {
-        zidl_map_uint8_t_uint64_t_entry pair[]={{1,UINT64_C(0x0102030405060708)},{2,UINT64_C(0x1112131415161718)}};
+        zidl_map_uint8_t_uint64_t_map_entry pair[]={{1,UINT64_C(0x0102030405060708)},{2,UINT64_C(0x1112131415161718)}};
         Maps_Mixed mixed={{2,2,pair,false}}, decoded={0};
         uint8_t bytes[128]; ZidlCdrWriter w; ZidlCdrReader r;
         zidl_cdr_writer_init_fixed(&w,bytes,sizeof bytes,version);zidl_cdr_writer_set_byte_order(&w,order);

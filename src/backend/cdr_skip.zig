@@ -209,18 +209,20 @@ pub fn emitSkipMember(self: anytype, m: ir.StructMember) anyerror!void {
 }
 
 pub fn emitSkipArray(self: anytype, elem_tr: ir.TypeRef, dims: []const u64, dim_idx: usize) anyerror!void {
+    // Enums and bitmasks have a fixed wire width, but their XCDR2 arrays
+    // still have a DHEADER. Open the window before taking the bulk shortcut.
+    const window = try openReadWindow(self, dim_idx == 0 and !isPrimitiveElement(arrayInnermost(elem_tr)));
     if (dim_idx == 0) {
-        // XCDR2: one DHEADER covers the whole (flattened) array.
-        // Fixed-size primitive element with all dims known → one bulk advance.
+        // Fixed-size elements with all dims known → one bulk advance.
         if (typeRefPrimWireSize(elem_tr)) |sz| {
             var total: u64 = 1;
             for (dims) |d| total *= d;
             try self.printI("_rc = zidl_cdr_skip_primitives(_r, {d}u, {d});\n", .{ total, sz });
             try readRcCheck(self);
+            try closeReadWindow(self, window);
             return;
         }
     }
-    const window = try openReadWindow(self, dim_idx == 0 and !isPrimitiveElement(arrayInnermost(elem_tr)));
     try emitSkipArrayDims(self, elem_tr, dims, dim_idx);
     try closeReadWindow(self, window);
 }
