@@ -416,3 +416,10 @@ separate pending effort.
   preclude it.
 - **Non-CDR wire encodings** (XCDR↔JSON, XCDR↔XML, MQTT bridge) and DynamicType /
   DynamicData / TypeObjectFactory — belong in a DDS runtime, not zidl.
+
+### Mutable union audit follow-up
+
+Discriminator MU flags and member admission are corrected across C/C++/Java/Zig.
+The [mutable union audit](design/mutable-union-audit.md) records validation,
+ownership and evolution-default contracts. Generic skip paths remain structural
+traversal; they do not establish complete-message admission.

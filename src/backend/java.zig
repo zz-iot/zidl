@@ -702,9 +702,9 @@ const Generator = struct {
             // Discriminant EMHEADER (member_id=0).
             const disc_lc = lcForJavaTypeRef(u.discriminant, &.{});
             const disc_emhword: u32 = if (disc_lc) |lc|
-                (@as(u32, lc) << 28) // member_id=0, must_understand=false
+                (0x8000_0000 | (@as(u32, lc) << 28)) // member_id=0, must_understand=true
             else
-                0x4000_0000; // LC=4 fallback
+                0xc000_0000; // LC=4 fallback, must-understand discriminator
             try self.ind();
             try self.print("_cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0x{X:0>8}); // disc EMHEADER\n", .{disc_emhword});
             if (disc_lc == null) {
@@ -11184,10 +11184,10 @@ test "java: @mutable union serialize emits DHEADER + disc EMHEADER + case EMHEAD
     try testGen(alloc,
         \\@mutable union U switch (long) { case 0: long x; case 1: string s; };
     , "test", "int _dhPos = _buf.position(); _buf.putInt(0);");
-    // Discriminant EMHEADER (member_id=0, LC=2 → 0x20000000)
+    // Discriminant EMHEADER (member_id=0, MU=1, LC=2 → 0xA0000000)
     try testGen(alloc,
         \\@mutable union U switch (long) { case 0: long x; case 1: string s; };
-    , "test", "_buf.putInt(0x20000000); // disc EMHEADER");
+    , "test", "_buf.putInt(0xA0000000); // disc EMHEADER");
     // Case `long x` EMHEADER (case_idx=0, member_id=1, LC=2 → 0x20000001)
     try testGen(alloc,
         \\@mutable union U switch (long) { case 0: long x; case 1: string s; };

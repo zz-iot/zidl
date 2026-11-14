@@ -3194,13 +3194,13 @@ const CdrGenerator = struct {
             try self.writeI("if (_rc) return _rc;\n");
             // Discriminant: member_id=0
             if (lcForCTypeRef(u.discriminant, &.{})) |lc| {
-                try self.printI("_rc = zidl_cdr_write_emheader(_w, 0, 0, {d});\n", .{lc});
+                try self.printI("_rc = zidl_cdr_write_emheader(_w, 0, 1, {d});\n", .{lc});
                 try self.writeI("if (_rc) return _rc;\n");
                 try self.emitDiscWriteC(u.discriminant, "_v->_d");
             } else {
                 try self.writeI("{ size_t _em_d = 0, _es_d = 0;\n");
                 self.indent_depth += 1;
-                try self.writeI("_rc = zidl_cdr_reserve_emheader(_w, 0, 0, &_em_d);\n");
+                try self.writeI("_rc = zidl_cdr_reserve_emheader(_w, 0, 1, &_em_d);\n");
                 try self.writeI("if (_rc) return _rc;\n");
                 try self.writeI("_es_d = _w->len;\n");
                 try self.emitDiscWriteC(u.discriminant, "_v->_d");

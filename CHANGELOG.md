@@ -18,6 +18,11 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- **Mutable union discriminator flags across backends.** C, C++ and Java now set
+  the discriminator must-understand flag, matching Zig and XTypes 1.3. The shared
+  independent wire-ID fixture now checks the same bit in every backend. Canonical
+  key bytes and TypeObject identities are unchanged.
+
 - **Zig union initialization.** Fresh unions initialize the payload arm selected
   by their default discriminator. Nested aggregates and arrays retain mapping
   defaults rather than byte-zeroing hidden union state. Fresh owning values are
