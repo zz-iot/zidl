@@ -9,3 +9,4 @@ module Admission {
     @mutable union EnumValue switch(Tag) { @id(10) case Zero: long number; @id(20) default: string text; };
     @mutable union NoDefault switch(long) { @id(10) case 0: long number; };
 };
+

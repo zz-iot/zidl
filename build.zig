@@ -1075,6 +1075,34 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    {
+        const step = b.step("test-java-union-admission", "Check Java mutable union admission in all output modes");
+        test_step.dependOn(step);
+        const javac = b.findProgram(.{ .names = &.{"javac"} });
+        const java = b.findProgram(.{ .names = &.{"java"} });
+        if (javac != null and java != null) for (0..3) |mode| {
+            const gen = b.addRunArtifact(exe);
+            gen.addArgs(&.{ "-b", "java" });
+            if (mode != 0) gen.addArg("--split-files");
+            if (mode == 1) gen.addArgs(&.{ "--java-package", "admission" });
+            gen.addArg("-o");
+            const dir = gen.addOutputDirectoryArg(b.fmt("union-admission-java-{d}", .{mode}));
+            gen.addFileArg(b.path("test/integration/native_union_admission/java_shapes.idl"));
+            const compile = javaCommand(b, &.{ javac.?, "-Xlint:unchecked", "-Werror", "-d" }, java_cdr);
+            const classes = compile.addOutputDirectoryArg("classes");
+            if (mode == 0) compile.addFileArg(dir.path(b, "Java_shapes.java")) else {
+                compile.addFileArg(dir.path(b, "Java_shapesCdrUtils.java"));
+                for ([_][]const u8{ "Value", "DefaultFirst", "Tag", "EnumValue", "NoDefault", "BooleanValue", "LongValue", "SmallTag", "SmallValue" }) |name| compile.addFileArg(dir.path(b, b.fmt("{s}.java", .{name})));
+            }
+            compile.addFileArg(b.path("test/integration/native_union_admission/AdmissionTest.java"));
+            const run = javaCommand(b, &.{ java.?, "-cp" }, java_cdr);
+            run.addDirectoryArg(classes);
+            run.addArg("AdmissionTest");
+            run.addArg(if (mode == 0) "Java_shapes$Admission$" else if (mode == 1) "admission." else "");
+            step.dependOn(&run.step);
+        };
+    }
+
     // ── XCDR known-answer checks ──────────────────────────────────────────────
     // test/integration/xcdr_known_answer/ka.idl covers every collection kind
     // (primitive / non-primitive / nested / array-typedef elements, multi-

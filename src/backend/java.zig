@@ -671,6 +671,26 @@ const Generator = struct {
         self.depth += 1;
     }
 
+    fn unionCaseCondition(self: *Generator, u: *const ir.Union, cas: ir.UnionCase, disc: []const u8) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(self.alloc);
+        const is_default = isDefaultUnionCase(cas);
+        try out.appendSlice(self.alloc, if (is_default) "!(false" else "(false");
+        for (u.cases) |candidate| {
+            if (isDefaultUnionCase(candidate)) continue;
+            if (!is_default and !std.mem.eql(u8, candidate.name, cas.name)) continue;
+            for (candidate.labels) |label| {
+                const value = try self.unionLabelExpr(u.discriminant, &.{label});
+                defer self.alloc.free(value);
+                const term = try std.fmt.allocPrint(self.alloc, " || ({s} == {s})", .{ disc, value });
+                defer self.alloc.free(term);
+                try out.appendSlice(self.alloc, term);
+            }
+        }
+        try out.appendSlice(self.alloc, ")");
+        return out.toOwnedSlice(self.alloc);
+    }
+
     fn emitUnionSerializeFns(self: *Generator, u: *const ir.Union) anyerror!void {
         const pfx = self.opts.type_prefix;
         const ext = u.annotations.extensibility;
@@ -678,11 +698,12 @@ const Generator = struct {
         const mutable = ext == .mutable;
 
         // Determine whether the discriminant is a Java enum or a primitive
-        const disc_is_enum = switch (u.discriminant) {
+        const disc_ref = cdr_skip.resolveAlias(u.discriminant);
+        const disc_is_enum = switch (disc_ref) {
             .named => |td| td == .enum_,
             else => false,
         };
-        const disc_is_bool = switch (u.discriminant) {
+        const disc_is_bool = switch (disc_ref) {
             .base => |b| b == .boolean,
             else => false,
         };
@@ -700,7 +721,7 @@ const Generator = struct {
             try self.ind();
             try self.write("_cdrAlign(_buf, _cdrBase, 4); int _dhPos = _buf.position(); _buf.putInt(0);\n");
             // Discriminant EMHEADER (member_id=0).
-            const disc_lc = lcForJavaTypeRef(u.discriminant, &.{});
+            const disc_lc = lcForJavaTypeRef(disc_ref, &.{});
             const disc_emhword: u32 = if (disc_lc) |lc|
                 (0x8000_0000 | (@as(u32, lc) << 28)) // member_id=0, must_understand=true
             else
@@ -715,23 +736,23 @@ const Generator = struct {
             // Write discriminant value.
             if (disc_is_enum) {
                 try self.ind();
-                try self.write("_cdrAlign(_buf, _cdrBase, 4); _buf.putInt(_discriminator.getValue());\n");
+                const lc = lcForJavaTypeRef(disc_ref, &.{}).?;
+                try self.write(switch (lc) {
+                    0 => "_buf.put((byte)_discriminator.getValue());\n",
+                    1 => "_cdrAlign(_buf, _cdrBase, 2); _buf.putShort((short)_discriminator.getValue());\n",
+                    else => "_cdrAlign(_buf, _cdrBase, 4); _buf.putInt(_discriminator.getValue());\n",
+                });
             } else if (disc_is_bool) {
                 try self.ind();
                 try self.write("_buf.put((byte)(_discriminator ? 1 : 0));\n");
             } else {
-                switch (u.discriminant) {
+                switch (disc_ref) {
                     .base => |b| {
-                        const align_v = baseCdrAlign(b);
-                        if (align_v > 1) {
-                            try self.ind();
-                            try self.print("_cdrAlign(_buf, _cdrBase, {d}); ", .{align_v});
-                        } else {
-                            try self.ind();
-                        }
+                        try self.ind();
+                        try self.writeAlignCall(b, "");
                         switch (b) {
-                            .octet, .int8, .uint8 => try self.write("_buf.put((byte)_discriminator);\n"),
-                            .short, .int16, .unsigned_short, .uint16 => try self.write("_buf.putShort((short)_discriminator);\n"),
+                            .octet, .char, .int8, .uint8 => try self.write("_buf.put((byte)_discriminator);\n"),
+                            .short, .wchar, .int16, .unsigned_short, .uint16 => try self.write("_buf.putShort((short)_discriminator);\n"),
                             .long, .int32, .unsigned_long, .uint32 => try self.write("_buf.putInt((int)_discriminator);\n"),
                             .long_long, .int64, .unsigned_long_long, .uint64 => try self.write("_buf.putLong((long)_discriminator);\n"),
                             else => try self.write("_buf.putInt((int)_discriminator);\n"),
@@ -747,77 +768,32 @@ const Generator = struct {
                 try self.ind();
                 try self.write("_buf.putInt(_niPos_disc, _buf.position() - _niPos_disc - 4);\n");
             }
-            // Case value EMHEADER: switch on discriminant.
-            try self.ind();
-            try self.write("switch (_discriminator) {\n");
-            self.depth += 1;
-            for (u.cases, 0..) |cas, cas_idx| {
-                if (isDefaultUnionCase(cas)) continue;
-                const case_mid: u32 = cas.annotations.memberId(@intCast(cas_idx + 1));
-                const case_lc = lcForJavaTypeRef(cas.type_ref, cas.dimensions);
-                const case_vword: u32 = 0x4000_0000 | case_mid; // LC=4
-                const case_fword: u32 = if (case_lc) |lc| (@as(u32, lc) << 28) | case_mid else case_vword;
-                try self.emitJavaUnionCaseLabelLines(u.discriminant, cas);
-                const access_ser = try std.fmt.allocPrint(self.alloc, "this.{s}", .{cas.name});
-                defer self.alloc.free(access_ser);
+            // Predicates support every discriminant width, including boolean
+            // and 64-bit values for which Java has no switch statement.
+            for (u.cases, 0..) |cas, idx| {
+                const condition = try self.unionCaseCondition(u, cas, "_discriminator");
+                defer self.alloc.free(condition);
                 try self.ind();
-                if (case_lc) |_| {
-                    try self.print("_cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0x{X:0>8}); // EMHEADER case {d}\n", .{ case_fword, case_mid });
-                } else {
-                    try self.print("_cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0x{X:0>8}); int _niPos_c{d} = _buf.position(); _buf.putInt(0);\n", .{ case_vword, cas_idx });
-                }
-                if (cas.dimensions.len > 0) {
-                    try self.emitSerializeArray(cas.type_ref, access_ser, cas.dimensions, "", 0);
-                } else {
-                    try self.emitSerializeForTypeRef(cas.type_ref, access_ser, "");
-                }
-                if (case_lc == null) {
+                try self.print("if ({s}) {{\n", .{condition});
+                const id = cas.annotations.memberId(@intCast(idx + 1));
+                const lc = lcForJavaTypeRef(cas.type_ref, cas.dimensions);
+                const header: u32 = (@as(u32, lc orelse 4) << 28) | id;
+                try self.ind();
+                try self.print("_cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0x{X:0>8});\n", .{header});
+                if (lc == null) {
                     try self.ind();
-                    try self.print("_buf.putInt(_niPos_c{d}, _buf.position() - _niPos_c{d} - 4);\n", .{ cas_idx, cas_idx });
+                    try self.write("int _ni = _buf.position(); _buf.putInt(0);\n");
                 }
-                try self.ind();
-                try self.write("break;\n");
-            }
-            // default arm
-            const default_case_mu: ?ir.UnionCase = blk: {
-                for (u.cases) |cas| {
-                    if (isDefaultUnionCase(cas)) break :blk cas;
-                }
-                break :blk null;
-            };
-            if (default_case_mu) |dc| {
-                const dc_mid: u32 = dc.annotations.memberId(0xFFFF_FFFF);
-                const dc_lc = lcForJavaTypeRef(dc.type_ref, dc.dimensions);
-                const dc_vword: u32 = 0x4000_0000 | dc_mid;
-                const dc_fword: u32 = if (dc_lc) |lc| (@as(u32, lc) << 28) | dc_mid else dc_vword;
-                try self.ind();
-                try self.write("default:\n");
-                const dc_access = try std.fmt.allocPrint(self.alloc, "this.{s}", .{dc.name});
-                defer self.alloc.free(dc_access);
-                try self.ind();
-                if (dc_lc) |_| {
-                    try self.print("_cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0x{X:0>8}); // EMHEADER default\n", .{dc_fword});
-                } else {
-                    try self.print("_cdrAlign(_buf, _cdrBase, 4); _buf.putInt(0x{X:0>8}); int _niPos_cdef = _buf.position(); _buf.putInt(0);\n", .{dc_vword});
-                }
-                if (dc.dimensions.len > 0) {
-                    try self.emitSerializeArray(dc.type_ref, dc_access, dc.dimensions, "", 0);
-                } else {
-                    try self.emitSerializeForTypeRef(dc.type_ref, dc_access, "");
-                }
-                if (dc_lc == null) {
+                const access = try std.fmt.allocPrint(self.alloc, "this.{s}", .{cas.name});
+                defer self.alloc.free(access);
+                if (cas.dimensions.len > 0) try self.emitSerializeArray(cas.type_ref, access, cas.dimensions, "", 0) else try self.emitSerializeForTypeRef(cas.type_ref, access, "");
+                if (lc == null) {
                     try self.ind();
-                    try self.write("_buf.putInt(_niPos_cdef, _buf.position() - _niPos_cdef - 4);\n");
+                    try self.write("_buf.putInt(_ni, _buf.position() - _ni - 4);\n");
                 }
                 try self.ind();
-                try self.write("break;\n");
-            } else {
-                try self.ind();
-                try self.write("default: break;\n");
+                try self.write("}\n");
             }
-            self.depth -= 1;
-            try self.ind();
-            try self.write("}\n");
             try self.ind();
             try self.write("_buf.putInt(_dhPos, _buf.position() - _dhPos - 4);\n");
         } else {
@@ -835,7 +811,7 @@ const Generator = struct {
                 try self.ind();
                 try self.write("_buf.put((byte)(_discriminator ? 1 : 0));\n");
             } else {
-                switch (u.discriminant) {
+                switch (disc_ref) {
                     .base => |b| {
                         try self.ind();
                         try self.writeAlignCall(b, "");
@@ -947,6 +923,8 @@ const Generator = struct {
             // @mutable union: read DHEADER, then EMHEADER loop.
             // member_id=0 is the discriminant; other IDs are case values.
             try self.ind();
+            try self.write("boolean _seenDisc=false, _seenValue=false;\n");
+            try self.ind();
             try self.write("int _frameLimit = _buf.limit(), _emEnd = _cdrReadFrameEnd(_buf, _cdrBase); _buf.limit(_emEnd);\n");
             try self.ind();
             try self.write("try { while (_buf.position() < _emEnd) {\n");
@@ -960,29 +938,30 @@ const Generator = struct {
             try self.ind();
             try self.write("try {\n");
             try self.ind();
-            try self.write("if (_memberId == 0) {\n");
+            try self.write("if (_memberId == 0) {\nif (_seenDisc) throw new IllegalArgumentException(\"duplicate union discriminator\");\n");
             self.depth += 1;
             // Read discriminant
             if (disc_is_enum) {
                 const disc_java = try self.typeRefToJava(u.discriminant, &.{});
                 defer self.alloc.free(disc_java);
                 try self.ind();
-                try self.print("_cdrAlign(_buf, _cdrBase, 4); _out._discriminator = {s}.valueOf(_buf.getInt());\n", .{disc_java});
+                const lc = lcForJavaTypeRef(disc_ref, &.{}).?;
+                const expr: []const u8 = switch (lc) {
+                    0 => "Byte.toUnsignedInt(_buf.get())",
+                    1 => "Short.toUnsignedInt(_buf.getShort())",
+                    else => "_buf.getInt()",
+                };
+                if (lc > 0) try self.print("_cdrAlign(_buf, _cdrBase, {d}); ", .{@as(u32, 1) << @intCast(lc)});
+                try self.print("_out._discriminator = {s}.valueOf({s});\n", .{ disc_java, expr });
             } else if (disc_is_bool) {
                 try self.ind();
-                try self.write("_out._discriminator = _buf.get() != 0;\n");
+                try self.write("byte _discByte=_buf.get(); if (_discByte!=0 && _discByte!=1) throw new IllegalArgumentException(\"invalid boolean discriminator\"); _out._discriminator=_discByte!=0;\n");
             } else {
-                switch (u.discriminant) {
+                switch (disc_ref) {
                     .base => |b| {
-                        const align_v = baseCdrAlign(b);
-                        const read_expr = baseCdrReadExpr(b);
-                        if (align_v > 1) {
-                            try self.ind();
-                            try self.print("_cdrAlign(_buf, _cdrBase, {d}); _out._discriminator = {s};\n", .{ align_v, read_expr });
-                        } else {
-                            try self.ind();
-                            try self.print("_out._discriminator = {s};\n", .{read_expr});
-                        }
+                        try self.ind();
+                        try self.writeAlignCall(b, "");
+                        try self.print("_out._discriminator = {s};\n", .{baseCdrReadExpr(b)});
                     },
                     else => {
                         try self.ind();
@@ -990,49 +969,30 @@ const Generator = struct {
                     },
                 }
             }
+            try self.ind();
+            try self.write("_seenDisc=true; if (_buf.position()!=_memberEnd) throw new IllegalArgumentException(\"invalid discriminator length\");\n");
             self.depth -= 1;
             try self.ind();
             try self.write("} else {\n");
             self.depth += 1;
-            // Switch on discriminant to read the corresponding case value.
             try self.ind();
             try self.write("switch (_memberId) {\n");
             self.depth += 1;
-            for (u.cases, 0..) |cas, cas_idx| {
-                if (isDefaultUnionCase(cas)) continue;
+            for (u.cases, 0..) |cas, idx| {
                 try self.ind();
-                try self.print("case {d}:\n", .{cas.annotations.memberId(@intCast(cas_idx + 1))});
+                try self.print("case {d}: {{\n", .{cas.annotations.memberId(@intCast(idx + 1))});
+                const condition = try self.unionCaseCondition(u, cas, "_out._discriminator");
+                defer self.alloc.free(condition);
+                try self.ind();
+                try self.print("if (!_seenDisc || _seenValue || !({s})) throw new IllegalArgumentException(\"invalid union member selection/order/duplicate\");\n", .{condition});
                 const out_expr = try std.fmt.allocPrint(self.alloc, "_out.{s}", .{cas.name});
                 defer self.alloc.free(out_expr);
-                if (cas.dimensions.len > 0) {
-                    try self.emitDeserializeArray(cas.type_ref, out_expr, cas.dimensions, "", 0);
-                } else {
-                    try self.emitDeserializeForTypeRef(cas.type_ref, out_expr, "");
-                }
+                if (cas.dimensions.len > 0) try self.emitDeserializeArray(cas.type_ref, out_expr, cas.dimensions, "", 0) else try self.emitDeserializeForTypeRef(cas.type_ref, out_expr, "");
                 try self.ind();
-                try self.write("break;\n");
-            }
-            const dc_mu: ?ir.UnionCase = blk: {
-                for (u.cases) |cas| {
-                    if (isDefaultUnionCase(cas)) break :blk cas;
-                }
-                break :blk null;
-            };
-            if (dc_mu) |dc| {
-                try self.ind();
-                try self.print("case {d}:\n", .{dc.annotations.memberId(0xFFFF_FFFF) & 0x0FFFFFFF});
-                const out_expr = try std.fmt.allocPrint(self.alloc, "_out.{s}", .{dc.name});
-                defer self.alloc.free(out_expr);
-                if (dc.dimensions.len > 0) {
-                    try self.emitDeserializeArray(dc.type_ref, out_expr, dc.dimensions, "", 0);
-                } else {
-                    try self.emitDeserializeForTypeRef(dc.type_ref, out_expr, "");
-                }
-                try self.ind();
-                try self.write("break;\n");
+                try self.write("_seenValue=true; if (_buf.position()!=_memberEnd) throw new IllegalArgumentException(\"invalid union member length\"); break; }\n");
             }
             try self.ind();
-            try self.write("default: if ((_emWord & 0x80000000) != 0) throw new IllegalArgumentException(\"unknown must-understand member\"); break;\n");
+            try self.write("default: if ((_emWord & 0x80000000)!=0) throw new IllegalArgumentException(\"unknown must-understand member\"); break;\n");
             self.depth -= 1;
             try self.ind();
             try self.write("}\n");
@@ -1048,6 +1008,20 @@ const Generator = struct {
             try self.write("}\n");
             try self.ind();
             try self.write("} finally { _buf.limit(_frameLimit); }\n");
+            try self.ind();
+            try self.write("if (!_seenDisc) throw new IllegalArgumentException(\"missing union discriminator\");\n");
+            try self.ind();
+            try self.write("if (!_seenValue) {\n");
+            for (u.cases) |cas| {
+                const condition = try self.unionCaseCondition(u, cas, "_out._discriminator");
+                defer self.alloc.free(condition);
+                const initial = try self.defaultForMember(cas.type_ref, cas.dimensions);
+                defer self.alloc.free(initial);
+                try self.ind();
+                try self.print("if ({s}) _out.{s}={s};\n", .{ condition, cas.name, initial });
+            }
+            try self.ind();
+            try self.write("}\n");
         } else {
             if (appendable) try self.emitAppendableReadBegin();
             // Read discriminant
@@ -1060,7 +1034,7 @@ const Generator = struct {
                 try self.ind();
                 try self.write("_out._discriminator = _buf.get() != 0;\n");
             } else {
-                switch (u.discriminant) {
+                switch (disc_ref) {
                     .base => |b| {
                         const read_expr = baseCdrReadExpr(b);
                         try self.ind();
@@ -1184,7 +1158,17 @@ const Generator = struct {
     ) anyerror![]u8 {
         for (labels) |lbl| {
             switch (lbl) {
-                .integer => |v| return std.fmt.allocPrint(self.alloc, "{d}", .{v}),
+                .integer => |v| {
+                    const resolved = cdr_skip.resolveAlias(disc);
+                    if (resolved == .base) switch (resolved.base) {
+                        .unsigned_long, .uint32 => return std.fmt.allocPrint(self.alloc, "((int){d}L)", .{v}),
+                        .octet, .uint8 => return std.fmt.allocPrint(self.alloc, "((byte){d})", .{v}),
+                        .unsigned_short, .uint16 => return std.fmt.allocPrint(self.alloc, "((short){d})", .{v}),
+                        else => {},
+                    };
+                    const suffix: []const u8 = if (resolved == .base and std.mem.eql(u8, baseToJavaType(resolved.base), "long")) "L" else "";
+                    return std.fmt.allocPrint(self.alloc, "{d}{s}", .{ v, suffix });
+                },
                 .boolean => |v| return self.alloc.dupe(u8, if (v) "true" else "false"),
                 .enumerator => |name| {
                     const disc_java = try self.typeRefToJava(disc, &.{});
@@ -11191,11 +11175,11 @@ test "java: @mutable union serialize emits DHEADER + disc EMHEADER + case EMHEAD
     // Case `long x` EMHEADER (case_idx=0, member_id=1, LC=2 → 0x20000001)
     try testGen(alloc,
         \\@mutable union U switch (long) { case 0: long x; case 1: string s; };
-    , "test", "_buf.putInt(0x20000001); // EMHEADER case 1");
+    , "test", "_buf.putInt(0x20000001);");
     // Case `string s` EMHEADER (case_idx=1, member_id=2, LC=4 → 0x40000002) + NEXTINT
     try testGen(alloc,
         \\@mutable union U switch (long) { case 0: long x; case 1: string s; };
-    , "test", "_buf.putInt(0x40000002); int _niPos_c1 = _buf.position(); _buf.putInt(0);");
+    , "test", "_buf.putInt(0x40000002);");
     // DHEADER patch
     try testGen(alloc,
         \\@mutable union U switch (long) { case 0: long x; case 1: string s; };

@@ -1,0 +1,9 @@
+#include "shapes.idl"
+
+module Admission {
+    @mutable union BooleanValue switch(boolean) { @id(10) case FALSE: long number; @id(20) default: string text; };
+    @mutable union LongValue switch(long long) { @id(10) case 4294967296: long number; @id(20) default: string text; };
+    @bit_bound(8) enum SmallTag { SZero, SOne };
+    typedef SmallTag TagAlias;
+    @mutable union SmallValue switch(TagAlias) { @id(10) case SZero: long number; @id(20) default: string text; };
+};
