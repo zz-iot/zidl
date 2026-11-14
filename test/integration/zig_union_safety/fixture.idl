@@ -14,16 +14,11 @@ union FinalStrUnion switch (long) {
     default: string s; // heap-owning case
 };
 
-// `@mutable`: discriminant and case value arrive as separate EMHEADER-framed
-// members, in principle in either order. Uses an explicit `case 1:` rather
-// than `default:` for the heap-owning case -- `@mutable` union `serialize()`
-// has a pre-existing, unrelated bug computing the wire member_id for a
-// `default:` case (not touched by this fix; sidestepped here to keep this
-// fixture scoped to the deinit-safety regression).
+// Mutable default-arm serialization must compile and use the resolved member ID.
 @mutable
 union MutableStrUnion switch (long) {
     case 0: long i;
-    case 1: string s; // heap-owning case
+    default: string s; // heap-owning default arm
 };
 
 // The discriminant's DEFAULT value (0, whatever `defaultForTypeRef` picks
@@ -42,3 +37,38 @@ union MutableOwningDefaultUnion switch (long) {
     case 0: string s; // owning, AND the discriminant's default value
     case 1: long i;
 };
+
+// Default labels need not be last. Their ID follows declaration order, not
+// discriminator values or a special default sentinel.
+@mutable union DefaultFirst switch (long) {
+    default: long fallback;
+    case 7: long known;
+};
+
+@mutable union ExplicitDefault switch (long) {
+    @id(17) case 0: long i;
+    @id(99) default: string s;
+};
+
+@mutable union SequentialDefault switch (long) {
+    @id(17) case 0: long i;
+    default: string s;
+};
+
+@mutable @autoid(HASH) union HashedDefault switch (long) {
+    case 0: long i;
+    @hashid("color") default: string s;
+};
+
+@mutable union NoDefault switch (long) {
+    case 0: long number;
+    case 1: string text;
+};
+
+union DefaultOwning switch (long) { case 1: long number; default: string text; };
+struct Nested { DefaultOwning choices[2]; };
+union NestedOwner switch (long) { case 0: Nested value; default: long number; };
+union ArrayOwner switch (long) { case 0: DefaultOwning values[2][2]; default: long number; };
+struct OptionalOwner { @optional Nested value; };
+enum Disc { One, Two };
+union EnumOwner switch (Disc) { case One: string text; default: long number; };

@@ -18,6 +18,28 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- **Zig union initialization.** Fresh unions initialize the payload arm selected
+  by their default discriminator. Nested aggregates and arrays retain mapping
+  defaults rather than byte-zeroing hidden union state. Fresh owning values are
+  safe to clone, serialize and deinitialize. Mutable decoding synthesizes a safe
+  default for an omitted locally selected payload, replacing `MissingUnionMember`.
+
+- **Zig mutable union validation.** Set the required discriminator must-understand
+  bit in XCDR2 output. Decode by member ID and reject IDs inconsistent with the
+  discriminator, duplicate known members, reordered known payloads, absent
+  discriminators and incorrect known-member lengths. Skip unknown non-MU
+  parameters and reject unknown MU parameters. A missing locally selected arm
+  receives its safe mapping default. Errors after publishing an
+  owning arm release its allocations. Canonical key bytes and hashes are unchanged.
+
+- **Zig mutable union default-arm coverage.** Remove the invalid `0xffffffff`
+  fallback member ID for direct IR generation; default arms use the same
+  declaration-index fallback as explicit arms. Normal IDL generation already uses
+  resolved member IDs. Compiled regressions cover owning defaults, default-first
+  declarations, sequential/explicit/hashed IDs, exact XCDR2 output, both input byte
+  orders, truncated input, allocation failures and cleanup. Run them separately
+  with `zig build test-zig-union-safety`.
+
 - **Key-hash compatibility:** all supported canonical non-primitive collection
   shapes now retain collection DHEADERs and include them in schema maximum/MD5
   policy. C/C++ and Java back-patch buffered holders; Zig shares one generated

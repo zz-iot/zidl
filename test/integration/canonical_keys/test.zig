@@ -108,6 +108,10 @@ test "normalized IDs agree across canonical holders, mutable wire headers and in
             const hex = parts.next().?;
             var expected: [256]u8 = undefined;
             const bytes = try std.fmt.hexToBytes(&expected, hex);
+            // Shared C/C++/Java fixtures still carry the old clear discriminator
+            // MU bit. Zig now sets the bit required by XTypes 1.3 section
+            // 7.2.2.4.4.4.6; member IDs and canonical key bytes are unchanged.
+            if (std.mem.eql(u8, entry[2], "UnionDefault")) bytes[11] |= 0x80;
             try testing.expectEqualSlices(u8, bytes, data.items);
             found = true;
         }

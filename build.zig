@@ -497,6 +497,8 @@ pub fn build(b: *std.Build) void {
         });
         const run_union_safety = b.addRunArtifact(union_safety_tests);
         test_step.dependOn(&run_union_safety.step);
+        const union_safety_step = b.step("test-zig-union-safety", "Compile and exercise Zig union codecs and cleanup");
+        union_safety_step.dependOn(&run_union_safety.step);
     }
 
     // ── Sequence-element compile-and-run checks (Zig, C, C++) ───────────────
