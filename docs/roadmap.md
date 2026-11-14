@@ -121,14 +121,11 @@ series and require a separate consumer-driven investigation. See
 
 ### C++ backend
 
-- **Direct `@optional` array members generate invalid C++.** For example,
-  `@optional long values[2]` declares a bare array while its codec calls
-  `.has_value()` / `.emplace()`. This predates native CDR consolidation; it is a
-  generator bug, not an intentional language restriction. Add an optional-capable
-  array representation (for example `std::optional<std::array<T, N>>`), including
-  multidimensional arrays and array typedefs, and compile/roundtrip tests for both CDR versions.
-  Arrays inside an optional aggregate work. See the
-  [optional-wire checkpoint](design/native-cdr-optional-wire-slice.md).
+- **Mutable decoding retains stale omitted optionals on reused C++ values.**
+  Mutable encodings omit absent optional fields; the reader currently leaves any
+  previous value engaged. Reset the projected optional fields before reading a
+  new mutable sample, including inherited fields and array typedefs, and cover
+  full/key/selected reads with present/absent/re-present reuse tests.
 
 - **`--generate-c-api` complex-type adapter (`ConcreteImplGenerator`)** — the largest single
   gap. Non-adaptable parameter/return types (bare/nested sequences, complex QoS structs,

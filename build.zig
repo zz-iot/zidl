@@ -978,6 +978,28 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    {
+        const array_step = b.step("test-cpp-optional-arrays", "Compile and exercise C++ optional arrays");
+        test_step.dependOn(array_step);
+        for ([_]bool{ false, true }) |pmr| {
+            const gen = b.addRunArtifact(exe);
+            gen.addArgs(&.{ "-b", "cpp" });
+            if (pmr) gen.addArg("--cpp-pmr-containers");
+            gen.addArg("-o");
+            const generated = gen.addOutputDirectoryArg(if (pmr) "optional-arrays-pmr" else "optional-arrays-stl");
+            gen.addFileArg(b.path("test/integration/cpp_optional_arrays/shapes.idl"));
+            const consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = true });
+            const flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" };
+            consumer.addCSourceFile(.{ .file = b.path("test/integration/cpp_optional_arrays/test.cpp"), .flags = flags });
+            consumer.addCSourceFile(.{ .file = generated.path(b, "shapes_cdr.cpp"), .flags = flags });
+            consumer.addIncludePath(generated);
+            consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
+            linkCdr(consumer, cdr_library);
+            const app = b.addExecutable(.{ .name = if (pmr) "optional-arrays-pmr" else "optional-arrays-stl", .root_module = consumer });
+            array_step.dependOn(&b.addRunArtifact(app).step);
+        }
+    }
+
     // ── XCDR known-answer checks ──────────────────────────────────────────────
     // test/integration/xcdr_known_answer/ka.idl covers every collection kind
     // (primitive / non-primitive / nested / array-typedef elements, multi-

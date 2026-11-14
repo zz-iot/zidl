@@ -18,6 +18,13 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- **C++ optional arrays compile and round-trip.** Direct optional arrays use
+  `std::optional<std::array<...>>`, including multidimensional arrays and arrays
+  of array typedefs. Existing optional typedefs keep their alias types. Generated
+  CDR indexing works for these wrappers in STL and PMR modes; ordinary member
+  arrays retain their existing representation. Compiled checks cover both CDR
+  versions, byte orders, present/absent values, counting writers and truncation.
+
 - C declarations put bounded string/wstring capacity after member array
   dimensions, matching codec indexing. Regenerate affected C bindings together;
   native array strides change even though total storage size is unchanged.

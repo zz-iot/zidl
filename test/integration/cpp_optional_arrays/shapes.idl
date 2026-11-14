@@ -1,0 +1,21 @@
+module Arrays {
+    typedef long Row[2];
+    typedef Row Alias;
+    struct Values {
+        @optional long direct[2];
+        @optional long grid[2][3];
+        @optional Alias aliased;
+        @optional Row rows[2];
+        @optional string words[2];
+        unsigned long tail;
+    };
+    @appendable struct App { @optional Values value; unsigned long tail; };
+    @mutable struct Mut {
+        @id(7) @optional long direct[2];
+        @id(9) @optional long grid[2][3];
+        @id(12) @optional Alias aliased;
+        @id(14) @optional Row rows[2];
+        @id(17) @optional string words[2];
+        unsigned long tail;
+    };
+};

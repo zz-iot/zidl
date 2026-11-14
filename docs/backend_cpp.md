@@ -45,6 +45,7 @@ the companion source file.
 | `wstring` | `std::wstring` |
 | `sequence<T>` | `std::vector<T>` |
 | `T[N]` | `std::array<T, N>` |
+| `@optional T[N]` | `std::optional<std::array<T, N>>` (nested arrays for multiple dimensions) |
 | `map<K,V>` | `std::map<K, V>` |
 | `@optional T` | `std::optional<T>` |
 | `enum` | `enum class Foo : uint32_t { ... }` |

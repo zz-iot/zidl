@@ -1307,7 +1307,7 @@ const Generator = struct {
 
     /// Emit a single member/field declaration.
     /// Arrays use C-style `Type name[D1][D2];`.
-    /// Optional (non-array) members use `std::optional<Type> name{};`.
+    /// Optional arrays wrap nested std::array storage in std::optional.
     /// Plain scalar members use `Type name{};` for default-zero initialisation.
     fn emitMemberDecl(
         self: *Generator,
@@ -1321,7 +1321,11 @@ const Generator = struct {
         const cpp_type = try self.typeRefToCpp(type_ref);
         defer self.alloc.free(cpp_type);
 
-        if (dims.len > 0) {
+        if (is_optional and dims.len > 0) {
+            const array_type = try self.makeArrayType(cpp_type, dims);
+            defer self.alloc.free(array_type);
+            try self.print("{s}std::optional<{s}> {s}{{}};\n", .{ indent, array_type, name });
+        } else if (dims.len > 0) {
             try self.print("{s}{s} {s}", .{ indent, cpp_type, name });
             for (dims) |d| {
                 try self.print("[{d}]", .{d});
