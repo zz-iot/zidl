@@ -204,5 +204,8 @@ preserved; reset the reader before retrying. Key-hash callbacks leave their hash
 output unchanged when decoding fails.
 
 Compiling with `-fno-exceptions` is supported, but allocation exhaustion can still
-terminate through STL/PMR. Preallocated/fallible storage requires a separate
-contract; see [C++ codec allocation failures](design/cpp-codec-allocation.md).
+terminate through STL/PMR. C++ applications requiring exception-free checked
+allocation failure should use generated C values and codecs directly. C coverage
+is being improved; unsupported features such as `map<K,V>` remain explicit gaps.
+C++ retains STL/PMR; alternative containers are outside this hardening series.
+See [C++ codec allocation failures](design/cpp-codec-allocation.md).

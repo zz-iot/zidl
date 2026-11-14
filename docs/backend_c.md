@@ -261,6 +261,16 @@ which emit inline field initializers for non-optional defaults.
 
 ---
 
+## Exception-free use from C++
+
+Generated C values and codecs are the alternative for C++ applications requiring
+exception-free checked allocation failure. Use the C representation directly and
+follow its initialization and cleanup contracts. The CDR allocator reports
+allocation failure through the existing integer status API; an allocator supplied
+by C++ must honor the C ABI and return failure without throwing. This does not
+promise allocation-free execution or complete IDL coverage. Current gaps, including
+`map<K,V>`, are listed below and remain targets for C coverage improvements.
+
 ## Known Limitations
 
 | Feature | Status |

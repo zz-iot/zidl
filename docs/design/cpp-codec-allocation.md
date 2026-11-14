@@ -40,28 +40,25 @@ not imply recoverable OOM. A conforming STL allocator signals failure by throwin
 returning null from `allocate` is not an alternative contract. PMR has the same
 constraint. Exhaustion can terminate an exception-free build.
 
-Recoverable failure without exceptions needs a separate, explicit storage mode.
-The existing STL representation and allocation behavior are preserved until that
-mode is designed and tested. The viable directions are:
+The C++ mapping remains STL by default and PMR when requested. Applications
+requiring exception-free operation with checked allocation failure should use
+**generated C bindings from C++**, including the C value representation, codec
+entry points and fallible `ZidlAllocator` interface. Converting those values back
+into allocating STL containers would reintroduce the same allocation constraint.
+C users follow the generated initialization, ownership and cleanup contracts.
 
-1. **Preallocated STL decoding.** Decode only within storage supplied before the
-   call; reject an operation before it could allocate. Capacity checks suffice
-   for simple vectors and strings, but not for the complete generated mapping.
-   Nested elements need their own prepared storage. Optional emplacement currently
-   replaces values and loses prepared capacity. Union arms decode through local
-   temporaries. Maps allocate individual nodes and have no `reserve` operation.
-   A useful implementation must define support/rejection for each shape and
-   validate admission before changing union or optional state.
-2. **Fallible containers.** Add an explicit C++ mapping whose string, sequence and
-   map operations return failure rather than throwing. This supports dynamic
-   allocation through `ZidlAllocator`, but changes public value types and requires
-   generated declarations, codec operations, cleanup and interface conversion
-   support. Bounded inline storage and unbounded allocator-backed storage need
-   separate rules.
-3. **C storage and codecs.** Use the existing generated C representation and its
-   fallible allocator interface in constrained C++ applications. This already
-   provides checked allocation failure, but is a different application mapping
-   from the STL C++ API.
+Improving C coverage for existing IDL features is part of the correctness and
+robustness work. The C backend currently rejects `map<K,V>`; that is a coverage
+gap to address explicitly, not an exception to the chosen policy. New C support
+must include a defined representation, bounds/extent checks, allocation-failure
+propagation, nested ownership/cleanup, and compiled C and C++ consumers.
+
+Custom, third-party or preallocated-only C++ container mappings are not part of
+this hardening series. Investigate alternatives separately only when a concrete
+consumer requirement calls for them. There is no pending container-library
+selection or alternate C++ storage implementation in this work.
+
+See [backend policy](../decisions.md#backend-policy) for the stable decision.
 
 A decoder memory budget is a complementary admission limit. It can reject a
 valid sample that exceeds policy, but cannot guarantee that an allocation within

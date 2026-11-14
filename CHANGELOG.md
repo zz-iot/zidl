@@ -22,8 +22,9 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   into `ZIDL_CDR_OVERFLOW` when exceptions are enabled. Failed decodes leave
   destructible, potentially partial output and bounded reader progress. Fault
   injection checks STL/PMR cleanup, retry and hash-output preservation. Generated
-  codecs still compile without exceptions; recoverable OOM in that mode requires
-  a separate storage contract. See `docs/design/cpp-codec-allocation.md`.
+  codecs still compile without exceptions; C++ consumers requiring exception-free
+  checked allocation failure should use generated C values/codecs. STL/PMR remains
+  the C++ mapping. See `docs/design/cpp-codec-allocation.md`.
 
 - C/C++ decoders validate sequence counts against declared bounds and probe the
   complete wire extent before allocating a sequence container. Primitive spans use

@@ -95,10 +95,20 @@ Features*.
 
 ### C backend
 
+The generated C representation and codecs are also the exception-free alternative
+for C++ consumers requiring checked allocation failure. Improve IDL coverage here;
+keep STL/PMR as the C++ mapping. Alternate C++ containers are outside this hardening
+series and require a separate consumer-driven investigation. See
+[backend policy](decisions.md#backend-policy).
+
 - **`map<K,V>`** — hard `error.MapTypeNotSupportedInCBackend` at codegen; the CDR generator
   additionally has `/* TODO: map write/read */` stub arms. (C++/Java/Zig CDR paths do
   marshal maps.) `c.zig:116`. In interface/callback parameter position it must become a
-  named hard error — see the C-ABI type-coverage design doc.
+  named hard error — see the C-ABI type-coverage design doc. Scope C map value
+  support as its own small series: define typed storage and duplicate-key semantics,
+  implement CDR read/write and cleanup, and test bounds, allocation failures and
+  nested owning keys/values with compiled C and C++ consumers. Interface/callback
+  adaptation is a separate slice; do not claim it from value-codec support alone.
 - **`@optional` `_set_` macro** is not emitted for array-backed members (fixed arrays,
   bounded strings/wstrings) — callers do direct assignment + manual `_present` bit update.
   No memcpy-based shape-aware setter. `backend_c.md`.
@@ -110,12 +120,6 @@ Features*.
   `std::pmr`) is a deliberately deferred option; not built.
 
 ### C++ backend
-
-- **Recoverable codec allocation failure without exceptions.** Exception-enabled
-  C++ decoder entry points translate STL storage exceptions into `ZIDL_CDR_OVERFLOW`
-  with destructible partial output. Exception-free builds still need an explicit
-  preallocated or fallible-container mapping; STL/PMR allocators cannot return null
-  to report failure. See the [contract and storage choices](design/cpp-codec-allocation.md).
 
 - **Direct `@optional` array members generate invalid C++.** For example,
   `@optional long values[2]` declares a bare array while its codec calls
