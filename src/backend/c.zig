@@ -3602,6 +3602,11 @@ const CdrGenerator = struct {
                 if (self.canonical_key) {
                     if (seq.bound) |n| try self.printI("if ({s}._length > {d}u) return ZIDL_CDR_INVALID;\n", .{ access, n });
                     try self.printI("if ({s}._length && !{s}._buffer) return ZIDL_CDR_INVALID;\n", .{ access, access });
+                    if (canonical.fixedCollectionElementWidth(seq.element.*)) |width| {
+                        try self.printI("if ({s}._length > (UINT32_MAX - 4u) / {d}u) return ZIDL_CDR_OVERFLOW;\n", .{ access, width });
+                        try self.printI("_rc = zidl_cdr_write_u32(_w, 4u + {s}._length * {d}u);\n", .{ access, width });
+                        try self.writeI("if (_rc) return _rc;\n");
+                    }
                 }
                 // XCDR2 prefixes a collection of non-primitive elements with a
                 // DHEADER (no-op for XCDR1 writers).

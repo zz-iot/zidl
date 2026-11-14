@@ -15,7 +15,7 @@
 #endif
 
 typedef struct { char name[64]; uint8_t bytes[512], hash[16]; size_t len; unsigned force; } Vector;
-static Vector vectors[32];
+static Vector vectors[64];
 static size_t vector_count;
 static unsigned nibble(char c) { return c <= '9' ? (unsigned)(c-'0') : (unsigned)(c-'a'+10); }
 static size_t hex_bytes(const char *hex, uint8_t *out) {
@@ -31,7 +31,7 @@ static void load_file(FILE *file) {
     assert(file);
     char name[64],bytes[1025],digest[33]; unsigned force;
     while (fscanf(file,"%63s %1024s %32s %u",name,bytes,digest,&force)==4) {
-        assert(vector_count<32);
+        assert(vector_count<64);
         Vector *v=&vectors[vector_count++];
         strcpy(v->name,name); v->len=hex_bytes(bytes,v->bytes);
         assert(hex_bytes(digest,v->hash)==16); v->force=force;
@@ -413,6 +413,17 @@ int main(int argc,char **argv) {
     assert(denied_allocations>0);
     for (size_t i=0;i<16;i++) assert(hash[i]==0xee);
     zidl_cdr_set_allocator(NULL);
+#ifndef __cplusplus
+    /* A hostile native count must fail before touching its undersized buffer. */
+    TYPE(ArrayEnum) single_enum = (TYPE(ArrayEnum))0;
+    TYPE(EnumUnboundedSeq) impossible = INIT;
+    impossible.values._length = impossible.values._maximum = UINT32_MAX;
+    impossible.values._buffer = &single_enum;
+    zidl_cdr_writer_init_fixed(&fixed_writer,fixed,sizeof fixed,ZIDL_XCDR2);
+    zidl_cdr_writer_set_byte_order(&fixed_writer,ZIDL_CDR_BE);
+    assert(Canonical_EnumUnboundedSeq_serialize_key_holder(&fixed_writer,&impossible)==ZIDL_CDR_OVERFLOW);
+    assert(fixed_writer.len==0);
+#endif
     puts("canonical key checks passed");
     return 0;
 }

@@ -27,11 +27,12 @@ Features*.
 
 - **Canonical key collection headers beyond enum/bitmask arrays.** The canonical
   generators still suppress collection DHEADERs for other non-primitive shapes,
-  including sequences of enums/bitmasks and collections of strings or aggregates.
+  including collections of strings or aggregates. Fixed-width enum/bitmask arrays
+  and sequences are covered by the independent collection witnesses.
   Audit serialization and maximum-size/MD5 policy with independent byte witnesses;
   streaming hashes need payload sizing before writing each delimiter. Aggregate
   FINAL projection must remain separate from collection framing. See the
-  [array-key checkpoint](design/native-cdr-array-keys.md) for the fixed array subset
+  [collection-key checkpoint](design/native-cdr-collection-keys.md) for the fixed-width subset
   and the specification evidence; existing collection vectors are not a broader
   conformance claim.
 - **XCDR1 `@mutable` data is not PL_CDR.** Peers expect a ParameterList (PL_CDR)

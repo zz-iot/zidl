@@ -18,6 +18,13 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- **Key-hash compatibility:** canonical sequences of enums/bitmasks now retain
+  their XCDR2 collection DHEADER in C, C++, Java and Zig. Empty sequences include
+  the count in a four-byte payload; MD5 policy accounts for the schema bound,
+  independently of actual length. Checked payload arithmetic rejects UINT32
+  overflow before reading elements. Fifteen new independent witnesses agree with
+  Cyclone key-hash extraction. See `docs/design/native-cdr-collection-keys.md`.
+
 - **Key-hash compatibility:** C, C++, Java and Zig canonical key holders now
   include the XCDR2 collection DHEADER for arrays of enums/bitmasks, including
   multidimensional arrays and array typedef chains. The delimiter contributes

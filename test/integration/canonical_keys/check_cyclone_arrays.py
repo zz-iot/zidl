@@ -36,4 +36,4 @@ with tempfile.TemporaryDirectory(prefix="zidl-array-oracle-") as temp:
         actual[name] = (data, force)
     if actual != expected:
         raise SystemExit(f"Cyclone differs:\nexpected={expected}\nactual={actual}")
-    print(f"Cyclone key-hash bytes and maximum-size policy agree for {len(actual)} arrays.")
+    print(f"Cyclone key-hash bytes and maximum-size policy agree for {len(actual)} collection witnesses.")

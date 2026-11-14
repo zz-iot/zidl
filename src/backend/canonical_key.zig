@@ -121,6 +121,18 @@ pub fn supported(alloc: std.mem.Allocator, tr: ir.TypeRef) !bool {
     };
 }
 
+/// Element width for the fixed-width non-primitive collection subset.
+pub fn fixedCollectionElementWidth(tr: ir.TypeRef) ?usize {
+    const element = wire.resolveAlias(tr);
+    return switch (element) {
+        .named => |td| switch (td) {
+            .enum_, .bitmask => wire.typeRefPrimWireSize(element),
+            else => null,
+        },
+        else => null,
+    };
+}
+
 /// XCDR2 enum/bitmask arrays retain their collection DHEADER in a FINAL
 /// canonical key holder. Flatten member dimensions and array typedefs into
 /// one extent; the streaming hash writer must know the payload size up front.
@@ -183,7 +195,7 @@ const Maximum = struct {
             .string => |bound| if (bound) |n| add(primitive(start, 4), @min(n, 17) + 1) else 17,
             .wstring => |bound| if (bound) |n| add(primitive(start, 4), @min(n, 17) * 2) else 17,
             .fixed_pt => |f| add(start, (@as(u64, f.digits) + 2) / 2),
-            .sequence => |seq| self.repeat(seq.element.*, &.{}, seq.bound orelse std.math.maxInt(u64), primitive(start, 4)),
+            .sequence => |seq| self.repeat(seq.element.*, &.{}, seq.bound orelse std.math.maxInt(u64), primitive(if (fixedCollectionElementWidth(seq.element.*) != null) primitive(start, 4) else start, 4)),
             .named => |td| switch (td) {
                 .struct_ => |s| blk: {
                     const members = try fields(self.alloc, s);
@@ -359,4 +371,17 @@ test "array key delimiters flatten typedefs, affect MD5 policy and reject overfl
     try testing.expect(!try forceMd5(testing.allocator, &holder)); // 4 + 3*4 = 16
     members[0].dimensions = &.{4};
     try testing.expect(try forceMd5(testing.allocator, &holder)); // 4 + 4*4 = 20
+}
+
+test "sequence key delimiter contributes to schema maximum through enum aliases" {
+    const testing = std.testing;
+    var enumeration = ir.Enum{ .name = "E", .qualified_name = "E", .span = undefined, .enumerators = &.{}, .annotations = .{} };
+    var alias = ir.Typedef{ .name = "Alias", .qualified_name = "Alias", .span = undefined, .type_ref = .{ .named = .{ .enum_ = &enumeration } }, .dimensions = &.{}, .raw = &.{} };
+    const element: ir.TypeRef = .{ .named = .{ .typedef = &alias } };
+    var members = [_]ir.StructMember{.{ .name = "key", .span = undefined, .type_ref = .{ .sequence = .{ .element = &element, .bound = 2 } }, .dimensions = &.{}, .annotations = .{ .is_key = true } }};
+    const holder = ir.Struct{ .name = "S", .qualified_name = "S", .span = undefined, .members = &members, .annotations = .{} };
+    try testing.expectEqual(@as(?usize, 4), fixedCollectionElementWidth(element));
+    try testing.expect(!try forceMd5(testing.allocator, &holder));
+    members[0].type_ref.sequence.bound = 3;
+    try testing.expect(try forceMd5(testing.allocator, &holder));
 }

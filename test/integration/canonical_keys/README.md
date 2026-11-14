@@ -98,3 +98,9 @@ The earlier aggregate/string collection vectors remain regression witnesses for
 the existing implementation. Their missing collection DHEADERs and maximum-size
 policy need a separate correction; do not treat them as independent conformance
 evidence for those shapes. Enum/bitmask arrays are the corrected subset here.
+
+The [collection-key checkpoint](../../../docs/design/native-cdr-collection-keys.md)
+extends the same independent oracle and optional Cyclone check to fifteen
+fixed-width enum/bitmask sequence witnesses (24 collection witnesses total).
+These distinguish actual extent from schema maximum, including empty sequences
+that still require MD5, overflow guards, alias chains and primitive controls.

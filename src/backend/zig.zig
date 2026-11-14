@@ -6373,6 +6373,14 @@ const Generator = struct {
                     if (seq.bound) |n| {
                         try self.print("{s}if ({s}.len > {d}) return error.SequenceTooLong;\n", .{ extra, access, n });
                     } else try self.print("{s}if ({s}._length != 0 and {s}._buffer == null) return error.InvalidSequence;\n", .{ extra, access, access });
+                    if (canonical.fixedCollectionElementWidth(seq.element.*)) |width| {
+                        const length = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ access, if (seq.bound != null) "len" else "_length" });
+                        defer self.alloc.free(length);
+                        try self.ind();
+                        try self.print("{s}if ({s} > (std.math.maxInt(u32) - 4) / {d}) return error.Overflow;\n", .{ extra, length, width });
+                        try self.ind();
+                        try self.print("{s}try writer.writeU32(4 + @as(u32, @intCast({s})) * {d});\n", .{ extra, length, width });
+                    }
                 }
                 // XCDR2 prefixes a collection of non-primitive elements with a
                 // DHEADER (a no-op for XCDR1 and key-hash writers).

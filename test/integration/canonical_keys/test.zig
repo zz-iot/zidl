@@ -329,3 +329,27 @@ test "enum and bitmask array collection headers, typedef flattening and MD5 boun
     try check(C.Mask64Array, .{ .values = .{ 1, 2 } }, "Mask64Array", .final, true);
     try check(C.PrimitiveGrid, .{ .values = .{ .{ 1, 2 }, .{ 3, 4 } } }, "PrimitiveGrid", .final, true);
 }
+
+test "enum and bitmask sequence collection headers use schema maxima even when empty" {
+    const e16: C.EnumSeq16 = .{ .values = try zidl_cdr.BoundedArray(C.ArrayEnum, 2).fromSlice(&.{ .ARRAY_ZERO, .ARRAY_ONE }) };
+    try check(C.EnumSeq16, e16, "EnumSeq16", .final, true);
+    try check(C.EnumSeq16, .{}, "EnumSeq16Empty", .final, true);
+    try check(C.EnumSeq20, .{ .values = try zidl_cdr.BoundedArray(C.ArrayEnum, 3).fromSlice(&.{ .ARRAY_ZERO, .ARRAY_ONE, .ARRAY_ZERO }) }, "EnumSeq20", .final, true);
+    try check(C.EnumSeq20, .{}, "EnumSeq20Empty", .final, true);
+    try check(C.EnumSeq20, .{ .values = try zidl_cdr.BoundedArray(C.ArrayEnum, 3).fromSlice(&.{.ARRAY_ONE}) }, "EnumSeq20Short", .final, true);
+    try check(C.MaskSeq16, .{ .values = try zidl_cdr.BoundedArray(u8, 8).fromSlice(&.{ 1, 2, 1, 2, 1, 2, 1, 2 }) }, "MaskSeq16", .final, true);
+    try check(C.MaskSeq17, .{ .values = try zidl_cdr.BoundedArray(u8, 9).fromSlice(&.{ 1, 2, 1, 2, 1, 2, 1, 2, 1 }) }, "MaskSeq17", .final, true);
+    try check(C.MaskSeq17, .{}, "MaskSeq17Empty", .final, true);
+    try check(C.Enum8Seq17, .{ .values = try zidl_cdr.BoundedArray(C.ArrayEnum8, 9).fromSlice(&.{ .NARROW_ZERO, .NARROW_ONE, .NARROW_ZERO }) }, "Enum8Seq17", .final, true);
+    try check(C.Enum16Seq16, .{ .values = try zidl_cdr.BoundedArray(C.ArrayEnum16, 4).fromSlice(&.{ .MEDIUM_ZERO, .MEDIUM_ONE }) }, "Enum16Seq16", .final, true);
+    try check(C.Mask64Seq16, .{ .values = try zidl_cdr.BoundedArray(u64, 1).fromSlice(&.{2}) }, "Mask64Seq16", .final, true);
+    try check(C.EnumUnboundedSeq, .{}, "EnumUnboundedSeq", .final, true);
+    try check(C.PrimitiveSeq16, .{ .values = try zidl_cdr.BoundedArray(u32, 3).fromSlice(&.{ 1, 2, 3 }) }, "PrimitiveSeq16", .final, true);
+    try check(C.PrimitiveSeq16, .{}, "PrimitiveSeq16Empty", .final, true);
+    try check(C.EnumSeqAlign, .{ .lead = 0xaa, .tail = 0xbb, .values = try zidl_cdr.BoundedArray(C.ArrayEnum8, 3).fromSlice(&.{ .NARROW_ZERO, .NARROW_ONE }) }, "EnumSeqAlign", .final, true);
+    const over_bound: C.EnumSeq16 = .{ .values = .{ .len = 3 } };
+    try testing.expectError(error.SequenceTooLong, C.EnumSeq16.computeKeyHashChecked(&over_bound));
+    var one = [_]C.ArrayEnum{.ARRAY_ZERO};
+    const impossible: C.EnumUnboundedSeq = .{ .values = .{ ._length = std.math.maxInt(u32), ._maximum = std.math.maxInt(u32), ._buffer = &one } };
+    try testing.expectError(error.Overflow, C.EnumUnboundedSeq.computeKeyHashChecked(&impossible));
+}

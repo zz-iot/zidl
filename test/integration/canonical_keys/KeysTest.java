@@ -137,6 +137,31 @@ public final class KeysTest {
             fromWire(values[i], 2, 7, names[i]);
         }
     }
+    static void sequenceWitness(String name, String typeName, List<?> values) throws Exception {
+        Object obj = value(typeName); set(obj, "values", values);
+        witness(name, obj); fromWire(obj, 1, 1, name); fromWire(obj, 2, 7, name);
+    }
+    static void sequenceKeys() throws Exception {
+        Object zero = enumValue("ArrayEnum", 0), one = enumValue("ArrayEnum", 1);
+        Object invalid = value("EnumSeq16"); set(invalid,"values",Arrays.asList(zero,one,zero)); rejects(invalid);
+        sequenceWitness("EnumSeq16", "EnumSeq16", Arrays.asList(zero, one));
+        sequenceWitness("EnumSeq16Empty", "EnumSeq16", Collections.emptyList());
+        sequenceWitness("EnumSeq20", "EnumSeq20", Arrays.asList(zero, one, zero));
+        sequenceWitness("EnumSeq20Empty", "EnumSeq20", Collections.emptyList());
+        sequenceWitness("EnumSeq20Short", "EnumSeq20", Arrays.asList(one));
+        sequenceWitness("MaskSeq16", "MaskSeq16", Arrays.asList(1,2,1,2,1,2,1,2));
+        sequenceWitness("MaskSeq17", "MaskSeq17", Arrays.asList(1,2,1,2,1,2,1,2,1));
+        sequenceWitness("MaskSeq17Empty", "MaskSeq17", Collections.emptyList());
+        sequenceWitness("Enum8Seq17", "Enum8Seq17", Arrays.asList(enumValue("ArrayEnum8",0), enumValue("ArrayEnum8",1), enumValue("ArrayEnum8",0)));
+        sequenceWitness("Enum16Seq16", "Enum16Seq16", Arrays.asList(enumValue("ArrayEnum16",0), enumValue("ArrayEnum16",1)));
+        sequenceWitness("Mask64Seq16", "Mask64Seq16", Arrays.asList(2L));
+        sequenceWitness("EnumUnboundedSeq", "EnumUnboundedSeq", Collections.emptyList());
+        sequenceWitness("PrimitiveSeq16", "PrimitiveSeq16", Arrays.asList(1,2,3));
+        sequenceWitness("PrimitiveSeq16Empty", "PrimitiveSeq16", Collections.emptyList());
+        Object aligned = value("EnumSeqAlign"); set(aligned,"lead",(byte)0xaa); set(aligned,"tail",(byte)0xbb);
+        set(aligned,"values",Arrays.asList(enumValue("ArrayEnum8",0),enumValue("ArrayEnum8",1)));
+        witness("EnumSeqAlign",aligned); fromWire(aligned,1,1,"EnumSeqAlign"); fromWire(aligned,2,7,"EnumSeqAlign");
+    }
     public static void main(String[] args) throws Exception {
         prefix = args[1];
         selectedNestedKeys();
@@ -147,6 +172,7 @@ public final class KeysTest {
             if (parts.length == 4) vectors.put(parts[0], parts);
         }
         arrayKeys();
+        sequenceKeys();
         Object align = value("Align"); set(align,"a",(byte)0xaa); set(align,"b",0x0102030405060708L); witness("Align",align);
         Object nested = value("Nested"); set(nested,"m_long",0x12345678); set(nested,"u",99); set(nested,"w",88);
         Object example = value("Example"); set(example,"label","BLUE"); set(example,"m_nested",nested); witness("Example",example);

@@ -2701,6 +2701,15 @@ const Generator = struct {
                     try self.ind();
                     try self.print("{s}if ({s}.size() > {d}) throw new IllegalArgumentException(\"sequence key exceeds bound\");\n", .{ extra, access, n });
                 };
+                if (self.canonical_key) {
+                    if (canonical.fixedCollectionElementWidth(seq.element.*)) |width| {
+                        try self.ind();
+                        try self.print("{s}if ({s}.size() > (0xffffffffL - 4) / {d}) throw new IllegalArgumentException(\"collection key size overflow\");\n", .{ extra, access, width });
+                        try self.ind();
+                        try self.writeAlignCall(.unsigned_long, extra);
+                        try self.print("_buf.putInt((int)(4L + {s}.size() * {d}L));\n", .{ access, width });
+                    }
+                }
                 // XCDR2 prefixes a collection of non-primitive elements with a DHEADER.
                 const cdh = try self.openCollectionDheader(!cdr_skip.isPrimitiveElement(seq.element.*), extra);
                 const e = try self.collName("_e");

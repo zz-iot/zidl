@@ -19,3 +19,17 @@ module Canonical {
     struct Mask64Array { @key ArrayMask64 values[2]; };
     struct PrimitiveGrid { @key ArrayPrimitiveRow values[2]; };
 };
+
+module Canonical {
+    typedef sequence<ArrayEnumAlias, 2> EnumSequenceValues;
+    struct EnumSeq16 { @key EnumSequenceValues values; };
+    struct EnumSeq20 { @key sequence<ArrayEnum, 3> values; };
+    struct MaskSeq16 { @key sequence<ArrayMask8, 8> values; };
+    struct MaskSeq17 { @key sequence<ArrayMask8, 9> values; };
+    struct Enum8Seq17 { @key sequence<ArrayEnum8, 9> values; };
+    struct Enum16Seq16 { @key sequence<ArrayEnum16, 4> values; };
+    struct Mask64Seq16 { @key sequence<ArrayMask64, 1> values; };
+    struct EnumUnboundedSeq { @key sequence<ArrayEnum> values; };
+    struct PrimitiveSeq16 { @key sequence<ArrayPrimitiveAlias, 3> values; };
+    struct EnumSeqAlign { @key octet lead; @key sequence<ArrayEnum8, 3> values; @key octet tail; };
+};
