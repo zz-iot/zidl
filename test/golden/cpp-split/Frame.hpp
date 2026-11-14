@@ -27,6 +27,8 @@ int Frame_skip_key_value(ZidlCdrReader *_r);
 int Frame_deserialize(ZidlCdrReader *_r, ::Frame *_v);
 /* Structural traversal only; success is not sample admission. */
 int Frame_skip(ZidlCdrReader *_r);
+/* Checked ordinary decode and hash; output is untouched on failure. */
+int Frame_process_sample_from_cdr(const uint8_t *, size_t, int key_only, uint8_t hash[16]);
 
 } // extern C
 #endif // FRAME_HPP

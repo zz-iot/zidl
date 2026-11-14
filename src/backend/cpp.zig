@@ -438,6 +438,10 @@ const Generator = struct {
         try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         try self.write("/* Structural traversal only; success is not sample admission. */\n");
         try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
+        if (true) {
+            try self.write("/* Checked ordinary decode and hash; output is untouched on failure. */\n");
+            try self.print("{s}{s}int {s}_process_sample_from_cdr(const uint8_t *, size_t, int key_only, uint8_t hash[16]);\n", .{ em, sp, c_name });
+        }
         // Keyless structs still get these prototypes when wrappers were
         // requested -- see the matching `else if` in the CDR generator's
         // struct-fns emission, which emits trivial (constant-zero-hash)
@@ -2048,6 +2052,8 @@ const CdrGenerator = struct {
         try self.emitStructValueFns(s, c_name, cpp_qname, false);
         try self.emitStructValueFns(s, c_name, cpp_qname, true);
         try cdr_skip.emitKeyValueSkip(self, s, c_name);
+
+        try @import("sample_processing.zig").emit(self, c_name, cpp_qname, has_key, false, true);
 
         // ── skip ─────────────────────────────────────────────────────────────
 

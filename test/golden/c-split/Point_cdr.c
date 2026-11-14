@@ -83,6 +83,28 @@ static int Point_skip_key_value_bounded_impl(ZidlCdrReader *_r) {
     return ZIDL_CDR_OK;
 }
 
+static int Point_process_sample_from_cdr_bounded_impl(const uint8_t *_payload, size_t _len, int _key_only, uint8_t _hash[16]);
+int Point_process_sample_from_cdr(const uint8_t *_payload, size_t _len, int _key_only, uint8_t _hash[16]) {
+    int _rc = Point_process_sample_from_cdr_bounded_impl(_payload, _len, _key_only, _hash);
+    return _rc;
+}
+static int Point_process_sample_from_cdr_bounded_impl(const uint8_t *_payload, size_t _len, int _key_only, uint8_t _hash[16]) {
+    if (!_payload || !_hash || (_key_only != 0 && _key_only != 1)) return ZIDL_CDR_INVALID;
+    ZidlCdrReader _reader;
+int _rc = zidl_cdr_reader_init(&_reader, _payload, _len);
+if (_rc) return _rc;
+    Point _value; memset(&_value, 0, sizeof _value);
+    uint8_t _result[16] = {0};
+    if (!_key_only) _rc = Point_deserialize(&_reader, &_value);
+    if (!_rc && _reader.pos != _len) {
+        size_t _left = _len - _reader.pos;
+        if (_left > 3 || (_len & 3u)) _rc = ZIDL_CDR_INVALID;
+        else for (size_t _i = _reader.pos; _i < _len; ++_i) if (_payload[_i] != 0) { _rc = ZIDL_CDR_INVALID; break; }
+    }
+    if (!_rc) memcpy(_hash, _result, 16);
+    return _rc;
+}
+
 static int Point_skip_bounded_impl(ZidlCdrReader *_r);
 int Point_skip(ZidlCdrReader *_r) {
     ZidlCdrReader _local = *_r;

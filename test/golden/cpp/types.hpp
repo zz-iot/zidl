@@ -90,6 +90,8 @@ int Point_skip_key_value(ZidlCdrReader *_r);
 int Point_deserialize(ZidlCdrReader *_r, ::Point *_v);
 /* Structural traversal only; success is not sample admission. */
 int Point_skip(ZidlCdrReader *_r);
+/* Checked ordinary decode and hash; output is untouched on failure. */
+int Point_process_sample_from_cdr(const uint8_t *, size_t, int key_only, uint8_t hash[16]);
 
 #define Sample_has_key 1
 #define Sample_KEY_HASH_FORCE_MD5 0
@@ -101,6 +103,8 @@ int Sample_skip_key_value(ZidlCdrReader *_r);
 int Sample_deserialize(ZidlCdrReader *_r, ::Sample *_v);
 /* Structural traversal only; success is not sample admission. */
 int Sample_skip(ZidlCdrReader *_r);
+/* Checked ordinary decode and hash; output is untouched on failure. */
+int Sample_process_sample_from_cdr(const uint8_t *, size_t, int key_only, uint8_t hash[16]);
 int Sample_serialize_key(ZidlCdrWriter *_w, const ::Sample *_v);
 int Sample_deserialize_key(ZidlCdrReader *_r, ::Sample *_v);
 int Sample_compute_key_hash(const ::Sample *_v, uint8_t _hash[16]);
@@ -116,6 +120,8 @@ int Frame_skip_key_value(ZidlCdrReader *_r);
 int Frame_deserialize(ZidlCdrReader *_r, ::Frame *_v);
 /* Structural traversal only; success is not sample admission. */
 int Frame_skip(ZidlCdrReader *_r);
+/* Checked ordinary decode and hash; output is untouched on failure. */
+int Frame_process_sample_from_cdr(const uint8_t *, size_t, int key_only, uint8_t hash[16]);
 
 #define Beacon_has_key 1
 #define Beacon_KEY_HASH_FORCE_MD5 0
@@ -127,6 +133,8 @@ int Beacon_skip_key_value(ZidlCdrReader *_r);
 int Beacon_deserialize(ZidlCdrReader *_r, ::Beacon *_v);
 /* Structural traversal only; success is not sample admission. */
 int Beacon_skip(ZidlCdrReader *_r);
+/* Checked ordinary decode and hash; output is untouched on failure. */
+int Beacon_process_sample_from_cdr(const uint8_t *, size_t, int key_only, uint8_t hash[16]);
 int Beacon_serialize_key(ZidlCdrWriter *_w, const ::Beacon *_v);
 int Beacon_deserialize_key(ZidlCdrReader *_r, ::Beacon *_v);
 int Beacon_compute_key_hash(const ::Beacon *_v, uint8_t _hash[16]);

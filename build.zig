@@ -1008,6 +1008,30 @@ pub fn build(b: *std.Build) void {
     }
 
 
+    {
+        const step = b.step("test-checked-sample-processing", "Check native admission callbacks and allocation failure publication");
+        test_step.dependOn(step);
+        for (0..3) |mode| {
+            const cpp = mode != 0;
+            const gen = b.addRunArtifact(exe);
+            gen.addArgs(&.{ "-b", if (cpp) "cpp" else "c" });
+            if (mode == 2) gen.addArg("--cpp-pmr-containers");
+            gen.addArg("-o");
+            const dir = gen.addOutputDirectoryArg(b.fmt("checked-sample-processing-{d}", .{mode}));
+            gen.addFileArg(b.path("test/integration/checked_sample_processing/shapes.idl"));
+            const m = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = cpp });
+            const flags: []const []const u8 = if (cpp) &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" } else &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" };
+            m.addCSourceFile(.{ .file = b.path(if (cpp) "test/integration/checked_sample_processing/test.cpp" else "test/integration/checked_sample_processing/test.c"), .flags = flags });
+            m.addCSourceFile(.{ .file = dir.path(b, if (cpp) "shapes_cdr.cpp" else "shapes_cdr.c"), .flags = flags });
+            m.addIncludePath(dir);
+            m.addIncludePath(b.path("packages/zidl-cdr/include"));
+            linkCdr(m, cdr_library);
+            const app = b.addExecutable(.{ .name = b.fmt("checked-sample-processing-{d}", .{mode}), .root_module = m });
+            step.dependOn(&b.addRunArtifact(app).step);
+        }
+    }
+
+
     // STL storage failures must stay inside generated C++ codec entry points.
     {
         const allocation_step = b.step("test-cpp-codec-allocation", "Inject C++ codec allocation failures");

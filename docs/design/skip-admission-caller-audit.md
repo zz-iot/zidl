@@ -58,3 +58,7 @@ effort. No middleware checkout or callback ABI was modified by this audit.
 There is no demonstrated need here for a new generic validated-skip API. Keep
 structural skip and projection efficient, document their limits, and test the
 actual admission boundary when wiring a consumer.
+
+A subsequent [checked-processing slice](checked-sample-processing.md) adds native
+ordinary-decode/hash callbacks and an opt-in checked middleware registration
+path. It does not retroactively strengthen the legacy registrations audited here.

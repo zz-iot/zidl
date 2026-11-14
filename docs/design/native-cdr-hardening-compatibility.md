@@ -15,6 +15,8 @@ They do not change the shared C allocator ABI or the process-wide allocator poli
 | Mutable union writers | All backends set the required discriminator MU bit. Canonical keys and TypeObject identities are unchanged by this flag correction. |
 | Java union lifecycle | Fresh constructors initialize only the selected payload; default-arm setters select a valid discriminator; decoded arrays allocate selected storage. Ordinary boolean default arms now round-trip. |
 | Native boolean union dispatch | Explicit int casts avoid strict compiler warnings across codecs and lifecycle helpers; storage and wire bytes are unchanged. |
+| Checked native processing | New process_sample_from_cdr helpers decode before hash publication, with ordinary evolution defaults and checked allocation cleanup. Checked middleware registration is opt-in; existing registration APIs remain unchanged. |
+| C++ split namespaces | Per-type declarations preserve IDL module scopes and codec C linkage. Rebuild generated split consumers; wire bytes do not change. |
 | Skip/projection contracts | Generated comments and independent regression witnesses make clear that structural traversal, returned fields and hashes are not sample-admission decisions. API signatures and skip semantics are unchanged. |
 | Mutable union readers | C/C++/Java now check member IDs, selected arm, discriminator order/presence, duplicates and known extents. C preserves caller-free partial output; C++ commits a local owning candidate; Java returns a fresh result. |
 | Unsupported long double codecs | C/C++/Java/Zig reject codec generation rather than emit eight-byte operations for the Float128 value family. Declaration-only mappings retain their existing limitations. |
@@ -45,3 +47,7 @@ and tests pass with the changes combined, not only as independent branches.
 The [skip/admission caller audit](skip-admission-caller-audit.md) records covered
 callers, independent counterexamples and the separate legacy middleware
 admission-hook decision.
+
+[Checked sample processing](checked-sample-processing.md) supplies an additive
+status-returning callback for consumers installing a checked admission hook;
+legacy hash and projection contracts are unchanged.

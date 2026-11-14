@@ -680,6 +680,10 @@ const Generator = struct {
         // Keyless structs still get these prototypes when wrappers were
         // requested -- see the matching `else if` in emitStructFns, which
         // emits trivial (constant-zero-hash) bodies for them.
+        if (!self.opts.c_no_free or !structHasSequenceFields(s)) {
+            try self.write("/* Checked ordinary decode and hash; output is untouched on failure. */\n");
+            try self.print("{s}{s}int {s}_process_sample_from_cdr(const uint8_t *, size_t, int key_only, uint8_t hash[16]);\n", .{ em, sp, c_name });
+        }
         if (has_key or (self.opts.generate_zzdds_wrappers and isZzddsTopicStructC(s))) {
             try self.print("{s}{s}int {s}_serialize_key(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, c_name });
             try self.print("{s}{s}int {s}_deserialize_key(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, c_name });
@@ -2462,6 +2466,8 @@ const CdrGenerator = struct {
         try self.emitStructValueFns(s, c_name, false);
         try self.emitStructValueFns(s, c_name, true);
         try cdr_skip.emitKeyValueSkip(self, s, c_name);
+
+        if (!self.opts.c_no_free or !structHasSequenceFields(s)) try @import("sample_processing.zig").emit(self, c_name, c_name, has_key, structHasSequenceFields(s), false);
 
         // ── skip ─────────────────────────────────────────────────────────────
 
@@ -5960,7 +5966,7 @@ test "c_backend cdr: unbounded wstring read uses zidl_cdr_read_wstring" {
     defer src.deinit(testing.allocator);
     try testing.expect(has(src.items, "zidl_cdr_read_wstring"));
     // Unbounded: assigns directly into the field pointer, no memcpy.
-    try testing.expect(!has(src.items, "memcpy"));
+    try testing.expect(!has(src.items, "memcpy(_v->ws"));
 }
 
 // ── CDR generation tests ──────────────────────────────────────────────────────

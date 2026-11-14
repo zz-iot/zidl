@@ -28,6 +28,12 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   valid default-arm discriminators in setters, and allocate decoded array arms.
   Include boolean default arms in ordinary union codecs.
 
+- Add native checked sample-processing callbacks that decode ordinary/key-only
+  values and publish hashes only on success, including keyless ALIVE data and
+  allocation-failure cleanup. Existing registration remains explicit opt-in.
+- Keep binding-only aliases separate from encoded-value diagnostic roots, so
+  interface sequences can coexist with ordinary codecs.
+
 - **Zig validated message admission.** Generated structs/unions expose
   `deserializeValidated` for exact message extent, required mutable members and
   strict known-member lengths. Validation propagates to nested values. Duplicate
