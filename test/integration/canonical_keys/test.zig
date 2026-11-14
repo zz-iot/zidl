@@ -386,3 +386,33 @@ test "native collection sizing rejects invalid bounded strings before writing a 
     try testing.expectError(error.StringTooLong, C.WideArray.serializeKeyHolder(&writer, bad_wide));
     try testing.expectEqual(@as(usize, 0), writer.len);
 }
+
+fn singleton(comptime T: type) T {
+    if (T == u8) return 'x';
+    var value: T = .{};
+    value.len = 1;
+    value.buf[0] = singleton(@TypeOf(value.buf[0]));
+    return value;
+}
+
+test "deep canonical counting visits nested collection bodies once" {
+    const value: C.DeepKey = .{ .values = singleton(C.Deep12) };
+    const count = comptime blk: {
+        @setEvalBranchQuota(30000);
+        var writer = zidl_cdr.PrimitiveWriter.initCounting(.four, .big);
+        C.DeepKey.serializeKeyHolder(&writer, .{ .values = singleton(C.Deep12) }) catch unreachable;
+        break :blk writer.len;
+    };
+    try testing.expectEqual(@as(usize, 102), count);
+    var expected: [102]u8 = @splat(0);
+    for (0..12) |i| {
+        std.mem.writeInt(u32, expected[i * 8 ..][0..4], @intCast(98 - i * 8), .big);
+        std.mem.writeInt(u32, expected[i * 8 + 4 ..][0..4], 1, .big);
+    }
+    std.mem.writeInt(u32, expected[96..100], 2, .big);
+    expected[100] = 'x';
+    var actual: [102]u8 = undefined;
+    var writer = zidl_cdr.PrimitiveWriter.initFixed(&actual, .four, .big);
+    try C.DeepKey.serializeKeyHolder(&writer, value);
+    try testing.expectEqualSlices(u8, &expected, &actual);
+}
