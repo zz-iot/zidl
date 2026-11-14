@@ -85,6 +85,13 @@ pub fn resolveAlias(tr: ir.TypeRef) ir.TypeRef {
     }
 }
 
+/// Promote only boolean union selectors to int. Switching directly on bool
+/// triggers strict compiler warnings; an explicit cast preserves its 0/1 value.
+pub fn unionSwitchPromotion(tr: ir.TypeRef) []const u8 {
+    const resolved = resolveAlias(tr);
+    return if (resolved == .base and resolved.base == .boolean) "(int)" else "";
+}
+
 /// The array typedef `tr` names (through dimension-less aliases), if any.
 pub fn arrayTypedefOf(tr: ir.TypeRef) ?*const ir.Typedef {
     return switch (resolveAlias(tr)) {

@@ -210,33 +210,10 @@ series and require a separate consumer-driven investigation. See
   ever emitted for it (independent of the deinit-idempotency fix in `CHANGELOG.md`). Bundle
   with the wider `wstring` support gap (`wstring` constants also emit only a comment — see
   the "All backends" section above) rather than fixing in isolation.
-- **`@mutable union` with a `default:` case emits an invalid wire member_id on `serialize`**
-  — found while adding `test/integration/zig_union_safety/`'s `@mutable` fixture: the
-  default case's EMHEADER is reserved with a `u32`-overflowing sentinel
-  (`reserveEmheader(4294967295, false)` in the generated output), a compile error whenever
-  that case actually needs allocator-owned cleanup (previously unexercised — no existing
-  test compiles a `@mutable union` whose `default:` case is heap-owning). Decode is
-  unaffected (any non-zero member_id already routes to the `else`/default arm). Sidestepped
-  in that fixture with an explicit `case N:` instead of `default:`; the `serialize`-side
-  member_id computation for a `@mutable` union default case needs its own fix.
-- **A union's `deinit()` is unsafe to call directly on a genuinely fresh, never-decoded `.{}`
-  value when the discriminant's default selects a heap-owning case** — `_u: union {...} =
-  undefined` (`emitUnion`) has no per-field safe default the way struct members do (`""`,
-  `.{}`), and Zig's own runtime safety check for a bare (non-`extern`) union panics
-  (`panic: invalid enum value`) on reading *any* field whose active field was never actually
-  written, independent of which case is selected. `deserializeInto`'s own generated
-  `errdefer` is now guarded against this (a local `_published` flag, only set once a case
-  arm has actually written both `out._u` and `out._d` together — see `CHANGELOG.md`), but a
-  caller who constructs `var v: SomeUnion = .{};` and calls `v.deinit(alloc)` *without* ever
-  successfully decoding into it first hits the same panic, for any union shaped this way.
-  Fixing this at the root would need a different `_u` representation (e.g. `extern union`
-  with a `std.mem.zeroes`-based default) — not attempted here: case payload types include
-  plain (non-`extern`) generated structs/unions, which Zig's `extern union` field-type rules
-  don't currently accept, so this needs its own design pass, not a quick patch.
-  `test/integration/zig_union_safety/fixture.idl`'s `OwningDefaultUnion` /
-  `MutableOwningDefaultUnion` are the regression fixtures for the `deserializeInto` half of
-  this (the half actually reachable from external input); they deliberately do not exercise
-  the direct-`deinit()`-on-a-bare-value half, since that is not yet safe by design.
+- **Wider mutable validation audit** — Zig union initialization and omitted-arm
+  defaults are covered by compiled lifecycle tests. Generic skip traversal and
+  other backend union codecs still need their own validation/flag audit.
+
 - **Idiomatic slice-friendly wrapper layer** over the generated C-ABI vtable — a planned
   ergonomic addition, not yet generated. `ecosystem.md`.
 - **`as_{Base}` convenience method for pure-Zig callers** — decided (emit a top-level
@@ -439,3 +416,10 @@ separate pending effort.
   preclude it.
 - **Non-CDR wire encodings** (XCDR↔JSON, XCDR↔XML, MQTT bridge) and DynamicType /
   DynamicData / TypeObjectFactory — belong in a DDS runtime, not zidl.
+
+### Mutable union audit follow-up
+
+Discriminator MU flags and member admission are corrected across C/C++/Java/Zig.
+The [mutable union audit](design/mutable-union-audit.md) records validation,
+ownership and evolution-default contracts. Generic skip paths remain structural
+traversal; they do not establish complete-message admission.

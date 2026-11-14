@@ -497,6 +497,31 @@ pub fn build(b: *std.Build) void {
         });
         const run_union_safety = b.addRunArtifact(union_safety_tests);
         test_step.dependOn(&run_union_safety.step);
+        const union_safety_step = b.step("test-zig-union-safety", "Compile and exercise Zig union codecs and cleanup");
+        test_step.dependOn(union_safety_step);
+        union_safety_step.dependOn(&run_union_safety.step);
+        // Lifecycle/default construction is also emitted without wire codecs.
+        for ([_]bool{ false, true }) |split| {
+            const declarations = b.addRunArtifact(exe);
+            declarations.addArgs(&.{ "-b", "zig", "--no-typesupport", "--no-typeobject-support" });
+            if (split) declarations.addArg("--split-files");
+            declarations.addArg("-o");
+            const dir = declarations.addOutputDirectoryArg(if (split) "union-declarations-split" else "union-declarations");
+            declarations.addFileArg(b.path("test/integration/zig_union_safety/fixture.idl"));
+            const fixture_mod = b.createModule(.{
+                .root_source_file = dir.path(b, "fixture.zig"),
+                .target = target,
+                .sanitize_thread = sanitize_thread,
+                .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings } },
+            });
+            const tests = b.addTest(.{ .root_module = b.createModule(.{
+                .root_source_file = b.path("test/integration/zig_union_safety/construction.zig"),
+                .target = target,
+                .sanitize_thread = sanitize_thread,
+                .imports = &.{.{ .name = "fixture", .module = fixture_mod }},
+            }) });
+            union_safety_step.dependOn(&b.addRunArtifact(tests).step);
+        }
     }
 
     // ── Sequence-element compile-and-run checks (Zig, C, C++) ───────────────
@@ -838,6 +863,68 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    {
+        const step = b.step("test-java-union-lifecycle", "Check Java union construction and arm selection");
+        test_step.dependOn(step);
+        const javac = b.findProgram(.{ .names = &.{"javac"} });
+        const java = b.findProgram(.{ .names = &.{"java"} });
+        if (javac != null and java != null) for (0..6) |mode| {
+            const split = mode % 3 != 0;
+            const packaged = mode % 3 == 1;
+            const codecs = mode < 3;
+            const gen = b.addRunArtifact(exe);
+            gen.addArgs(&.{ "-b", "java" });
+            if (split) gen.addArg("--split-files");
+            if (packaged) gen.addArgs(&.{ "--java-package", "lifecycle" });
+            if (!codecs) gen.addArg("--no-typesupport");
+            gen.addArg("-o");
+            const dir = gen.addOutputDirectoryArg(b.fmt("java-union-lifecycle-{d}", .{mode}));
+            gen.addFileArg(b.path("test/integration/java_union_lifecycle/lifecycle.idl"));
+            const compile = javaCommand(b, &.{ javac.?, "-Xlint:unchecked", "-Werror", "-d" }, java_cdr);
+            const classes = compile.addOutputDirectoryArg("classes");
+            if (!split) compile.addFileArg(dir.path(b, "Lifecycle.java")) else {
+                if (codecs) compile.addFileArg(dir.path(b, "LifecycleCdrUtils.java"));
+                for ([_][]const u8{ "Kind", "Leaf", "EnumValue", "DefaultValue", "LeafDefault", "NoDefault", "BooleanFinal", "BooleanAppendable", "BooleanMutable", "WideValue", "ArrayValue", "EnumArray", "Recursive", "GenericArray", "Holder" }) |name| compile.addFileArg(dir.path(b, b.fmt("{s}.java", .{name})));
+            }
+            compile.addFileArg(b.path("test/integration/java_union_lifecycle/LifecycleTest.java"));
+            const run = javaCommand(b, &.{ java.?, "-cp" }, java_cdr);
+            run.addDirectoryArg(classes);
+            run.addArg("LifecycleTest");
+            run.addArg(if (!split) "Lifecycle$Life$" else if (packaged) "lifecycle." else "");
+            run.addArg(if (codecs) "true" else "false");
+            step.dependOn(&run.step);
+        };
+    }
+
+    {
+        const step = b.step("test-native-boolean-union", "Check warning-clean boolean union dispatch and lifecycle");
+        test_step.dependOn(step);
+        const dir = "test/integration/native_boolean_union/";
+        for (0..6) |mode| {
+            const cpp = mode % 3 != 0;
+            const pmr = mode % 3 == 2;
+            const split = mode >= 3;
+            const gen = b.addRunArtifact(exe);
+            gen.addArgs(&.{ "-b", if (cpp) "cpp" else "c" });
+            if (pmr) gen.addArg("--cpp-pmr-containers");
+            if (split) gen.addArg("--split-files");
+            gen.addArg("-o");
+            const out = gen.addOutputDirectoryArg(b.fmt("native-boolean-union-{d}", .{mode}));
+            gen.addFileArg(b.path(dir ++ "bools.idl"));
+            const m = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = cpp });
+            const flags: []const []const u8 = if (cpp) (if (split) &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror", "-DSPLIT" } else &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" }) else (if (split) &.{ "-std=c99", "-Wall", "-Wextra", "-Werror", "-DSPLIT" } else &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" });
+            m.addCSourceFile(.{ .file = b.path(if (cpp) dir ++ "test.cpp" else dir ++ "test.c"), .flags = flags });
+            if (split) {
+                for ([_][]const u8{ "FinalValue", "AppendValue", "MutableValue", "Exhaustive" }) |name| m.addCSourceFile(.{ .file = out.path(b, b.fmt("BoolSafety_{s}_cdr.{s}", .{ name, if (cpp) "cpp" else "c" })), .flags = flags });
+            } else m.addCSourceFile(.{ .file = out.path(b, if (cpp) "bools_cdr.cpp" else "bools_cdr.c"), .flags = flags });
+            m.addIncludePath(out);
+            m.addIncludePath(b.path("packages/zidl-cdr/include"));
+            linkCdr(m, cdr_library);
+            const app = b.addExecutable(.{ .name = b.fmt("boolean-union-{d}", .{mode}), .root_module = m });
+            step.dependOn(&b.addRunArtifact(app).step);
+        }
+    }
+
     // STL storage failures must stay inside generated C++ codec entry points.
     {
         const allocation_step = b.step("test-cpp-codec-allocation", "Inject C++ codec allocation failures");
@@ -1036,6 +1123,69 @@ pub fn build(b: *std.Build) void {
             const app = b.addExecutable(.{ .name = if (pmr) "optional-arrays-pmr" else "optional-arrays-stl", .root_module = consumer });
             array_step.dependOn(&b.addRunArtifact(app).step);
         }
+    }
+
+    {
+        const admission_step = b.step("test-native-union-admission", "Check native mutable union member admission and ownership");
+        test_step.dependOn(admission_step);
+        const gen = b.addRunArtifact(exe);
+        gen.addArgs(&.{ "-b", "c", "-o" });
+        const generated = gen.addOutputDirectoryArg("union-admission-c");
+        gen.addFileArg(b.path("test/integration/native_union_admission/shapes.idl"));
+        const consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true });
+        const flags = &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" };
+        consumer.addCSourceFile(.{ .file = b.path("test/integration/native_union_admission/test.c"), .flags = flags });
+        consumer.addCSourceFile(.{ .file = generated.path(b, "shapes_cdr.c"), .flags = flags });
+        consumer.addIncludePath(generated);
+        consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
+        linkCdr(consumer, cdr_library);
+        const app = b.addExecutable(.{ .name = "union-admission-c", .root_module = consumer });
+        admission_step.dependOn(&b.addRunArtifact(app).step);
+        for ([_]bool{ false, true }) |pmr| {
+            const cpp_gen = b.addRunArtifact(exe);
+            cpp_gen.addArgs(&.{ "-b", "cpp" });
+            if (pmr) cpp_gen.addArg("--cpp-pmr-containers");
+            cpp_gen.addArg("-o");
+            const dir = cpp_gen.addOutputDirectoryArg(if (pmr) "union-admission-pmr" else "union-admission-stl");
+            cpp_gen.addFileArg(b.path("test/integration/native_union_admission/shapes.idl"));
+            const cpp_consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = true });
+            const cpp_flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" };
+            cpp_consumer.addCSourceFile(.{ .file = b.path("test/integration/native_union_admission/test.cpp"), .flags = cpp_flags });
+            cpp_consumer.addCSourceFile(.{ .file = dir.path(b, "shapes_cdr.cpp"), .flags = cpp_flags });
+            cpp_consumer.addIncludePath(dir);
+            cpp_consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
+            linkCdr(cpp_consumer, allocation_cdr_library);
+            const cpp_app = b.addExecutable(.{ .name = if (pmr) "union-admission-pmr" else "union-admission-stl", .root_module = cpp_consumer });
+            admission_step.dependOn(&b.addRunArtifact(cpp_app).step);
+        }
+    }
+
+    {
+        const step = b.step("test-java-union-admission", "Check Java mutable union admission in all output modes");
+        test_step.dependOn(step);
+        const javac = b.findProgram(.{ .names = &.{"javac"} });
+        const java = b.findProgram(.{ .names = &.{"java"} });
+        if (javac != null and java != null) for (0..3) |mode| {
+            const gen = b.addRunArtifact(exe);
+            gen.addArgs(&.{ "-b", "java" });
+            if (mode != 0) gen.addArg("--split-files");
+            if (mode == 1) gen.addArgs(&.{ "--java-package", "admission" });
+            gen.addArg("-o");
+            const dir = gen.addOutputDirectoryArg(b.fmt("union-admission-java-{d}", .{mode}));
+            gen.addFileArg(b.path("test/integration/native_union_admission/java_shapes.idl"));
+            const compile = javaCommand(b, &.{ javac.?, "-Xlint:unchecked", "-Werror", "-d" }, java_cdr);
+            const classes = compile.addOutputDirectoryArg("classes");
+            if (mode == 0) compile.addFileArg(dir.path(b, "Java_shapes.java")) else {
+                compile.addFileArg(dir.path(b, "Java_shapesCdrUtils.java"));
+                for ([_][]const u8{ "Value", "DefaultFirst", "Tag", "EnumValue", "NoDefault", "BooleanValue", "LongValue", "SmallTag", "SmallValue" }) |name| compile.addFileArg(dir.path(b, b.fmt("{s}.java", .{name})));
+            }
+            compile.addFileArg(b.path("test/integration/native_union_admission/AdmissionTest.java"));
+            const run = javaCommand(b, &.{ java.?, "-cp" }, java_cdr);
+            run.addDirectoryArg(classes);
+            run.addArg("AdmissionTest");
+            run.addArg(if (mode == 0) "Java_shapes$Admission$" else if (mode == 1) "admission." else "");
+            step.dependOn(&run.step);
+        };
     }
 
     // ── XCDR known-answer checks ──────────────────────────────────────────────

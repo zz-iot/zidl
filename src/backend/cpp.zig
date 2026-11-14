@@ -2899,20 +2899,20 @@ const CdrGenerator = struct {
             try self.writeI("_rc = zidl_cdr_reserve_dheader(_w, &_dh);\n");
             try self.writeI("if (_rc) return _rc;\n");
             if (lcForCppTypeRef(u.discriminant, &.{})) |lc| {
-                try self.printI("_rc = zidl_cdr_write_emheader(_w, 0, 0, {d});\n", .{lc});
+                try self.printI("_rc = zidl_cdr_write_emheader(_w, 0, 1, {d});\n", .{lc});
                 try self.writeI("if (_rc) return _rc;\n");
                 try self.emitDiscWriteCpp(u.discriminant, "_v->_d()");
             } else {
                 try self.writeI("{ size_t _em_d = 0, _es_d = 0;\n");
                 self.indent_depth += 1;
-                try self.writeI("_rc = zidl_cdr_reserve_emheader(_w, 0, 0, &_em_d);\n");
+                try self.writeI("_rc = zidl_cdr_reserve_emheader(_w, 0, 1, &_em_d);\n");
                 try self.writeI("if (_rc) return _rc;\n");
                 try self.writeI("_es_d = _w->len;\n");
                 try self.emitDiscWriteCpp(u.discriminant, "_v->_d()");
                 try self.writeI("_rc = zidl_cdr_patch_emheader_checked(_w, _em_d, _es_d); if (_rc) return _rc; }\n");
                 self.indent_depth -= 1;
             }
-            try self.writeI("switch (_v->_d()) {\n");
+            try self.printI("switch ({s}_v->_d()) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
             self.indent_depth += 1;
             var has_default_m = false;
             for (u.cases, 0..) |cas, cas_idx| {
@@ -2971,7 +2971,7 @@ const CdrGenerator = struct {
             }
             // Write discriminant via getter _v->_d()
             try self.emitDiscWriteCpp(u.discriminant, "_v->_d()");
-            try self.writeI("switch (_v->_d()) {\n");
+            try self.printI("switch ({s}_v->_d()) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
             self.indent_depth += 1;
             var has_default = false;
             for (u.cases) |cas| {
@@ -3015,74 +3015,48 @@ const CdrGenerator = struct {
             try cdr_skip.emitReadFunction(self, name, cpp_qname, false, if (mutable) "1" else if (appendable) "_r->xcdr_version == ZIDL_XCDR2" else "0");
         }
         if (mutable) {
-            try self.writeI("int _rc;\n");
-            try self.writeI("size_t _em_end;\n");
-            try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_em_end);\n");
-            try self.writeI("if (_rc) return _rc;\n");
+            try self.printI("{s} _candidate{{}}; auto *_destination=_v;\n", .{cpp_qname});
+            try self.writeI("{ auto *_v=&_candidate; int _rc; bool _seen_disc=false, _seen_value=false; decltype(_v->_d()) _disc{};\nsize_t _em_end; _rc=zidl_cdr_read_mutable_dheader(_r,&_em_end); if (_rc) return _rc;\n");
             try cdr_skip.limitReader(self, "_em_end");
-            try self.writeI("for (size_t _frame_limit = _r->data_len, _member_end = _r->pos; zidl_cdr_mutable_has_more(_r, _em_end); _r->pos = _member_end, _r->data_len = _frame_limit) {\n");
+            try self.writeI("for (size_t _frame_limit=_r->data_len, _member_end=_r->pos; zidl_cdr_mutable_has_more(_r,_em_end); _r->pos=_member_end, _r->data_len=_frame_limit) {\n");
             self.indent_depth += 1;
-            try self.writeI("ZidlEmHeader _emh;\n");
-            try self.writeI("_rc = zidl_cdr_read_emheader(_r, &_emh);\n");
-            try self.writeI("if (_rc) return _rc;\n");
+            try self.writeI("ZidlEmHeader _emh; _rc=zidl_cdr_read_emheader(_r,&_emh); if (_rc) return _rc;\n");
             try cdr_skip.memberWindow(self);
-            try self.writeI("if (_emh.member_id == 0) {\n");
-            self.indent_depth += 1;
-            try self.emitDiscReadCpp(u.discriminant, "_v");
-            self.indent_depth -= 1;
-            try self.writeI("} else {\n");
-            self.indent_depth += 1;
-            try self.writeI("switch (_v->_d()) {\n");
-            self.indent_depth += 1;
-            var has_default_d = false;
-            for (u.cases) |cas| {
-                if (isDefaultUnionCase(cas)) has_default_d = true;
-                try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
-                // A case body scope of its own: a bare `_tmp_*` declaration
-                // directly under the case label would make this an ill-formed
-                // "jump to case label" once there's more than one case (later
-                // labels jump past this one's initialization).
-                try self.writeI("{\n");
-                self.indent_depth += 1;
+            try self.writeI("switch (_emh.member_id) {\ncase 0: {\nif (_seen_disc) return ZIDL_CDR_INVALID;\n");
+            try self.emitDiscReadLocalCpp(u.discriminant, "_incoming");
+            try self.writeI("_disc=_incoming; _seen_disc=true;\nif (_r->pos != _member_end) return ZIDL_CDR_INVALID;\nbreak; }\n");
+            for (u.cases, 0..) |cas, idx| {
+                try self.printI("case {d}: {{\n", .{cas.annotations.memberId(@intCast(idx + 1))});
+                try self.printI("if (!_seen_disc || _seen_value) return ZIDL_CDR_INVALID;\nswitch ({s}_disc) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
+                if (isDefaultUnionCase(cas)) {
+                    for (u.cases) |other| {
+                        if (isDefaultUnionCase(other)) continue;
+                        try self.emitUnionCaseLabelLinesCpp(u.discriminant, other);
+                        try self.writeI("return ZIDL_CDR_INVALID;\n");
+                    }
+                    try self.writeI("default: break;\n");
+                } else {
+                    try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
+                    try self.writeI("break;\ndefault: return ZIDL_CDR_INVALID;\n");
+                }
+                try self.writeI("}\n_v->_d(_disc);\n");
+                const cpp_type = try cppTypeStr(self.alloc, self.opts, cas.type_ref);
+                defer self.alloc.free(cpp_type);
                 if (cas.dimensions.len > 0) {
-                    const cpp_type = try cppTypeStr(self.alloc, self.opts, cas.type_ref);
-                    defer self.alloc.free(cpp_type);
                     const dims_str = try cArrayDimsStr(self.alloc, cas.dimensions);
                     defer self.alloc.free(dims_str);
-                    const tmp_name = try std.fmt.allocPrint(self.alloc, "_tmp_{s}", .{cas.name});
-                    defer self.alloc.free(tmp_name);
-                    try self.printI("{s} {s}{s}{{}};\n", .{ cpp_type, tmp_name, dims_str });
-                    try self.emitReadArray(cas.type_ref, cas.name, tmp_name, cas.dimensions, 0);
-                    try self.printI("_v->{s}({s});\n", .{ cas.name, tmp_name });
+                    try self.printI("{s} _tmp{s}{{}};\n", .{ cpp_type, dims_str });
+                    try self.emitReadArray(cas.type_ref, cas.name, "_tmp", cas.dimensions, 0);
                 } else {
-                    const cpp_type = try cppTypeStr(self.alloc, self.opts, cas.type_ref);
-                    defer self.alloc.free(cpp_type);
-                    const tmp_name = try std.fmt.allocPrint(self.alloc, "_tmp_{s}", .{cas.name});
-                    defer self.alloc.free(tmp_name);
-                    try self.printI("{s} {s}{{}};\n", .{ cpp_type, tmp_name });
-                    try self.emitReadForTypeRef(cas.type_ref, cas.name, tmp_name);
-                    try self.printI("_v->{s}({s});\n", .{ cas.name, tmp_name });
+                    try self.printI("{s} _tmp{{}};\n", .{cpp_type});
+                    try self.emitReadForTypeRef(cas.type_ref, cas.name, "_tmp");
                 }
-                try self.writeI("break;\n");
-                self.indent_depth -= 1;
-                try self.writeI("}\n");
+                try self.printI("_v->{s}(_tmp);\n", .{cas.name});
+                try self.writeI("_seen_value=true;\nif (_r->pos != _member_end) return ZIDL_CDR_INVALID;\nbreak; }\n");
             }
-            if (!has_default_d) {
-                try self.writeI("default:\n");
-                self.indent_depth += 1;
-                try self.writeI("if (_emh.must_understand) return ZIDL_CDR_INVALID;\n");
-                try self.writeI("_rc = zidl_cdr_skip_emheader_payload(_r, &_emh);\n");
-                try self.writeI("if (_rc) return _rc;\n");
-                try self.writeI("break;\n");
-                self.indent_depth -= 1;
-            }
+            try self.writeI("default:\nif (_emh.must_understand) return ZIDL_CDR_INVALID;\n_rc=zidl_cdr_skip_emheader_payload(_r,&_emh); if (_rc) return _rc;\nbreak;\n}\n");
             self.indent_depth -= 1;
-            try self.writeI("}\n"); // switch
-            self.indent_depth -= 1;
-            try self.writeI("}\n"); // if member_id==0 else
-            self.indent_depth -= 1;
-            try self.writeI("}\n"); // while
-            try self.writeI("return ZIDL_CDR_OK;\n");
+            try self.writeI("}\nif (!_seen_disc) return ZIDL_CDR_INVALID;\nif (!_seen_value) _v->_d(_disc);\n}\n*_destination=std::move(_candidate);\nreturn ZIDL_CDR_OK;\n");
             try self.write("}\n\n");
         } else {
             try self.writeI("int _rc;\n");
@@ -3098,7 +3072,7 @@ const CdrGenerator = struct {
             }
             // Read discriminant into temp then set via setter
             try self.emitDiscReadCpp(u.discriminant, "_v");
-            try self.writeI("switch (_v->_d()) {\n");
+            try self.printI("switch ({s}_v->_d()) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
             self.indent_depth += 1;
             var has_default = false;
             for (u.cases) |cas| {
@@ -3169,7 +3143,7 @@ const CdrGenerator = struct {
                 try self.writeI("}\n");
             }
             try self.emitDiscReadLocalCpp(u.discriminant, "_d");
-            try self.writeI("switch (_d) {\n");
+            try self.printI("switch ({s}_d) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
             self.indent_depth += 1;
             var has_default_s = false;
             for (u.cases) |cas| {
@@ -3419,7 +3393,7 @@ const CdrGenerator = struct {
 
     fn emitUnionDestroyActive(self: *CdrGenerator, u: *const ir.Union, cpp_qname: []const u8) anyerror!void {
         try self.print("void {s}::_destroy_active() noexcept {{\n", .{cpp_qname});
-        try self.writeI("switch (_disc) {\n");
+        try self.printI("switch ({s}_disc) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
         self.indent_depth += 1;
         for (u.cases) |cas| {
             try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
@@ -3435,7 +3409,7 @@ const CdrGenerator = struct {
 
     fn emitUnionConstructDefault(self: *CdrGenerator, u: *const ir.Union, cpp_qname: []const u8) anyerror!void {
         try self.print("void {s}::_construct_default() {{\n", .{cpp_qname});
-        try self.writeI("switch (_disc) {\n");
+        try self.printI("switch ({s}_disc) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
         self.indent_depth += 1;
         for (u.cases) |cas| {
             try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
@@ -3451,7 +3425,7 @@ const CdrGenerator = struct {
 
     fn emitUnionCopyConstructFrom(self: *CdrGenerator, u: *const ir.Union, cpp_qname: []const u8) anyerror!void {
         try self.print("void {s}::_copy_construct_from(const {s} &other) {{\n", .{ cpp_qname, cpp_qname });
-        try self.writeI("switch (other._disc) {\n");
+        try self.printI("switch ({s}other._disc) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
         self.indent_depth += 1;
         for (u.cases) |cas| {
             try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
@@ -3482,7 +3456,7 @@ const CdrGenerator = struct {
     /// in `emitUnionLifecycleFns` for why: unlike a copy, this can't throw.
     fn emitUnionMoveConstructFrom(self: *CdrGenerator, u: *const ir.Union, cpp_qname: []const u8) anyerror!void {
         try self.print("void {s}::_move_construct_from({s} &other) {{\n", .{ cpp_qname, cpp_qname });
-        try self.writeI("switch (other._disc) {\n");
+        try self.printI("switch ({s}other._disc) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
         self.indent_depth += 1;
         for (u.cases) |cas| {
             try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);

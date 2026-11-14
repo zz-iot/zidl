@@ -184,7 +184,7 @@ pub fn generateSplitFiles(
             .{opts.input_stem},
         );
         try gen.write("const std = @import(\"std\");\n");
-        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_authoring or opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(m.items)) {
+        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_authoring or opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(m.items) or gen.itemsNeedLifecycleRuntime(m.items)) {
             try gen.write("const zidl_cdr = @import(\"zidl_cdr\");\nconst zidl_bindings = @import(\"zidl_bindings\");\n");
         }
         if (opts.generate_zzdds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(m.items)) {
@@ -240,7 +240,7 @@ pub fn generateSplitFiles(
     if (non_module.items.len > 0) {
         if (module_names.items.len > 0) try gen.write("\n");
         try gen.write("const std = @import(\"std\");\n");
-        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_authoring or opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(non_module.items)) {
+        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_authoring or opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(non_module.items) or gen.itemsNeedLifecycleRuntime(non_module.items)) {
             try gen.write("const zidl_cdr = @import(\"zidl_cdr\");\nconst zidl_bindings = @import(\"zidl_bindings\");\n");
         }
         if (opts.generate_zzdds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(non_module.items)) {
@@ -322,6 +322,20 @@ const Generator = struct {
         while (i < self.depth) : (i += 1) try self.write("    ");
     }
 
+    fn itemsNeedLifecycleRuntime(self: *Generator, items: []const ir.ModuleItem) bool {
+        for (items) |item| switch (item) {
+            .module => |m| if (self.itemsNeedLifecycleRuntime(m.items)) return true,
+            .type_decl => |td| switch (td) {
+                .struct_ => |v| if (self.structNeedsCleanup(v)) return true,
+                .union_ => |v| if (self.unionNeedsCleanup(v)) return true,
+                .typedef => |v| if (self.typeOwnsHeap(v.type_ref)) return true,
+                else => {},
+            },
+            else => {},
+        };
+        return false;
+    }
+
     // ── Top-level file emission ───────────────────────────────────────────────
 
     fn emitFile(self: *Generator, spec: *const ir.Spec) !void {
@@ -333,7 +347,7 @@ const Generator = struct {
             try self.print("// Zig output target: {s}\n\n", .{self.opts.zig_version.label()});
         }
         try self.write("const std = @import(\"std\");\n");
-        if (!self.opts.no_typesupport or self.opts.pl_cdr or self.opts.zig_generate_authoring or self.opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(spec.items)) {
+        if (!self.opts.no_typesupport or self.opts.pl_cdr or self.opts.zig_generate_authoring or self.opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(spec.items) or self.itemsNeedLifecycleRuntime(spec.items)) {
             try self.write("const zidl_cdr = @import(\"zidl_cdr\");\nconst zidl_bindings = @import(\"zidl_bindings\");\n");
         }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveTopicTypes(spec.items)) {
@@ -578,7 +592,21 @@ const Generator = struct {
             }
         }
         try self.ind();
-        try self.write("    } = undefined,\n");
+        try self.print("    }} = switch (@as({s}, {s})) {{\n", .{ disc_zig, disc_default });
+        var has_default = false;
+        for (u.cases) |cas| {
+            if (isDefaultUnionCase(cas)) {
+                has_default = true;
+                try self.write("        else");
+            } else {
+                try self.emitZigUnionCaseArmPattern(u.discriminant, cas, "        ");
+            }
+            const initial = try self.defaultForArrayRef(cas.type_ref, cas.dimensions);
+            defer self.alloc.free(initial);
+            try self.print(" => .{{ .{s} = {s} }},\n", .{ cas.name, initial });
+        }
+        if (!has_default and !unionLabelsExhaustive(u)) try self.write("        else => undefined,\n");
+        try self.write("    },\n");
 
         if (!self.opts.no_typesupport) {
             try self.emitUnionCdr(u);
@@ -649,13 +677,15 @@ const Generator = struct {
         try self.ind();
         try self.write("    pub const has_key = false;\n");
 
-        // Find default case (shared by serialize + deserialize)
-        const default_case: ?ir.UnionCase = blk: {
-            for (u.cases) |cas| {
-                if (isDefaultUnionCase(cas)) break :blk cas;
+        // Preserve the declaration index for the unresolved-IR fallback too;
+        // a default label has the same member identity rules as any other arm.
+        const default_case_index: ?usize = blk: {
+            for (u.cases, 0..) |cas, idx| {
+                if (isDefaultUnionCase(cas)) break :blk idx;
             }
             break :blk null;
         };
+        const default_case: ?ir.UnionCase = if (default_case_index) |idx| u.cases[idx] else null;
 
         try self.emitCanonicalUnion(u, default_case);
 
@@ -672,11 +702,11 @@ const Generator = struct {
             const disc_lc = lcForTypeRef(u.discriminant, &.{});
             if (disc_lc) |lc| {
                 try self.ind();
-                try self.print("        try writer.writeEmheaderFixed(0, false, {d});\n", .{lc});
+                try self.print("        try writer.writeEmheaderFixed(0, true, {d});\n", .{lc});
                 try self.emitDiscWriteZig(u.discriminant, "value._d", "        ");
             } else {
                 try self.ind();
-                try self.write("        const _em_disc = try writer.reserveEmheader(0, false);\n");
+                try self.write("        const _em_disc = try writer.reserveEmheader(0, true);\n");
                 try self.emitDiscWriteZig(u.discriminant, "value._d", "        ");
                 try self.ind();
                 try self.write("        try writer.patchEmheaderChecked(_em_disc);\n");
@@ -714,7 +744,7 @@ const Generator = struct {
                 try self.write("            },\n");
             }
             if (default_case) |dc| {
-                const dc_member_id: u32 = dc.annotations.memberId(0xFFFF_FFFF);
+                const dc_member_id: u32 = dc.annotations.memberId(@intCast(default_case_index.? + 1));
                 const dc_access = try std.fmt.allocPrint(self.alloc, "value._u.{s}", .{dc.name});
                 defer self.alloc.free(dc_access);
                 try self.ind();
@@ -740,7 +770,7 @@ const Generator = struct {
                 }
                 try self.ind();
                 try self.write("            },\n");
-            } else {
+            } else if (!unionLabelsExhaustive(u)) {
                 try self.ind();
                 try self.write("            else => {},\n");
             }
@@ -788,7 +818,7 @@ const Generator = struct {
                 }
                 try self.ind();
                 try self.write("            },\n");
-            } else {
+            } else if (!unionLabelsExhaustive(u)) {
                 try self.ind();
                 try self.write("            else => {},\n");
             }
@@ -862,17 +892,14 @@ const Generator = struct {
         defer self.alloc.free(disc_zig);
 
         if (mutable) {
-            // @mutable union: read DHEADER, then EMHEADER loop.
-            // Convention: member_id=0 is the discriminant; subsequent IDs are case values.
-            // `_d` starts at the same default `out._d` itself would (not
-            // `undefined`): a case-value EMHEADER arriving before the
-            // discriminant one is a pre-existing, well-defined (if
-            // semantically wrong) edge case switching on that default,
-            // which must stay well-defined now that `_d` is a local.
+            // A mutable union's discriminator precedes its selected payload
+            // (XTypes 1.3 section 7.4.1.2.3). Dispatch payloads by member ID;
+            // unknown parameters are never interpreted as the selected arm.
             const disc_default = try self.defaultForTypeRef(u.discriminant);
             defer self.alloc.free(disc_default);
             try self.ind();
             try self.print("        var _d: {s} = {s};\n", .{ disc_zig, disc_default });
+            try self.write("        var _saw_disc = false;\n        var _saw_case = false;\n");
             try self.ind();
             try self.write("        const _em_end = try reader.readMutableDheader();\n");
             try self.emitReaderWindow("        ", "@as(?usize, _em_end)");
@@ -882,65 +909,54 @@ const Generator = struct {
             try self.write("            const _emh = try reader.readEmheader();\n");
             try self.emitReaderWindow("            ", "@as(?usize, try reader.emheaderEnd(_emh))");
             try self.ind();
-            try self.write("            if (_emh.member_id == 0) {\n");
-            // Discriminant
-            try self.emitDiscReadZig(u.discriminant, "_d", "                ");
-            try self.ind();
-            try self.write("            } else {\n");
-            // Case values: switch on the already-read discriminant
-            try self.ind();
-            try self.write("                switch (_d) {\n");
+            try self.write("            switch (_emh.member_id) {\n                0 => {\n                    if (_saw_disc) return error.DuplicateMember;\n");
+            try self.emitDiscReadZig(u.discriminant, "_d", "                    ");
+            try self.write("                    _saw_disc = true;\n                    if (reader.pos != reader.data.len) return error.InvalidMemberLength;\n                },\n");
             for (u.cases, 0..) |cas, cas_idx| {
+                try self.ind();
+                try self.print("                {d} => {{\n", .{cas.annotations.memberId(@intCast(cas_idx + 1))});
+                try self.write("                    if (!_saw_disc) return error.InvalidUnionOrder;\n                    if (_saw_case) return error.DuplicateMember;\n                    switch (_d) {\n");
+                if (isDefaultUnionCase(cas)) {
+                    // Explicit discriminant labels cannot select the default.
+                    for (u.cases) |other| {
+                        if (isDefaultUnionCase(other)) continue;
+                        try self.emitZigUnionCaseArmPattern(u.discriminant, other, "                        ");
+                        try self.write(" => return error.InvalidUnionMember,\n");
+                    }
+                    try self.write("                        else => {},\n");
+                } else {
+                    try self.emitZigUnionCaseArmPattern(u.discriminant, cas, "                        ");
+                    try self.write(" => {},\n");
+                    if (!booleanLabelsExhaustive(u.discriminant, &.{cas})) try self.write("                        else => return error.InvalidUnionMember,\n");
+                }
+                try self.write("                    }\n");
+                try self.emitUnionCaseDeserializeAssign("out", cas, "                    ");
+                try self.ind();
+                try self.write("                    out._d = _d;\n                    _saw_case = true;\n");
+                if (union_has_deinit) {
+                    try self.ind();
+                    try self.write("                    _published = true;\n");
+                }
+                try self.write("                    if (reader.pos != reader.data.len) return error.InvalidMemberLength;\n                },\n");
+            }
+            try self.ind();
+            try self.write("                else => {\n                    if (_emh.must_understand) return error.UnknownMustUnderstand;\n                    try reader.skipEmheaderPayload(_emh);\n                },\n            }\n        }\n        if (!_saw_disc) return error.MissingDiscriminator;\n        if (!_saw_case) {\n            switch (_d) {\n");
+            for (u.cases) |cas| {
                 if (isDefaultUnionCase(cas)) continue;
-                try self.emitZigUnionCaseArmPattern(u.discriminant, cas, "                    ");
+                try self.emitZigUnionCaseArmPattern(u.discriminant, cas, "                ");
                 try self.write(" => {\n");
-                try self.emitUnionCaseDeserializeAssign("out", cas, "                        ");
-                try self.ind();
-                try self.write("                        out._d = _d;\n");
-                if (union_has_deinit) {
-                    try self.ind();
-                    try self.write("                        _published = true;\n");
-                }
-                _ = cas_idx;
-                try self.ind();
-                try self.write("                    },\n");
+                const initial = try self.defaultForArrayRef(cas.type_ref, cas.dimensions);
+                defer self.alloc.free(initial);
+                try self.print("                    out._u = .{{ .{s} = {s} }}; out._d = _d;\n                }},\n", .{ cas.name, initial });
             }
-            if (default_case) |dc| {
-                try self.ind();
-                try self.write("                    else => {\n");
-                try self.emitUnionCaseDeserializeAssign("out", dc, "                        ");
-                try self.ind();
-                try self.write("                        out._d = _d;\n");
-                if (union_has_deinit) {
-                    try self.ind();
-                    try self.write("                        _published = true;\n");
-                }
-                try self.ind();
-                try self.write("                    },\n");
-            } else {
-                try self.ind();
-                try self.write("                    else => {\n");
-                try self.ind();
-                try self.write("                        if (_emh.must_understand) return error.UnknownMustUnderstand;\n");
-                try self.ind();
-                try self.write("                        try reader.skipEmheaderPayload(_emh);\n");
-                try self.ind();
-                try self.write("                    },\n");
+            if (default_case) |cas| {
+                const initial = try self.defaultForArrayRef(cas.type_ref, cas.dimensions);
+                defer self.alloc.free(initial);
+                try self.print("                else => {{ out._u = .{{ .{s} = {s} }}; out._d = _d; }},\n", .{ cas.name, initial });
+            } else if (!unionLabelsExhaustive(u)) {
+                try self.write("                else => out._d = _d,\n");
             }
-            try self.ind();
-            try self.write("                }\n");
-            try self.ind();
-            try self.write("            }\n");
-            try self.ind();
-            try self.write("        }\n");
-            // No unconditional `out._d = _d;` here (unlike the @final/XCDR2
-            // branch below): each case arm above already committed `out._d`
-            // atomically with `out._u`. A message carrying only a
-            // discriminant EMHEADER with no matching case-value EMHEADER
-            // (spec-non-compliant -- `serialize` always emits both) would
-            // otherwise commit a new `out._d` with no corresponding `out._u`
-            // payload ever having been published, reintroducing the same
-            // undefined-payload hazard this whole scheme exists to avoid.
+            try self.write("            }\n        }\n");
         } else {
             if (appendable) {
                 try self.emitReaderWindow("        ", "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
@@ -976,7 +992,7 @@ const Generator = struct {
                 }
                 try self.ind();
                 try self.write("            },\n");
-            } else {
+            } else if (!unionLabelsExhaustive(u)) {
                 try self.ind();
                 try self.write("            else => {},\n");
             }
@@ -1037,7 +1053,7 @@ const Generator = struct {
                 }
                 try self.ind();
                 try self.write("            },\n");
-            } else {
+            } else if (!unionLabelsExhaustive(u)) {
                 try self.ind();
                 try self.write("            else => {},\n");
             }
@@ -1050,7 +1066,7 @@ const Generator = struct {
 
     /// Emit the discriminant write statement for Zig.
     fn emitDiscWriteZig(self: *Generator, disc: ir.TypeRef, access: []const u8, extra: []const u8) anyerror!void {
-        switch (disc) {
+        switch (resolveAlias(disc)) {
             .base => |b| {
                 const method = baseWriteMethod(b);
                 try self.ind();
@@ -1090,7 +1106,7 @@ const Generator = struct {
 
     /// Emit the discriminant read statement for Zig.
     fn emitDiscReadZig(self: *Generator, disc: ir.TypeRef, out_expr: []const u8, extra: []const u8) anyerror!void {
-        switch (disc) {
+        switch (resolveAlias(disc)) {
             .base => |b| {
                 const method = baseReadMethod(b);
                 try self.ind();
@@ -1185,17 +1201,19 @@ const Generator = struct {
             try self.ind();
             try self.write("            },\n");
         }
-        try self.ind();
-        try self.write("            else => {\n");
-        if (default_case) |dc| {
-            if (self.caseNeedsCleanup(dc)) {
-                const field_name = try std.fmt.allocPrint(self.alloc, "_u.{s}", .{dc.name});
-                defer self.alloc.free(field_name);
-                try self.emitFieldSeqDeinit(field_name, dc.type_ref, dc.dimensions, "                ");
+        if (default_case != null or !unionLabelsExhaustive(u)) {
+            try self.ind();
+            try self.write("            else => {\n");
+            if (default_case) |dc| {
+                if (self.caseNeedsCleanup(dc)) {
+                    const field_name = try std.fmt.allocPrint(self.alloc, "_u.{s}", .{dc.name});
+                    defer self.alloc.free(field_name);
+                    try self.emitFieldSeqDeinit(field_name, dc.type_ref, dc.dimensions, "                ");
+                }
             }
+            try self.ind();
+            try self.write("            },\n");
         }
-        try self.ind();
-        try self.write("            },\n");
         try self.ind();
         try self.write("        }\n");
         try self.ind();
@@ -1234,18 +1252,20 @@ const Generator = struct {
             try self.ind();
             try self.write("            },\n");
         }
-        try self.ind();
-        try self.write("            else => {\n");
-        if (default_case) |dc| {
-            if (self.caseNeedsCleanup(dc)) {
-                const field_name = try std.fmt.allocPrint(self.alloc, "_u.{s}", .{dc.name});
-                defer self.alloc.free(field_name);
-                try self.emitFieldSeqCloneStmt(field_name, dc.type_ref, dc.dimensions, "                ");
-                try self.emitFieldSeqCloneErrdefer(field_name, dc.type_ref, dc.dimensions, "                ");
+        if (default_case != null or !unionLabelsExhaustive(u)) {
+            try self.ind();
+            try self.write("            else => {\n");
+            if (default_case) |dc| {
+                if (self.caseNeedsCleanup(dc)) {
+                    const field_name = try std.fmt.allocPrint(self.alloc, "_u.{s}", .{dc.name});
+                    defer self.alloc.free(field_name);
+                    try self.emitFieldSeqCloneStmt(field_name, dc.type_ref, dc.dimensions, "                ");
+                    try self.emitFieldSeqCloneErrdefer(field_name, dc.type_ref, dc.dimensions, "                ");
+                }
             }
+            try self.ind();
+            try self.write("            },\n");
         }
-        try self.ind();
-        try self.write("            },\n");
         try self.ind();
         try self.write("        }\n");
         try self.ind();
@@ -3499,7 +3519,7 @@ const Generator = struct {
         } else if (dims.len > 0) {
             const arr_type = try self.makeArrayType(zig_type, dims);
             defer self.alloc.free(arr_type);
-            const default = try self.defaultForArrayType(arr_type);
+            const default = try self.defaultForArrayRef(type_ref, dims);
             defer self.alloc.free(default);
             try self.print("    {s}: {s} = {s},\n", .{ name, arr_type, default });
         } else if (default_value) |dv| {
@@ -3524,7 +3544,9 @@ const Generator = struct {
         );
         defer self.alloc.free(child_ty);
         try self.ind();
-        try self.print("{s}var {s}: {s} = std.mem.zeroes({s});\n", .{ indent, opt_var, child_ty, child_ty });
+        const initial = try self.defaultForArrayRef(m.type_ref, m.dimensions);
+        defer self.alloc.free(initial);
+        try self.print("{s}var {s}: {s} = {s};\n", .{ indent, opt_var, child_ty, initial });
         if (self.typeOwnsHeap(m.type_ref)) {
             try self.ind();
             try self.print("{s}errdefer zidl_bindings.deinitOwned(&{s}, allocator);\n", .{ indent, opt_var });
@@ -3684,7 +3706,7 @@ const Generator = struct {
                 }
                 try self.ind();
                 try self.write("            },\n");
-            } else {
+            } else if (!unionLabelsExhaustive(u)) {
                 try self.ind();
                 try self.write("            else => {},\n");
             }
@@ -7185,7 +7207,7 @@ const Generator = struct {
             try self.alloc.dupe(u8, zig_type);
         defer self.alloc.free(decl_type);
         const default_val: []u8 = if (m.dimensions.len > 0)
-            try self.defaultForArrayType(decl_type)
+            try self.defaultForArrayRef(m.type_ref, m.dimensions)
         else
             try self.defaultForTypeRef(m.type_ref);
         defer self.alloc.free(default_val);
@@ -7569,11 +7591,7 @@ const Generator = struct {
                 .typedef => |t| blk: {
                     // Follow the chain: array typedefs need zeroes, scalar ones recurse.
                     if (t.dimensions.len > 0) {
-                        const elem = try self.typeRefToZig(t.type_ref);
-                        defer self.alloc.free(elem);
-                        const arr = try self.makeArrayType(elem, t.dimensions);
-                        defer self.alloc.free(arr);
-                        break :blk try self.defaultForArrayType(arr);
+                        break :blk try self.defaultForArrayRef(t.type_ref, t.dimensions);
                     } else {
                         break :blk try self.defaultForTypeRef(t.type_ref);
                     }
@@ -7586,8 +7604,17 @@ const Generator = struct {
         };
     }
 
-    fn defaultForArrayType(self: *Generator, arr_type: []const u8) ![]u8 {
-        return std.fmt.allocPrint(self.alloc, "std.mem.zeroes({s})", .{arr_type});
+    /// Construct each array element using its mapping default, preserving
+    /// nested union active fields and aggregate member initializers.
+    fn defaultForArrayRef(self: *Generator, tr: ir.TypeRef, dims: []const u64) anyerror![]u8 {
+        if (dims.len == 0) return self.defaultForTypeRef(tr);
+        const elem = try self.typeRefToZig(tr);
+        defer self.alloc.free(elem);
+        const inner_type = try self.makeArrayType(elem, dims[1..]);
+        defer self.alloc.free(inner_type);
+        const inner = try self.defaultForArrayRef(tr, dims[1..]);
+        defer self.alloc.free(inner);
+        return std.fmt.allocPrint(self.alloc, "@as([{d}]{s}, @splat(@as({s}, {s})))", .{ dims[0], inner_type, inner_type, inner });
     }
 
     // ── Array type builder ────────────────────────────────────────────────────
@@ -8471,7 +8498,7 @@ test "zig_backend: array field" {
     , "mat");
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "m: [2][4]i32 = std.mem.zeroes([2][4]i32),"));
+    try testing.expect(has(s, "m: [2][4]i32 = @as([2][4]i32, @splat(@as([4]i32, @as([4]i32, @splat(@as(i32, 0)))))),"));
 }
 
 test "zig_backend: optional field" {
@@ -8605,7 +8632,7 @@ test "zig_backend: union" {
     try testing.expect(has(s, "_u: union {"));
     try testing.expect(has(s, "i: i32,"));
     try testing.expect(has(s, "s: []const u8,"));
-    try testing.expect(has(s, "} = undefined,"));
+    try testing.expect(has(s, "} = switch (@as(i32, 0)) {"));
 }
 
 test "zig_backend: union CDR serialize/deserialize" {
@@ -11797,4 +11824,50 @@ test "strict authoring is opt-in without changing legacy TOML dependency behavio
     try testing.expect(has(strict.items, "const zidl_bindings"));
     try testing.expect(has(strict.items, "pub fn decodeToml"));
     try testing.expect(!has(strict.items, "_toml_applied"));
+}
+
+test "zig_backend: unresolved mutable default IDs use declaration indices" {
+    // Direct IR callers need the same fallback as explicit arms. The normal
+    // builder already resolves these IDs and would hide a bad fallback.
+    var cases = [_]ir.UnionCase{
+        .{ .name = "fallback", .span = undefined, .labels = &.{.default}, .type_ref = .{ .base = .long }, .dimensions = &.{}, .annotations = .{} },
+        .{ .name = "known", .span = undefined, .labels = &.{.{ .integer = 7 }}, .type_ref = .{ .string = null }, .dimensions = &.{}, .annotations = .{} },
+    };
+    var u = ir.Union{
+        .name = "Sample",
+        .qualified_name = "Sample",
+        .span = undefined,
+        .discriminant = .{ .base = .long },
+        .cases = &cases,
+        .annotations = .{ .extensibility = .mutable },
+    };
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    var gen = Generator{ .alloc = testing.allocator, .opts = .{ .input_stem = "sample" }, .out = &out };
+    try gen.emitUnionCdr(&u);
+    try testing.expect(has(out.items, "writeEmheaderFixed(1, false, 2)"));
+    try testing.expect(!has(out.items, "4294967295"));
+
+    std.mem.swap(ir.UnionCase, &cases[0], &cases[1]);
+    cases[0].labels = &.{.{ .integer = 7 }};
+    cases[1].labels = &.{.default};
+    cases[1].type_ref = .{ .string = null };
+    out.clearRetainingCapacity();
+    try gen.emitUnionCdr(&u);
+    try testing.expect(has(out.items, "reserveEmheader(2, false)"));
+    try testing.expect(!has(out.items, "4294967295"));
+}
+
+fn unionLabelsExhaustive(u: *const ir.Union) bool {
+    return booleanLabelsExhaustive(u.discriminant, u.cases);
+}
+
+fn booleanLabelsExhaustive(discriminant: ir.TypeRef, cases: []const ir.UnionCase) bool {
+    const disc = resolveAlias(discriminant);
+    if (disc != .base or disc.base != .boolean) return false;
+    var labels: u2 = 0;
+    for (cases) |cas| for (cas.labels) |label| {
+        if (label == .boolean) labels |= if (label.boolean) @as(u2, 2) else 1;
+    };
+    return labels == 3;
 }

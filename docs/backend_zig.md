@@ -306,6 +306,21 @@ pub const MyUnion = struct {
 }; // MyUnion
 ```
 
+For `@mutable` unions, XCDR2 serialization sets the discriminator's
+must-understand flag. `deserializeInto` dispatches by member ID and checks that
+known arm IDs agree with the discriminator. It rejects duplicate known members,
+known payloads before the discriminator, a missing discriminator and incorrect
+known-member lengths. Unknown non-must-understand parameters are skipped; unknown
+must-understand parameters fail. Previously decoded owning payloads are released
+if a later parameter fails validation.
+
+Fresh union values initialize the arm selected by their default discriminator.
+Nested aggregates and array elements use their mapping defaults, so owning values
+can be cloned, serialized and deinitialized immediately after `.{}` construction.
+If mutable type evolution omits a locally selected payload, decoding initializes
+that arm to its mapping default. A missing discriminator remains invalid.
+Generic skip traversal and XCDR1 mutable framing are separate contracts.
+
 ### Enum
 Non-exhaustive Zig enum (allows unknown wire values for DDS evolution):
 ```zig

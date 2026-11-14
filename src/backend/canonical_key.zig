@@ -293,7 +293,7 @@ pub fn emitCUnion(self: anytype, u: *const ir.Union, name: []const u8, value_typ
         defer self.canonical_key = old;
         try self.writeI("int _rc = ZIDL_CDR_OK;\n");
         if (cpp) try self.emitDiscWriteCpp(u.discriminant, "_v->_d()") else try self.emitDiscWriteC(u.discriminant, "_v->_d");
-        try self.writeI(if (cpp) "switch (_v->_d()) {\n" else "switch (_v->_d) {\n");
+        try self.printI(if (cpp) "switch ({s}_v->_d()) {{\n" else "switch ({s}_v->_d) {{\n", .{@import("cdr_skip.zig").unionSwitchPromotion(u.discriminant)});
         self.indent_depth += 1;
         var has_default = false;
         for (u.cases) |cas| {

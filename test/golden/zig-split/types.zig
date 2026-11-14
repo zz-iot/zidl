@@ -88,7 +88,7 @@ pub const Sample = struct {
     str: []const u8 = "",
     bstr: zidl_cdr.BoundedArray(u8, 32) = .{},
     nums: extern struct { _maximum: u32 = 0, _length: u32 = 0, _buffer: ?[*]i32 = null, _release: bool = false } = .{},
-    arr: [3]i32 = std.mem.zeroes([3]i32),
+    arr: [3]i32 = @as([3]i32, @splat(@as(i32, 0))),
     clr: Color = .RED,
     nested: Point = .{},
 
