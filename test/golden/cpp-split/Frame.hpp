@@ -23,6 +23,7 @@ int Frame_serialize(ZidlCdrWriter *_w, const ::Frame *_v);
 int Frame_serialize_key_holder(ZidlCdrWriter *_w, const ::Frame *_v);
 int Frame_serialize_key_value(ZidlCdrWriter *_w, const ::Frame *_v);
 int Frame_deserialize_key_value(ZidlCdrReader *_r, ::Frame *_v);
+int Frame_skip_key_value(ZidlCdrReader *_r);
 int Frame_deserialize(ZidlCdrReader *_r, ::Frame *_v);
 int Frame_skip(ZidlCdrReader *_r);
 

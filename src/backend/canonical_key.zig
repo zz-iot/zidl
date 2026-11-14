@@ -250,6 +250,7 @@ pub fn emitCUnion(self: anytype, u: *const ir.Union, name: []const u8, value_typ
             };
             if (cas.labels.len == 0) has_default = true;
             if (cpp) try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas) else try self.emitUnionCaseLabelLinesC(u.discriminant, cas);
+            if (cpp) try self.writeI("{\n");
             self.indent_depth += 1;
             const access = if (cpp)
                 (if (cas.dimensions.len != 0) try std.fmt.allocPrint(self.alloc, "_v->{s}()", .{cas.name}) else try self.emitUnionCaseSerializeAccess(cas))
@@ -261,6 +262,7 @@ pub fn emitCUnion(self: anytype, u: *const ir.Union, name: []const u8, value_typ
             } else try self.emitWriteForTypeRef(cas.type_ref, cas.name, access);
             try self.writeI("break;\n");
             self.indent_depth -= 1;
+            if (cpp) try self.writeI("}\n");
         }
         if (!has_default) try self.writeI("default: break;\n");
         self.indent_depth -= 1;

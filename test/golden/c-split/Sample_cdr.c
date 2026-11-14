@@ -176,6 +176,21 @@ static int Sample_deserialize_key_value_bounded_impl(ZidlCdrReader *_r, Sample *
     return ZIDL_CDR_OK;
 }
 
+static int Sample_skip_key_value_bounded_impl(ZidlCdrReader *_r);
+int Sample_skip_key_value(ZidlCdrReader *_r) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Sample_skip_key_value_bounded_impl(&_local);
+    _r->pos = !_rc && (0) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Sample_skip_key_value_bounded_impl(ZidlCdrReader *_r) {
+    int _rc = ZIDL_CDR_OK; (void)_rc;
+    { uint32_t _tmp; _rc = zidl_cdr_read_u32(_r, &_tmp); }
+    if (_rc) return _rc;
+    return ZIDL_CDR_OK;
+}
+
 static int Sample_skip_bounded_impl(ZidlCdrReader *_r);
 int Sample_skip(ZidlCdrReader *_r) {
     ZidlCdrReader _local = *_r;

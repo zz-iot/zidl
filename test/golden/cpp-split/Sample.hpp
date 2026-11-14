@@ -41,6 +41,7 @@ int Sample_serialize(ZidlCdrWriter *_w, const ::Sample *_v);
 int Sample_serialize_key_holder(ZidlCdrWriter *_w, const ::Sample *_v);
 int Sample_serialize_key_value(ZidlCdrWriter *_w, const ::Sample *_v);
 int Sample_deserialize_key_value(ZidlCdrReader *_r, ::Sample *_v);
+int Sample_skip_key_value(ZidlCdrReader *_r);
 int Sample_deserialize(ZidlCdrReader *_r, ::Sample *_v);
 int Sample_skip(ZidlCdrReader *_r);
 int Sample_serialize_key(ZidlCdrWriter *_w, const ::Sample *_v);

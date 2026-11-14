@@ -117,6 +117,31 @@ static void sequence_validation(void) {
                 CHECK_SEQUENCE(SeqStructs, inner == 2 ? ZIDL_CDR_OK : ZIDL_CDR_INVALID);
             }
 
+            /* Sequence preflight must follow nested key projection rather than
+             * requiring the element's omitted non-key fields. */
+            for (int key_only = 0; key_only < 2; ++key_only) {
+                START_WIRE();
+                size_t header = sequence_start(&w, true, 2);
+                for (int i = 0; i < 2; ++i) {
+                    assert(zidl_cdr_write_i32(&w, 10 + i) == 0);
+                    if (!key_only) assert(zidl_cdr_write_i32(&w, 99) == 0);
+                }
+                sequence_end(&w, header);
+                SEQ_TYPE(KeySequence) value = INIT;
+                ZidlCdrReader projected;
+                assert(zidl_cdr_reader_init(&projected, bytes, w.len) == 0);
+                assert((key_only ? Validation_KeySequence_deserialize_key_value(&projected, &value)
+                                 : Validation_KeySequence_deserialize(&projected, &value)) == 0);
+                assert(projected.pos == w.len);
+                uint8_t expected[16], actual[16];
+                assert(Validation_KeySequence_compute_key_hash(&value, expected) == 0);
+                assert((key_only ? Validation_KeySequence_compute_key_hash_from_cdr_key_only(bytes, w.len, actual)
+                                 : Validation_KeySequence_compute_key_hash_from_cdr(bytes, w.len, actual)) == 0);
+                assert(!memcmp(expected, actual, 16));
+                FREE(KeySequence, value);
+                assert(live_count == 0);
+            }
+
             /* A failed probe after an already decoded owning field remains
              * safe to free; key-hash traversal must clean its temporary too. */
             START_WIRE();

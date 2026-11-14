@@ -431,6 +431,7 @@ const Generator = struct {
         try self.print("{s}{s}int {s}_serialize_key_holder(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         try self.print("{s}{s}int {s}_serialize_key_value(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         try self.print("{s}{s}int {s}_deserialize_key_value(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
+        try self.print("{s}{s}int {s}_skip_key_value(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         // Keyless structs still get these prototypes when wrappers were
@@ -776,6 +777,7 @@ const Generator = struct {
         if (needs_lifetime) {
             try self.write("    void _destroy_active() noexcept;\n");
             try self.write("    void _construct_default();\n");
+            try self.print("    {s}({s} v, int);\n", .{ u.name, disc_cpp });
             try self.print("    void _copy_construct_from(const {s} &other);\n", .{u.name});
             // Shared by the move ctor, move assignment, and operator=(const&)'s
             // temporary-to-*this step.
@@ -1634,6 +1636,20 @@ const CdrGenerator = struct {
         try self.write("#endif\n");
     }
 
+    fn emitAllocationTry(self: *CdrGenerator) !void {
+        try self.write("#if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)\n");
+        try self.writeI("try {\n");
+        try self.write("#endif\n");
+        self.indent_depth += 1;
+    }
+
+    fn emitAllocationCatch(self: *CdrGenerator) !void {
+        self.indent_depth -= 1;
+        try self.write("#if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)\n");
+        try self.writeI("} catch (const std::bad_alloc&) {\n    return ZIDL_CDR_OVERFLOW;\n} catch (const std::length_error&) {\n    return ZIDL_CDR_OVERFLOW;\n}\n");
+        try self.write("#endif\n");
+    }
+
     /// Return the C++ type string suitable for declaring a local variable of this type
     /// in the CDR source file (e.g. `"int32_t"`, `"std::string"`, `"::Ns::Foo"`).
     /// Caller owns the returned slice.
@@ -2025,6 +2041,7 @@ const CdrGenerator = struct {
 
         try self.emitStructValueFns(s, c_name, cpp_qname, false);
         try self.emitStructValueFns(s, c_name, cpp_qname, true);
+        try cdr_skip.emitKeyValueSkip(self, s, c_name);
 
         // ── skip ─────────────────────────────────────────────────────────────
 
@@ -2091,6 +2108,7 @@ const CdrGenerator = struct {
             try self.write("}\n\n");
 
             try self.print("int {s}_compute_key_hash_from_cdr_key_only(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {{\n", .{c_name});
+            try self.emitAllocationTry();
             try self.writeI("ZidlCdrReader _reader;\n");
             try self.writeI("int _rc = zidl_cdr_reader_init(&_reader, _payload, _len);\n");
             try self.writeI("if (_rc) return _rc;\n");
@@ -2098,9 +2116,11 @@ const CdrGenerator = struct {
             try self.printI("_rc = {s}_deserialize_key_value(&_reader, &_value);\n", .{c_name});
             try self.printI("if (!_rc) _rc = {s}_compute_key_hash(&_value, _hash);\n", .{c_name});
             try self.writeI("return _rc;\n");
+            try self.emitAllocationCatch();
             try self.write("}\n\n");
 
             try self.print("int {s}_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]) {{\n", .{c_name});
+            try self.emitAllocationTry();
             try self.writeI("ZidlCdrReader _r_data;\n");
             try self.writeI("int _rc = zidl_cdr_reader_init(&_r_data, _payload, _len);\n");
             try self.writeI("if (_rc) return _rc;\n");
@@ -2108,6 +2128,7 @@ const CdrGenerator = struct {
             try self.printI("_rc = {s}_deserialize(&_r_data, &_v_data);\n", .{c_name});
             try self.writeI("if (_rc) return _rc;\n");
             try self.printI("return {s}_compute_key_hash(&_v_data, _hash);\n", .{c_name});
+            try self.emitAllocationCatch();
             try self.write("}\n\n");
         } else if (self.opts.generate_zzdds_wrappers and isZzddsTopicStructCpp(s)) {
             // Keyless topic type but --generate-zzdds-wrappers was requested:
@@ -2898,6 +2919,7 @@ const CdrGenerator = struct {
                 if (isDefaultUnionCase(cas)) has_default_m = true;
                 const case_member_id: u32 = cas.annotations.memberId(@intCast(cas_idx + 1));
                 try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
+                try self.writeI("{\n");
                 self.indent_depth += 1;
                 if (cas.dimensions.len > 0) {
                     const access = try std.fmt.allocPrint(self.alloc, "_v->{s}()", .{cas.name});
@@ -2930,6 +2952,7 @@ const CdrGenerator = struct {
                 }
                 try self.writeI("break;\n");
                 self.indent_depth -= 1;
+                try self.writeI("}\n");
             }
             if (!has_default_m) {
                 try self.writeI("default: break;\n");
@@ -2954,6 +2977,7 @@ const CdrGenerator = struct {
             for (u.cases) |cas| {
                 if (isDefaultUnionCase(cas)) has_default = true;
                 try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
+                try self.writeI("{\n");
                 self.indent_depth += 1;
                 if (cas.dimensions.len > 0) {
                     const access = try std.fmt.allocPrint(self.alloc, "_v->{s}()", .{cas.name});
@@ -2966,6 +2990,7 @@ const CdrGenerator = struct {
                 }
                 try self.writeI("break;\n");
                 self.indent_depth -= 1;
+                try self.writeI("}\n");
             }
             if (!has_default) {
                 try self.writeI("default:\n");
@@ -3380,7 +3405,13 @@ const CdrGenerator = struct {
         if (!typeRefIsCppNonTrivial(cas.type_ref)) return;
         const access = try std.fmt.allocPrint(self.alloc, "_u._{s}", .{cas.name});
         defer self.alloc.free(access);
-        if (cas.dimensions.len > 0) {
+        if (cas.dimensions.len > 0 and op == .construct_default) {
+            const cpp_type = try cppTypeStr(self.alloc, self.opts, cas.type_ref);
+            defer self.alloc.free(cpp_type);
+            const dims = try cArrayDimsStr(self.alloc, cas.dimensions);
+            defer self.alloc.free(dims);
+            try self.printI("{{ using _Array = {s}{s}; new (&({s})) _Array(); }}\n", .{ cpp_type, dims, access });
+        } else if (cas.dimensions.len > 0) {
             try self.emitUnionArrayLifecycleOp(op, cas.type_ref, access, access, cas.dimensions, 0);
         } else {
             try self.emitUnionLifecycleLeaf(op, cas.type_ref, access, access);
@@ -3497,6 +3528,12 @@ const CdrGenerator = struct {
         self.indent_depth -= 1;
         try self.write("}\n\n");
 
+        try self.print("{s}::{s}({s} v, int) : _disc(v) {{\n", .{ cpp_qname, u.name, disc_cpp });
+        self.indent_depth += 1;
+        try self.writeI("_construct_default();\n");
+        self.indent_depth -= 1;
+        try self.write("}\n\n");
+
         try self.print("{s}::{s}(const {s} &other) : _disc(other._disc) {{\n", .{ cpp_qname, u.name, cpp_qname });
         self.indent_depth += 1;
         try self.writeI("_copy_construct_from(other);\n");
@@ -3560,9 +3597,8 @@ const CdrGenerator = struct {
         self.indent_depth += 1;
         try self.writeI("if (v != _disc) {\n");
         self.indent_depth += 1;
-        try self.writeI("_destroy_active();\n");
-        try self.writeI("_disc = v;\n");
-        try self.writeI("_construct_default();\n");
+        try self.printI("{s} tmp(v, 0);\n", .{cpp_qname});
+        try self.writeI("*this = std::move(tmp);\n");
         self.indent_depth -= 1;
         try self.writeI("}\n");
         self.indent_depth -= 1;

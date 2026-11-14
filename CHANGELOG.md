@@ -18,6 +18,9 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Preserve nested key-only sequence projections during allocation-free native preflight.
+- Contain allocating C++ hash-callback defaults and preserve valid union arms when construction fails, including partial arrays.
+
 - Preserve IDL module namespaces and codec C linkage in per-type C++ split
   headers, including cross-module dependencies and owning union lifecycles.
 

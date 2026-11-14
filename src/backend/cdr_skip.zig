@@ -138,6 +138,38 @@ pub fn encapKindC(s: *const ir.Struct) []const u8 {
 
 // ── Skip emitters ────────────────────────────────────────────────────────────
 
+/// Allocation-free traversal of the same nested projection as key-value readers.
+/// Keep a named function for recursive collection types and split-file output.
+pub fn emitKeyValueSkip(self: anytype, s: *const ir.Struct, c_name: []const u8) !void {
+    const name = try std.fmt.allocPrint(self.alloc, "{s}_skip_key_value", .{c_name});
+    defer self.alloc.free(name);
+    const previous = self.wire_key;
+    self.wire_key = true;
+    defer self.wire_key = previous;
+    try emitReadFunction(self, name, null, false, "0");
+    try self.writeI("int _rc = ZIDL_CDR_OK; (void)_rc;\n");
+    if (s.annotations.extensibility == .mutable) {
+        try self.writeI("size_t _end;\n_rc = zidl_cdr_read_mutable_dheader(_r, &_end);\n");
+        try readRcCheck(self);
+        try self.writeI("return zidl_cdr_seek_to(_r, _end);\n");
+    } else {
+        if (s.annotations.extensibility == .appendable) {
+            try self.writeI("if (_r->xcdr_version == ZIDL_XCDR2) {\n");
+            self.indent_depth += 1;
+            try self.writeI("uint32_t _size;\n_rc = zidl_cdr_read_dheader(_r, &_size);\n");
+            try readRcCheck(self);
+            try self.writeI("return zidl_cdr_skip(_r, _size);\n");
+            self.indent_depth -= 1;
+            try self.writeI("}\n");
+        }
+        const fields = try @import("canonical_key.zig").wireFields(self.alloc, s, true);
+        defer self.alloc.free(fields);
+        for (fields) |field| try emitSkipMember(self, field.member.*);
+        try self.writeI("return ZIDL_CDR_OK;\n");
+    }
+    try self.write("}\n\n");
+}
+
 pub fn emitSkipMember(self: anytype, m: ir.StructMember) anyerror!void {
     if (m.annotations.is_optional) {
         try self.writeI("{ bool _present;\n");
@@ -305,7 +337,7 @@ pub fn emitSkipForTypeRef(self: anytype, tr: ir.TypeRef) anyerror!void {
             .struct_, .exception, .union_ => {
                 const c_type = try self.prefixedCName(ir.typeDeclQualifiedName(td));
                 defer self.alloc.free(c_type);
-                try self.printI("_rc = {s}_skip(_r);\n", .{c_type});
+                try self.printI("_rc = {s}_{s}(_r);\n", .{ c_type, if (self.wire_key and td == .struct_) "skip_key_value" else "skip" });
                 try readRcCheck(self);
             },
             .bitset => |bs| {

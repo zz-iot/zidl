@@ -66,6 +66,23 @@ static int Point_deserialize_key_value_bounded_impl(ZidlCdrReader *_r, Point *_v
     return ZIDL_CDR_OK;
 }
 
+static int Point_skip_key_value_bounded_impl(ZidlCdrReader *_r);
+int Point_skip_key_value(ZidlCdrReader *_r) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Point_skip_key_value_bounded_impl(&_local);
+    _r->pos = !_rc && (0) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Point_skip_key_value_bounded_impl(ZidlCdrReader *_r) {
+    int _rc = ZIDL_CDR_OK; (void)_rc;
+    { int32_t _tmp; _rc = zidl_cdr_read_i32(_r, &_tmp); }
+    if (_rc) return _rc;
+    { int32_t _tmp; _rc = zidl_cdr_read_i32(_r, &_tmp); }
+    if (_rc) return _rc;
+    return ZIDL_CDR_OK;
+}
+
 static int Point_skip_bounded_impl(ZidlCdrReader *_r);
 int Point_skip(ZidlCdrReader *_r) {
     ZidlCdrReader _local = *_r;
@@ -255,6 +272,21 @@ int Sample_deserialize_key_value(ZidlCdrReader *_r, Sample *_v) {
 static int Sample_deserialize_key_value_bounded_impl(ZidlCdrReader *_r, Sample *_v) {
     int _rc = ZIDL_CDR_OK; (void)_rc;
     _rc = zidl_cdr_read_u32(_r, &_v->id);
+    if (_rc) return _rc;
+    return ZIDL_CDR_OK;
+}
+
+static int Sample_skip_key_value_bounded_impl(ZidlCdrReader *_r);
+int Sample_skip_key_value(ZidlCdrReader *_r) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Sample_skip_key_value_bounded_impl(&_local);
+    _r->pos = !_rc && (0) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Sample_skip_key_value_bounded_impl(ZidlCdrReader *_r) {
+    int _rc = ZIDL_CDR_OK; (void)_rc;
+    { uint32_t _tmp; _rc = zidl_cdr_read_u32(_r, &_tmp); }
     if (_rc) return _rc;
     return ZIDL_CDR_OK;
 }
@@ -453,6 +485,30 @@ static int Frame_deserialize_key_value_bounded_impl(ZidlCdrReader *_r, Frame *_v
     return ZIDL_CDR_OK;
 }
 
+static int Frame_skip_key_value_bounded_impl(ZidlCdrReader *_r);
+int Frame_skip_key_value(ZidlCdrReader *_r) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Frame_skip_key_value_bounded_impl(&_local);
+    _r->pos = !_rc && (0) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Frame_skip_key_value_bounded_impl(ZidlCdrReader *_r) {
+    int _rc = ZIDL_CDR_OK; (void)_rc;
+    if (_r->xcdr_version == ZIDL_XCDR2) {
+        uint32_t _size;
+_rc = zidl_cdr_read_dheader(_r, &_size);
+        if (_rc) return _rc;
+        return zidl_cdr_skip(_r, _size);
+    }
+    { uint32_t _tmp; _rc = zidl_cdr_read_u32(_r, &_tmp); }
+    if (_rc) return _rc;
+    { const char *_sp; uint32_t _sl; _rc = zidl_cdr_read_string_zerocopy(_r, &_sp, &_sl);
+    if (_rc) return _rc;
+    }
+    return ZIDL_CDR_OK;
+}
+
 static int Frame_skip_bounded_impl(ZidlCdrReader *_r);
 int Frame_skip(ZidlCdrReader *_r) {
     ZidlCdrReader _local = *_r;
@@ -559,6 +615,27 @@ static int Beacon_deserialize_key_value_bounded_impl(ZidlCdrReader *_r, Beacon *
         if (_rc) return _rc;
     }
     _rc = zidl_cdr_read_u32(_r, &_v->id);
+    if (_rc) return _rc;
+    return ZIDL_CDR_OK;
+}
+
+static int Beacon_skip_key_value_bounded_impl(ZidlCdrReader *_r);
+int Beacon_skip_key_value(ZidlCdrReader *_r) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Beacon_skip_key_value_bounded_impl(&_local);
+    _r->pos = !_rc && (0) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Beacon_skip_key_value_bounded_impl(ZidlCdrReader *_r) {
+    int _rc = ZIDL_CDR_OK; (void)_rc;
+    if (_r->xcdr_version == ZIDL_XCDR2) {
+        uint32_t _size;
+_rc = zidl_cdr_read_dheader(_r, &_size);
+        if (_rc) return _rc;
+        return zidl_cdr_skip(_r, _size);
+    }
+    { uint32_t _tmp; _rc = zidl_cdr_read_u32(_r, &_tmp); }
     if (_rc) return _rc;
     return ZIDL_CDR_OK;
 }

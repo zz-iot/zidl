@@ -88,6 +88,23 @@ static int Point_deserialize_key_value_bounded_impl(ZidlCdrReader *_r, ::Point *
     return ZIDL_CDR_OK;
 }
 
+static int Point_skip_key_value_bounded_impl(ZidlCdrReader *_r);
+int Point_skip_key_value(ZidlCdrReader *_r) {
+    ZidlCdrReader _local = *_r;
+    int _rc = Point_skip_key_value_bounded_impl(&_local);
+    _r->pos = !_rc && (0) ? _local.data_len : (_local.pos <= _local.data_len ? _local.pos : _local.data_len);
+    return _rc;
+}
+
+static int Point_skip_key_value_bounded_impl(ZidlCdrReader *_r) {
+    int _rc = ZIDL_CDR_OK; (void)_rc;
+    { int32_t _tmp; _rc = zidl_cdr_read_i32(_r, &_tmp); }
+    if (_rc) return _rc;
+    { int32_t _tmp; _rc = zidl_cdr_read_i32(_r, &_tmp); }
+    if (_rc) return _rc;
+    return ZIDL_CDR_OK;
+}
+
 static int Point_skip_bounded_impl(ZidlCdrReader *_r);
 int Point_skip(ZidlCdrReader *_r) {
     ZidlCdrReader _local = *_r;

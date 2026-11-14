@@ -127,6 +127,69 @@ int main() {
             failures<Allocation::Choice>(bytes, w.len, Allocation_Choice_deserialize);
             failures<Allocation::Nested>(bytes, w.len, Allocation_Nested_deserialize);
 
+            // Constructing a callback temporary can allocate before decoding.
+            for (int key_only = 0; key_only < 2; ++key_only) {
+                begin();
+                assert(zidl_cdr_write_i32(&w, 3) == 0);
+                if (!key_only) {
+                    assert(zidl_cdr_write_string(&w, text, sizeof text - 1) == 0);
+                    assert(zidl_cdr_write_string(&w, text, sizeof text - 1) == 0);
+                }
+                auto callback = key_only ? Allocation_DefaultValue_compute_key_hash_from_cdr_key_only
+                                         : Allocation_DefaultValue_compute_key_hash_from_cdr;
+                uint8_t hash[16];
+                const size_t baseline = live_allocations, start = attempts;
+                assert(callback(bytes, w.len, hash) == 0);
+                const size_t count = attempts - start;
+                assert(count > 0 && live_allocations == baseline);
+                for (bool length_error : {false, true}) {
+                    inject_length_error = length_error;
+                    for (size_t i = 0; i < count; ++i) {
+                        std::memset(hash, 0xa5, sizeof hash);
+                        fail_at = attempts + i;
+                        assert(callback(bytes, w.len, hash) == ZIDL_CDR_OVERFLOW);
+                        fail_at = std::numeric_limits<size_t>::max();
+                        assert(live_allocations == baseline);
+                        for (uint8_t b : hash) assert(b == 0xa5);
+                    }
+                }
+                inject_length_error = false;
+            }
+            // Arm construction (including partially constructed arrays) must
+            // preserve the old arm when an allocating default throws.
+            for (int arm : {1, 2}) {
+                begin();
+                assert(zidl_cdr_write_i32(&w, arm) == 0);
+                size_t array_header = (size_t)-1;
+                if (arm == 2) assert(zidl_cdr_reserve_dheader_maybe(&w, &array_header) == 0);
+                for (int i = 0; i < arm; ++i) {
+                    assert(zidl_cdr_write_i32(&w, i) == 0);
+                    assert(zidl_cdr_write_string(&w, text, sizeof text - 1) == 0);
+                    assert(zidl_cdr_write_string(&w, text, sizeof text - 1) == 0);
+                }
+                if (array_header != (size_t)-1) assert(zidl_cdr_patch_dheader_checked(&w, array_header) == 0);
+                failures<Allocation::DefaultChoice>(bytes, w.len, Allocation_DefaultChoice_deserialize);
+                for (bool length_error : {false, true}) {
+                    inject_length_error = length_error;
+                    for (int i = 0; i < arm * 2; ++i) {
+                        const size_t baseline = live_allocations;
+                        {
+                            Allocation::DefaultChoice value{};
+                            value.number(17);
+                            fail_at = attempts + (size_t)i;
+                            bool caught = false;
+                            try { value._d(arm); } catch (const std::bad_alloc&) { caught = true; }
+                            catch (const std::length_error&) { caught = true; }
+                            fail_at = std::numeric_limits<size_t>::max();
+                            assert(caught && value._d() == 0 && value.number() == 17);
+                            value._d(arm);
+                        }
+                        assert(live_allocations == baseline);
+                    }
+                }
+                inject_length_error = false;
+            }
+
             // Map decodes allocate both value strings and tree nodes.
             begin();
             assert(zidl_cdr_write_u32(&w, 2) == 0);
@@ -137,6 +200,15 @@ int main() {
             failures<Allocation::MapValue>(bytes, w.len, Allocation_MapValue_deserialize);
 
             if (version == ZIDL_XCDR2) {
+                {
+                    Allocation::DefaultMutableChoice input{};
+                    input._d(1);
+                    zidl_cdr_writer_init_fixed(&w, bytes, sizeof bytes, version);
+                    zidl_cdr_writer_set_byte_order(&w, order);
+                    assert(zidl_cdr_write_encap_kind(&w, ZIDL_EXT_MUTABLE) == 0);
+                    assert(Allocation_DefaultMutableChoice_serialize(&w, &input) == 0);
+                    failures<Allocation::DefaultMutableChoice>(bytes, w.len, Allocation_DefaultMutableChoice_deserialize);
+                }
                 Allocation::Optional input{};
                 input.values.emplace();
                 input.values->push_back(text);

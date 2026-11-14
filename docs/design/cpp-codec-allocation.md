@@ -78,3 +78,13 @@ The length-error injection verifies the second translation path explicitly.
 Both representations also compile and run a preallocated sample smoke test with
 `-fno-exceptions -fno-rtti`. That test establishes build compatibility and normal
 error reporting, not graceful handling of an attempted allocation's failure.
+
+Hash-from-CDR callbacks include temporary construction in the exception boundary,
+including allocating IDL defaults. Union discriminator changes construct a complete
+candidate before replacing the active payload; whole-array placement construction
+rolls back partially constructed elements. Failure tests cover two allocating
+members, array arms and mutable candidates in STL/PMR modes.
+
+Sequence preflight uses an allocation-free key-value projection traversal for
+nested struct elements when decoding genuine key-only data. This helper is
+structural traversal, not a complete-message admission decision.
