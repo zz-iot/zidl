@@ -583,3 +583,71 @@ test "validated unions reject missing selected payloads and clean trailing ownin
     try testing.expectError(error.DuplicateMember, fixture.StrictPayload.deserializeInto(&ordinary, &reader, testing.allocator));
     ordinary.deinit(testing.allocator);
 }
+
+fn literalRejected(alloc: std.mem.Allocator, bytes: []const u8) !void {
+    var reader = try zidl_cdr.CdrReader.init(bytes);
+    var value: fixture.LiteralDefault = .{};
+    defer value.deinit(alloc);
+    if (fixture.LiteralDefault.deserializeValidated(&value, &reader, alloc)) |_| {
+        return error.AcceptedTrailing;
+    } else |err| if (err != error.TrailingBytes) return err;
+    try testing.expectEqual(@as(usize, 4), reader.pos);
+}
+
+fn literalPartial(alloc: std.mem.Allocator, bytes: []const u8) !void {
+    var reader = try zidl_cdr.CdrReader.init(bytes);
+    var value: fixture.LiteralPair = .{};
+    defer value.deinit(alloc);
+    if (fixture.LiteralPair.deserializeValidated(&value, &reader, alloc)) |_| {
+        return error.AcceptedTruncation;
+    } else |err| if (err != error.EndOfStream) return err;
+}
+
+test "validated literal defaults release rejected decoded strings and retain fresh literals" {
+    var fresh: fixture.LiteralDefault = .{};
+    try testing.expectEqualStrings("literal", fresh.text);
+    fresh.deinit(testing.allocator);
+    fresh.deinit(testing.allocator);
+    var optional: fixture.LiteralOptional = .{};
+    try testing.expectEqualStrings("optional", optional.text.?);
+    optional.deinit(testing.allocator);
+    var collision: fixture.LiteralCollision = .{};
+    collision.deinit(testing.allocator);
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(testing.allocator);
+    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&bytes, testing.allocator);
+    try writer.writeEncapHeader();
+    try fixture.LiteralDefault.serialize(&writer, .{});
+    try writer.writeU8(1);
+    try literalRejected(testing.allocator, bytes.items);
+    try testing.checkAllAllocationFailures(testing.allocator, literalRejected, .{bytes.items});
+    bytes.clearRetainingCapacity();
+    writer = zidl_cdr.CdrWriter(.xcdr2).init(&bytes, testing.allocator);
+    try writer.writeEncapHeader();
+    try writer.writeString("decoded");
+    try literalPartial(testing.allocator, bytes.items);
+    try testing.checkAllAllocationFailures(testing.allocator, literalPartial, .{bytes.items});
+}
+
+fn literalClone(alloc: std.mem.Allocator) !void {
+    const fresh: fixture.LiteralPair = .{};
+    var copy = try fresh.clone(alloc);
+    defer copy.deinit(alloc);
+    try testing.expectEqualStrings("first", copy.first);
+    try testing.expect(copy.first.ptr != fresh.first.ptr);
+    const optional: fixture.LiteralOptional = .{};
+    var optional_copy = try optional.clone(alloc);
+    defer optional_copy.deinit(alloc);
+    try testing.expectEqualStrings("optional", optional_copy.text.?);
+    try testing.expect(optional_copy.text.?.ptr != optional.text.?.ptr);
+    const alias: fixture.LiteralAlias = .{};
+    var alias_copy = try alias.clone(alloc);
+    defer alias_copy.deinit(alloc);
+    try testing.expectEqualStrings("alias", alias_copy.text);
+    try testing.expect(alias_copy.text.ptr != alias.text.ptr);
+}
+
+test "default literal clone owns only its duplicated strings" {
+    try literalClone(testing.allocator);
+    try testing.checkAllAllocationFailures(testing.allocator, literalClone, .{});
+}

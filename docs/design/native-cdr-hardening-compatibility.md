@@ -10,6 +10,7 @@ They do not change the shared C allocator ABI or the process-wide allocator poli
 | C++ direct optional arrays | Fields now use optional nested `std::array` storage rather than invalid bare arrays receiving optional operations. Optional array typedefs keep their alias types. |
 | C++ reused mutable samples | Omitted projected optionals disengage. Key-only reads preserve non-key state. |
 | C++ allocation failures | Public codec readers translate `bad_alloc` and `length_error` into checked statuses when exceptions are enabled. STL/PMR mappings remain; exception-disabled users requiring recoverable exhaustion use C values/codecs and non-throwing allocator callbacks. |
+| Zig literal-default strings | Default-only structs gain cleanup/clone for decoded ownership. Fresh named literal defaults stay borrowed; decoded/cloned replacements are released on failure and deinit. Value layout is unchanged. |
 | Zig union defaults | Fresh payloads select the mapping-default arm, including nested owning aggregates/arrays. Callers changing cases still set matching discriminator and whole payload literals together. |
 | Zig validated admission | New opt-in `deserializeValidated` requires exact message extent and required mutable fields, propagates strict checks, preserves reader state on failure and cleans owning output. Ordinary evolution defaults remain available. |
 | Mutable union writers | All backends set the required discriminator MU bit. Canonical keys and TypeObject identities are unchanged by this flag correction. |

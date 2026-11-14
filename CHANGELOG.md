@@ -18,6 +18,9 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Release decoded/cloned Zig literal-default strings on cleanup and rejected
+  validated messages while preserving untouched borrowed default literals.
+
 - Document structural skip/projection contracts and add malformed-wire regression
   checks separating traversal, key/field extraction and validated admission.
 

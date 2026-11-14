@@ -500,8 +500,15 @@ const Generator = struct {
             try self.ind();
             try self.write("    _toml_applied: bool = false,\n");
         }
-        for (s.members) |m| {
-            try self.emitField(m.name, m.type_ref, m.dimensions, m.annotations.is_optional, m.annotations.default_value);
+        for (s.members, 0..) |m, index| {
+            if (memberHasBorrowedStringDefault(m)) {
+                const name = try self.defaultLiteralName(s, index);
+                defer self.alloc.free(name);
+                const mapped = try self.typeRefToZig(m.type_ref);
+                defer self.alloc.free(mapped);
+                try self.ind();
+                try self.print("    {s}: {s}{s} = {s},\n", .{ m.name, if (m.annotations.is_optional) "?" else "", mapped, name });
+            } else try self.emitField(m.name, m.type_ref, m.dimensions, m.annotations.is_optional, m.annotations.default_value);
         }
         if (self.plRetainsUnknown(s)) {
             // The generated retention field would shadow an identically named
@@ -518,6 +525,19 @@ const Generator = struct {
             try self.write("    /// Owned; freed by `deinit`.\n");
             try self.ind();
             try self.write("    unknown_params: []zidl_cdr.RawParam = &.{},\n");
+        }
+        // A stable named literal distinguishes untouched borrowed defaults from
+        // allocated decoded/cloned strings without changing the value layout.
+        for (s.members, 0..) |m, index| {
+            if (!memberHasBorrowedStringDefault(m)) continue;
+            const name = try self.defaultLiteralName(s, index);
+            defer self.alloc.free(name);
+            const mapped = try self.typeRefToZig(m.type_ref);
+            defer self.alloc.free(mapped);
+            const initial = try self.formatDefaultValueZig(m.annotations.default_value.?, m.type_ref);
+            defer self.alloc.free(initial);
+            try self.ind();
+            try self.print("    const {s}: {s} = {s};\n", .{ name, mapped, initial });
         }
         // default() is always emitted; it relies only on field defaults, not CDR support.
         try self.ind();
@@ -5268,43 +5288,32 @@ const Generator = struct {
         try self.write("    }\n");
     }
 
-    /// `typeRefNeedsSeqDeinit(m.type_ref) or this type has an unbounded string,
-    /// directly or via a nested struct field` — matches the C backend's parity
-    /// fix (`structHasSequenceFields`/`emitStructFree`, see `zidl/CHANGELOG.md`
-    /// v0.3.5 — `{Type}_free()` body completeness): any unbounded string/wstring
-    /// or any sequence needs cleanup, not just unbounded sequences.
-    ///
-    /// One case the C fix doesn't have to consider: `m` is *itself* a plain
-    /// unbounded string (or a typedef chain to one) with a non-empty `@default`,
-    /// **and** we're not under `--zig-generate-toml-config`. `deserializeInto`
-    /// unconditionally dupes every required string field it actually reads —
-    /// same as `applyToml` does — so any *deserialized* value is always safe to
-    /// free. The risk is a value that was never deserialized at all (e.g. bare
-    /// `.{}`, or an `errdefer`-triggered `deinit()` firing before this field was
-    /// reached): its `[]const u8` field is still pointing at comptime-literal
-    /// storage, and `alloc.free()` on that is memory corruption, not a leak.
-    /// C sidesteps this because its runtime `_default()` calls `zidl_cdr_strdup`
-    /// unconditionally (always heap, never a raw literal pointer) — Zig's
-    /// comptime struct-literal field defaults can't do the equivalent at compile
-    /// time. `--zig-generate-toml-config` structs are exempt from this
-    /// exclusion: `emitFieldSeqCloneStmt`'s dupe and `_toml_applied` (see
-    /// `emitFieldSeqDeinit`) already track real per-value ownership for exactly
-    /// this case, flag-independently. Outside that flag, such a member is
-    /// deliberately left out of cleanup — a narrow, pre-existing gap (same as
-    /// before this fix), not a new regression — rather than risk freeing static
-    /// memory.
+    /// Give each borrowed default one stable identity without introducing a
+    /// hidden value field. Avoid collisions with user-declared field names.
+    fn defaultLiteralName(self: *Generator, value: *const ir.Struct, index: usize) ![]u8 {
+        var name = try std.fmt.allocPrint(self.alloc, "_zidl_default_{d}", .{index});
+        errdefer self.alloc.free(name);
+        while (true) {
+            var collision = false;
+            for (value.members) |m| if (std.mem.eql(u8, m.name, name)) {
+                collision = true;
+                break;
+            };
+            if (!collision) return name;
+            const next = try std.fmt.allocPrint(self.alloc, "{s}_", .{name});
+            self.alloc.free(name);
+            name = next;
+        }
+    }
+
+    /// Defaulted strings still own decoded/cloned data. Their deinitializer
+    /// distinguishes that data from the named borrowed default literal.
     fn memberNeedsCleanup(self: *Generator, m: ir.StructMember) bool {
         if (self.usesGenericOwnership(m.type_ref, m.dimensions)) return true;
         if (typeRefNeedsSeqDeinit(m.type_ref)) return true;
         if (self.boundedSeqNeedsElementCleanup(m.type_ref)) return true;
         if (self.aggregateNeedsCleanup(m.type_ref)) return true;
         if (!typeRefHasUnboundedString(m.type_ref)) return false;
-        if (typeRefIsDirectPlainString(m.type_ref) and
-            !self.opts.zig_generate_toml_config and
-            memberHasNonEmptyStringDefault(m))
-        {
-            return false;
-        }
         return true;
     }
 
@@ -5406,8 +5415,23 @@ const Generator = struct {
             },
             else => {},
         };
-        for (s.members) |m| {
+        for (s.members, 0..) |m, index| {
             if (!self.memberNeedsCleanup(m)) continue;
+            if (memberHasBorrowedStringDefault(m)) {
+                const name = try self.defaultLiteralName(s, index);
+                defer self.alloc.free(name);
+                try self.ind();
+                if (m.annotations.is_optional) {
+                    try self.print("        if (self.{s}) |_text| {{ if (_text.len != 0 and _text.ptr != {s}.ptr) alloc.free(_text); }}\n", .{ m.name, name });
+                    try self.ind();
+                    try self.print("        self.{s} = null;\n", .{m.name});
+                } else {
+                    try self.print("        if (self.{s}.len != 0 and self.{s}.ptr != {s}.ptr) alloc.free(self.{s});\n", .{ m.name, m.name, name, m.name });
+                    try self.ind();
+                    try self.print("        self.{s} = &.{{}};\n", .{m.name});
+                }
+                continue;
+            }
             if (m.annotations.is_optional) {
                 // `x: ?T` — clean the payload through `.?`, guarded on presence.
                 const fa = try std.fmt.allocPrint(self.alloc, "{s}.?", .{m.name});
@@ -5433,20 +5457,8 @@ const Generator = struct {
         try self.write("    }\n");
     }
 
-    /// Emit `if (self.field.len != 0) alloc.free(self.field);` followed by an
-    /// unconditional `self.field = "";`, gated on `self._toml_applied` under
-    /// `--zig-generate-toml-config` (a string field has no ownership flag of
-    /// its own, so without that guard, an untouched `T{}` whose non-empty
-    /// `@default` literal was never duped would have its static storage
-    /// passed to `alloc.free` here — undefined behavior; see
-    /// `Generator.memberNeedsCleanup`'s doc comment for why the *caller*
-    /// already excludes this exact risk outside that flag by never reaching
-    /// this function for such a field at all, so no equivalent guard is needed
-    /// here in that case). The unconditional reset makes a second `deinit()`
-    /// call a safe no-op (`len == 0` short-circuits the free) instead of a
-    /// double-free — the same idempotency `emitFieldSeqDeinit`'s `.sequence`
-    /// and `unknown_params` arms already have by resetting their field after
-    /// freeing.
+    /// Release an ordinary owned string and empty it for idempotent cleanup.
+    /// Literal-default fields use their separate identity guard in struct deinit.
     fn emitPlainStringFreeStmt(self: *Generator, field_name: []const u8, indent: []const u8) !void {
         try self.ind();
         if (self.opts.zig_generate_toml_config) {
@@ -5578,7 +5590,9 @@ const Generator = struct {
                 try self.ind();
                 try self.print("        if (self.{s} != null) {{\n", .{m.name});
                 try self.ind();
-                try self.print("            result.{s} = .{{}};\n", .{m.name});
+                const initial = try self.defaultForArrayRef(m.type_ref, m.dimensions);
+                defer self.alloc.free(initial);
+                try self.print("            result.{s} = {s};\n", .{ m.name, initial });
                 try self.emitFieldSeqCloneStmt(fa, m.type_ref, m.dimensions, "            ");
                 try self.ind();
                 try self.write("        }\n");
@@ -10862,12 +10876,9 @@ test "zig_backend: plain unbounded string field gets deinit/clone, general case"
     try testing.expect(has(s, "result.body = if (self.body.len != 0) try alloc.dupe(u8, self.body) else self.body;"));
 }
 
-test "zig_backend: non-empty @default string field excluded from cleanup outside toml config" {
-    // A member with a non-empty @default is left out of deinit()/clone(): its
-    // default is a comptime string literal, unsafe to alloc.free() if deinit()
-    // ever fires on a value that was never deserialized. Only `label` (with
-    // the risky non-empty default) is excluded; `note` (no default) still
-    // gets real cleanup, so deinit()/clone() are still emitted for the struct.
+test "zig_backend: literal defaults remain borrowed while decoded strings get cleanup" {
+    // Untouched literal storage stays borrowed; decoded and cloned strings
+    // are owned and must participate in cleanup, including failure paths.
     var out = try testGen(
         \\struct Cfg {
         \\    @default("unknown") string label;
@@ -10877,16 +10888,15 @@ test "zig_backend: non-empty @default string field excluded from cleanup outside
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {"));
-    try testing.expect(!has(s, "alloc.free(self.label)"));
+    try testing.expect(has(s, "self.label.ptr != _zidl_default_0.ptr) alloc.free(self.label)"));
     try testing.expect(has(s, "if (self.note.len != 0) alloc.free(self.note);"));
     try testing.expect(has(s, "pub fn clone(self: @This(), alloc: std.mem.Allocator) !@This() {"));
-    try testing.expect(!has(s, "result.label ="));
+    try testing.expect(has(s, "result.label ="));
     try testing.expect(has(s, "result.note = if (self.note.len != 0) try alloc.dupe(u8, self.note) else self.note;"));
 }
 
 test "zig_backend: empty @default string field still gets cleanup outside toml config" {
-    // @default("") is always safe to free (zero-length) -- only a *non-empty*
-    // default is excluded.
+    // Empty defaults need no identity guard; ordinary cleanup remains valid.
     var out = try testGen(
         \\struct Cfg2 { @default("") string label; };
     , "cfg2");
@@ -10948,7 +10958,8 @@ test "zig_backend: @default on non-optional field sets initializer" {
     const s = h.items;
     try testing.expect(has(s, "base_port: u16 = 7400,"));
     try testing.expect(has(s, "active: bool = true,"));
-    try testing.expect(has(s, "label: []const u8 = \"hello\","));
+    try testing.expect(has(s, "label: []const u8 = _zidl_default_2,"));
+    try testing.expect(has(s, "const _zidl_default_2: []const u8 = \"hello\";"));
 }
 
 test "zig_backend: @optional with @default sets typed optional initializer" {
@@ -11936,4 +11947,9 @@ test "zig_backend: unsupported map keys fail before output even without codecs" 
             try testing.expectError(error.UnsupportedZigMapKey, testGenOpts(source, "unsupported", .{ .no_typesupport = no_typesupport }));
         }
     }
+}
+
+fn memberHasBorrowedStringDefault(m: ir.StructMember) bool {
+    if (m.dimensions.len != 0 or !memberHasNonEmptyStringDefault(m)) return false;
+    return typeRefIsDirectPlainString(m.type_ref);
 }

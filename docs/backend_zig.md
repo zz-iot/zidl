@@ -621,3 +621,10 @@ e.g. `DDS::Duration_t` → `DDS.<pfx>Duration_t`.
 - Decoding an unbounded sequence of heap-owning elements starts every element at its
   default value before reading, so a decode that fails part-way leaves an owner whose
   `deinit` is safe to call.
+
+Unbounded narrow-string fields with nonempty IDL defaults retain a stable named
+borrowed literal. Generated cleanup preserves that literal and releases decoded
+or cloned replacements. This includes optional fields and aliases. Such structs
+now expose `deinit`/`clone` even when their only owning state comes from decoding
+those fields; failed exact-message validation releases that state. No hidden
+ownership field is added to the value layout.
