@@ -2435,11 +2435,14 @@ const Generator = struct {
     /// `int _cdh = -1; if (_xcdrVersion == 2) { ...; _cdh = pos; putInt(0); }`
     /// and returns the local's name (caller frees via closeCollectionDheader).
     fn openCollectionDheader(self: *Generator, needed: bool, extra: []const u8) !?[]u8 {
-        if (self.canonical_key) return null;
         if (!needed) return null;
         const name = try self.collName("_cdh");
         try self.ind();
-        try self.print("{s}{{ int {s} = -1; if (_xcdrVersion == 2) {{ _cdrAlign(_buf, _cdrBase, 4); {s} = _buf.position(); _buf.putInt(0); }}\n", .{ extra, name, name });
+        if (self.canonical_key) {
+            try self.print("{s}{{ _cdrAlignKey(_buf, _cdrBase, 4); int {s} = _buf.position(); _buf.putInt(0);\n", .{ extra, name });
+        } else {
+            try self.print("{s}{{ int {s} = -1; if (_xcdrVersion == 2) {{ _cdrAlign(_buf, _cdrBase, 4); {s} = _buf.position(); _buf.putInt(0); }}\n", .{ extra, name, name });
+        }
         return name;
     }
 
@@ -2701,8 +2704,17 @@ const Generator = struct {
                     try self.ind();
                     try self.print("{s}if ({s}.size() > {d}) throw new IllegalArgumentException(\"sequence key exceeds bound\");\n", .{ extra, access, n });
                 };
+                if (self.canonical_key) {
+                    if (canonical.fixedCollectionElementWidth(seq.element.*)) |width| {
+                        try self.ind();
+                        try self.print("{s}if ({s}.size() > (0xffffffffL - 4) / {d}) throw new IllegalArgumentException(\"collection key size overflow\");\n", .{ extra, access, width });
+                        try self.ind();
+                        try self.writeAlignCall(.unsigned_long, extra);
+                        try self.print("_buf.putInt((int)(4L + {s}.size() * {d}L));\n", .{ access, width });
+                    }
+                }
                 // XCDR2 prefixes a collection of non-primitive elements with a DHEADER.
-                const cdh = try self.openCollectionDheader(!cdr_skip.isPrimitiveElement(seq.element.*), extra);
+                const cdh = try self.openCollectionDheader(!cdr_skip.isPrimitiveElement(seq.element.*) and (!self.canonical_key or canonical.fixedCollectionElementWidth(seq.element.*) == null), extra);
                 const e = try self.collName("_e");
                 defer self.alloc.free(e);
                 try self.ind();
@@ -3042,7 +3054,14 @@ const Generator = struct {
         extra: []const u8,
         depth: usize,
     ) anyerror!void {
-        const cdh = try self.openCollectionDheader(depth == 0 and !cdr_skip.isPrimitiveElement(cdr_skip.arrayInnermost(elem_tr)), extra);
+        if (self.canonical_key and depth == 0) {
+            if (try canonical.fixedArrayDelimiterSize(elem_tr, dims)) |size| {
+                try self.ind();
+                try self.writeAlignCall(.unsigned_long, extra);
+                try self.print("_buf.putInt((int){d}L);\n", .{size});
+            }
+        }
+        const cdh = try self.openCollectionDheader(depth == 0 and !cdr_skip.isPrimitiveElement(cdr_skip.arrayInnermost(elem_tr)) and (!self.canonical_key or try canonical.fixedArrayDelimiterSize(elem_tr, dims) == null), extra);
         try self.emitSerializeArrayDims(elem_tr, access, dims, extra, depth);
         try self.closeCollectionDheader(cdh, extra);
     }
@@ -7612,6 +7631,9 @@ fn structOwnsHeapMemory(s: *const ir.Struct) bool {
 const JavaFilterFieldKind = enum { skip, int_like, float_like, string_like };
 
 fn classifyFilterFieldKindJava(tr: ir.TypeRef) JavaFilterFieldKind {
+    // Typedef dimensions belong to the value just like member dimensions.
+    // Resolving to the scalar element would emit scalar access on an array.
+    if (cdr_skip.arrayTypedefOf(tr) != null) return .skip;
     return switch (resolveMemberShape(tr)) {
         .string_ => .string_like,
         .enum_ => .int_like,

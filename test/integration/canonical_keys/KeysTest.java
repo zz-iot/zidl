@@ -106,13 +106,95 @@ public final class KeysTest {
             check(buf.position()==buf.limit() && Arrays.equals(hash(key),expected),"nested key-only extent/hash");
         }
     }
+    static Object enumValue(String name, int number) throws Exception {
+        return type(name).getMethod("valueOf", int.class).invoke(null, number);
+    }
+    static void arrayKeys() throws Exception {
+        Object zero = enumValue("ArrayEnum", 0), one = enumValue("ArrayEnum", 1);
+        Object e16 = value("EnumArray16"); set(e16, "values", array("ArrayEnum", zero, one, zero));
+        Object e20 = value("EnumArray20"); set(e20, "values", array("ArrayEnum", zero, one, zero, one));
+        Object grid = value("EnumGrid");
+        Object rows = Array.newInstance(type("ArrayEnum"), 2, 2);
+        Array.set(rows, 0, array("ArrayEnum", zero, one));
+        Array.set(rows, 1, array("ArrayEnum", one, zero));
+        set(grid, "values", rows);
+        Object m16 = value("MaskArray16"), m17 = value("MaskArray17");
+        int[] bytes16 = new int[12], bytes17 = new int[13];
+        for (int i = 0; i < 12; i++) bytes16[i] = bytes17[i] = (i % 2 == 0 ? 1 : 2);
+        bytes17[12] = 1;
+        set(m16, "values", bytes16); set(m17, "values", bytes17);
+        Object narrow = value("NarrowArray"); set(narrow, "lead", (byte)0xaa); set(narrow, "tail", (byte)0xbb);
+        set(narrow, "values", array("ArrayEnum8", enumValue("ArrayEnum8", 0), enumValue("ArrayEnum8", 1), enumValue("ArrayEnum8", 0)));
+        Object medium = value("Enum16Array");
+        set(medium, "values", array("ArrayEnum16", enumValue("ArrayEnum16", 0), enumValue("ArrayEnum16", 1)));
+        Object wide = value("Mask64Array"); set(wide, "values", new long[]{1, 2});
+        Object primitive = value("PrimitiveGrid"); set(primitive, "values", new int[][]{{1, 2}, {3, 4}});
+        String[] names = {"EnumArray16", "EnumArray20", "EnumGrid", "MaskArray16", "MaskArray17", "NarrowArray", "Enum16Array", "Mask64Array", "PrimitiveGrid"};
+        Object[] values = {e16, e20, grid, m16, m17, narrow, medium, wide, primitive};
+        for (int i = 0; i < names.length; i++) {
+            witness(names[i], values[i]);
+            fromWire(values[i], 1, 1, names[i]);
+            fromWire(values[i], 2, 7, names[i]);
+        }
+    }
+    static void sequenceWitness(String name, String typeName, List<?> values) throws Exception {
+        Object obj = value(typeName); set(obj, "values", values);
+        witness(name, obj); fromWire(obj, 1, 1, name); fromWire(obj, 2, 7, name);
+    }
+    static void sequenceKeys() throws Exception {
+        Object zero = enumValue("ArrayEnum", 0), one = enumValue("ArrayEnum", 1);
+        Object invalid = value("EnumSeq16"); set(invalid,"values",Arrays.asList(zero,one,zero)); rejects(invalid);
+        sequenceWitness("EnumSeq16", "EnumSeq16", Arrays.asList(zero, one));
+        sequenceWitness("EnumSeq16Empty", "EnumSeq16", Collections.emptyList());
+        sequenceWitness("EnumSeq20", "EnumSeq20", Arrays.asList(zero, one, zero));
+        sequenceWitness("EnumSeq20Empty", "EnumSeq20", Collections.emptyList());
+        sequenceWitness("EnumSeq20Short", "EnumSeq20", Arrays.asList(one));
+        sequenceWitness("MaskSeq16", "MaskSeq16", Arrays.asList(1,2,1,2,1,2,1,2));
+        sequenceWitness("MaskSeq17", "MaskSeq17", Arrays.asList(1,2,1,2,1,2,1,2,1));
+        sequenceWitness("MaskSeq17Empty", "MaskSeq17", Collections.emptyList());
+        sequenceWitness("Enum8Seq17", "Enum8Seq17", Arrays.asList(enumValue("ArrayEnum8",0), enumValue("ArrayEnum8",1), enumValue("ArrayEnum8",0)));
+        sequenceWitness("Enum16Seq16", "Enum16Seq16", Arrays.asList(enumValue("ArrayEnum16",0), enumValue("ArrayEnum16",1)));
+        sequenceWitness("Mask64Seq16", "Mask64Seq16", Arrays.asList(2L));
+        sequenceWitness("EnumUnboundedSeq", "EnumUnboundedSeq", Collections.emptyList());
+        sequenceWitness("PrimitiveSeq16", "PrimitiveSeq16", Arrays.asList(1,2,3));
+        sequenceWitness("PrimitiveSeq16Empty", "PrimitiveSeq16", Collections.emptyList());
+        Object aligned = value("EnumSeqAlign"); set(aligned,"lead",(byte)0xaa); set(aligned,"tail",(byte)0xbb);
+        set(aligned,"values",Arrays.asList(enumValue("ArrayEnum8",0),enumValue("ArrayEnum8",1)));
+        witness("EnumSeqAlign",aligned); fromWire(aligned,1,1,"EnumSeqAlign"); fromWire(aligned,2,7,"EnumSeqAlign");
+    }
+    static void variableWitness(String name, Object obj) throws Exception {
+        witness(name,obj); fromWire(obj,1,1,name); fromWire(obj,2,7,name);
+    }
+    static void variableKeys() throws Exception {
+        Object textArray=value("TextArray"); set(textArray,"values",new String[]{"A","BC"}); variableWitness("TextArray",textArray);
+        Object grid=value("TextGrid"); set(grid,"values",new String[][]{{"A","BC"},{"","D"}}); variableWitness("TextGrid",grid);
+        sequenceWitness("TextSeq","TextSeq",Arrays.asList("A","BC"));
+        sequenceWitness("TextSeqEmpty","TextSeq",Collections.emptyList());
+        sequenceWitness("TextSeqShort","TextSeq",Arrays.asList("A"));
+        Object first=value("PlainItem"), second=value("PlainItem"); set(first,"id",1); set(second,"id",2);
+        sequenceWitness("ItemSeq","ItemSeq",Arrays.asList(first,second));
+        Object itemArray=value("ItemArray"); set(itemArray,"values",array("PlainItem",first,second)); variableWitness("ItemArray",itemArray);
+        sequenceWitness("NestedSeq","NestedSeq",Arrays.asList(Arrays.asList(1,2),Collections.emptyList()));
+        sequenceWitness("ArraySeq","ArraySeq",Arrays.asList((Object)array("ArrayEnum",enumValue("ArrayEnum",0),enumValue("ArrayEnum",1))));
+        Object text=value("VariableChoice"), number=value("VariableChoice"); set(text,"text","A"); set(number,"id",7);
+        sequenceWitness("UnionSeq","UnionSeq",Arrays.asList(text,number));
+        Object envelope=value("StringEnvelope"), inner=value("TextSeq"); set(inner,"values",Arrays.asList("A"));
+        set(envelope,"lead",(byte)0xaa); set(envelope,"inner",inner); set(envelope,"tail",(byte)0xbb); variableWitness("StringEnvelope",envelope);
+        Object wide=value("WideArray"); set(wide,"values",new String[]{"A",""}); variableWitness("WideArray",wide);
+    }
     public static void main(String[] args) throws Exception {
         prefix = args[1];
         selectedNestedKeys();
-        for (String line : Files.readAllLines(Paths.get(args[0]))) {
+        List<String> allVectors = new java.util.ArrayList<>(Files.readAllLines(Paths.get(args[0])));
+        allVectors.addAll(Files.readAllLines(Paths.get(args[0]).resolveSibling("array_vectors.txt")));
+        allVectors.addAll(Files.readAllLines(Paths.get(args[0]).resolveSibling("variable_vectors.txt")));
+        for (String line : allVectors) {
             String[] parts = line.trim().split(" +");
             if (parts.length == 4) vectors.put(parts[0], parts);
         }
+        arrayKeys();
+        sequenceKeys();
+        variableKeys();
         Object align = value("Align"); set(align,"a",(byte)0xaa); set(align,"b",0x0102030405060708L); witness("Align",align);
         Object nested = value("Nested"); set(nested,"m_long",0x12345678); set(nested,"u",99); set(nested,"w",88);
         Object example = value("Example"); set(example,"label","BLUE"); set(example,"m_nested",nested); witness("Example",example);

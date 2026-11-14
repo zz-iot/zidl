@@ -18,6 +18,33 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- **Key-hash compatibility:** all supported canonical non-primitive collection
+  shapes now retain collection DHEADERs and include them in schema maximum/MD5
+  policy. C/C++ and Java back-patch buffered holders; Zig shares one generated
+  body between counting and streaming passes without encoded scratch storage.
+  Independent variable and projected-key witnesses replace earlier missing-header
+  expectations. Vendor limits/disagreements are recorded separately in
+  `docs/design/native-cdr-collection-keys.md`. Regenerate affected participants
+  together; ordinary sample and key-only wire encodings are unchanged.
+
+- **Key-hash compatibility:** canonical sequences of enums/bitmasks now retain
+  their XCDR2 collection DHEADER in C, C++, Java and Zig. Empty sequences include
+  the count in a four-byte payload; MD5 policy accounts for the schema bound,
+  independently of actual length. Checked payload arithmetic rejects UINT32
+  overflow before reading elements. Fifteen new independent witnesses agree with
+  Cyclone key-hash extraction. See `docs/design/native-cdr-collection-keys.md`.
+
+- **Key-hash compatibility:** C, C++, Java and Zig canonical key holders now
+  include the XCDR2 collection DHEADER for arrays of enums/bitmasks, including
+  multidimensional arrays and array typedef chains. The delimiter contributes
+  to the schema maximum and can change the padded-key/MD5 decision. Regenerate
+  affected participants together; old and corrected hashes identify different
+  instances. Primitive arrays are unchanged. Nine independent byte/hash witnesses
+  agree with Cyclone DDS key-hash extraction. Further collection framing is
+  described in `docs/design/native-cdr-collection-keys.md`.
+- Java scalar field filtering skips array typedefs, avoiding invalid `.getValue()`
+  calls on enum arrays in generated single-file and split output.
+
 - Preserve nested key-only sequence projections during allocation-free native preflight.
 - Contain allocating C++ hash-callback defaults and preserve valid union arms when construction fails, including partial arrays.
 

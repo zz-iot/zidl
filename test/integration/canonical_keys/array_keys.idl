@@ -1,0 +1,36 @@
+module Canonical {
+    enum ArrayEnum { ARRAY_ZERO, ARRAY_ONE };
+    @bit_bound(8) enum ArrayEnum8 { NARROW_ZERO, NARROW_ONE };
+    @bit_bound(16) enum ArrayEnum16 { MEDIUM_ZERO, MEDIUM_ONE };
+    @bit_bound(8) bitmask ArrayMask8 { MASK_LOW, MASK_NEXT };
+    @bit_bound(64) bitmask ArrayMask64 { WIDE_LOW, WIDE_NEXT };
+    typedef ArrayEnum ArrayEnumAlias;
+    typedef ArrayEnumAlias ArrayEnumRow[2];
+    typedef ArrayEnumRow ArrayEnumGrid[2];
+    typedef unsigned long ArrayPrimitiveAlias;
+    typedef ArrayPrimitiveAlias ArrayPrimitiveRow[2];
+    struct EnumArray16 { @key ArrayEnum values[3]; };
+    struct EnumArray20 { @key ArrayEnum values[4]; };
+    struct EnumGrid { @key ArrayEnumGrid values; };
+    struct MaskArray16 { @key ArrayMask8 values[12]; };
+    struct MaskArray17 { @key ArrayMask8 values[13]; };
+    struct NarrowArray { @key octet lead; @key ArrayEnum8 values[3]; @key octet tail; };
+    struct Enum16Array { @key ArrayEnum16 values[2]; };
+    struct Mask64Array { @key ArrayMask64 values[2]; };
+    struct PrimitiveGrid { @key ArrayPrimitiveRow values[2]; };
+};
+
+module Canonical {
+    typedef sequence<ArrayEnumAlias, 2> EnumSequenceValues;
+    struct EnumSeq16 { @key EnumSequenceValues values; };
+    struct EnumSeq20 { @key sequence<ArrayEnum, 3> values; };
+    struct MaskSeq16 { @key sequence<ArrayMask8, 8> values; };
+    struct MaskSeq17 { @key sequence<ArrayMask8, 9> values; };
+    struct Enum8Seq17 { @key sequence<ArrayEnum8, 9> values; };
+    struct Enum16Seq16 { @key sequence<ArrayEnum16, 4> values; };
+    struct Mask64Seq16 { @key sequence<ArrayMask64, 1> values; };
+    struct EnumUnboundedSeq { @key sequence<ArrayEnum> values; };
+    struct PrimitiveSeq16 { @key sequence<ArrayPrimitiveAlias, 3> values; };
+    struct EnumSeqAlign { @key octet lead; @key sequence<ArrayEnum8, 3> values; @key octet tail; };
+};
+#include "variable_keys.idl"

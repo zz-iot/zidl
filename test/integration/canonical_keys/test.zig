@@ -5,7 +5,7 @@ const testing = std.testing;
 
 const Vector = struct { bytes: []u8, hash: [16]u8, force: bool };
 fn vector(name: []const u8) !Vector {
-    var lines = std.mem.tokenizeScalar(u8, @embedFile("vectors.txt"), '\n');
+    var lines = std.mem.tokenizeScalar(u8, @embedFile("vectors.txt") ++ @embedFile("array_vectors.txt") ++ @embedFile("variable_vectors.txt"), '\n');
     while (lines.next()) |line| {
         var parts = std.mem.tokenizeScalar(u8, line, ' ');
         if (!std.mem.eql(u8, parts.next().?, name)) continue;
@@ -297,4 +297,122 @@ test "key-only mutable reader windows, future tails, MU and EMHEADER overflow" {
         std.mem.writeInt(u32, data[52..56], 0xffffffff, .little);
         if (lc == 4) try testing.expectError(error.EndOfStream, decodeKeyExample(data[0..56])) else try testing.expectError(error.InvalidEmheader, decodeKeyExample(data[0..56]));
     }
+}
+
+test "enum and bitmask array collection headers, typedef flattening and MD5 boundary" {
+    var e16: C.EnumArray16 = .{};
+    e16.values[1] = .ARRAY_ONE;
+    try check(C.EnumArray16, e16, "EnumArray16", .final, true);
+    var e20: C.EnumArray20 = .{};
+    e20.values[1] = .ARRAY_ONE;
+    e20.values[3] = .ARRAY_ONE;
+    try check(C.EnumArray20, e20, "EnumArray20", .final, true);
+    var grid: C.EnumGrid = .{};
+    grid.values[0][1] = .ARRAY_ONE;
+    grid.values[1][0] = .ARRAY_ONE;
+    try check(C.EnumGrid, grid, "EnumGrid", .final, true);
+    var m16: C.MaskArray16 = .{};
+    var m17: C.MaskArray17 = .{};
+    for (0..12) |i| {
+        m16.values[i] = if (i % 2 == 0) 1 else 2;
+        m17.values[i] = m16.values[i];
+    }
+    m17.values[12] = 1;
+    try check(C.MaskArray16, m16, "MaskArray16", .final, true);
+    try check(C.MaskArray17, m17, "MaskArray17", .final, true);
+    var narrow: C.NarrowArray = .{ .lead = 0xaa, .tail = 0xbb };
+    narrow.values[1] = .NARROW_ONE;
+    try check(C.NarrowArray, narrow, "NarrowArray", .final, true);
+    var medium: C.Enum16Array = .{};
+    medium.values[1] = .MEDIUM_ONE;
+    try check(C.Enum16Array, medium, "Enum16Array", .final, true);
+    try check(C.Mask64Array, .{ .values = .{ 1, 2 } }, "Mask64Array", .final, true);
+    try check(C.PrimitiveGrid, .{ .values = .{ .{ 1, 2 }, .{ 3, 4 } } }, "PrimitiveGrid", .final, true);
+}
+
+test "enum and bitmask sequence collection headers use schema maxima even when empty" {
+    const e16: C.EnumSeq16 = .{ .values = try zidl_cdr.BoundedArray(C.ArrayEnum, 2).fromSlice(&.{ .ARRAY_ZERO, .ARRAY_ONE }) };
+    try check(C.EnumSeq16, e16, "EnumSeq16", .final, true);
+    try check(C.EnumSeq16, .{}, "EnumSeq16Empty", .final, true);
+    try check(C.EnumSeq20, .{ .values = try zidl_cdr.BoundedArray(C.ArrayEnum, 3).fromSlice(&.{ .ARRAY_ZERO, .ARRAY_ONE, .ARRAY_ZERO }) }, "EnumSeq20", .final, true);
+    try check(C.EnumSeq20, .{}, "EnumSeq20Empty", .final, true);
+    try check(C.EnumSeq20, .{ .values = try zidl_cdr.BoundedArray(C.ArrayEnum, 3).fromSlice(&.{.ARRAY_ONE}) }, "EnumSeq20Short", .final, true);
+    try check(C.MaskSeq16, .{ .values = try zidl_cdr.BoundedArray(u8, 8).fromSlice(&.{ 1, 2, 1, 2, 1, 2, 1, 2 }) }, "MaskSeq16", .final, true);
+    try check(C.MaskSeq17, .{ .values = try zidl_cdr.BoundedArray(u8, 9).fromSlice(&.{ 1, 2, 1, 2, 1, 2, 1, 2, 1 }) }, "MaskSeq17", .final, true);
+    try check(C.MaskSeq17, .{}, "MaskSeq17Empty", .final, true);
+    try check(C.Enum8Seq17, .{ .values = try zidl_cdr.BoundedArray(C.ArrayEnum8, 9).fromSlice(&.{ .NARROW_ZERO, .NARROW_ONE, .NARROW_ZERO }) }, "Enum8Seq17", .final, true);
+    try check(C.Enum16Seq16, .{ .values = try zidl_cdr.BoundedArray(C.ArrayEnum16, 4).fromSlice(&.{ .MEDIUM_ZERO, .MEDIUM_ONE }) }, "Enum16Seq16", .final, true);
+    try check(C.Mask64Seq16, .{ .values = try zidl_cdr.BoundedArray(u64, 1).fromSlice(&.{2}) }, "Mask64Seq16", .final, true);
+    try check(C.EnumUnboundedSeq, .{}, "EnumUnboundedSeq", .final, true);
+    try check(C.PrimitiveSeq16, .{ .values = try zidl_cdr.BoundedArray(u32, 3).fromSlice(&.{ 1, 2, 3 }) }, "PrimitiveSeq16", .final, true);
+    try check(C.PrimitiveSeq16, .{}, "PrimitiveSeq16Empty", .final, true);
+    try check(C.EnumSeqAlign, .{ .lead = 0xaa, .tail = 0xbb, .values = try zidl_cdr.BoundedArray(C.ArrayEnum8, 3).fromSlice(&.{ .NARROW_ZERO, .NARROW_ONE }) }, "EnumSeqAlign", .final, true);
+    const over_bound: C.EnumSeq16 = .{ .values = .{ .len = 3 } };
+    try testing.expectError(error.SequenceTooLong, C.EnumSeq16.computeKeyHashChecked(&over_bound));
+    var one = [_]C.ArrayEnum{.ARRAY_ZERO};
+    const impossible: C.EnumUnboundedSeq = .{ .values = .{ ._length = std.math.maxInt(u32), ._maximum = std.math.maxInt(u32), ._buffer = &one } };
+    try testing.expectError(error.Overflow, C.EnumUnboundedSeq.computeKeyHashChecked(&impossible));
+}
+
+test "variable collections measure projected payloads without buffering hash bytes" {
+    const Text = zidl_cdr.BoundedArray(u8, 4);
+    const a = try Text.fromSlice("A");
+    const bc = try Text.fromSlice("BC");
+    const d = try Text.fromSlice("D");
+    try check(C.TextArray, .{ .values = .{ a, bc } }, "TextArray", .final, true);
+    try check(C.TextGrid, .{ .values = .{ .{ a, bc }, .{ .{}, d } } }, "TextGrid", .final, true);
+    try check(C.TextSeq, .{ .values = try zidl_cdr.BoundedArray(Text, 2).fromSlice(&.{ a, bc }) }, "TextSeq", .final, true);
+    try check(C.TextSeq, .{}, "TextSeqEmpty", .final, true);
+    const text_short: C.TextSeq = .{ .values = try zidl_cdr.BoundedArray(Text, 2).fromSlice(&.{a}) };
+    try check(C.TextSeq, text_short, "TextSeqShort", .final, true);
+    const items = [_]C.PlainItem{ .{ .id = 1 }, .{ .id = 2 } };
+    try check(C.ItemSeq, .{ .values = try zidl_cdr.BoundedArray(C.PlainItem, 2).fromSlice(&items) }, "ItemSeq", .final, true);
+    try check(C.ItemArray, .{ .values = items }, "ItemArray", .final, true);
+    try check(C.NestedSeq, .{ .values = try zidl_cdr.BoundedArray(C.PrimitiveInner, 2).fromSlice(&.{ try C.PrimitiveInner.fromSlice(&.{ 1, 2 }), .{} }) }, "NestedSeq", .final, true);
+    try check(C.ArraySeq, .{ .values = try zidl_cdr.BoundedArray(C.ArrayEnumRow, 2).fromSlice(&.{.{ .ARRAY_ZERO, .ARRAY_ONE }}) }, "ArraySeq", .final, true);
+    const choices = [_]C.VariableChoice{ .{ ._d = 0, ._u = .{ .text = a } }, .{ ._d = 1, ._u = .{ .id = 7 } } };
+    try check(C.UnionSeq, .{ .values = try zidl_cdr.BoundedArray(C.VariableChoice, 2).fromSlice(&choices) }, "UnionSeq", .final, true);
+    try check(C.StringEnvelope, .{ .lead = 0xaa, .tail = 0xbb, .inner = text_short }, "StringEnvelope", .final, true);
+    try check(C.WideArray, .{ .values = .{ try zidl_cdr.BoundedArray(u16, 2).fromSlice(&.{'A'}), .{} } }, "WideArray", .final, true);
+}
+
+test "native collection sizing rejects invalid bounded strings before writing a delimiter" {
+    const bad_text: C.TextArray = .{ .values = .{ .{ .len = 5 }, .{} } };
+    const bad_wide: C.WideArray = .{ .values = .{ .{ .len = 3 }, .{} } };
+    var bytes: [64]u8 = undefined;
+    var writer = zidl_cdr.PrimitiveWriter.initFixed(&bytes, .four, .big);
+    try testing.expectError(error.StringTooLong, C.TextArray.serializeKeyHolder(&writer, bad_text));
+    try testing.expectEqual(@as(usize, 0), writer.len);
+    try testing.expectError(error.StringTooLong, C.WideArray.serializeKeyHolder(&writer, bad_wide));
+    try testing.expectEqual(@as(usize, 0), writer.len);
+}
+
+fn singleton(comptime T: type) T {
+    if (T == u8) return 'x';
+    var value: T = .{};
+    value.len = 1;
+    value.buf[0] = singleton(@TypeOf(value.buf[0]));
+    return value;
+}
+
+test "deep canonical counting visits nested collection bodies once" {
+    const value: C.DeepKey = .{ .values = singleton(C.Deep12) };
+    const count = comptime blk: {
+        @setEvalBranchQuota(30000);
+        var writer = zidl_cdr.PrimitiveWriter.initCounting(.four, .big);
+        C.DeepKey.serializeKeyHolder(&writer, .{ .values = singleton(C.Deep12) }) catch unreachable;
+        break :blk writer.len;
+    };
+    try testing.expectEqual(@as(usize, 102), count);
+    var expected: [102]u8 = @splat(0);
+    for (0..12) |i| {
+        std.mem.writeInt(u32, expected[i * 8 ..][0..4], @intCast(98 - i * 8), .big);
+        std.mem.writeInt(u32, expected[i * 8 + 4 ..][0..4], 1, .big);
+    }
+    std.mem.writeInt(u32, expected[96..100], 2, .big);
+    expected[100] = 'x';
+    var actual: [102]u8 = undefined;
+    var writer = zidl_cdr.PrimitiveWriter.initFixed(&actual, .four, .big);
+    try C.DeepKey.serializeKeyHolder(&writer, value);
+    try testing.expectEqualSlices(u8, &expected, &actual);
 }

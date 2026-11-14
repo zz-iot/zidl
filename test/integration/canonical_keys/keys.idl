@@ -46,3 +46,4 @@ module Canonical {
     struct SelectedInner { long ignored; @key long id; };
     struct SelectedOuter { @key SelectedInner inner; @key long tail; };
 };
+#include "array_keys.idl"

@@ -3643,10 +3643,15 @@ const CdrGenerator = struct {
                 if (self.canonical_key) {
                     try self.printI("if ({s}.size() > UINT32_MAX) return ZIDL_CDR_OVERFLOW;\n", .{access});
                     if (seq.bound) |n| try self.printI("if ({s}.size() > {d}u) return ZIDL_CDR_INVALID;\n", .{ access, n });
+                    if (canonical.fixedCollectionElementWidth(seq.element.*)) |width| {
+                        try self.printI("if ({s}.size() > (UINT32_MAX - 4u) / {d}u) return ZIDL_CDR_OVERFLOW;\n", .{ access, width });
+                        try self.printI("_rc = zidl_cdr_write_u32(_w, 4u + (uint32_t){s}.size() * {d}u);\n", .{ access, width });
+                        try self.writeI("if (_rc) return _rc;\n");
+                    }
                 }
                 // XCDR2 prefixes a collection of non-primitive elements with a
                 // DHEADER (no-op for XCDR1 writers).
-                const dh = try self.openCollectionDheader(!cdr_skip.isPrimitiveElement(seq.element.*));
+                const dh = try self.openCollectionDheader(!cdr_skip.isPrimitiveElement(seq.element.*) and (!self.canonical_key or canonical.fixedCollectionElementWidth(seq.element.*) == null));
                 const si = try cdr_skip.collName(self.alloc, "_si", self.coll_depth);
                 defer self.alloc.free(si);
                 try self.printI("_rc = zidl_cdr_write_u32(_w, (uint32_t){s}.size());\n", .{access});
@@ -3765,7 +3770,13 @@ const CdrGenerator = struct {
         dims: []const u64,
         dim_idx: usize,
     ) anyerror!void {
-        const dh = try self.openCollectionDheader(dim_idx == 0 and !cdr_skip.isPrimitiveElement(cdr_skip.arrayInnermost(elem_tr)));
+        if (self.canonical_key and dim_idx == 0) {
+            if (try canonical.fixedArrayDelimiterSize(elem_tr, dims)) |size| {
+                try self.printI("_rc = zidl_cdr_write_u32(_w, {d}u);\n", .{size});
+                try self.writeI("if (_rc) return _rc;\n");
+            }
+        }
+        const dh = try self.openCollectionDheader(dim_idx == 0 and !cdr_skip.isPrimitiveElement(cdr_skip.arrayInnermost(elem_tr)) and (!self.canonical_key or try canonical.fixedArrayDelimiterSize(elem_tr, dims) == null));
         try self.emitWriteArrayDims(elem_tr, access, dims, dim_idx);
         try self.closeCollectionDheader(dh);
     }
@@ -3801,12 +3812,11 @@ const CdrGenerator = struct {
     /// prefixes with a DHEADER; returns the local's name (caller passes it to
     /// closeCollectionDheader) or null when no DHEADER applies.
     fn openCollectionDheader(self: *CdrGenerator, needed: bool) !?[]u8 {
-        if (self.canonical_key) return null;
         if (!needed) return null;
         const name = try cdr_skip.collName(self.alloc, "_cdh", self.coll_depth);
         try self.printI("{{ size_t {s};\n", .{name});
         self.indent_depth += 1;
-        try self.printI("_rc = zidl_cdr_reserve_dheader_maybe(_w, &{s});\n", .{name});
+        try self.printI("_rc = {s}(_w, &{s});\n", .{ if (self.canonical_key) "zidl_cdr_reserve_dheader" else "zidl_cdr_reserve_dheader_maybe", name });
         try self.writeI("if (_rc) return _rc;\n");
         return name;
     }

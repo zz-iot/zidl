@@ -648,6 +648,8 @@ pub fn build(b: *std.Build) void {
         gen_zig.addArgs(&.{ "-b", "zig", "-o" });
         const zig_dir = gen_zig.addOutputDirectoryArg("canonical-keys-zig");
         gen_zig.addFileArg(b.path(dir ++ "keys.idl"));
+        gen_zig.addFileInput(b.path(dir ++ "array_keys.idl"));
+        gen_zig.addFileInput(b.path(dir ++ "variable_keys.idl"));
         const fixture = b.createModule(.{
             .root_source_file = zig_dir.path(b, "keys.zig"),
             .target = target,
@@ -667,6 +669,8 @@ pub fn build(b: *std.Build) void {
             gen.addArgs(&.{ "-b", lang, "-o" });
             const generated = gen.addOutputDirectoryArg(b.fmt("canonical-keys-{s}", .{lang}));
             gen.addFileArg(b.path(dir ++ "keys.idl"));
+            gen.addFileInput(b.path(dir ++ "array_keys.idl"));
+            gen.addFileInput(b.path(dir ++ "variable_keys.idl"));
             const m = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .sanitize_thread = sanitize_thread, .link_libc = true, .link_libcpp = cpp });
             const flags: []const []const u8 = if (cpp) &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" } else &.{ "-std=c99", "-Wall", "-Werror" };
             m.addCSourceFile(.{ .file = b.path(if (cpp) dir ++ "test.cpp" else dir ++ "test.c"), .flags = flags });
@@ -677,7 +681,7 @@ pub fn build(b: *std.Build) void {
             const app = b.addExecutable(.{ .name = b.fmt("zidl-canonical-keys-{s}", .{lang}), .root_module = m });
             const run = b.addRunArtifact(app);
             run.addFileArg(b.path(dir ++ "vectors.txt"));
-            for ([_][]const u8{ "wire_ids.txt", "wide_wire.txt", "key_wire.txt" }) |name| run.addFileInput(b.path(b.fmt("{s}{s}", .{ dir, name })));
+            for ([_][]const u8{ "wire_ids.txt", "wide_wire.txt", "key_wire.txt", "array_vectors.txt", "variable_vectors.txt" }) |name| run.addFileInput(b.path(b.fmt("{s}{s}", .{ dir, name })));
             key_step.dependOn(&run.step);
         }
         const maybe_javac = b.findProgram(.{ .names = &.{"javac"} });
@@ -690,10 +694,12 @@ pub fn build(b: *std.Build) void {
                 gen.addArg("-o");
                 const generated = gen.addOutputDirectoryArg(if (split) "canonical-keys-java-split" else "canonical-keys-java");
                 gen.addFileArg(b.path(dir ++ "keys.idl"));
+                gen.addFileInput(b.path(dir ++ "array_keys.idl"));
+                gen.addFileInput(b.path(dir ++ "variable_keys.idl"));
                 const compile_java = javaCommand(b, &.{ maybe_javac.?, "-Xlint:unchecked", "-Werror", "-d" }, java_cdr);
                 const classes = compile_java.addOutputDirectoryArg(if (split) "canonical-keys-java-split-classes" else "canonical-keys-java-classes");
                 if (split) {
-                    for ([_][]const u8{ "KeysCdrUtils", "Align", "Nested", "Example", "Bounded16", "Bounded17", "Unbounded", "Seq16", "Seq17", "InnerNoKeys", "UnkeyedNested", "ArrayKey", "SeqAgg", "Choice", "UnionKey", "Wide16", "Wide17", "Base", "Derived", "Sequential", "Hashed", "AutoBase", "AutoDerived", "IdChoice", "UnionDefault", "WideSeq", "SelectedInner", "SelectedOuter" }) |name| {
+                    for ([_][]const u8{ "KeysCdrUtils", "Align", "Nested", "Example", "Bounded16", "Bounded17", "Unbounded", "Seq16", "Seq17", "InnerNoKeys", "UnkeyedNested", "ArrayKey", "SeqAgg", "Choice", "UnionKey", "Wide16", "Wide17", "Base", "Derived", "Sequential", "Hashed", "AutoBase", "AutoDerived", "IdChoice", "UnionDefault", "WideSeq", "SelectedInner", "SelectedOuter", "ArrayEnum", "ArrayEnum8", "ArrayEnum16", "ArrayMask8", "ArrayMask64", "EnumArray16", "EnumArray20", "EnumGrid", "MaskArray16", "MaskArray17", "NarrowArray", "Enum16Array", "Mask64Array", "PrimitiveGrid", "EnumSeq16", "EnumSeq20", "MaskSeq16", "MaskSeq17", "Enum8Seq17", "Enum16Seq16", "Mask64Seq16", "EnumUnboundedSeq", "PrimitiveSeq16", "EnumSeqAlign", "TextArray", "TextGrid", "TextSeq", "PlainItem", "ItemSeq", "ItemArray", "NestedSeq", "ArraySeq", "VariableChoice", "UnionSeq", "StringEnvelope", "WideArray" }) |name| {
                         compile_java.addFileArg(generated.path(b, b.fmt("{s}.java", .{name})));
                     }
                 } else compile_java.addFileArg(generated.path(b, "Keys.java"));
@@ -702,7 +708,7 @@ pub fn build(b: *std.Build) void {
                 run.addDirectoryArg(classes);
                 run.addArg("KeysTest");
                 run.addFileArg(b.path(dir ++ "vectors.txt"));
-                for ([_][]const u8{ "wire_ids.txt", "wide_wire.txt", "key_wire.txt" }) |name| run.addFileInput(b.path(b.fmt("{s}{s}", .{ dir, name })));
+                for ([_][]const u8{ "wire_ids.txt", "wide_wire.txt", "key_wire.txt", "array_vectors.txt", "variable_vectors.txt" }) |name| run.addFileInput(b.path(b.fmt("{s}{s}", .{ dir, name })));
                 run.addArg(if (split) "canonicalkeys." else "Keys$Canonical$");
                 key_step.dependOn(&run.step);
             }

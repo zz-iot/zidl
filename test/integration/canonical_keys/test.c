@@ -15,7 +15,7 @@
 #endif
 
 typedef struct { char name[64]; uint8_t bytes[512], hash[16]; size_t len; unsigned force; } Vector;
-static Vector vectors[32];
+static Vector vectors[64];
 static size_t vector_count;
 static unsigned nibble(char c) { return c <= '9' ? (unsigned)(c-'0') : (unsigned)(c-'a'+10); }
 static size_t hex_bytes(const char *hex, uint8_t *out) {
@@ -27,11 +27,11 @@ static const Vector *lookup(const char *name) {
     for (size_t i=0; i<vector_count; i++) if (!strcmp(name,vectors[i].name)) return &vectors[i];
     abort();
 }
-static void load(const char *path) {
-    FILE *file=fopen(path,"r"); assert(file);
+static void load_file(FILE *file) {
+    assert(file);
     char name[64],bytes[1025],digest[33]; unsigned force;
     while (fscanf(file,"%63s %1024s %32s %u",name,bytes,digest,&force)==4) {
-        assert(vector_count<32);
+        assert(vector_count<64);
         Vector *v=&vectors[vector_count++];
         strcpy(v->name,name); v->len=hex_bytes(bytes,v->bytes);
         assert(hex_bytes(digest,v->hash)==16); v->force=force;
@@ -265,8 +265,15 @@ static void unexpected_free(void *ctx,void *p,size_t n,size_t alignment) {
     (void)ctx; (void)p; (void)n; (void)alignment; abort();
 }
 
+#include "array_values.h"
+
 int main(int argc,char **argv) {
-    assert(argc==2); load(argv[1]); load_wire(argv[1]); load_key(argv[1]);
+    assert(argc==2);
+    load_file(fopen(argv[1], "r"));
+    load_file(open_sibling(argv[1], "array_vectors.txt"));
+    load_file(open_sibling(argv[1], "variable_vectors.txt"));
+    array_key_values();
+    load_wire(argv[1]); load_key(argv[1]);
     TYPE(Sequential) sequential=INIT;
     sequential.a=0xaa; sequential.b=0x05060708; sequential.c=0xcc; sequential.d=0x01020304;
     CHECK(Sequential,sequential,"Sequential",2,0);
@@ -394,11 +401,44 @@ int main(int argc,char **argv) {
     assert(Canonical_Align_serialize_key_holder(&fixed_writer,&align)==0);
     zidl_cdr_compute_key_hash_for_type(fixed_writer.buf,fixed_writer.len,Canonical_Align_KEY_HASH_FORCE_MD5,hash);
     assert(!memcmp(hash,lookup("Align")->hash,16) && denied_allocations==0);
+    TYPE(EnumArray20) enum_fixed=INIT;
+    enum_fixed.values[1]=enum_fixed.values[3]=(TYPE(ArrayEnum))1;
+    uint8_t enum_buffer[20];
+    zidl_cdr_writer_init_fixed(&fixed_writer,enum_buffer,sizeof enum_buffer,ZIDL_XCDR2);
+    zidl_cdr_writer_set_byte_order(&fixed_writer,ZIDL_CDR_BE);
+    assert(Canonical_EnumArray20_serialize_key_holder(&fixed_writer,&enum_fixed)==0);
+    zidl_cdr_compute_key_hash_for_type(fixed_writer.buf,fixed_writer.len,Canonical_EnumArray20_KEY_HASH_FORCE_MD5,hash);
+    assert(!memcmp(hash,lookup("EnumArray20")->hash,16) && denied_allocations==0);
+    TYPE(TextSeq) text_fixed=INIT;
+#ifdef __cplusplus
+    text_fixed.values={"A","BC"};
+#else
+    char text_elements[2][5]={"A","BC"};
+    text_fixed.values._buffer=text_elements;
+    text_fixed.values._length=text_fixed.values._maximum=2;
+#endif
+    uint8_t text_buffer[64];
+    zidl_cdr_writer_init_fixed(&fixed_writer,text_buffer,sizeof text_buffer,ZIDL_XCDR2);
+    zidl_cdr_writer_set_byte_order(&fixed_writer,ZIDL_CDR_BE);
+    assert(Canonical_TextSeq_serialize_key_holder(&fixed_writer,&text_fixed)==0);
+    zidl_cdr_compute_key_hash_for_type(fixed_writer.buf,fixed_writer.len,Canonical_TextSeq_KEY_HASH_FORCE_MD5,hash);
+    assert(!memcmp(hash,lookup("TextSeq")->hash,16) && denied_allocations==0);
     memset(hash,0xee,sizeof hash);
     assert(Canonical_Align_compute_key_hash(&align,hash)==ZIDL_CDR_OVERFLOW);
     assert(denied_allocations>0);
     for (size_t i=0;i<16;i++) assert(hash[i]==0xee);
     zidl_cdr_set_allocator(NULL);
+#ifndef __cplusplus
+    /* A hostile native count must fail before touching its undersized buffer. */
+    TYPE(ArrayEnum) single_enum = (TYPE(ArrayEnum))0;
+    TYPE(EnumUnboundedSeq) impossible = INIT;
+    impossible.values._length = impossible.values._maximum = UINT32_MAX;
+    impossible.values._buffer = &single_enum;
+    zidl_cdr_writer_init_fixed(&fixed_writer,fixed,sizeof fixed,ZIDL_XCDR2);
+    zidl_cdr_writer_set_byte_order(&fixed_writer,ZIDL_CDR_BE);
+    assert(Canonical_EnumUnboundedSeq_serialize_key_holder(&fixed_writer,&impossible)==ZIDL_CDR_OVERFLOW);
+    assert(fixed_writer.len==0);
+#endif
     puts("canonical key checks passed");
     return 0;
 }

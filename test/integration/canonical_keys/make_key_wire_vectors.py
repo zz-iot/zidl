@@ -8,8 +8,8 @@ CANONICAL = {
     "Nested": (bytes.fromhex("12345678"), False),
     "Sequential": (bytes.fromhex("cc00000001020304aa00000005060708"), False),
     "Hashed": (bytes.fromhex("01020304aa"), False),
-    "ArrayKey": (bytes.fromhex("0102030405060708"), False),
-    "SeqAgg": (bytes.fromhex("000000020102030405060708"), False),
+    "ArrayKey": (bytes.fromhex("000000080102030405060708"), False),
+    "SeqAgg": (bytes.fromhex("0000000c000000020102030405060708"), False),
     "UnkeyedNested": (bytes.fromhex("1234aa"), False),
 }
 rows = []

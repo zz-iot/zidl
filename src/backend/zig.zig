@@ -267,6 +267,8 @@ pub fn generateSplitFiles(
 
 // ── Generator (private implementation) ───────────────────────────────────────
 
+const KeyCollection = struct { type_ref: ir.TypeRef, dimensions: []const u64 };
+
 const Generator = struct {
     alloc: std.mem.Allocator,
     opts: interface.Options,
@@ -294,6 +296,8 @@ const Generator = struct {
     coll_depth: u8 = 0,
     reader_window_id: usize = 0,
     canonical_key: bool = false,
+    key_collections: ?*std.ArrayList(KeyCollection) = null,
+    key_collection_body: bool = false,
     wire_key: bool = false,
 
     fn deinit(self: *Generator) void {
@@ -3587,6 +3591,11 @@ const Generator = struct {
     // ── CDR serialization emission ────────────────────────────────────────────
 
     fn emitCanonicalStruct(self: *Generator, s: *const ir.Struct) !void {
+        var collections = std.ArrayList(KeyCollection).empty;
+        defer collections.deinit(self.alloc);
+        const previous_collections = self.key_collections;
+        self.key_collections = &collections;
+        defer self.key_collections = previous_collections;
         if (structHasKey(s)) {
             const force = try canonical.forceMd5(self.alloc, s);
             try self.ind();
@@ -3622,9 +3631,15 @@ const Generator = struct {
         }
         try self.ind();
         try self.write("    }\n\n");
+        try self.emitKeyCollectionHelpers(&collections);
     }
 
     fn emitCanonicalUnion(self: *Generator, u: *const ir.Union, default_case: ?ir.UnionCase) anyerror!void {
+        var collections = std.ArrayList(KeyCollection).empty;
+        defer collections.deinit(self.alloc);
+        const previous_collections = self.key_collections;
+        self.key_collections = &collections;
+        defer self.key_collections = previous_collections;
         try self.ind();
         try self.write("    pub fn serializeKeyHolder(writer: anytype, value: @This()) !void {\n");
         if (!try canonical.supported(self.alloc, .{ .named = .{ .union_ = @constCast(u) } })) {
@@ -3678,6 +3693,70 @@ const Generator = struct {
         }
         try self.ind();
         try self.write("    }\n\n");
+        try self.emitKeyCollectionHelpers(&collections);
+    }
+
+    /// Emit a body once and use it for both sizing and actual streaming. Each
+    /// DHEADER realigns the payload to a four-byte origin, so a fresh counting
+    /// writer measures the exact payload independently of the caller's offset.
+    fn emitKeyCollection(self: *Generator, tr: ir.TypeRef, dims: []const u64, access: []const u8, extra: []const u8) !void {
+        const pending = self.key_collections.?;
+        const id = pending.items.len;
+        try pending.append(self.alloc, .{ .type_ref = tr, .dimensions = dims });
+        try self.ind();
+        try self.print("{s}{{\n", .{extra});
+        try self.ind();
+        try self.print("{s}    const _key_counting = if (comptime @TypeOf(writer.*) == zidl_cdr.PrimitiveWriter) writer.storage == .counting else false;\n", .{extra});
+        try self.ind();
+        try self.print("{s}    if (_key_counting) {{\n", .{extra});
+        try self.ind();
+        try self.print("{s}        try writer.writeU32(0);\n", .{extra});
+        try self.ind();
+        try self.print("{s}        const _key_start = writer.len;\n", .{extra});
+        try self.ind();
+        try self.print("{s}        try _zidl_keyCollection{d}(writer, {s});\n", .{ extra, id, access });
+        try self.ind();
+        try self.print("{s}        _ = std.math.cast(u32, writer.len - _key_start) orelse return error.Overflow;\n", .{extra});
+        try self.ind();
+        try self.print("{s}    }} else {{\n", .{extra});
+        try self.ind();
+        try self.print("{s}        var _key_size = zidl_cdr.PrimitiveWriter.initCounting(.four, .big);\n", .{extra});
+        try self.ind();
+        try self.print("{s}        try _zidl_keyCollection{d}(&_key_size, {s});\n", .{ extra, id, access });
+        try self.ind();
+        try self.print("{s}        try writer.writeU32(std.math.cast(u32, _key_size.len) orelse return error.Overflow);\n", .{extra});
+        try self.ind();
+        try self.print("{s}        try _zidl_keyCollection{d}(writer, {s});\n", .{ extra, id, access });
+        try self.ind();
+        try self.print("{s}    }}\n", .{extra});
+        try self.ind();
+        try self.print("{s}}}\n", .{extra});
+    }
+
+    fn emitKeyCollectionHelpers(self: *Generator, collections: *std.ArrayList(KeyCollection)) anyerror!void {
+        const previous_key = self.canonical_key;
+        const previous_depth = self.coll_depth;
+        const previous_body = self.key_collection_body;
+        self.canonical_key = true;
+        self.coll_depth = 0;
+        defer self.canonical_key = previous_key;
+        defer self.coll_depth = previous_depth;
+        defer self.key_collection_body = previous_body;
+        var index: usize = 0;
+        while (index < collections.items.len) : (index += 1) {
+            // Copy before nested collections append and potentially move the list.
+            const collection = collections.items[index];
+            try self.ind();
+            try self.print("    fn _zidl_keyCollection{d}(writer: anytype, value: anytype) anyerror!void {{\n", .{index});
+            if (collection.dimensions.len != 0) {
+                try self.emitWriteArrayDims(collection.type_ref, "value", collection.dimensions, "        ", 0);
+            } else {
+                self.key_collection_body = true;
+                try self.emitWriteForTypeRef(collection.type_ref, "value", "        ");
+            }
+            try self.ind();
+            try self.write("    }\n\n");
+        }
     }
 
     fn emitMutableStructWrite(self: *Generator, s: *const ir.Struct, key_only: bool) anyerror!void {
@@ -6352,6 +6431,10 @@ const Generator = struct {
                 try self.print("{s}try writer.{s}({s});\n", .{ extra, method, access });
             },
             .string => |bound| {
+                if (self.canonical_key) if (bound) |n| {
+                    try self.ind();
+                    try self.print("{s}if ({s}.len > {d}) return error.StringTooLong;\n", .{ extra, access, n });
+                };
                 try self.ind();
                 if (bound != null) {
                     try self.print("{s}try writer.writeString({s}.slice());\n", .{ extra, access });
@@ -6360,6 +6443,10 @@ const Generator = struct {
                 }
             },
             .wstring => |bound| {
+                if (self.canonical_key) if (bound) |n| {
+                    try self.ind();
+                    try self.print("{s}if ({s}.len > {d}) return error.StringTooLong;\n", .{ extra, access, n });
+                };
                 try self.ind();
                 if (bound != null) {
                     try self.print("{s}try writer.{s}({s}.slice());\n", .{ extra, if (self.canonical_key) "writeKeyWstring" else "writeWstring", access });
@@ -6368,14 +6455,29 @@ const Generator = struct {
                 }
             },
             .sequence => |seq| {
+                const body_only = self.key_collection_body;
+                self.key_collection_body = false;
+                if (self.canonical_key and !body_only and !isPrimitiveElement(seq.element.*) and canonical.fixedCollectionElementWidth(seq.element.*) == null) {
+                    try self.emitKeyCollection(tr, &.{}, access, extra);
+                    return;
+                }
                 if (self.canonical_key) {
                     try self.ind();
                     if (seq.bound) |n| {
                         try self.print("{s}if ({s}.len > {d}) return error.SequenceTooLong;\n", .{ extra, access, n });
                     } else try self.print("{s}if ({s}._length != 0 and {s}._buffer == null) return error.InvalidSequence;\n", .{ extra, access, access });
+                    if (canonical.fixedCollectionElementWidth(seq.element.*)) |width| {
+                        const length = try std.fmt.allocPrint(self.alloc, "{s}.{s}", .{ access, if (seq.bound != null) "len" else "_length" });
+                        defer self.alloc.free(length);
+                        try self.ind();
+                        try self.print("{s}if ({s} > (std.math.maxInt(u32) - 4) / {d}) return error.Overflow;\n", .{ extra, length, width });
+                        try self.ind();
+                        try self.print("{s}try writer.writeU32(4 + @as(u32, @intCast({s})) * {d});\n", .{ extra, length, width });
+                    }
                 }
-                // XCDR2 prefixes a collection of non-primitive elements with a
-                // DHEADER (a no-op for XCDR1 and key-hash writers).
+                // Ordinary XCDR2 collections reserve their DHEADER here.
+                // Canonical headers use the known-size path above or the
+                // shared counting/streaming collection-body helper.
                 const cdh = try self.openCollectionDheader(!isPrimitiveElement(seq.element.*), extra);
                 const body = if (cdh != null) try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra}) else try self.alloc.dupe(u8, extra);
                 defer self.alloc.free(body);
@@ -6960,6 +7062,16 @@ const Generator = struct {
     /// array, so a single DHEADER covers the whole array when its innermost
     /// element type is non-primitive.
     fn emitWriteArray(self: *Generator, elem_tr: ir.TypeRef, access: []const u8, dims: []const u64, extra: []const u8, depth: usize) anyerror!void {
+        if (self.canonical_key and depth == 0 and !isPrimitiveElement(arrayInnermost(elem_tr)) and try canonical.fixedArrayDelimiterSize(elem_tr, dims) == null) {
+            try self.emitKeyCollection(elem_tr, dims, access, extra);
+            return;
+        }
+        if (self.canonical_key and depth == 0) {
+            if (try canonical.fixedArrayDelimiterSize(elem_tr, dims)) |size| {
+                try self.ind();
+                try self.print("{s}try writer.writeU32({d});\n", .{ extra, size });
+            }
+        }
         const cdh = try self.openCollectionDheader(depth == 0 and !isPrimitiveElement(arrayInnermost(elem_tr)), extra);
         const body = if (cdh != null) try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra}) else try self.alloc.dupe(u8, extra);
         defer self.alloc.free(body);

@@ -25,12 +25,6 @@ Features*.
 
 ### All backends
 
-- **Key hash of keys containing arrays of enums or bitmasks.** The key-hash writers
-  (Zig `KeyHashWriter`, C's XCDR1 big-endian key writer) omit every DHEADER, which is
-  right for aggregates but not for the XCDR2 collection DHEADER of an array-of-enum or
-  array-of-bitmask key member (arrays of primitives have none). The hash writer streams
-  into MD5 and cannot back-patch a length, so it needs the array's byte size computed
-  up front.
 - **XCDR1 `@mutable` data is not PL_CDR.** Peers expect a ParameterList (PL_CDR)
   encoding for XCDR1 samples of mutable types; zidl writes plain CDR1 framing with a
   CDR1 identifier. XCDR2 mutable types are correct (PL_CDR2, EMHEADERs).

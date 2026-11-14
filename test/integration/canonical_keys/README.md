@@ -70,3 +70,57 @@ reference LC=5, unknown/MU members and LC 4–7 size overflow. A C tracking allo
 checks cleanup after a sequence buffer is allocated and a nested key read fails.
 Java checks parent-limit restoration; native Zig checks reader-bound restoration.
 Sidecar wire files are explicit C/Java run-cache inputs.
+
+The [array-key checkpoint](../../../docs/design/native-cdr-array-keys.md) adds
+`array_keys.idl` and nine canonical witnesses in `array_vectors.txt`. Regenerate
+those bytes and hashes with `python3 make_array_key_vectors.py`; the script uses
+only standard Python packing/hashlib and explicit XTypes rules. The normal key
+suite checks all four backends, including Java single/split output, and fixed,
+counting, dynamic and native streaming paths. Enum/bitmask widths, nested array
+typedefs, alignment, and schema maxima at 16/17/20 bytes are covered. A denied CDR
+allocator verifies the fixed array-holder plus MD5 path remains allocation-free.
+
+Optionally check an independent implementation without networking or packet
+capture:
+
+```sh
+python3 check_cyclone_arrays.py --cyclone /path/to/cyclonedds
+```
+
+This uses an already built Cyclone tree (`build/bin/idlc`, `build/lib/libddsc`)
+and a system C compiler. It generates types from the same IDL and extracts
+XCDR2 BE keys in explicit `DDS_CDR_KEY_SERIALIZATION_KEYHASH` mode. All fields in
+these FINAL fixtures are keys, so the input native sample is also a key-only
+sample. It compares bytes and the schema-based fixed-key/MD5 flag with the
+independent Python witnesses. No Cyclone dependency is added to normal CI.
+
+The [collection-key checkpoint](../../../docs/design/native-cdr-collection-keys.md)
+corrects the earlier aggregate/string collection expectations, including dependent
+key-only and projection hashes. Aggregate extensibility headers stay omitted;
+collection DHEADERs are retained.
+
+The [collection-key checkpoint](../../../docs/design/native-cdr-collection-keys.md)
+extends the same independent oracle and optional Cyclone check to fifteen
+fixed-width enum/bitmask sequence witnesses (24 collection witnesses total).
+These distinguish actual extent from schema maximum, including empty sequences
+that still require MD5, overflow guards, alias chains and primitive controls.
+
+`make_variable_key_vectors.py` adds twelve variable collection witnesses in
+`variable_vectors.txt` and corrects `ArrayKey`, `SeqAgg` and `WideSeq` in the older
+vector file. Also run `make_key_wire_vectors.py` to refresh dependent hashes.
+The key-projection fixture's independent `make_vectors.py` now retains collection
+delimiters in `RootArray` and `RootSeq` canonical bytes too; wire byte columns do
+not change. All 56 canonical cases run in every backend fixture.
+
+With the documented local Cyclone build, the default optional oracle reports a
+wide-string byte-order disagreement and IDLC does not support union collection
+keys. `UnionSeq` is specification-only in that check. To explicitly exclude the
+observed wide-array discrepancy and check the other 34 collection witnesses:
+
+```sh
+python3 check_cyclone_arrays.py --cyclone /path/to/cyclonedds --exclude WideArray
+```
+
+The command prints the excluded expected/observed bytes. It does not replace
+expected bytes or claim agreement for the excluded cases. See the checkpoint for
+exact observations, including the separate Fast CDR wide-length probe.
