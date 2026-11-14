@@ -3208,7 +3208,7 @@ const CdrGenerator = struct {
                 self.indent_depth -= 1;
             }
             // Case value uses the normalized IR member identity.
-            try self.writeI("switch (_v->_d) {\n");
+            try self.printI("switch ({s}_v->_d) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
             self.indent_depth += 1;
             var has_default_m = false;
             for (u.cases, 0..) |cas, cas_idx| {
@@ -3259,7 +3259,7 @@ const CdrGenerator = struct {
                 try self.writeI("if (_rc) return _rc;\n");
             }
             try self.emitDiscWriteC(u.discriminant, "_v->_d");
-            try self.writeI("switch (_v->_d) {\n");
+            try self.printI("switch ({s}_v->_d) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
             self.indent_depth += 1;
             var has_default = false;
             for (u.cases) |cas| {
@@ -3317,7 +3317,7 @@ const CdrGenerator = struct {
             try self.writeI("_seen_disc=true;\nif (_r->pos != _member_end) return ZIDL_CDR_INVALID;\nbreak; }\n");
             for (u.cases, 0..) |cas, idx| {
                 try self.printI("case {d}: {{\n", .{cas.annotations.memberId(@intCast(idx + 1))});
-                try self.writeI("if (!_seen_disc || _seen_value) return ZIDL_CDR_INVALID;\nswitch (_disc) {\n");
+                try self.printI("if (!_seen_disc || _seen_value) return ZIDL_CDR_INVALID;\nswitch ({s}_disc) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
                 if (isDefaultUnionCase(cas)) {
                     for (u.cases) |other| {
                         if (isDefaultUnionCase(other)) continue;
@@ -3355,7 +3355,7 @@ const CdrGenerator = struct {
                 try self.writeI("}\n");
             }
             try self.emitDiscReadC(u.discriminant, "_v->_d");
-            try self.writeI("switch (_v->_d) {\n");
+            try self.printI("switch ({s}_v->_d) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
             self.indent_depth += 1;
             var has_default = false;
             for (u.cases) |cas| {
@@ -3415,7 +3415,7 @@ const CdrGenerator = struct {
             defer self.alloc.free(disc_c);
             try self.printI("{s} _d;\n", .{disc_c});
             try self.emitDiscReadC(u.discriminant, "_d");
-            try self.writeI("switch (_d) {\n");
+            try self.printI("switch ({s}_d) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
             self.indent_depth += 1;
             var has_default = false;
             for (u.cases) |cas| {
@@ -4261,7 +4261,7 @@ const CdrGenerator = struct {
         defer self.alloc.free(c_name);
 
         try self.print("void {s}_free({s} *v) {{\n", .{ c_name, c_name });
-        try self.writeI("switch (v->_d) {\n");
+        try self.printI("switch ({s}v->_d) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
         self.indent_depth += 1;
         for (u.cases) |cas| {
             // Every case gets a label, owning or not: a non-owning case must

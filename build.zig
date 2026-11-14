@@ -875,6 +875,36 @@ pub fn build(b: *std.Build) void {
     }
 
 
+    {
+        const step = b.step("test-native-boolean-union", "Check warning-clean boolean union dispatch and lifecycle");
+        test_step.dependOn(step);
+        const dir = "test/integration/native_boolean_union/";
+        for (0..6) |mode| {
+            const cpp = mode % 3 != 0;
+            const pmr = mode % 3 == 2;
+            const split = mode >= 3;
+            const gen = b.addRunArtifact(exe);
+            gen.addArgs(&.{ "-b", if (cpp) "cpp" else "c" });
+            if (pmr) gen.addArg("--cpp-pmr-containers");
+            if (split) gen.addArg("--split-files");
+            gen.addArg("-o");
+            const out = gen.addOutputDirectoryArg(b.fmt("native-boolean-union-{d}", .{mode}));
+            gen.addFileArg(b.path(dir ++ "bools.idl"));
+            const m = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = cpp });
+            const flags: []const []const u8 = if (cpp) (if (split) &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror", "-DSPLIT" } else &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" }) else (if (split) &.{ "-std=c99", "-Wall", "-Wextra", "-Werror", "-DSPLIT" } else &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" });
+            m.addCSourceFile(.{ .file = b.path(if (cpp) dir ++ "test.cpp" else dir ++ "test.c"), .flags = flags });
+            if (split) {
+                for ([_][]const u8{ "FinalValue", "AppendValue", "MutableValue", "Exhaustive" }) |name| m.addCSourceFile(.{ .file = out.path(b, b.fmt("BoolSafety_{s}_cdr.{s}", .{ name, if (cpp) "cpp" else "c" })), .flags = flags });
+            } else m.addCSourceFile(.{ .file = out.path(b, if (cpp) "bools_cdr.cpp" else "bools_cdr.c"), .flags = flags });
+            m.addIncludePath(out);
+            m.addIncludePath(b.path("packages/zidl-cdr/include"));
+            linkCdr(m, cdr_library);
+            const app = b.addExecutable(.{ .name = b.fmt("boolean-union-{d}", .{mode}), .root_module = m });
+            step.dependOn(&b.addRunArtifact(app).step);
+        }
+    }
+
+
     // STL storage failures must stay inside generated C++ codec entry points.
     {
         const allocation_step = b.step("test-cpp-codec-allocation", "Inject C++ codec allocation failures");

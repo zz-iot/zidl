@@ -2912,7 +2912,7 @@ const CdrGenerator = struct {
                 try self.writeI("_rc = zidl_cdr_patch_emheader_checked(_w, _em_d, _es_d); if (_rc) return _rc; }\n");
                 self.indent_depth -= 1;
             }
-            try self.writeI("switch (_v->_d()) {\n");
+            try self.printI("switch ({s}_v->_d()) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
             self.indent_depth += 1;
             var has_default_m = false;
             for (u.cases, 0..) |cas, cas_idx| {
@@ -2971,7 +2971,7 @@ const CdrGenerator = struct {
             }
             // Write discriminant via getter _v->_d()
             try self.emitDiscWriteCpp(u.discriminant, "_v->_d()");
-            try self.writeI("switch (_v->_d()) {\n");
+            try self.printI("switch ({s}_v->_d()) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
             self.indent_depth += 1;
             var has_default = false;
             for (u.cases) |cas| {
@@ -3027,7 +3027,7 @@ const CdrGenerator = struct {
             try self.writeI("_disc=_incoming; _seen_disc=true;\nif (_r->pos != _member_end) return ZIDL_CDR_INVALID;\nbreak; }\n");
             for (u.cases, 0..) |cas, idx| {
                 try self.printI("case {d}: {{\n", .{cas.annotations.memberId(@intCast(idx + 1))});
-                try self.writeI("if (!_seen_disc || _seen_value) return ZIDL_CDR_INVALID;\nswitch (_disc) {\n");
+                try self.printI("if (!_seen_disc || _seen_value) return ZIDL_CDR_INVALID;\nswitch ({s}_disc) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
                 if (isDefaultUnionCase(cas)) {
                     for (u.cases) |other| {
                         if (isDefaultUnionCase(other)) continue;
@@ -3072,7 +3072,7 @@ const CdrGenerator = struct {
             }
             // Read discriminant into temp then set via setter
             try self.emitDiscReadCpp(u.discriminant, "_v");
-            try self.writeI("switch (_v->_d()) {\n");
+            try self.printI("switch ({s}_v->_d()) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
             self.indent_depth += 1;
             var has_default = false;
             for (u.cases) |cas| {
@@ -3143,7 +3143,7 @@ const CdrGenerator = struct {
                 try self.writeI("}\n");
             }
             try self.emitDiscReadLocalCpp(u.discriminant, "_d");
-            try self.writeI("switch (_d) {\n");
+            try self.printI("switch ({s}_d) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
             self.indent_depth += 1;
             var has_default_s = false;
             for (u.cases) |cas| {
@@ -3393,7 +3393,7 @@ const CdrGenerator = struct {
 
     fn emitUnionDestroyActive(self: *CdrGenerator, u: *const ir.Union, cpp_qname: []const u8) anyerror!void {
         try self.print("void {s}::_destroy_active() noexcept {{\n", .{cpp_qname});
-        try self.writeI("switch (_disc) {\n");
+        try self.printI("switch ({s}_disc) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
         self.indent_depth += 1;
         for (u.cases) |cas| {
             try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
@@ -3409,7 +3409,7 @@ const CdrGenerator = struct {
 
     fn emitUnionConstructDefault(self: *CdrGenerator, u: *const ir.Union, cpp_qname: []const u8) anyerror!void {
         try self.print("void {s}::_construct_default() {{\n", .{cpp_qname});
-        try self.writeI("switch (_disc) {\n");
+        try self.printI("switch ({s}_disc) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
         self.indent_depth += 1;
         for (u.cases) |cas| {
             try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
@@ -3425,7 +3425,7 @@ const CdrGenerator = struct {
 
     fn emitUnionCopyConstructFrom(self: *CdrGenerator, u: *const ir.Union, cpp_qname: []const u8) anyerror!void {
         try self.print("void {s}::_copy_construct_from(const {s} &other) {{\n", .{ cpp_qname, cpp_qname });
-        try self.writeI("switch (other._disc) {\n");
+        try self.printI("switch ({s}other._disc) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
         self.indent_depth += 1;
         for (u.cases) |cas| {
             try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);
@@ -3456,7 +3456,7 @@ const CdrGenerator = struct {
     /// in `emitUnionLifecycleFns` for why: unlike a copy, this can't throw.
     fn emitUnionMoveConstructFrom(self: *CdrGenerator, u: *const ir.Union, cpp_qname: []const u8) anyerror!void {
         try self.print("void {s}::_move_construct_from({s} &other) {{\n", .{ cpp_qname, cpp_qname });
-        try self.writeI("switch (other._disc) {\n");
+        try self.printI("switch ({s}other._disc) {{\n", .{cdr_skip.unionSwitchPromotion(u.discriminant)});
         self.indent_depth += 1;
         for (u.cases) |cas| {
             try self.emitUnionCaseLabelLinesCpp(u.discriminant, cas);

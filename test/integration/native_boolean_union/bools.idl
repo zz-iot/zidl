@@ -1,0 +1,6 @@
+    typedef boolean BoolSafety_Flag;
+    typedef BoolSafety_Flag BoolSafety_Alias;
+    @final union BoolSafety_FinalValue switch(BoolSafety_Alias) { case FALSE: long number; default: string text; };
+    @appendable union BoolSafety_AppendValue switch(BoolSafety_Flag) { default: string text; case FALSE: long number; };
+    @mutable union BoolSafety_MutableValue switch(boolean) { @id(10) case FALSE: long number; @id(20) default: string text; };
+    @final union BoolSafety_Exhaustive switch(boolean) { case FALSE: long number; case TRUE: long other; };

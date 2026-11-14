@@ -18,6 +18,9 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Make boolean union dispatch warning-clean in C/C++, including aliases,
+  canonical-key codecs and owning lifecycle helpers.
+
 - Initialize Java union discriminators and selected payloads consistently, select
   valid default-arm discriminators in setters, and allocate decoded array arms.
   Include boolean default arms in ordinary union codecs.
