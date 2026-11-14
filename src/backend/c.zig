@@ -116,7 +116,7 @@ pub fn generateHeader(
     opts: interface.Options,
     out: *std.ArrayList(u8),
 ) !void {
-    if (itemsHaveMaps(spec.items)) return error.MapTypeNotSupportedInCBackend;
+    if (itemsHaveMaps(spec.items) and (opts.generate_interfaces or opts.generate_zzdds_wrappers)) return error.UnsupportedCMapBindings;
     var gen = Generator{
         .alloc = alloc,
         .opts = opts,
@@ -160,6 +160,13 @@ fn tdHasMap(td: ir.TypeDecl) bool {
         .union_ => |u| for (u.cases) |c| if (typeRefHasMap(c.type_ref)) return true,
         .exception => |e| for (e.members) |m| if (typeRefHasMap(m.type_ref)) return true,
         .typedef => |t| return typeRefHasMap(t.type_ref),
+        .interface => |iface| {
+            for (iface.operations) |op| {
+                if (op.return_type) |tr| if (typeRefHasMap(tr)) return true;
+                for (op.params) |param| if (typeRefHasMap(param.type_ref)) return true;
+            }
+            for (iface.attributes) |attr| if (typeRefHasMap(attr.type_ref)) return true;
+        },
         else => {},
     }
     return false;
@@ -391,10 +398,7 @@ const Generator = struct {
                 try self.scanTypeRefForSeqs(seq.element.*);
                 try self.ensureSeqTypedef(seq.element.*);
             },
-            .map => |m| {
-                try self.scanTypeRefForSeqs(m.key.*);
-                try self.scanTypeRefForSeqs(m.value.*);
-            },
+            .map => try self.ensureMapTypedef(tr),
             else => {},
         }
     }
@@ -451,6 +455,24 @@ const Generator = struct {
             try self.print("#endif\n", .{});
         }
         try self.write("\n");
+    }
+
+    fn ensureMapTypedef(self: *Generator, tr: ir.TypeRef) !void {
+        const m = tr.map;
+        if (!primitiveMapKey(m.key.*) or !primitiveMapValue(m.value.*)) return error.UnsupportedCMapType;
+        const name = try seqElemKeyC(self.alloc, self.opts.type_prefix, tr);
+        defer self.alloc.free(name);
+        if (self.seq_emitted.contains(name)) return;
+        try self.seq_emitted.put(self.alloc, try self.alloc.dupe(u8, name), {});
+        const key = try self.typeRefToC(m.key.*);
+        defer self.alloc.free(key);
+        const value = try self.typeRefToC(m.value.*);
+        defer self.alloc.free(value);
+        // Keys and values in this first slice are primitive, so entry definitions
+        // need no incomplete aggregate or deferred by-value declaration.
+        try self.print("#ifndef {s}_DEFINED\n#define {s}_DEFINED\n", .{ name, name });
+        try self.print("typedef struct {{ {s} key; {s} value; }} {s}_entry;\n", .{ key, value, name });
+        try self.print("typedef struct {{ uint32_t _maximum, _length; {s}_entry *_buffer; bool _release; }} {s};\n#endif\n\n", .{ name, name });
     }
 
     // ── Item / declaration emission ───────────────────────────────────────────
@@ -1362,7 +1384,7 @@ const Generator = struct {
             .string => self.alloc.dupe(u8, "char *"),
             .wstring => self.alloc.dupe(u8, "uint16_t *"),
             .fixed_pt => self.alloc.dupe(u8, "double"),
-            .map => self.alloc.dupe(u8, "void *"),
+            .map => seqElemKeyC(self.alloc, self.opts.type_prefix, tr),
         };
     }
 
@@ -1409,7 +1431,13 @@ fn seqElemKeyC(alloc: std.mem.Allocator, type_prefix: []const u8, elem: ir.TypeR
         .string => |b| if (b) |n| std.fmt.allocPrint(alloc, "string{d}", .{n}) else alloc.dupe(u8, "string"),
         .wstring => |b| if (b) |n| std.fmt.allocPrint(alloc, "wstring{d}", .{n}) else alloc.dupe(u8, "wstring"),
         .fixed_pt => alloc.dupe(u8, "fixed_pt"),
-        .map => alloc.dupe(u8, "map"),
+        .map => |m| blk: {
+            const key = try seqElemKeyC(alloc, type_prefix, m.key.*);
+            defer alloc.free(key);
+            const value = try seqElemKeyC(alloc, type_prefix, m.value.*);
+            defer alloc.free(value);
+            break :blk std.fmt.allocPrint(alloc, "zidl_map_{s}_{s}", .{ key, value });
+        },
     };
 }
 
@@ -1421,6 +1449,24 @@ fn typeRefIsArrayBacked(tr: ir.TypeRef) bool {
         .named => |td| switch (td) {
             .typedef => |t| t.dimensions.len > 0 or typeRefIsArrayBacked(t.type_ref),
             else => false,
+        },
+        else => false,
+    };
+}
+
+/// Primitive-only initial C map slice.
+fn primitiveMapValue(tr: ir.TypeRef) bool {
+    return switch (cdr_skip.resolveAlias(tr)) {
+        .base => |b| b != .long_double and b != .any and b != .object and b != .value_base,
+        else => false,
+    };
+}
+
+fn primitiveMapKey(tr: ir.TypeRef) bool {
+    return switch (cdr_skip.resolveAlias(tr)) {
+        .base => |b| switch (b) {
+            .float, .double, .long_double, .any, .object, .value_base => false,
+            else => true,
         },
         else => false,
     };
@@ -1567,6 +1613,7 @@ fn itemsHaveZzddsTopicStructC(items: []const ir.ModuleItem) bool {
 fn isUnboundedSeqTypedef(t: *const ir.Typedef) bool {
     return t.dimensions.len == 0 and switch (t.type_ref) {
         .sequence => |seq| seq.bound == null,
+        .map => true,
         else => false,
     };
 }
@@ -1588,7 +1635,7 @@ fn typeRefHasSequence(tr: ir.TypeRef) bool {
     return switch (tr) {
         .string => |b| b == null,
         .wstring => |b| b == null,
-        .sequence => true,
+        .sequence, .map => true,
         .named => |td| switch (td) {
             // Whether the typedef is itself an array (t.dimensions.len > 0)
             // doesn't change whether its *element* type owns heap memory --
@@ -1680,6 +1727,7 @@ fn typeRefHasOwnedFields(tr: ir.TypeRef) bool {
         .string => |bound| bound == null,
         .wstring => |bound| bound == null,
         .sequence => |seq| seq.bound == null,
+        .map => true,
         .named => |td| switch (td) {
             .struct_ => |s| structHasOwnedFields(s),
             .typedef => |t| typeRefHasOwnedFields(t.type_ref),
@@ -3622,8 +3670,28 @@ const CdrGenerator = struct {
                 try self.printI("_rc = zidl_cdr_write_fixed(_w, {d}, {d}, {s});\n", .{ fp.digits, fp.scale, access });
                 try self.writeI("if (_rc) return _rc;\n");
             },
-            .map => {
-                try self.printI("/* TODO: map write for {s} */\n", .{field_name});
+            .map => |m| {
+                if (!primitiveMapKey(m.key.*) or !primitiveMapValue(m.value.*)) return error.UnsupportedCMapType;
+                const mi = try cdr_skip.collName(self.alloc, "_mi", self.coll_depth);
+                defer self.alloc.free(mi);
+                try self.printI("if ({s}._length > {s}._maximum || ({s}._length && !{s}._buffer)) return ZIDL_CDR_INVALID;\n", .{ access, access, access, access });
+                if (m.bound) |bound| try self.printI("if ({s}._length > {d}u) return ZIDL_CDR_INVALID;\n", .{ access, bound });
+                if (cdr_skip.resolveAlias(m.key.*) == .base and cdr_skip.resolveAlias(m.key.*).base == .boolean) try self.printI("for (uint32_t {s}=0; {s}<{s}._length; ++{s}) if ({s}._buffer[{s}].key > 1) return ZIDL_CDR_INVALID;\n", .{ mi, mi, access, mi, access, mi });
+                if (cdr_skip.resolveAlias(m.value.*) == .base and cdr_skip.resolveAlias(m.value.*).base == .boolean) try self.printI("for (uint32_t {s}=0; {s}<{s}._length; ++{s}) if ({s}._buffer[{s}].value > 1) return ZIDL_CDR_INVALID;\n", .{ mi, mi, access, mi, access, mi });
+                try self.printI("for (uint32_t {s}=0; {s}<{s}._length; ++{s}) for (uint32_t _mj=0; _mj<{s}; ++_mj) if ({s}._buffer[{s}].key == {s}._buffer[_mj].key) return ZIDL_CDR_INVALID;\n", .{ mi, mi, access, mi, mi, access, mi, access });
+                try self.printI("_rc = zidl_cdr_write_u32(_w, {s}._length); if (_rc) return _rc;\n", .{access});
+                try self.printI("for (uint32_t {s}=0; {s}<{s}._length; ++{s}) {{\n", .{ mi, mi, access, mi });
+                self.indent_depth += 1;
+                const key = try std.fmt.allocPrint(self.alloc, "{s}._buffer[{s}].key", .{ access, mi });
+                defer self.alloc.free(key);
+                const value = try std.fmt.allocPrint(self.alloc, "{s}._buffer[{s}].value", .{ access, mi });
+                defer self.alloc.free(value);
+                self.coll_depth += 1;
+                try self.emitWriteForTypeRef(m.key.*, field_name, key);
+                try self.emitWriteForTypeRef(m.value.*, field_name, value);
+                self.coll_depth -= 1;
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
             },
         }
     }
@@ -4030,8 +4098,53 @@ const CdrGenerator = struct {
                 try self.printI("_rc = zidl_cdr_read_fixed(_r, {d}, {d}, &{s});\n", .{ fp.digits, fp.scale, lval });
                 try self.emitRcCheck();
             },
-            .map => {
-                try self.printI("/* TODO: map read for {s} */\n", .{field_name});
+            .map => |m| {
+                if (!primitiveMapKey(m.key.*) or !primitiveMapValue(m.value.*)) return error.UnsupportedCMapType;
+                const mi = try cdr_skip.collName(self.alloc, "_mi", self.coll_depth);
+                defer self.alloc.free(mi);
+                const ml = try cdr_skip.collName(self.alloc, "_ml", self.coll_depth);
+                defer self.alloc.free(ml);
+                const name = try seqElemKeyC(self.alloc, self.opts.type_prefix, tr);
+                defer self.alloc.free(name);
+                try self.printI("{{ uint32_t {s}; _rc = zidl_cdr_read_u32(_r, &{s});\n", .{ ml, ml });
+                self.indent_depth += 1;
+                try self.emitRcCheck();
+                if (m.bound) |bound| {
+                    try self.printI("if ({s} > {d}u) {{\n", .{ ml, bound });
+                    try self.emitReturnRc("ZIDL_CDR_INVALID");
+                    try self.writeI("}\n");
+                }
+                try self.printI("size_t _map_bytes = (size_t){s} * sizeof({s}_entry);\n", .{ ml, name });
+                try self.printI("if ({s} && _map_bytes / {s} != sizeof({s}_entry)) {{\n", .{ ml, ml, name });
+                try self.emitReturnRc("ZIDL_CDR_OVERFLOW");
+                try self.writeI("}\n");
+                // Probe the entire declared extent before allocating a buffer.
+                try self.writeI("{ ZidlCdrReader _probe = *_r; ZidlCdrReader *_r = &_probe;\n");
+                try self.printI("for (uint32_t {s}=0; {s}<{s}; ++{s}) {{\n", .{ mi, mi, ml, mi });
+                try cdr_skip.emitSkipForTypeRef(self, m.key.*);
+                try cdr_skip.emitSkipForTypeRef(self, m.value.*);
+                try self.writeI("} }\n");
+                try self.printI("{s}._maximum = {s}; {s}._length = 0; {s}._release = true;\n", .{ lval, ml, lval, lval });
+                try self.printI("{s}._buffer = {s} ? ({s}_entry *)zidl_cdr_alloc((size_t){s} * sizeof({s}_entry)) : NULL;\n", .{ lval, ml, name, ml, name });
+                try self.printI("if ({s} && !{s}._buffer) {{ {s}._maximum=0;\n", .{ ml, lval, lval });
+                try self.emitReturnRc("ZIDL_CDR_OVERFLOW");
+                try self.writeI("}\n");
+                try self.printI("for (uint32_t {s}=0; {s}<{s}; ++{s}) {{\n", .{ mi, mi, ml, mi });
+                const key = try std.fmt.allocPrint(self.alloc, "{s}._buffer[{s}].key", .{ lval, mi });
+                defer self.alloc.free(key);
+                const value = try std.fmt.allocPrint(self.alloc, "{s}._buffer[{s}].value", .{ lval, mi });
+                defer self.alloc.free(value);
+                self.coll_depth += 1;
+                try self.emitReadForTypeRef(m.key.*, field_name, key);
+                try self.emitReadForTypeRef(m.value.*, field_name, value);
+                self.coll_depth -= 1;
+                try self.printI("for (uint32_t _mj=0; _mj<{s}; ++_mj) if ({s} == {s}._buffer[_mj].key) {{\n", .{ mi, key, lval });
+                try self.emitReturnRc("ZIDL_CDR_INVALID");
+                try self.writeI("}\n");
+                try self.printI("++{s}._length;\n", .{lval});
+                try self.writeI("}\n");
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
             },
         }
     }
@@ -4321,6 +4434,10 @@ const CdrGenerator = struct {
                 self.indent_depth -= 1;
                 try self.writeI("}\n");
             },
+            .map => {
+                try self.printI("if ({s}._release) zidl_cdr_free({s}._buffer, {s}._maximum * sizeof(*{s}._buffer));\n", .{ lval, lval, lval, lval });
+                try self.printI("{s}._buffer=NULL; {s}._length={s}._maximum=0; {s}._release=false;\n", .{ lval, lval, lval, lval });
+            },
             .named => |td| switch (td) {
                 .typedef => |t| if (t.dimensions.len == 0) {
                     try self.emitFreeTypeRefGeneral(t.type_ref, lval, depth);
@@ -4607,6 +4724,7 @@ const CdrGenerator = struct {
             .named => |td| self.prefixedCName(ir.typeDeclQualifiedName(td)),
             .string => |b| if (b) |n| std.fmt.allocPrint(self.alloc, "char[{d}]", .{n + 1}) else self.alloc.dupe(u8, "char *"),
             .wstring => |b| if (b) |n| std.fmt.allocPrint(self.alloc, "uint16_t[{d}]", .{n + 1}) else self.alloc.dupe(u8, "uint16_t *"),
+            .map => seqElemKeyC(self.alloc, self.opts.type_prefix, tr),
             .sequence => |seq| blk: {
                 const key = try seqElemKeyC(self.alloc, self.opts.type_prefix, seq.element.*);
                 defer self.alloc.free(key);
@@ -5422,7 +5540,7 @@ test "c_backend: map type returns error" {
     const alloc = testing.allocator;
     var ast_arena = std.heap.ArenaAllocator.init(alloc);
     defer ast_arena.deinit();
-    var p = parser_mod.Parser.init("struct S { map<long, long> m; };", ast_arena.allocator());
+    var p = parser_mod.Parser.init("struct S { map<string, long> m; };", ast_arena.allocator());
     const spec = try p.parseSpecification();
     var az = try semantic_mod.Analyzer.init(alloc);
     defer az.deinit();
@@ -5433,7 +5551,7 @@ test "c_backend: map type returns error" {
     defer out.deinit(alloc);
     const opts = interface.Options{ .input_stem = "map_test" };
     const result = generateHeader(alloc, &ir_spec, opts, &out);
-    try testing.expectError(error.MapTypeNotSupportedInCBackend, result);
+    try testing.expectError(error.UnsupportedCMapType, result);
 }
 
 test "c_backend: native" {

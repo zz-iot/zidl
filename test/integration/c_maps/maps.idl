@@ -1,0 +1,6 @@
+module Maps {
+    typedef map<long, long, 3> Table;
+    struct Sample { Table values; unsigned long tail; };
+    struct Nested { sequence<Table> values; };
+    struct Mixed { map<octet, unsigned long long, 2> values; };
+};

@@ -423,3 +423,11 @@ Discriminator MU flags and member admission are corrected across C/C++/Java/Zig.
 The [mutable union audit](design/mutable-union-audit.md) records validation,
 ownership and evolution-default contracts. Generic skip paths remain structural
 traversal; they do not establish complete-message admission.
+
+### C map coverage follow-up
+
+Primitive maps now have typed storage and checked codecs. The remaining slices
+are non-primitive rule-(15) framing, string/enum/aggregate/collection keys/values,
+more scalable duplicate validation for very large maps, and interface/middleware
+binding adaptation. Primitive duplicate checks are quadratic; callers should
+choose schema bounds appropriate for their admission budget.

@@ -45,7 +45,7 @@ for its `_free`, unless `--c-no-free` is set.
 | `sequence<T>` | `typedef struct { uint32_t _maximum; uint32_t _length; T *_buffer; bool _release; } T_seq;` (e.g. `int32_t_seq`; nested: `int32_t_seq_seq`) |
 | `sequence<string<N>>` | `stringN_seq` with inline elements: `char (*_buffer)[N + 1]` (like a bounded string struct field) |
 | `T[N]` | `T name[N]` |
-| `map<K,V>` | **Not supported** — error at codegen time |
+| `map<K,V>` | Typed entry buffer for integral/boolean/character keys and primitive values; other shapes reject with `UnsupportedCMapType` |
 | `@optional T` | Supported — see [`@optional` members](#optional-members) below |
 | `enum` | `typedef enum { ... } Foo;` (CDR: `uint32_t`) |
 | `bitmask` | `typedef uint8/16/32/64_t Foo;` (storage sized by `@bit_bound`) |
@@ -285,10 +285,35 @@ promise allocation-free execution or complete IDL coverage. Current gaps, includ
 
 | Feature | Status |
 |---|---|
-| `map<K,V>` | Not supported — returns `error.MapTypeNotSupportedInCBackend` |
+| Non-primitive maps / map binding adapters | Return `UnsupportedCMapType` / `UnsupportedCMapBindings` |
 | User-supplied allocator for strings/sequences | Process-wide only — `zidl_cdr_set_allocator` sets one global `ZidlAllocator`; no per-type / per-reader / per-call override |
 | `@optional`: more than 64 members per struct | Returns `error.TooManyOptionalMembers` at codegen time |
 | `@optional`: `_set_` macro omitted for array-backed members | Use direct assignment + manual `_present` bit update |
 | `@default` on non-optional members | Returns `error.DefaultOnNonOptionalNotSupportedInCBackend` at codegen time |
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
 | `--generate-interfaces`: full DDS object/resource adaptation | Opaque handle typedefs + free function declarations are generated (see [`ecosystem.md`](ecosystem.md) §`--generate-interfaces`); richer DDS object binding semantics remain runtime-specific future work |
+
+## Primitive map slice
+
+A supported map uses a generated `zidl_map_<key>_<value>_entry` (`key`, `value`)
+and a sequence-shaped owner with `_maximum`, `_length`, `_buffer`, `_release`.
+It is a logical unique-key collection; iteration follows buffer order. Decoding
+allocates the entry array with the configured `ZidlAllocator`; free the enclosing
+value (or map typedef) using its generated `_free`. Borrowed buffers use
+`_release=false` and are not freed. The map free path clears its view and is
+idempotent. A decode error leaves any allocated buffer freeable by the caller.
+
+This first slice supports integral, boolean and character primitive keys and
+primitive values, excluding long double. Scalar aliases, bounded/unbounded maps,
+arrays and sequence elements use the same typed representation. String, enum,
+aggregate and collection keys/values still fail explicitly: their XCDR2 map
+framing/ownership needs a separate slice. Map-bearing interface and middleware
+wrapper generation is also explicitly deferred.
+
+XTypes 1.3 rules (14) and (16) encode these maps as a count and key/value pairs,
+without a DHEADER in either XCDR version. The complete declared extent and schema
+bound are checked before allocating. Duplicate keys reject with `ZIDL_CDR_INVALID`
+on both read and write. The initial duplicate check is quadratic in entry count;
+use an appropriate schema bound for untrusted large inputs. No hash-table policy
+or implicit sorting is imposed on callers. Non-primitive rule (15) needs a
+separate implementation, rather than treating every map as a sequence of pairs.

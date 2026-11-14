@@ -925,6 +925,34 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+
+    {
+        const map_step = b.step("test-c-maps", "Check primitive C map storage, wire bytes and allocation failures");
+        test_step.dependOn(map_step);
+        const gen = b.addRunArtifact(exe);
+        gen.addArgs(&.{ "-b", "c", "-o" });
+        const generated = gen.addOutputDirectoryArg("c-maps");
+        gen.addFileArg(b.path("test/integration/c_maps/maps.idl"));
+        const consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true });
+        const flags = &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" };
+        consumer.addCSourceFile(.{ .file = b.path("test/integration/c_maps/test.c"), .flags = flags });
+        consumer.addCSourceFile(.{ .file = generated.path(b, "maps_cdr.c"), .flags = flags });
+        consumer.addIncludePath(generated);
+        consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
+        linkCdr(consumer, cdr_library);
+        const app = b.addExecutable(.{ .name = "c-maps", .root_module = consumer });
+        map_step.dependOn(&b.addRunArtifact(app).step);
+        const cpp_consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = true });
+        cpp_consumer.addCSourceFile(.{ .file = b.path("test/integration/c_maps/test.cpp"), .flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror", "-fno-exceptions", "-fno-rtti" } });
+        cpp_consumer.addCSourceFile(.{ .file = generated.path(b, "maps_cdr.c"), .flags = flags });
+        cpp_consumer.addIncludePath(generated);
+        cpp_consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
+        linkCdr(cpp_consumer, cdr_library);
+        const cpp_app = b.addExecutable(.{ .name = "c-maps-cpp", .root_module = cpp_consumer });
+        map_step.dependOn(&b.addRunArtifact(cpp_app).step);
+    }
+
+
     // STL storage failures must stay inside generated C++ codec entry points.
     {
         const allocation_step = b.step("test-cpp-codec-allocation", "Inject C++ codec allocation failures");
