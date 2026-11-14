@@ -300,6 +300,7 @@ pub fn emitSkipForTypeRef(self: anytype, tr: ir.TypeRef) anyerror!void {
             try closeReadWindow(self, window);
         },
         .map => |m| {
+            if (comptime @hasDecl(@TypeOf(self.*), "emitSkipMap")) return self.emitSkipMap(tr);
             const window = try openReadWindow(self, !(isPrimitiveElement(m.key.*) and isPrimitiveElement(m.value.*)));
             const ml = try collName(self.alloc, "_ml", self.coll_depth);
             defer self.alloc.free(ml);

@@ -942,6 +942,14 @@ pub fn build(b: *std.Build) void {
         linkCdr(consumer, cdr_library);
         const app = b.addExecutable(.{ .name = "c-maps", .root_module = consumer });
         map_step.dependOn(&b.addRunArtifact(app).step);
+        const owning = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true });
+        owning.addCSourceFile(.{ .file = b.path("test/integration/c_maps/nonprimitive.c"), .flags = flags });
+        owning.addCSourceFile(.{ .file = generated.path(b, "maps_cdr.c"), .flags = flags });
+        owning.addIncludePath(generated);
+        owning.addIncludePath(b.path("packages/zidl-cdr/include"));
+        linkCdr(owning, cdr_library);
+        const owning_app = b.addExecutable(.{ .name = "c-maps-owning", .root_module = owning });
+        map_step.dependOn(&b.addRunArtifact(owning_app).step);
         const cpp_consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = true });
         cpp_consumer.addCSourceFile(.{ .file = b.path("test/integration/c_maps/test.cpp"), .flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror", "-fno-exceptions", "-fno-rtti" } });
         cpp_consumer.addCSourceFile(.{ .file = generated.path(b, "maps_cdr.c"), .flags = flags });

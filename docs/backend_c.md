@@ -45,7 +45,7 @@ for its `_free`, unless `--c-no-free` is set.
 | `sequence<T>` | `typedef struct { uint32_t _maximum; uint32_t _length; T *_buffer; bool _release; } T_seq;` (e.g. `int32_t_seq`; nested: `int32_t_seq_seq`) |
 | `sequence<string<N>>` | `stringN_seq` with inline elements: `char (*_buffer)[N + 1]` (like a bounded string struct field) |
 | `T[N]` | `T name[N]` |
-| `map<K,V>` | Typed entry buffer for integral/boolean/character keys and primitive values; other shapes reject with `UnsupportedCMapType` |
+| `map<K,V>` | Typed entry buffer for supported integer/string keys and ordinary C-mapped values; unsupported shapes reject explicitly |
 | `@optional T` | Supported — see [`@optional` members](#optional-members) below |
 | `enum` | `typedef enum { ... } Foo;` (CDR: `uint32_t`) |
 | `bitmask` | `typedef uint8/16/32/64_t Foo;` (storage sized by `@bit_bound`) |
@@ -285,7 +285,7 @@ promise allocation-free execution or complete IDL coverage. Current gaps, includ
 
 | Feature | Status |
 |---|---|
-| Non-primitive maps / map binding adapters | Return `UnsupportedCMapType` / `UnsupportedCMapBindings` |
+| Unsupported map keys/values / map binding adapters | Return `UnsupportedCMapType` / `UnsupportedCMapBindings` |
 | User-supplied allocator for strings/sequences | Process-wide only — `zidl_cdr_set_allocator` sets one global `ZidlAllocator`; no per-type / per-reader / per-call override |
 | `@optional`: more than 64 members per struct | Returns `error.TooManyOptionalMembers` at codegen time |
 | `@optional`: `_set_` macro omitted for array-backed members | Use direct assignment + manual `_present` bit update |
@@ -293,7 +293,7 @@ promise allocation-free execution or complete IDL coverage. Current gaps, includ
 | Union discriminant: complex types | Emits `/* TODO: unsupported discriminant */` |
 | `--generate-interfaces`: full DDS object/resource adaptation | Opaque handle typedefs + free function declarations are generated (see [`ecosystem.md`](ecosystem.md) §`--generate-interfaces`); richer DDS object binding semantics remain runtime-specific future work |
 
-## Primitive map slice
+## Map storage and codecs
 
 A supported map uses a generated `zidl_map_<key>_<value>_entry` (`key`, `value`)
 and a sequence-shaped owner with `_maximum`, `_length`, `_buffer`, `_release`.
@@ -303,17 +303,24 @@ value (or map typedef) using its generated `_free`. Borrowed buffers use
 `_release=false` and are not freed. The map free path clears its view and is
 idempotent. A decode error leaves any allocated buffer freeable by the caller.
 
-This first slice supports integral, boolean and character primitive keys and
-primitive values, excluding long double. Scalar aliases, bounded/unbounded maps,
-arrays and sequence elements use the same typed representation. String, enum,
-aggregate and collection keys/values still fail explicitly: their XCDR2 map
-framing/ownership needs a separate slice. Map-bearing interface and middleware
-wrapper generation is also explicitly deferred.
+Supported keys include signed/unsigned integers, narrow/wide strings (bounded or
+unbounded), scalar aliases and enum/bitmask extensions. Ordinary mapped values
+include strings, arrays through typedefs, sequences, structs/unions and nested
+maps. Opaque/dynamic values, long double and unsupported key families still fail
+explicitly. Recursive named value types are checked without recursing forever.
+Map-bearing interface and middleware wrapper generation is a separate adapter
+slice and rejects with `UnsupportedCMapBindings` for now.
 
-XTypes 1.3 rules (14) and (16) encode these maps as a count and key/value pairs,
-without a DHEADER in either XCDR version. The complete declared extent and schema
-bound are checked before allocating. Duplicate keys reject with `ZIDL_CDR_INVALID`
-on both read and write. The initial duplicate check is quadratic in entry count;
-use an appropriate schema bound for untrusted large inputs. No hash-table policy
-or implicit sorting is imposed on callers. Non-primitive rule (15) needs a
-separate implementation, rather than treating every map as a sequence of pairs.
+XTypes 1.3 rules (14) and (16) encode primitive maps as count + key/value pairs.
+[OMG DDSXTY14-72](https://issues.omg.org/issues/DDSXTY14-72) corrects rule (15): a non-primitive XCDR2 map uses DHEADER + count + pairs.
+The decoder probes the bounded frame to validate its full extent and schema
+bound, then allocates one zero-initialized entry buffer and decodes the pairs.
+Nested owning values are freed on partial-result cleanup. C skip traversal uses
+the same map framing. Duplicate keys reject on read/write (string content, not
+pointer identity). Wide keys compare UTF-16 units in the existing C string model.
+
+Duplicate checks are quadratic in entry count; choose schema bounds appropriate
+for an untrusted admission budget. No implicit hash table or sorting policy is
+imposed. Pure C value/codec headers compile in C++ with exceptions disabled.
+Single and split headers defer entry definitions until their value types are
+complete; `_free` respects borrowed entries and clears the map view.
