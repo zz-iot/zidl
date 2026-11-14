@@ -88,3 +88,7 @@ members, array arms and mutable candidates in STL/PMR modes.
 Sequence preflight uses an allocation-free key-value projection traversal for
 nested struct elements when decoding genuine key-only data. This helper is
 structural traversal, not a complete-message admission decision.
+
+The single-threaded global-new/delete failpoint executables link an unsanitized
+CDR archive in TSan builds because the sanitizer owns those same operator symbols.
+The normal runtime and other consumers retain instrumentation.

@@ -78,6 +78,13 @@ pub fn build(b: *std.Build) void {
     const verbose_tests = b.option(bool, "verbose-tests", "Show successful integration test output") orelse false;
     const runtimes = @import("build/runtime.zig").add(b, b.path("."), target, optimize, sanitize_thread);
     const cdr_library = @import("packages/zidl-cdr/c_api_build.zig").add(b, b.path("packages/zidl-cdr"), runtimes.codec, target, .Debug, sanitize_thread, true);
+    // Allocation failpoint executables replace global new/delete. TSan defines
+    // those same symbols; keep these single-threaded tests and their archive
+    // unsanitized, while the normal runtime/consumer tests retain TSan coverage.
+    const allocation_cdr_library = if (sanitize_thread) blk: {
+        const uninstrumented = @import("build/runtime.zig").add(b, b.path("."), target, .Debug, false);
+        break :blk @import("packages/zidl-cdr/c_api_build.zig").add(b, b.path("packages/zidl-cdr"), uninstrumented.codec, target, .Debug, false, true);
+    } else cdr_library;
     b.modules.put(b.allocator, "zidl_cdr", runtimes.codec) catch @panic("OOM");
     b.modules.put(b.allocator, "zidl_bindings", runtimes.bindings) catch @panic("OOM");
 
@@ -761,7 +768,7 @@ pub fn build(b: *std.Build) void {
                 .file = dir.path(b, if (cpp) "sequences_cdr.cpp" else "sequences_cdr.c"),
                 .flags = flags,
             });
-            linkCdr(validation_mod, cdr_library);
+            linkCdr(validation_mod, if (cpp) allocation_cdr_library else cdr_library);
             validation_mod.addIncludePath(dir);
             validation_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
             const validation_exe = b.addExecutable(.{ .name = b.fmt("zidl-cdr-validation-{s}", .{lang}), .root_module = validation_mod });
@@ -799,7 +806,6 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-
     {
         const step = b.step("test-cpp-split-namespaces", "Compile and link C++ module namespaces in split output");
         test_step.dependOn(step);
@@ -826,7 +832,6 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-
     // STL storage failures must stay inside generated C++ codec entry points.
     {
         const allocation_step = b.step("test-cpp-codec-allocation", "Inject C++ codec allocation failures");
@@ -849,7 +854,7 @@ pub fn build(b: *std.Build) void {
             allocation_mod.addCSourceFile(.{ .file = dir.path(b, "fixture_cdr.cpp"), .flags = flags });
             allocation_mod.addIncludePath(dir);
             allocation_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
-            linkCdr(allocation_mod, cdr_library);
+            linkCdr(allocation_mod, allocation_cdr_library);
             const allocation_exe = b.addExecutable(.{ .name = if (pmr) "cpp-codec-allocation-pmr" else "cpp-codec-allocation-stl", .root_module = allocation_mod });
             allocation_step.dependOn(&b.addRunArtifact(allocation_exe).step);
             const no_exceptions_mod = b.createModule(.{
