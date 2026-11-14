@@ -89,7 +89,82 @@ static void sequence_key_values(void) {
     SET_SEQ(aligned, narrow, 2);
     CHECK(EnumSeqAlign, aligned, "EnumSeqAlign", 0, 1);
 }
+static void variable_key_values(void) {
+    TYPE(TextArray) text_array = INIT;
+    TYPE(TextGrid) grid = INIT;
+    TYPE(TextSeq) text_seq = INIT;
+#ifdef __cplusplus
+    text_array.values[0] = "A"; text_array.values[1] = "BC";
+    grid.values[0][0] = "A"; grid.values[0][1] = "BC";
+    grid.values[1][0] = ""; grid.values[1][1] = "D";
+    text_seq.values = {"A", "BC"};
+#else
+    strcpy(text_array.values[0], "A"); strcpy(text_array.values[1], "BC");
+    strcpy(grid.values[0][0], "A"); strcpy(grid.values[0][1], "BC");
+    strcpy(grid.values[1][1], "D");
+    char words[2][5] = {"A", "BC"};
+    SET_SEQ(text_seq, words, 2);
+#endif
+    CHECK(TextArray, text_array, "TextArray", 0, 1);
+    CHECK(TextGrid, grid, "TextGrid", 0, 1);
+    CHECK(TextSeq, text_seq, "TextSeq", 0, 1);
+    CLEAR_SEQ(text_seq);
+    CHECK(TextSeq, text_seq, "TextSeqEmpty", 0, 1);
+#ifdef __cplusplus
+    text_seq.values = {"A"};
+#else
+    SET_SEQ(text_seq, words, 1);
+#endif
+    CHECK(TextSeq, text_seq, "TextSeqShort", 0, 1);
+    TYPE(PlainItem) items[2] = INIT;
+    items[0].id = 1; items[1].id = 2;
+    TYPE(ItemSeq) item_seq = INIT;
+    SET_SEQ(item_seq, items, 2);
+    TYPE(ItemArray) item_array = INIT;
+    item_array.values[0] = items[0]; item_array.values[1] = items[1];
+    CHECK(ItemSeq, item_seq, "ItemSeq", 0, 1);
+    CHECK(ItemArray, item_array, "ItemArray", 0, 1);
+    TYPE(NestedSeq) nested = INIT;
+    TYPE(ArraySeq) array_seq = INIT;
+#ifdef __cplusplus
+    nested.values = {{1, 2}, {}};
+    array_seq.values.push_back({(TYPE(ArrayEnum))0, (TYPE(ArrayEnum))1});
+#else
+    int32_t numbers[2] = {1, 2};
+    TYPE(PrimitiveInner) rows[2] = INIT;
+    rows[0]._length = rows[0]._maximum = 2; rows[0]._buffer = numbers;
+    SET_SEQ(nested, rows, 2);
+    TYPE(ArrayEnumRow) enum_rows[1] = {{(TYPE(ArrayEnum))0, (TYPE(ArrayEnum))1}};
+    SET_SEQ(array_seq, enum_rows, 1);
+#endif
+    CHECK(NestedSeq, nested, "NestedSeq", 0, 1);
+    CHECK(ArraySeq, array_seq, "ArraySeq", 0, 1);
+#ifndef ZIDL_CYCLONE_ORACLE
+    TYPE(VariableChoice) choices[2] = INIT;
+#ifdef __cplusplus
+    choices[0].text("A"); choices[1]._d(1); choices[1].id(7);
+#else
+    choices[0]._d = 0; strcpy(choices[0]._u.text, "A");
+    choices[1]._d = 1; choices[1]._u.id = 7;
+#endif
+    TYPE(UnionSeq) union_seq = INIT;
+    SET_SEQ(union_seq, choices, 2);
+    CHECK(UnionSeq, union_seq, "UnionSeq", 0, 1);
+#endif
+    TYPE(StringEnvelope) envelope = INIT;
+    envelope.lead = 0xaa; envelope.tail = 0xbb;
+    envelope.inner = text_seq;
+    CHECK(StringEnvelope, envelope, "StringEnvelope", 0, 1);
+    TYPE(WideArray) wide = INIT;
+#ifdef __cplusplus
+    wide.values[0] = L"A";
+#else
+    wide.values[0][0] = 'A';
+#endif
+    CHECK(WideArray, wide, "WideArray", 0, 1);
+}
 static void array_key_values(void) {
     fixed_array_key_values();
     sequence_key_values();
+    variable_key_values();
 }

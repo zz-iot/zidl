@@ -78,9 +78,7 @@ whose corrected maximum changes the MD5 policy. Persisted old key hashes need
 an application-level migration or reset. Primitive-array keys are unchanged.
 
 This fixes the enum/bitmask array subset, including nested aggregate and union
-call sites through the shared array emitter. Canonical collection DHEADERs for
-other non-primitive shapes, such as sequences of enums/bitmasks and arrays or
-sequences of strings/aggregates, remain suppressed by the older generator path.
-Their byte vectors and maximum-size policy need a separate correction. Existing
-regression vectors for those shapes are not conformance evidence; the open
-roadmap item records that limitation.
+call sites through the shared array emitter. The subsequent
+[collection-key correction](native-cdr-collection-keys.md) covers sequences and
+other supported non-primitive collection shapes and replaces their earlier
+regression expectations with delimiter-aware independent vectors.

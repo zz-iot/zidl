@@ -1,0 +1,19 @@
+module Canonical {
+    struct TextArray { @key string<4> values[2]; };
+    struct TextGrid { @key string<4> values[2][2]; };
+    struct TextSeq { @key sequence<string<4>, 2> values; };
+    struct PlainItem { @key long id; };
+    struct ItemSeq { @key sequence<PlainItem, 2> values; };
+    struct ItemArray { @key PlainItem values[2]; };
+    typedef sequence<long, 2> PrimitiveInner;
+    struct NestedSeq { @key sequence<PrimitiveInner, 2> values; };
+    struct ArraySeq { @key sequence<ArrayEnumRow, 2> values; };
+    union VariableChoice switch (long) { case 0: string<4> text; case 1: long id; };
+#ifndef ZIDL_CYCLONE_ORACLE
+    // The optional Cyclone oracle currently rejects union collection keys.
+    // The ordinary all-backend fixture retains the specification witness.
+    struct UnionSeq { @key sequence<VariableChoice, 2> values; };
+#endif
+    struct StringEnvelope { @key octet lead; @key TextSeq inner; @key octet tail; };
+    struct WideArray { @key wstring<2> values[2]; };
+};

@@ -162,17 +162,39 @@ public final class KeysTest {
         set(aligned,"values",Arrays.asList(enumValue("ArrayEnum8",0),enumValue("ArrayEnum8",1)));
         witness("EnumSeqAlign",aligned); fromWire(aligned,1,1,"EnumSeqAlign"); fromWire(aligned,2,7,"EnumSeqAlign");
     }
+    static void variableWitness(String name, Object obj) throws Exception {
+        witness(name,obj); fromWire(obj,1,1,name); fromWire(obj,2,7,name);
+    }
+    static void variableKeys() throws Exception {
+        Object textArray=value("TextArray"); set(textArray,"values",new String[]{"A","BC"}); variableWitness("TextArray",textArray);
+        Object grid=value("TextGrid"); set(grid,"values",new String[][]{{"A","BC"},{"","D"}}); variableWitness("TextGrid",grid);
+        sequenceWitness("TextSeq","TextSeq",Arrays.asList("A","BC"));
+        sequenceWitness("TextSeqEmpty","TextSeq",Collections.emptyList());
+        sequenceWitness("TextSeqShort","TextSeq",Arrays.asList("A"));
+        Object first=value("PlainItem"), second=value("PlainItem"); set(first,"id",1); set(second,"id",2);
+        sequenceWitness("ItemSeq","ItemSeq",Arrays.asList(first,second));
+        Object itemArray=value("ItemArray"); set(itemArray,"values",array("PlainItem",first,second)); variableWitness("ItemArray",itemArray);
+        sequenceWitness("NestedSeq","NestedSeq",Arrays.asList(Arrays.asList(1,2),Collections.emptyList()));
+        sequenceWitness("ArraySeq","ArraySeq",Arrays.asList((Object)array("ArrayEnum",enumValue("ArrayEnum",0),enumValue("ArrayEnum",1))));
+        Object text=value("VariableChoice"), number=value("VariableChoice"); set(text,"text","A"); set(number,"id",7);
+        sequenceWitness("UnionSeq","UnionSeq",Arrays.asList(text,number));
+        Object envelope=value("StringEnvelope"), inner=value("TextSeq"); set(inner,"values",Arrays.asList("A"));
+        set(envelope,"lead",(byte)0xaa); set(envelope,"inner",inner); set(envelope,"tail",(byte)0xbb); variableWitness("StringEnvelope",envelope);
+        Object wide=value("WideArray"); set(wide,"values",new String[]{"A",""}); variableWitness("WideArray",wide);
+    }
     public static void main(String[] args) throws Exception {
         prefix = args[1];
         selectedNestedKeys();
         List<String> allVectors = new java.util.ArrayList<>(Files.readAllLines(Paths.get(args[0])));
         allVectors.addAll(Files.readAllLines(Paths.get(args[0]).resolveSibling("array_vectors.txt")));
+        allVectors.addAll(Files.readAllLines(Paths.get(args[0]).resolveSibling("variable_vectors.txt")));
         for (String line : allVectors) {
             String[] parts = line.trim().split(" +");
             if (parts.length == 4) vectors.put(parts[0], parts);
         }
         arrayKeys();
         sequenceKeys();
+        variableKeys();
         Object align = value("Align"); set(align,"a",(byte)0xaa); set(align,"b",0x0102030405060708L); witness("Align",align);
         Object nested = value("Nested"); set(nested,"m_long",0x12345678); set(nested,"u",99); set(nested,"w",88);
         Object example = value("Example"); set(example,"label","BLUE"); set(example,"m_nested",nested); witness("Example",example);

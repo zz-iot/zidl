@@ -271,6 +271,7 @@ int main(int argc,char **argv) {
     assert(argc==2);
     load_file(fopen(argv[1], "r"));
     load_file(open_sibling(argv[1], "array_vectors.txt"));
+    load_file(open_sibling(argv[1], "variable_vectors.txt"));
     array_key_values();
     load_wire(argv[1]); load_key(argv[1]);
     TYPE(Sequential) sequential=INIT;
@@ -408,6 +409,20 @@ int main(int argc,char **argv) {
     assert(Canonical_EnumArray20_serialize_key_holder(&fixed_writer,&enum_fixed)==0);
     zidl_cdr_compute_key_hash_for_type(fixed_writer.buf,fixed_writer.len,Canonical_EnumArray20_KEY_HASH_FORCE_MD5,hash);
     assert(!memcmp(hash,lookup("EnumArray20")->hash,16) && denied_allocations==0);
+    TYPE(TextSeq) text_fixed=INIT;
+#ifdef __cplusplus
+    text_fixed.values={"A","BC"};
+#else
+    char text_elements[2][5]={"A","BC"};
+    text_fixed.values._buffer=text_elements;
+    text_fixed.values._length=text_fixed.values._maximum=2;
+#endif
+    uint8_t text_buffer[64];
+    zidl_cdr_writer_init_fixed(&fixed_writer,text_buffer,sizeof text_buffer,ZIDL_XCDR2);
+    zidl_cdr_writer_set_byte_order(&fixed_writer,ZIDL_CDR_BE);
+    assert(Canonical_TextSeq_serialize_key_holder(&fixed_writer,&text_fixed)==0);
+    zidl_cdr_compute_key_hash_for_type(fixed_writer.buf,fixed_writer.len,Canonical_TextSeq_KEY_HASH_FORCE_MD5,hash);
+    assert(!memcmp(hash,lookup("TextSeq")->hash,16) && denied_allocations==0);
     memset(hash,0xee,sizeof hash);
     assert(Canonical_Align_compute_key_hash(&align,hash)==ZIDL_CDR_OVERFLOW);
     assert(denied_allocations>0);

@@ -147,12 +147,16 @@ def canonical(name):
         force = True
     else:
         for _ in range(2 if name == "RootSeq" else 1):
+            # FINAL aggregate projection removes aggregate framing, while
+            # each non-primitive collection retains its own XCDR2 delimiter.
+            pos = w.begin()
             if name == "RootSeq":
                 w.u32(2)
             for before, text, after in ((11, "blue", 22), (33, "orange", 44)):
                 w.u32(before); w.text(text)
                 if name == "RootSeq":
                     w.u32(after)
+            w.end(pos)
         force = True
     data = bytes(w.data)
     return hashlib.md5(data).digest() if force else data.ljust(16, b"\0")

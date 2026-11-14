@@ -33,3 +33,4 @@ module Canonical {
     struct PrimitiveSeq16 { @key sequence<ArrayPrimitiveAlias, 3> values; };
     struct EnumSeqAlign { @key octet lead; @key sequence<ArrayEnum8, 3> values; @key octet tail; };
 };
+#include "variable_keys.idl"

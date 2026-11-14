@@ -5,7 +5,7 @@ const testing = std.testing;
 
 const Vector = struct { bytes: []u8, hash: [16]u8, force: bool };
 fn vector(name: []const u8) !Vector {
-    var lines = std.mem.tokenizeScalar(u8, @embedFile("vectors.txt") ++ @embedFile("array_vectors.txt"), '\n');
+    var lines = std.mem.tokenizeScalar(u8, @embedFile("vectors.txt") ++ @embedFile("array_vectors.txt") ++ @embedFile("variable_vectors.txt"), '\n');
     while (lines.next()) |line| {
         var parts = std.mem.tokenizeScalar(u8, line, ' ');
         if (!std.mem.eql(u8, parts.next().?, name)) continue;
@@ -352,4 +352,37 @@ test "enum and bitmask sequence collection headers use schema maxima even when e
     var one = [_]C.ArrayEnum{.ARRAY_ZERO};
     const impossible: C.EnumUnboundedSeq = .{ .values = .{ ._length = std.math.maxInt(u32), ._maximum = std.math.maxInt(u32), ._buffer = &one } };
     try testing.expectError(error.Overflow, C.EnumUnboundedSeq.computeKeyHashChecked(&impossible));
+}
+
+test "variable collections measure projected payloads without buffering hash bytes" {
+    const Text = zidl_cdr.BoundedArray(u8, 4);
+    const a = try Text.fromSlice("A");
+    const bc = try Text.fromSlice("BC");
+    const d = try Text.fromSlice("D");
+    try check(C.TextArray, .{ .values = .{ a, bc } }, "TextArray", .final, true);
+    try check(C.TextGrid, .{ .values = .{ .{ a, bc }, .{ .{}, d } } }, "TextGrid", .final, true);
+    try check(C.TextSeq, .{ .values = try zidl_cdr.BoundedArray(Text, 2).fromSlice(&.{ a, bc }) }, "TextSeq", .final, true);
+    try check(C.TextSeq, .{}, "TextSeqEmpty", .final, true);
+    const text_short: C.TextSeq = .{ .values = try zidl_cdr.BoundedArray(Text, 2).fromSlice(&.{a}) };
+    try check(C.TextSeq, text_short, "TextSeqShort", .final, true);
+    const items = [_]C.PlainItem{ .{ .id = 1 }, .{ .id = 2 } };
+    try check(C.ItemSeq, .{ .values = try zidl_cdr.BoundedArray(C.PlainItem, 2).fromSlice(&items) }, "ItemSeq", .final, true);
+    try check(C.ItemArray, .{ .values = items }, "ItemArray", .final, true);
+    try check(C.NestedSeq, .{ .values = try zidl_cdr.BoundedArray(C.PrimitiveInner, 2).fromSlice(&.{ try C.PrimitiveInner.fromSlice(&.{ 1, 2 }), .{} }) }, "NestedSeq", .final, true);
+    try check(C.ArraySeq, .{ .values = try zidl_cdr.BoundedArray(C.ArrayEnumRow, 2).fromSlice(&.{.{ .ARRAY_ZERO, .ARRAY_ONE }}) }, "ArraySeq", .final, true);
+    const choices = [_]C.VariableChoice{ .{ ._d = 0, ._u = .{ .text = a } }, .{ ._d = 1, ._u = .{ .id = 7 } } };
+    try check(C.UnionSeq, .{ .values = try zidl_cdr.BoundedArray(C.VariableChoice, 2).fromSlice(&choices) }, "UnionSeq", .final, true);
+    try check(C.StringEnvelope, .{ .lead = 0xaa, .tail = 0xbb, .inner = text_short }, "StringEnvelope", .final, true);
+    try check(C.WideArray, .{ .values = .{ try zidl_cdr.BoundedArray(u16, 2).fromSlice(&.{'A'}), .{} } }, "WideArray", .final, true);
+}
+
+test "native collection sizing rejects invalid bounded strings before writing a delimiter" {
+    const bad_text: C.TextArray = .{ .values = .{ .{ .len = 5 }, .{} } };
+    const bad_wide: C.WideArray = .{ .values = .{ .{ .len = 3 }, .{} } };
+    var bytes: [64]u8 = undefined;
+    var writer = zidl_cdr.PrimitiveWriter.initFixed(&bytes, .four, .big);
+    try testing.expectError(error.StringTooLong, C.TextArray.serializeKeyHolder(&writer, bad_text));
+    try testing.expectEqual(@as(usize, 0), writer.len);
+    try testing.expectError(error.StringTooLong, C.WideArray.serializeKeyHolder(&writer, bad_wide));
+    try testing.expectEqual(@as(usize, 0), writer.len);
 }

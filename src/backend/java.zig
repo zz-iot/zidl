@@ -2435,11 +2435,14 @@ const Generator = struct {
     /// `int _cdh = -1; if (_xcdrVersion == 2) { ...; _cdh = pos; putInt(0); }`
     /// and returns the local's name (caller frees via closeCollectionDheader).
     fn openCollectionDheader(self: *Generator, needed: bool, extra: []const u8) !?[]u8 {
-        if (self.canonical_key) return null;
         if (!needed) return null;
         const name = try self.collName("_cdh");
         try self.ind();
-        try self.print("{s}{{ int {s} = -1; if (_xcdrVersion == 2) {{ _cdrAlign(_buf, _cdrBase, 4); {s} = _buf.position(); _buf.putInt(0); }}\n", .{ extra, name, name });
+        if (self.canonical_key) {
+            try self.print("{s}{{ _cdrAlignKey(_buf, _cdrBase, 4); int {s} = _buf.position(); _buf.putInt(0);\n", .{ extra, name });
+        } else {
+            try self.print("{s}{{ int {s} = -1; if (_xcdrVersion == 2) {{ _cdrAlign(_buf, _cdrBase, 4); {s} = _buf.position(); _buf.putInt(0); }}\n", .{ extra, name, name });
+        }
         return name;
     }
 
@@ -2711,7 +2714,7 @@ const Generator = struct {
                     }
                 }
                 // XCDR2 prefixes a collection of non-primitive elements with a DHEADER.
-                const cdh = try self.openCollectionDheader(!cdr_skip.isPrimitiveElement(seq.element.*), extra);
+                const cdh = try self.openCollectionDheader(!cdr_skip.isPrimitiveElement(seq.element.*) and (!self.canonical_key or canonical.fixedCollectionElementWidth(seq.element.*) == null), extra);
                 const e = try self.collName("_e");
                 defer self.alloc.free(e);
                 try self.ind();
@@ -3058,7 +3061,7 @@ const Generator = struct {
                 try self.print("_buf.putInt((int){d}L);\n", .{size});
             }
         }
-        const cdh = try self.openCollectionDheader(depth == 0 and !cdr_skip.isPrimitiveElement(cdr_skip.arrayInnermost(elem_tr)), extra);
+        const cdh = try self.openCollectionDheader(depth == 0 and !cdr_skip.isPrimitiveElement(cdr_skip.arrayInnermost(elem_tr)) and (!self.canonical_key or try canonical.fixedArrayDelimiterSize(elem_tr, dims) == null), extra);
         try self.emitSerializeArrayDims(elem_tr, access, dims, extra, depth);
         try self.closeCollectionDheader(cdh, extra);
     }

@@ -10,7 +10,8 @@ serializer: big endian PLAIN_CDR2, maximum alignment four, zero padding and no
 encapsulation, aggregate extensibility headers or member headers. Collection
 DHEADERs are a separate rule: this initial checkpoint incorrectly suppressed all
 of them. The [array-key correction](native-cdr-array-keys.md) fixes enum/bitmask
-arrays; other non-primitive collection keys remain open in the roadmap.
+arrays; the [collection correction](native-cdr-collection-keys.md) covers sequences
+and remaining supported non-primitive collection keys.
 The shared generator plan
 projects nested aggregates recursively and orders members by their resolved IDs.
 A nested structure without marked keys contributes all its members. Union

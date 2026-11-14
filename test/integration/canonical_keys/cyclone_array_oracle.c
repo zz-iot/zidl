@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "dds/dds.h"
 #include "dds/cdr/dds_cdrstream.h"
 #include "array_keys.h"

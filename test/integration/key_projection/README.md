@@ -31,3 +31,8 @@ cleanup. Java reads use read-only buffers and verify parent limits are restored.
 Normative basis: XTypes 1.3 §§7.2.2.4.5, 7.2.2.4.7, 7.4.1.1.5.1 and 7.6.8;
 RTPS 2.5 §9.6.4.8. These witnesses implement the stated layout rules directly;
 they are not a claim of external-peer interoperability or exhaustive conformance.
+
+Canonical `RootArray`/`RootSeq` hashes include the non-primitive collection
+DHEADERs. Their aggregate elements are still projected to FINAL key holders.
+The collection-key correction updates the independent generator's hashes without
+changing its full-sample or key-only wire byte columns.
