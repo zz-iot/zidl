@@ -2053,7 +2053,7 @@ const CdrGenerator = struct {
         try self.emitStructValueFns(s, c_name, cpp_qname, true);
         try cdr_skip.emitKeyValueSkip(self, s, c_name);
 
-        try @import("sample_processing.zig").emit(self, c_name, cpp_qname, has_key, false, true);
+        try @import("sample_processing.zig").emit(self, c_name, cpp_qname, has_key, false, appendable, true);
 
         // ── skip ─────────────────────────────────────────────────────────────
 

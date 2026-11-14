@@ -2,7 +2,7 @@
 //! helper; independent of any middleware header or registration ABI.
 const std = @import("std");
 
-pub fn emit(self: anytype, name: []const u8, value_type: []const u8, has_key: bool, owns: bool, comptime cpp: bool) !void {
+pub fn emit(self: anytype, name: []const u8, value_type: []const u8, has_key: bool, owns: bool, framed_key: bool, comptime cpp: bool) !void {
     const fn_name = try std.fmt.allocPrint(self.alloc, "{s}_process_sample_from_cdr", .{name});
     defer self.alloc.free(fn_name);
     const args = "const uint8_t *_payload, size_t _len, int _key_only, uint8_t _hash[16]";
@@ -20,6 +20,7 @@ pub fn emit(self: anytype, name: []const u8, value_type: []const u8, has_key: bo
         try self.printI("_rc = _key_only ? {s}_deserialize_key_value(&_reader, &_value) : {s}_deserialize(&_reader, &_value);\n", .{ name, name });
     } else {
         try self.printI("if (!_key_only) _rc = {s}_deserialize(&_reader, &_value);\n", .{name});
+        if (framed_key) try self.writeI("if (_key_only && _reader.xcdr_version == ZIDL_XCDR2) {\n    uint32_t _size;\n    _rc = zidl_cdr_read_dheader(&_reader, &_size);\n    if (!_rc && _size != 0) _rc = ZIDL_CDR_INVALID;\n}\n");
     }
     // RTPS submessages may append up to three zero octets to a four-byte
     // boundary. Unknown extension fields inside delimited bodies are handled

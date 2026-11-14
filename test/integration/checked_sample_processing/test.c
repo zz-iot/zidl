@@ -80,6 +80,34 @@ int main(void) {
   zidl_cdr_set_allocator(&a);
   for (int version = 1; version <= 2; version++)
     for (int le = 0; le < 2; le++) {
+      /* Keyless appendable lifecycle data has an empty XCDR2 DHEADER. */
+      uint8_t lifecycle[32];
+      ZidlCdrWriter lifecycle_writer;
+      zidl_cdr_writer_init_fixed(&lifecycle_writer, lifecycle, sizeof lifecycle, version);
+      zidl_cdr_writer_set_byte_order(&lifecycle_writer, le ? ZIDL_CDR_LE : ZIDL_CDR_BE);
+      assert(zidl_cdr_write_encap_kind(&lifecycle_writer, ZIDL_EXT_APPENDABLE) == 0);
+      size_t key_header;
+      assert(zidl_cdr_reserve_dheader_maybe(&lifecycle_writer, &key_header) == 0);
+      if (key_header != (size_t)-1) assert(zidl_cdr_patch_dheader_checked(&lifecycle_writer, key_header) == 0);
+      run(Processing_KeylessAppendable_process_sample_from_cdr, lifecycle, lifecycle_writer.len, 1, 0);
+      if (version == ZIDL_XCDR2) {
+        for (size_t cut = 4; cut < lifecycle_writer.len; ++cut)
+          assert(run(Processing_KeylessAppendable_process_sample_from_cdr, lifecycle, cut, 1, -99) != 0);
+        assert(zidl_cdr_write_i32(&lifecycle_writer, 7) == 0);
+        assert(zidl_cdr_patch_dheader_checked(&lifecycle_writer, key_header) == 0);
+        run(Processing_KeylessAppendable_process_sample_from_cdr, lifecycle, lifecycle_writer.len, 1, ZIDL_CDR_INVALID);
+      }
+#ifdef __cplusplus
+      Processing::KeylessAppendable ordinary{};
+#else
+      Processing_KeylessAppendable ordinary = {0};
+#endif
+      ordinary.number = 7;
+      zidl_cdr_writer_init_fixed(&lifecycle_writer, lifecycle, sizeof lifecycle, version);
+      zidl_cdr_writer_set_byte_order(&lifecycle_writer, le ? ZIDL_CDR_LE : ZIDL_CDR_BE);
+      assert(zidl_cdr_write_encap_kind(&lifecycle_writer, ZIDL_EXT_APPENDABLE) == 0);
+      assert(Processing_KeylessAppendable_serialize(&lifecycle_writer, &ordinary) == 0);
+      run(Processing_KeylessAppendable_process_sample_from_cdr, lifecycle, lifecycle_writer.len, 0, 0);
       uint8_t bytes[128] = {0};
       bytes[1] = (uint8_t)(version == 2 ? (le ? 7 : 6) : (le ? 1 : 0));
       word(bytes + 4, 0, le);

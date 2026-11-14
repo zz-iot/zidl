@@ -3,3 +3,5 @@ module Processing {
     @final struct Keyless { string text; };
     @mutable struct Evolving { @id(1) long number; };
 };
+
+module Processing { @appendable struct KeylessAppendable { long number; }; };
