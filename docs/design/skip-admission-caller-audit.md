@@ -62,3 +62,8 @@ actual admission boundary when wiring a consumer.
 A subsequent [checked-processing slice](checked-sample-processing.md) adds native
 ordinary-decode/hash callbacks and an opt-in checked middleware registration
 path. It does not retroactively strengthen the legacy registrations audited here.
+
+Native struct `_skip_key_value` helpers follow the same recursive key projection
+as key-only readers so sequence preflight does not require omitted non-key fields.
+Like ordinary skip helpers, they provide allocation-free structural traversal;
+they do not validate an entire sample for admission.

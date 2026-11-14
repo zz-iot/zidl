@@ -41,3 +41,7 @@ truncation and padding, evolution defaults, every allocation failpoint and both
 C++ allocation exception classes. A long default string exercises construction
 before decoding. Adjacent middleware integration tests compile an actual generated
 C helper and reject malformed keyed/keyless samples on a real DataReader.
+
+Keyless key-only values still consume their required empty XCDR2 delimiter for
+appendable/mutable mappings. Missing, truncated or nonempty key framing rejects
+before hash publication; an ordinary ALIVE value still uses the complete decoder.

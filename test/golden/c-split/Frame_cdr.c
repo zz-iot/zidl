@@ -128,6 +128,11 @@ if (_rc) return _rc;
     Frame _value; memset(&_value, 0, sizeof _value);
     uint8_t _result[16] = {0};
     if (!_key_only) _rc = Frame_deserialize(&_reader, &_value);
+    if (_key_only && _reader.xcdr_version == ZIDL_XCDR2) {
+    uint32_t _size;
+    _rc = zidl_cdr_read_dheader(&_reader, &_size);
+    if (!_rc && _size != 0) _rc = ZIDL_CDR_INVALID;
+}
     if (!_rc && _reader.pos != _len) {
         size_t _left = _len - _reader.pos;
         if (_left > 3 || (_len & 3u)) _rc = ZIDL_CDR_INVALID;
