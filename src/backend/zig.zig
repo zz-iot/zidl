@@ -1019,7 +1019,7 @@ const Generator = struct {
         // ── skip ──────────────────────────────────────────────────────────────
         try self.write("\n");
         try self.ind();
-        try self.write("    pub fn skip(reader: *zidl_cdr.CdrReader) !void {\n");
+        try self.write("    /// Structural traversal only; success is not sample admission.\n    pub fn skip(reader: *zidl_cdr.CdrReader) !void {\n");
         if (mutable) {
             try self.ind();
             try self.write("        const _end = try reader.readMutableDheader();\n");
@@ -1459,7 +1459,7 @@ const Generator = struct {
                 try self.write("    }\n");
                 try self.write("\n");
                 try self.ind();
-                try self.write("    pub fn skip(reader: *zidl_cdr.CdrReader) !void {\n");
+                try self.write("    /// Structural traversal only; success is not sample admission.\n    pub fn skip(reader: *zidl_cdr.CdrReader) !void {\n");
                 try self.ind();
                 try self.print("        _ = try reader.{s}();\n", .{read_m});
                 try self.ind();
@@ -4068,7 +4068,7 @@ const Generator = struct {
 
         // skip (allocation-free fast-forward over one full serialized sample)
         try self.ind();
-        try self.write("    pub fn skip(reader: *zidl_cdr.CdrReader) !void {\n");
+        try self.write("    /// Structural traversal only; success is not sample admission.\n    pub fn skip(reader: *zidl_cdr.CdrReader) !void {\n");
         if (mutable) {
             try self.ind();
             try self.write("        const _end = try reader.readMutableDheader();\n");
@@ -4506,7 +4506,7 @@ const Generator = struct {
         _ = s;
         try self.write("\n");
         try self.ind();
-        try self.write("    pub fn computeKeyHashFromCdr(ctx: *anyopaque, payload: []const u8) [16]u8 {\n");
+        try self.write("    /// Key extraction only; a returned hash is not sample admission.\n    pub fn computeKeyHashFromCdr(ctx: *anyopaque, payload: []const u8) [16]u8 {\n");
         try self.ind();
         try self.write("        const allocator: *const std.mem.Allocator = @ptrCast(@alignCast(ctx));\n");
         try self.ind();
@@ -4566,26 +4566,14 @@ const Generator = struct {
     /// real fix, not a style preference: `TypeSupport.get_field` existed but no
     /// binding ever populated it).
     ///
-    /// Unlike `computeKeyHashFromCdr` (which only ever needs `@key` members),
-    /// a filter expression can reference *any* simple-typed member, so this
-    /// fully deserializes `payload` via the struct's own `deserialize` (CDR
-    /// isn't randomly addressable — a partial/selective parse skipping ahead
-    /// to just the requested field isn't meaningfully simpler than a full
-    /// one) rather than reusing `deserializeKeyInto`'s member walk.
-    ///
-    /// `scratch` (see `TypeSupport.get_field`'s doc comment for why it
-    /// exists): a matched string member's bytes are copied there rather than
-    /// returned as a slice into the local `_v` — `_v` is freed (when it has a
-    /// generated `deinit()`) before this function returns, so a slice into it
-    /// would dangle. A string too long for `scratch` returns `null` (unknown
-    /// field) rather than truncating and risking a wrong comparison result —
-    /// `filter_mod.eval` already treats an evaluation error as "pass the
-    /// sample through", the same safe fallback either way.
+    /// This projects the requested field via `deserializeSelected`, structurally
+    /// skipping other fields. A returned filter value does not validate the full
+    /// sample and must not be used as an admission decision.
     fn emitGetFieldFromCdr(self: *Generator, s: *const ir.Struct) !void {
         const needs_cleanup = self.structNeedsCleanup(s);
         try self.write("\n");
         try self.ind();
-        try self.write("    pub fn getFieldFromCdr(ctx: *anyopaque, payload: []const u8, field: []const u8, scratch: []u8) ?_zzdds.dcps.filter.FilterValue {\n");
+        try self.write("    /// Field extraction only; a returned value is not sample admission.\n    pub fn getFieldFromCdr(ctx: *anyopaque, payload: []const u8, field: []const u8, scratch: []u8) ?_zzdds.dcps.filter.FilterValue {\n");
         // `field` is always used now (fieldIndex(field) below). `scratch` is
         // referenced only by string_like members' scratch-copy -- a struct
         // with no string_like member leaves it unreferenced, which Zig
@@ -4738,7 +4726,7 @@ const Generator = struct {
 
         // deserializeSelected
         try self.ind();
-        try self.write("    pub fn deserializeSelected(reader: *zidl_cdr.CdrReader, want: FieldMask, out: *@This(), allocator: std.mem.Allocator) !void {\n");
+        try self.write("    /// Field projection only; skipped content is not validated.\n    pub fn deserializeSelected(reader: *zidl_cdr.CdrReader, want: FieldMask, out: *@This(), allocator: std.mem.Allocator) !void {\n");
         if (fallback) {
             try self.ind();
             try self.write("        _ = want;\n");

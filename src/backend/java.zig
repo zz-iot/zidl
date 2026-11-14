@@ -1993,6 +1993,8 @@ const Generator = struct {
         // skip
         try self.write("\n");
         try self.ind();
+        try self.write("/** Structural traversal only; success is not sample admission. */\n");
+        try self.ind();
         try self.write("public static void skip(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {\n");
         try self.ind();
         try self.write("    _buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");

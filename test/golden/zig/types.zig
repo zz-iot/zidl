@@ -72,6 +72,7 @@ pub const Point = extern struct {
         out.y = try reader.readI32();
     }
 
+    /// Structural traversal only; success is not sample admission.
     pub fn skip(reader: *zidl_cdr.CdrReader) !void {
         _ = try reader.readI32();
         _ = try reader.readI32();
@@ -197,6 +198,7 @@ pub const Sample = struct {
         out.id = try reader.readU32();
     }
 
+    /// Structural traversal only; success is not sample admission.
     pub fn skip(reader: *zidl_cdr.CdrReader) !void {
         _ = try reader.readU32();
         _ = try reader.readBool();
@@ -330,6 +332,7 @@ pub const Frame = struct {
         out.topic = try reader.readString(allocator);
     }
 
+    /// Structural traversal only; success is not sample admission.
     pub fn skip(reader: *zidl_cdr.CdrReader) !void {
         if (reader.xcdr_version == .xcdr2) {
             const _size = try reader.readDheader();
@@ -411,6 +414,7 @@ pub const Beacon = struct {
         out.id = try reader.readU32();
     }
 
+    /// Structural traversal only; success is not sample admission.
     pub fn skip(reader: *zidl_cdr.CdrReader) !void {
         if (reader.xcdr_version == .xcdr2) {
             const _size = try reader.readDheader();

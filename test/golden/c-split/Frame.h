@@ -19,6 +19,7 @@ int Frame_serialize_key_value(ZidlCdrWriter *_w, const Frame *_v);
 int Frame_deserialize_key_value(ZidlCdrReader *_r, Frame *_v);
 int Frame_skip_key_value(ZidlCdrReader *_r);
 int Frame_deserialize(ZidlCdrReader *_r, Frame *_v);
+/* Structural traversal only; success is not sample admission. */
 int Frame_skip(ZidlCdrReader *_r);
 
 /* Initialize uninitialized storage using IDL defaults and zero values. Not a reset operation: release any owned fields before reinitializing an existing object. */

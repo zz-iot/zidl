@@ -18,6 +18,9 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Document structural skip/projection contracts and add malformed-wire regression
+  checks separating traversal, key/field extraction and validated admission.
+
 - Make boolean union dispatch warning-clean in C/C++, including aliases,
   canonical-key codecs and owning lifecycle helpers.
 

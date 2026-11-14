@@ -13,6 +13,9 @@ They do not change the shared C allocator ABI or the process-wide allocator poli
 | Zig union defaults | Fresh payloads select the mapping-default arm, including nested owning aggregates/arrays. Callers changing cases still set matching discriminator and whole payload literals together. |
 | Zig validated admission | New opt-in `deserializeValidated` requires exact message extent and required mutable fields, propagates strict checks, preserves reader state on failure and cleans owning output. Ordinary evolution defaults remain available. |
 | Mutable union writers | All backends set the required discriminator MU bit. Canonical keys and TypeObject identities are unchanged by this flag correction. |
+| Java union lifecycle | Fresh constructors initialize only the selected payload; default-arm setters select a valid discriminator; decoded arrays allocate selected storage. Ordinary boolean default arms now round-trip. |
+| Native boolean union dispatch | Explicit int casts avoid strict compiler warnings across codecs and lifecycle helpers; storage and wire bytes are unchanged. |
+| Skip/projection contracts | Generated comments and independent regression witnesses make clear that structural traversal, returned fields and hashes are not sample-admission decisions. API signatures and skip semantics are unchanged. |
 | Mutable union readers | C/C++/Java now check member IDs, selected arm, discriminator order/presence, duplicates and known extents. C preserves caller-free partial output; C++ commits a local owning candidate; Java returns a fresh result. |
 | Unsupported long double codecs | C/C++/Java/Zig reject codec generation rather than emit eight-byte operations for the Float128 value family. Declaration-only mappings retain their existing limitations. |
 | Zig map keys | Unsupported bounded narrow strings, wide strings and other unsupported key representations fail explicitly, including declaration-only output. Unbounded narrow-string aliases use content hashing. |
@@ -38,3 +41,7 @@ Relevant regression fixtures cover compiled C/C++/Zig/Java output, independent
 canonical and ordinary-wire witnesses, both byte orders, counting/fixed writers,
 truncations, every allocation failpoint and idempotent cleanup. Generated snapshots
 and tests pass with the changes combined, not only as independent branches.
+
+The [skip/admission caller audit](skip-admission-caller-audit.md) records covered
+callers, independent counterexamples and the separate legacy middleware
+admission-hook decision.

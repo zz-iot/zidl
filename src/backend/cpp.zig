@@ -436,6 +436,7 @@ const Generator = struct {
         try self.print("{s}{s}int {s}_deserialize_key_value(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         try self.print("{s}{s}int {s}_skip_key_value(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
+        try self.write("/* Structural traversal only; success is not sample admission. */\n");
         try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         // Keyless structs still get these prototypes when wrappers were
         // requested -- see the matching `else if` in the CDR generator's
@@ -474,6 +475,7 @@ const Generator = struct {
             if (first_k) try self.write("0");
             try self.write("))\n");
             try self.print("{s}{s}bool {s}_field_index(const char *_name, size_t _name_len, uint32_t *_out_idx);\n", .{ em, sp, c_name });
+            try self.write("/* Field projection only; skipped content is not validated. */\n");
             try self.print("{s}{s}int {s}_deserialize_selected(ZidlCdrReader *_r, uint64_t _want, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         }
         try self.write("\n");
@@ -623,6 +625,7 @@ const Generator = struct {
         try self.print("{s}{s}int {s}_serialize(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         try self.print("{s}{s}int {s}_serialize_key_holder(ZidlCdrWriter *_w, const {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
+        try self.write("/* Structural traversal only; success is not sample admission. */\n");
         try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         try self.write("\n");
     }
