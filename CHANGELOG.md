@@ -18,6 +18,9 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Preserve IDL module namespaces and codec C linkage in per-type C++ split
+  headers, including cross-module dependencies and owning union lifecycles.
+
 - **C++ mutable optional reuse.** Clear optional fields in the active decode
   projection before reading mutable parameters, so omitted fields cannot retain
   values from a previous sample. Include inherited fields and optional arrays;

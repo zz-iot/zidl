@@ -17,6 +17,7 @@ struct Point {
     static Point default_value() { return Point{}; }
 }; // struct Point
 
+extern "C" {
 #define Point_has_key 0
 int Point_serialize(ZidlCdrWriter *_w, const ::Point *_v);
 int Point_serialize_key_holder(ZidlCdrWriter *_w, const ::Point *_v);
@@ -25,4 +26,5 @@ int Point_deserialize_key_value(ZidlCdrReader *_r, ::Point *_v);
 int Point_deserialize(ZidlCdrReader *_r, ::Point *_v);
 int Point_skip(ZidlCdrReader *_r);
 
+} // extern C
 #endif // POINT_HPP

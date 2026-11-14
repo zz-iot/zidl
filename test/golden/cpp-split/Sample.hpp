@@ -34,6 +34,7 @@ struct Sample {
     static Sample default_value() { return Sample{}; }
 }; // struct Sample
 
+extern "C" {
 #define Sample_has_key 1
 #define Sample_KEY_HASH_FORCE_MD5 0
 int Sample_serialize(ZidlCdrWriter *_w, const ::Sample *_v);
@@ -48,4 +49,5 @@ int Sample_compute_key_hash(const ::Sample *_v, uint8_t _hash[16]);
 int Sample_compute_key_hash_from_cdr_key_only(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);
 int Sample_compute_key_hash_from_cdr(const uint8_t *_payload, size_t _len, uint8_t _hash[16]);
 
+} // extern C
 #endif // SAMPLE_HPP

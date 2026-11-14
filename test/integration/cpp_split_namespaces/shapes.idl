@@ -1,0 +1,19 @@
+struct Top { long value; };
+module First {
+    enum Kind { Zero, One };
+    typedef Kind Tag;
+    module Nested {
+        struct Data { string text; };
+        @mutable union Value switch(First::Tag) { case First::Zero: string text; default: Data record; };
+        typedef sequence<Data,3> Rows;
+        @final struct Packet { Value choice; Rows entries; };
+    };
+};
+module Second {
+    module Nested {
+        enum Kind { Zero, One };
+        struct Data { First::Nested::Data original; Top root_value; Kind tag; };
+        typedef First::Nested::Packet Alias;
+        struct Packet { Alias incoming; Data other; };
+    };
+};

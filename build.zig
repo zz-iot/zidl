@@ -800,6 +800,33 @@ pub fn build(b: *std.Build) void {
     }
 
 
+    {
+        const step = b.step("test-cpp-split-namespaces", "Compile and link C++ module namespaces in split output");
+        test_step.dependOn(step);
+        for (0..4) |mode| {
+            const split = mode >= 2;
+            const gen = b.addRunArtifact(exe);
+            gen.addArgs(&.{ "-b", "cpp" });
+            if (mode % 2 == 1) gen.addArg("--cpp-pmr-containers");
+            if (split) gen.addArg("--split-files");
+            gen.addArg("-o");
+            const dir = gen.addOutputDirectoryArg(b.fmt("cpp-split-namespaces-{d}", .{mode}));
+            gen.addFileArg(b.path("test/integration/cpp_split_namespaces/shapes.idl"));
+            const m = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = true });
+            const flags: []const []const u8 = if (split) &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror", "-DSPLIT" } else &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" };
+            m.addCSourceFile(.{ .file = b.path("test/integration/cpp_split_namespaces/test.cpp"), .flags = flags });
+            if (split) {
+                for ([_][]const u8{ "Top", "First_Nested_Data", "First_Nested_Value", "First_Nested_Packet", "Second_Nested_Data", "Second_Nested_Packet" }) |name| m.addCSourceFile(.{ .file = dir.path(b, b.fmt("{s}_cdr.cpp", .{name})), .flags = flags });
+            } else m.addCSourceFile(.{ .file = dir.path(b, "shapes_cdr.cpp"), .flags = flags });
+            m.addIncludePath(dir);
+            m.addIncludePath(b.path("packages/zidl-cdr/include"));
+            linkCdr(m, cdr_library);
+            const app = b.addExecutable(.{ .name = b.fmt("cpp-split-namespaces-{d}", .{mode}), .root_module = m });
+            step.dependOn(&b.addRunArtifact(app).step);
+        }
+    }
+
+
     // STL storage failures must stay inside generated C++ codec entry points.
     {
         const allocation_step = b.step("test-cpp-codec-allocation", "Inject C++ codec allocation failures");

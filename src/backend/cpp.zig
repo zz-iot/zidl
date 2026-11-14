@@ -7451,6 +7451,7 @@ fn generateTypeHeader(
     if (opts.generate_interfaces and needs.memory) try gen.write("#include <atomic>\n#include <memory>\n");
     if (needs.map) try gen.write("#include <map>\n");
     if (needs.optional) try gen.write("#include <optional>\n");
+    if (needs.union_arrays) try gen.write("#include <cstring>\n");
     if (needs.union_lifetime) try gen.write("#include <new>\n");
     try gen.write("#include <array>\n");
     try gen.write("#include <stdexcept>\n");
@@ -7478,7 +7479,19 @@ fn generateTypeHeader(
         try gen.print("namespace {s} {{\n\n", .{opts.cpp_namespace});
     }
 
+    // Dependencies stay at file scope; only the IDL declaration belongs in
+    // its enclosing modules. CDR entry points retain global C linkage.
+    var namespace_depth: usize = 0;
+    if (std.mem.lastIndexOf(u8, qname, "::")) |end| {
+        var scopes = std.mem.splitSequence(u8, qname[0..end], "::");
+        while (scopes.next()) |scope| {
+            if (scope.len == 0) continue;
+            try gen.print("namespace {s} {{\n", .{scope});
+            namespace_depth += 1;
+        }
+    }
     try gen.emitTypeDecl(td);
+    for (0..namespace_depth) |_| try gen.write("} // IDL namespace\n");
 
     if (opts.generate_zzdds_wrappers and !opts.no_typesupport) {
         switch (td) {
@@ -7492,12 +7505,15 @@ fn generateTypeHeader(
     }
 
     if (!opts.no_typesupport) {
+        const has_cdr = td == .struct_ or td == .exception or td == .union_;
+        if (has_cdr) try gen.write("extern \"C\" {\n");
         switch (td) {
             .struct_ => |s| try gen.emitStructCdrProtos(s),
             .exception => |e| try gen.emitExceptionCdrProtos(e),
             .union_ => |u| try gen.emitUnionCdrProtos(u),
             else => {},
         }
+        if (has_cdr) try gen.write("} // extern C\n");
     }
 
     if (opts.cpp_namespace.len > 0) {
