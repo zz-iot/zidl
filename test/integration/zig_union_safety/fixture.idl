@@ -75,3 +75,6 @@ union EnumOwner switch (Disc) { case One: string text; default: long number; };
 
 typedef boolean BooleanAlias;
 union ExhaustiveBool switch(BooleanAlias) { case FALSE: long no; case TRUE: long yes; };
+
+@mutable union GroupedBool switch(boolean) { @id(10) case FALSE: case TRUE: long value; };
+@mutable union GroupedBoolOwned switch(boolean) { @id(10) case FALSE: case TRUE: string text; };

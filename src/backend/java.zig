@@ -981,6 +981,19 @@ const Generator = struct {
         // ── deserializeFrom ──────────────────────────────────────────────────
         try self.write("\n");
         try self.ind();
+        var generic_array = false;
+        for (u.cases) |cas| {
+            const mapped = try self.typeRefToJava(cas.type_ref, cas.dimensions);
+            defer self.alloc.free(mapped);
+            if (std.mem.endsWith(u8, mapped, "]") and std.mem.indexOfScalar(u8, mapped, '<') != null) {
+                generic_array = true;
+                break;
+            }
+        }
+        if (generic_array) {
+            try self.write("@SuppressWarnings(\"unchecked\")\n");
+            try self.ind();
+        }
         try self.print("public static {s}{s} deserializeFrom(java.nio.ByteBuffer _buf, int _cdrBase, int _xcdrVersion) {{\n", .{ pfx, u.name });
         self.depth += 1;
         try self.ind();

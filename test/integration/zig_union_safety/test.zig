@@ -456,3 +456,34 @@ test "exhaustive boolean union aliases round-trip ordinary codecs" {
     try testing.expect(result._d);
     try testing.expectEqual(@as(i32, 17), result._u.yes);
 }
+
+test "grouped exhaustive boolean labels admit both discriminator values" {
+    inline for (.{ false, true }) |disc| {
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(testing.allocator);
+        var writer = zidl_cdr.CdrWriter(.xcdr2).init(&bytes, testing.allocator);
+        try writer.writeEncapHeader();
+        try fixture.GroupedBool.serialize(&writer, .{ ._d = disc, ._u = .{ .value = 17 } });
+        var reader = try zidl_cdr.CdrReader.init(bytes.items);
+        var result: fixture.GroupedBool = .{};
+        try fixture.GroupedBool.deserializeInto(&result, &reader, testing.allocator);
+        try testing.expectEqual(disc, result._d);
+        try testing.expectEqual(@as(i32, 17), result._u.value);
+    }
+}
+
+test "grouped owning boolean payloads support clone and cleanup" {
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(testing.allocator);
+    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&bytes, testing.allocator);
+    try writer.writeEncapHeader();
+    try fixture.GroupedBoolOwned.serialize(&writer, .{ ._d = true, ._u = .{ .text = "owned" } });
+    var reader = try zidl_cdr.CdrReader.init(bytes.items);
+    var result: fixture.GroupedBoolOwned = .{};
+    try fixture.GroupedBoolOwned.deserializeInto(&result, &reader, testing.allocator);
+    defer result.deinit(testing.allocator);
+    var copy = try result.clone(testing.allocator);
+    defer copy.deinit(testing.allocator);
+    try testing.expectEqualStrings("owned", copy._u.text);
+    try testing.expect(copy._u.text.ptr != result._u.text.ptr);
+}

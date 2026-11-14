@@ -884,7 +884,7 @@ pub fn build(b: *std.Build) void {
             const classes = compile.addOutputDirectoryArg("classes");
             if (!split) compile.addFileArg(dir.path(b, "Lifecycle.java")) else {
                 if (codecs) compile.addFileArg(dir.path(b, "LifecycleCdrUtils.java"));
-                for ([_][]const u8{ "Kind", "Leaf", "EnumValue", "DefaultValue", "LeafDefault", "NoDefault", "BooleanFinal", "BooleanAppendable", "BooleanMutable", "WideValue", "ArrayValue", "EnumArray", "Recursive", "Holder" }) |name| compile.addFileArg(dir.path(b, b.fmt("{s}.java", .{name})));
+                for ([_][]const u8{ "Kind", "Leaf", "EnumValue", "DefaultValue", "LeafDefault", "NoDefault", "BooleanFinal", "BooleanAppendable", "BooleanMutable", "WideValue", "ArrayValue", "EnumArray", "Recursive", "GenericArray", "Holder" }) |name| compile.addFileArg(dir.path(b, b.fmt("{s}.java", .{name})));
             }
             compile.addFileArg(b.path("test/integration/java_union_lifecycle/LifecycleTest.java"));
             const run = javaCommand(b, &.{ java.?, "-cp" }, java_cdr);

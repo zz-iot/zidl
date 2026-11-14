@@ -122,6 +122,21 @@ public class LifecycleTest {
     Object holder = fresh("Holder");
     check(get(get(holder, "enum_value"), "text").equals(""));
     roundtrip(holder);
+    Object generic = fresh("GenericArray");
+    for (Object list : (Object[])get(generic, "values"))
+      check(((List<?>)list).isEmpty());
+    List<?>[] lists = {Arrays.asList(4), Arrays.asList(5, 6)};
+    set(generic, "values", List[].class, lists);
+    Object[] decodedLists = (Object[])get(roundtrip(generic), "values");
+    check(((List<?>)decodedLists[1]).equals(Arrays.asList(5, 6)));
+    if (codecs) {
+      byte[] missing = {0, 11, 0, 0, 8, 0, 0, 0, 0, 0, 0, (byte)0xa0, 0, 0, 0, 0};
+      ByteBuffer input = ByteBuffer.wrap(missing);
+      input.position(4);
+      Object omitted = generic.getClass().getMethod("deserializeFrom", ByteBuffer.class, int.class, int.class).invoke(null, input, 4, 2);
+      for (Object list : (Object[])get(omitted, "values"))
+        check(((List<?>)list).isEmpty());
+    }
     System.out.println("Java union lifecycle passed");
   }
 }

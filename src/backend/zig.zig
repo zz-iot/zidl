@@ -926,7 +926,8 @@ const Generator = struct {
                     try self.write("                        else => {},\n");
                 } else {
                     try self.emitZigUnionCaseArmPattern(u.discriminant, cas, "                        ");
-                    try self.write(" => {},\n                        else => return error.InvalidUnionMember,\n");
+                    try self.write(" => {},\n");
+                    if (!booleanLabelsExhaustive(u.discriminant, &.{cas})) try self.write("                        else => return error.InvalidUnionMember,\n");
                 }
                 try self.write("                    }\n");
                 try self.emitUnionCaseDeserializeAssign("out", cas, "                    ");
@@ -1200,17 +1201,19 @@ const Generator = struct {
             try self.ind();
             try self.write("            },\n");
         }
-        try self.ind();
-        try self.write("            else => {\n");
-        if (default_case) |dc| {
-            if (self.caseNeedsCleanup(dc)) {
-                const field_name = try std.fmt.allocPrint(self.alloc, "_u.{s}", .{dc.name});
-                defer self.alloc.free(field_name);
-                try self.emitFieldSeqDeinit(field_name, dc.type_ref, dc.dimensions, "                ");
+        if (default_case != null or !unionLabelsExhaustive(u)) {
+            try self.ind();
+            try self.write("            else => {\n");
+            if (default_case) |dc| {
+                if (self.caseNeedsCleanup(dc)) {
+                    const field_name = try std.fmt.allocPrint(self.alloc, "_u.{s}", .{dc.name});
+                    defer self.alloc.free(field_name);
+                    try self.emitFieldSeqDeinit(field_name, dc.type_ref, dc.dimensions, "                ");
+                }
             }
+            try self.ind();
+            try self.write("            },\n");
         }
-        try self.ind();
-        try self.write("            },\n");
         try self.ind();
         try self.write("        }\n");
         try self.ind();
@@ -1249,18 +1252,20 @@ const Generator = struct {
             try self.ind();
             try self.write("            },\n");
         }
-        try self.ind();
-        try self.write("            else => {\n");
-        if (default_case) |dc| {
-            if (self.caseNeedsCleanup(dc)) {
-                const field_name = try std.fmt.allocPrint(self.alloc, "_u.{s}", .{dc.name});
-                defer self.alloc.free(field_name);
-                try self.emitFieldSeqCloneStmt(field_name, dc.type_ref, dc.dimensions, "                ");
-                try self.emitFieldSeqCloneErrdefer(field_name, dc.type_ref, dc.dimensions, "                ");
+        if (default_case != null or !unionLabelsExhaustive(u)) {
+            try self.ind();
+            try self.write("            else => {\n");
+            if (default_case) |dc| {
+                if (self.caseNeedsCleanup(dc)) {
+                    const field_name = try std.fmt.allocPrint(self.alloc, "_u.{s}", .{dc.name});
+                    defer self.alloc.free(field_name);
+                    try self.emitFieldSeqCloneStmt(field_name, dc.type_ref, dc.dimensions, "                ");
+                    try self.emitFieldSeqCloneErrdefer(field_name, dc.type_ref, dc.dimensions, "                ");
+                }
             }
+            try self.ind();
+            try self.write("            },\n");
         }
-        try self.ind();
-        try self.write("            },\n");
         try self.ind();
         try self.write("        }\n");
         try self.ind();
@@ -11854,10 +11859,14 @@ test "zig_backend: unresolved mutable default IDs use declaration indices" {
 }
 
 fn unionLabelsExhaustive(u: *const ir.Union) bool {
-    const disc = resolveAlias(u.discriminant);
+    return booleanLabelsExhaustive(u.discriminant, u.cases);
+}
+
+fn booleanLabelsExhaustive(discriminant: ir.TypeRef, cases: []const ir.UnionCase) bool {
+    const disc = resolveAlias(discriminant);
     if (disc != .base or disc.base != .boolean) return false;
     var labels: u2 = 0;
-    for (u.cases) |cas| for (cas.labels) |label| {
+    for (cases) |cas| for (cas.labels) |label| {
         if (label == .boolean) labels |= if (label.boolean) @as(u2, 2) else 1;
     };
     return labels == 3;
