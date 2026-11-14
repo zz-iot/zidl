@@ -93,6 +93,22 @@ static void strings(ZidlCdrWriter *w) {
 int main() {
     TestResource resource;
     auto *previous_resource = std::pmr::set_default_resource(&resource);
+    // Poisoned storage makes unset scalar/array payloads observable before
+    // decoding or a setter overwrites them. Moving a new arm must read live values.
+    {
+        alignas(Allocation::ScalarChoice) unsigned char storage[sizeof(Allocation::ScalarChoice)];
+        std::memset(storage, 0xa5, sizeof storage);
+        auto *value = new (storage) Allocation::ScalarChoice();
+        assert(value->_d() == 0 && !value->flag());
+        value->_d(42);
+        value->text(text);
+        value->_d(0);
+        assert(!value->flag());
+        value->_d(1);
+        assert(value->numbers()[0] == 0 && value->numbers()[1] == 0);
+        value->~ScalarChoice();
+        assert(live_allocations == 0);
+    }
     for (int version = ZIDL_XCDR1; version <= ZIDL_XCDR2; ++version) {
         for (int order = ZIDL_CDR_LE; order <= ZIDL_CDR_BE; ++order) {
             uint8_t bytes[512];

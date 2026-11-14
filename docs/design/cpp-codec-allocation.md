@@ -92,3 +92,7 @@ structural traversal, not a complete-message admission decision.
 The single-threaded global-new/delete failpoint executables link an unsanitized
 CDR archive in TSan builds because the sanitizer owns those same operator symbols.
 The normal runtime and other consumers retain instrumentation.
+
+Discriminator-selected temporaries value-initialize scalar and array arms as
+well as constructing owning arms, so moving a new arm never reads unset storage.
+Poisoned-storage tests cover boolean and scalar-array construction and switching.

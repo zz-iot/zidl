@@ -3333,7 +3333,6 @@ const CdrGenerator = struct {
                 try self.printI("{{ using _LT = {s}; ({s}).~_LT(); }}\n", .{ cpp_type, dst_access });
             },
             .construct_default => {
-                if (!non_trivial) return;
                 const cpp_type = try cppTypeStr(self.alloc, self.opts, tr);
                 defer self.alloc.free(cpp_type);
                 try self.printI("new (&({s})) {s}();\n", .{ dst_access, cpp_type });
@@ -3402,7 +3401,7 @@ const CdrGenerator = struct {
     /// switch (discriminant already selects `_disc`'s own case; no source
     /// value involved).
     fn emitUnionCaseSelfOp(self: *CdrGenerator, op: UnionLifecycleOp, cas: ir.UnionCase) anyerror!void {
-        if (!typeRefIsCppNonTrivial(cas.type_ref)) return;
+        if (!typeRefIsCppNonTrivial(cas.type_ref) and op != .construct_default) return;
         const access = try std.fmt.allocPrint(self.alloc, "_u._{s}", .{cas.name});
         defer self.alloc.free(access);
         if (cas.dimensions.len > 0 and op == .construct_default) {
