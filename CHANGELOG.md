@@ -25,6 +25,13 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   valid default-arm discriminators in setters, and allocate decoded array arms.
   Include boolean default arms in ordinary union codecs.
 
+- **Zig validated message admission.** Generated structs/unions expose
+  `deserializeValidated` for exact message extent, required mutable members and
+  strict known-member lengths. Validation propagates to nested values. Duplicate
+  known mutable fields are rejected before replacing owning storage, in both
+  ordinary and validated decoding. Failures retain the caller reader's state and
+  clean owning output; ordinary decoding retains omitted-member evolution defaults.
+
 - **Reject unsupported ordinary XCDR1 mutable framing.** Mandatory native
   DHEADER operations reject XCDR1 before advancing the cursor or writing bytes;
   generated Java mutable methods reject version 1 too. This replaces non-standard

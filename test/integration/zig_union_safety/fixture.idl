@@ -78,3 +78,6 @@ union ExhaustiveBool switch(BooleanAlias) { case FALSE: long no; case TRUE: long
 
 @mutable union GroupedBool switch(boolean) { @id(10) case FALSE: case TRUE: long value; };
 @mutable union GroupedBoolOwned switch(boolean) { @id(10) case FALSE: case TRUE: string text; };
+@mutable struct StrictPayload { @id(2) string text; @id(3) @optional long extra; };
+struct StrictEnvelope { StrictPayload inner; long tail; };
+struct StrictFinal { long value; };

@@ -662,6 +662,14 @@ const Generator = struct {
         try self.print("{s}{s}._u = .{{ .{s} = _tmp }};\n", .{ extra, out_expr, cas.name });
     }
 
+    /// Exact-extent admission is opt-in; ordinary DDS evolution decoding keeps
+    /// its omitted-member defaults. A local reader preserves caller state on error.
+    fn emitValidatedRead(self: *Generator, owns: bool) !void {
+        try self.write("\n    pub fn deserializeValidated(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {\n        var _reader = reader.*;\n        _reader.strict_validation = true;\n        try @This().deserializeInto(out, &_reader, allocator);\n");
+        if (owns) try self.write("        errdefer out.deinit(allocator);\n");
+        try self.write("        if (_reader.pos != _reader.data.len) return error.TrailingBytes;\n        _reader.strict_validation = reader.strict_validation;\n        reader.* = _reader;\n    }\n");
+    }
+
     fn emitUnionCdr(self: *Generator, u: *const ir.Union) anyerror!void {
         const ext = u.annotations.extensibility;
         const mutable = ext == .mutable;
@@ -690,6 +698,7 @@ const Generator = struct {
         const default_case: ?ir.UnionCase = if (default_case_index) |idx| u.cases[idx] else null;
 
         try self.emitCanonicalUnion(u, default_case);
+        try self.emitValidatedRead(self.unionNeedsCleanup(u));
 
         // ── serialize ────────────────────────────────────────────────────────
         try self.write("\n");
@@ -946,7 +955,7 @@ const Generator = struct {
             for (u.cases) |cas| {
                 if (isDefaultUnionCase(cas)) continue;
                 try self.emitZigUnionCaseArmPattern(u.discriminant, cas, "                ");
-                try self.write(" => {\n");
+                try self.write(" => {\n                    if (reader.strict_validation) return error.MissingUnionMember;\n");
                 const initial = try self.defaultForArrayRef(cas.type_ref, cas.dimensions);
                 defer self.alloc.free(initial);
                 try self.print("                    out._u = .{{ .{s} = {s} }}; out._d = _d;\n                }},\n", .{ cas.name, initial });
@@ -954,7 +963,7 @@ const Generator = struct {
             if (default_case) |cas| {
                 const initial = try self.defaultForArrayRef(cas.type_ref, cas.dimensions);
                 defer self.alloc.free(initial);
-                try self.print("                else => {{ out._u = .{{ .{s} = {s} }}; out._d = _d; }},\n", .{ cas.name, initial });
+                try self.print("                else => {{ if (reader.strict_validation) return error.MissingUnionMember; out._u = .{{ .{s} = {s} }}; out._d = _d; }},\n", .{ cas.name, initial });
             } else if (!unionLabelsExhaustive(u)) {
                 try self.write("                else => out._d = _d,\n");
             }
@@ -3856,6 +3865,7 @@ const Generator = struct {
     }
 
     fn emitStructValueFns(self: *Generator, s: *const ir.Struct, projection: bool) anyerror!void {
+        if (!projection) try self.emitValidatedRead(self.structNeedsCleanup(s));
         const mutable = s.annotations.extensibility == .mutable;
         const appendable = s.annotations.extensibility == .appendable;
         const wire_fields = try canonical.wireFields(self.alloc, s, projection);
@@ -3946,6 +3956,7 @@ const Generator = struct {
             try self.ind();
             try self.write("        const _em_end = try reader.readMutableDheader();\n");
             try self.emitReaderWindow("        ", "@as(?usize, _em_end)");
+            if (wire_fields.len > 0) try self.print("        var _seen: [{d}]bool = @splat(false);\n", .{wire_fields.len});
             try self.ind();
             try self.write("        while (reader.mutableHasMore(_em_end)) {\n");
             try self.ind();
@@ -3953,7 +3964,7 @@ const Generator = struct {
             try self.emitReaderWindow("            ", "@as(?usize, try reader.emheaderEnd(_emh))");
             try self.ind();
             try self.write("            switch (_emh.member_id) {\n");
-            for (wire_fields) |field| {
+            for (wire_fields, 0..) |field, seen_idx| {
                 var m = field.member.*;
                 const path = try canonical.zigMemberPath(self.alloc, field);
                 defer self.alloc.free(path);
@@ -3962,6 +3973,7 @@ const Generator = struct {
                 const member_id: u32 = memberIdAt(m, idx);
                 try self.ind();
                 try self.print("                {d} => {{\n", .{member_id});
+                try self.print("                    if (_seen[{d}]) return error.DuplicateMember; _seen[{d}] = true;\n", .{ seen_idx, seen_idx });
                 if (m.annotations.is_optional) {
                     // For @mutable+@optional: member appears → value is present.
                     try self.emitOptionalMemberDecode(m, "                    ");
@@ -3975,6 +3987,7 @@ const Generator = struct {
                     }
                 }
                 try self.ind();
+                try self.write("                    if (reader.strict_validation and reader.pos != reader.data.len) return error.InvalidMemberLength;\n");
                 try self.write("                },\n");
             }
             try self.ind();
@@ -3989,6 +4002,9 @@ const Generator = struct {
             try self.write("            }\n");
             try self.ind();
             try self.write("        }\n");
+            for (wire_fields, 0..) |field, seen_idx| {
+                if (!field.member.annotations.is_optional) try self.print("        if (reader.strict_validation and !_seen[{d}]) return error.MissingRequiredMember;\n", .{seen_idx});
+            }
         } else {
             if (appendable) {
                 try self.emitReaderWindow("        ", "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");

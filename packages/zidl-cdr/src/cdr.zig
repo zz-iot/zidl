@@ -718,6 +718,8 @@ pub const CdrReader = struct {
     /// True when the stream uses PL_CDR (ParameterList) framing.
     /// xcdr_version is .xcdr1 for PL_CDR; this flag distinguishes PL_CDR from plain XCDR1.
     is_pl_cdr: bool,
+    /// Opt-in required-member and exact-known-member admission checks.
+    strict_validation: bool = false,
 
     // ── Construction ─────────────────────────────────────────────────────
 

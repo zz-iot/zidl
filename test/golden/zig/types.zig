@@ -41,6 +41,15 @@ pub const Point = extern struct {
 
     pub const has_key = false;
 
+
+    pub fn deserializeValidated(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
+        var _reader = reader.*;
+        _reader.strict_validation = true;
+        try @This().deserializeInto(out, &_reader, allocator);
+        if (_reader.pos != _reader.data.len) return error.TrailingBytes;
+        _reader.strict_validation = reader.strict_validation;
+        reader.* = _reader;
+    }
     pub fn serialize(writer: anytype, value: @This()) !void {
         try writer.writeI32(value.x);
         try writer.writeI32(value.y);
@@ -102,6 +111,16 @@ pub const Sample = struct {
 
     pub const has_key = true;
 
+
+    pub fn deserializeValidated(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
+        var _reader = reader.*;
+        _reader.strict_validation = true;
+        try @This().deserializeInto(out, &_reader, allocator);
+        errdefer out.deinit(allocator);
+        if (_reader.pos != _reader.data.len) return error.TrailingBytes;
+        _reader.strict_validation = reader.strict_validation;
+        reader.* = _reader;
+    }
     pub fn serialize(writer: anytype, value: @This()) !void {
         try writer.writeU32(value.id);
         try writer.writeBool(value.b);
@@ -270,6 +289,16 @@ pub const Frame = struct {
 
     pub const has_key = false;
 
+
+    pub fn deserializeValidated(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
+        var _reader = reader.*;
+        _reader.strict_validation = true;
+        try @This().deserializeInto(out, &_reader, allocator);
+        errdefer out.deinit(allocator);
+        if (_reader.pos != _reader.data.len) return error.TrailingBytes;
+        _reader.strict_validation = reader.strict_validation;
+        reader.* = _reader;
+    }
     pub fn serialize(writer: anytype, value: @This()) !void {
         const _dh = try writer.reserveDheaderMaybe();
         try writer.writeU32(value.seq_num);
@@ -342,6 +371,16 @@ pub const Beacon = struct {
 
     pub const has_key = true;
 
+
+    pub fn deserializeValidated(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
+        var _reader = reader.*;
+        _reader.strict_validation = true;
+        try @This().deserializeInto(out, &_reader, allocator);
+        errdefer out.deinit(allocator);
+        if (_reader.pos != _reader.data.len) return error.TrailingBytes;
+        _reader.strict_validation = reader.strict_validation;
+        reader.* = _reader;
+    }
     pub fn serialize(writer: anytype, value: @This()) !void {
         const _dh = try writer.reserveDheaderMaybe();
         try writer.writeU32(value.id);

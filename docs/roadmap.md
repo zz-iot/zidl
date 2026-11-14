@@ -177,16 +177,12 @@ series and require a separate consumer-driven investigation. See
 
 ### Zig backend
 
-- **Untrusted-input decoding for broker-style protocols:** generated mutable decoding
-  currently accepts absent required members and duplicate singleton members. The zzdds
-  broker draft keeps mutable encoding only for bootstrap bodies; its established bodies
-  are final and require exact-extent decoding (reject truncation and trailing bytes)
-  through bounded sub-readers. Provide generic required/duplicate-member validation or an
-  explicit validated-decoder facility, and expose consumed length for final bodies,
-  before consumers treat generated decoding as untrusted-message admission. Bounded
-  sequences use inline storage sized to the schema maximum; provide a bounded
-  allocator-backed or borrowed mapping for large wire ceilings so embedded consumers need
-  not reserve the maximum in every native value.
+- **Bounded Zig storage policy for large wire ceilings:** validated admission is
+  available through `deserializeValidated` (required mutable members, duplicate
+  rejection and exact message extent). Bounded sequences still use inline
+  schema-maximum storage; allocator-backed/borrowed bounded storage remains a
+  separate consumer-driven mapping investigation.
+
 - **`wstring` constants** emit only a comment — `[]const u16` literals are unsupported.
 - **`--zig-generate-toml-config`** (`applyToml`) — fixed-size arrays (incl. array typedefs),
   unions, bitmasks, bounded strings, and sequences of non-string turn the whole generated
