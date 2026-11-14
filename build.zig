@@ -1025,7 +1025,7 @@ pub fn build(b: *std.Build) void {
             m.addCSourceFile(.{ .file = dir.path(b, if (cpp) "shapes_cdr.cpp" else "shapes_cdr.c"), .flags = flags });
             m.addIncludePath(dir);
             m.addIncludePath(b.path("packages/zidl-cdr/include"));
-            linkCdr(m, cdr_library);
+            linkCdr(m, if (cpp) allocation_cdr_library else cdr_library);
             const app = b.addExecutable(.{ .name = b.fmt("checked-sample-processing-{d}", .{mode}), .root_module = m });
             step.dependOn(&b.addRunArtifact(app).step);
         }
