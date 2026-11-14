@@ -41,7 +41,6 @@ pub const Point = extern struct {
 
     pub const has_key = false;
 
-
     pub fn deserializeValidated(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
         var _reader = reader.*;
         _reader.strict_validation = true;
@@ -111,7 +110,6 @@ pub const Sample = struct {
     }
 
     pub const has_key = true;
-
 
     pub fn deserializeValidated(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
         var _reader = reader.*;
@@ -291,7 +289,6 @@ pub const Frame = struct {
 
     pub const has_key = false;
 
-
     pub fn deserializeValidated(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
         var _reader = reader.*;
         _reader.strict_validation = true;
@@ -373,7 +370,6 @@ pub const Beacon = struct {
     }
 
     pub const has_key = true;
-
 
     pub fn deserializeValidated(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
         var _reader = reader.*;

@@ -666,7 +666,7 @@ const Generator = struct {
     /// Exact-extent admission is opt-in; ordinary DDS evolution decoding keeps
     /// its omitted-member defaults. A local reader preserves caller state on error.
     fn emitValidatedRead(self: *Generator, owns: bool) !void {
-        try self.write("\n    pub fn deserializeValidated(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {\n        var _reader = reader.*;\n        _reader.strict_validation = true;\n        try @This().deserializeInto(out, &_reader, allocator);\n");
+        try self.write("    pub fn deserializeValidated(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {\n        var _reader = reader.*;\n        _reader.strict_validation = true;\n        try @This().deserializeInto(out, &_reader, allocator);\n");
         if (owns) try self.write("        errdefer out.deinit(allocator);\n");
         try self.write("        if (_reader.pos != _reader.data.len) return error.TrailingBytes;\n        _reader.strict_validation = reader.strict_validation;\n        reader.* = _reader;\n    }\n");
     }
