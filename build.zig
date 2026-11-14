@@ -1224,6 +1224,52 @@ pub fn build(b: *std.Build) void {
         };
     }
 
+    {
+        const step = b.step("test-map-admission", "Check map wire framing and admission across C++, Java and Zig");
+        test_step.dependOn(step);
+        const dir = "test/integration/map_admission/";
+        const gen = b.addRunArtifact(exe);
+        gen.addArgs(&.{ "-b", "zig", "-o" });
+        const generated = gen.addOutputDirectoryArg("map-admission-zig");
+        gen.addFileArg(b.path(dir ++ "shapes.idl"));
+        const fixture = b.createModule(.{ .root_source_file = generated.path(b, "shapes.zig"), .target = target, .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings } } });
+        const tests = b.addTest(.{ .name = "map-admission", .root_module = b.createModule(.{ .root_source_file = b.path(dir ++ "test.zig"), .target = target, .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "fixture", .module = fixture } } }) });
+        step.dependOn(&b.addRunArtifact(tests).step);
+        for ([_]bool{ false, true }) |pmr| {
+            const g = b.addRunArtifact(exe);
+            g.addArgs(&.{ "-b", "cpp" });
+            if (pmr) g.addArg("--cpp-pmr-containers");
+            g.addArg("-o");
+            const out = g.addOutputDirectoryArg(if (pmr) "map-admission-pmr" else "map-admission-stl");
+            g.addFileArg(b.path(dir ++ "shapes.idl"));
+            const m = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = true });
+            const flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" };
+            m.addCSourceFile(.{ .file = b.path(dir ++ "test.cpp"), .flags = flags });
+            m.addCSourceFile(.{ .file = out.path(b, "shapes_cdr.cpp"), .flags = flags });
+            m.addIncludePath(out);
+            m.addIncludePath(b.path("packages/zidl-cdr/include"));
+            linkCdr(m, cdr_library);
+            const app = b.addExecutable(.{ .name = if (pmr) "map-pmr" else "map-stl", .root_module = m });
+            step.dependOn(&b.addRunArtifact(app).step);
+        }
+        const javac = b.findProgram(.{ .names = &.{"javac"} });
+        const java = b.findProgram(.{ .names = &.{"java"} });
+        if (javac != null and java != null) {
+            const g = b.addRunArtifact(exe);
+            g.addArgs(&.{ "-b", "java", "-o" });
+            const out = g.addOutputDirectoryArg("map-admission-java");
+            g.addFileArg(b.path(dir ++ "shapes.idl"));
+            const compile = javaCommand(b, &.{ javac.?, "-Xlint:unchecked", "-Werror", "-d" }, java_cdr);
+            const classes = compile.addOutputDirectoryArg("classes");
+            compile.addFileArg(out.path(b, "Shapes.java"));
+            compile.addFileArg(b.path(dir ++ "MapTest.java"));
+            const run = javaCommand(b, &.{ java.?, "-cp" }, java_cdr);
+            run.addDirectoryArg(classes);
+            run.addArg("MapTest");
+            step.dependOn(&run.step);
+        }
+    }
+
     // ── XCDR known-answer checks ──────────────────────────────────────────────
     // test/integration/xcdr_known_answer/ka.idl covers every collection kind
     // (primitive / non-primitive / nested / array-typedef elements, multi-

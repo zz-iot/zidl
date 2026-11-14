@@ -3648,17 +3648,23 @@ const CdrGenerator = struct {
                 try self.writeI("if (_rc) return _rc;\n");
             },
             .map => |m| {
+                try self.printI("if ({s}.size() > UINT32_MAX) return ZIDL_CDR_OVERFLOW;\n", .{access});
+                if (m.bound) |n| try self.printI("if ({s}.size() > {d}u) return ZIDL_CDR_INVALID;\n", .{ access, n });
+                const dh = try self.openCollectionDheader(!(cdr_skip.isPrimitiveElement(m.key.*) and cdr_skip.isPrimitiveElement(m.value.*)));
                 try self.printI("{{ uint32_t _mc = (uint32_t){s}.size();\n", .{access});
                 self.indent_depth += 1;
                 try self.writeI("_rc = zidl_cdr_write_u32(_w, _mc); if (_rc) return _rc;\n");
                 try self.printI("for (auto const& _me : {s}) {{\n", .{access});
                 self.indent_depth += 1;
+                self.coll_depth += 1;
                 try self.emitWriteForTypeRef(m.key.*, field_name, "_me.first");
                 try self.emitWriteForTypeRef(m.value.*, field_name, "_me.second");
+                self.coll_depth -= 1;
                 self.indent_depth -= 1;
                 try self.writeI("}\n");
                 self.indent_depth -= 1;
                 try self.writeI("}\n");
+                try self.closeCollectionDheader(dh);
             },
         }
     }
@@ -3962,24 +3968,31 @@ const CdrGenerator = struct {
                 try self.writeI("if (_rc) return _rc;\n");
             },
             .map => |m| {
+                try cdr_skip.preflightSequence(self, tr);
+                const window = try cdr_skip.openReadWindow(self, !(cdr_skip.isPrimitiveElement(m.key.*) and cdr_skip.isPrimitiveElement(m.value.*)));
                 const k_type = try self.cppTypeForLocal(m.key.*);
                 defer self.alloc.free(k_type);
                 const v_type = try self.cppTypeForLocal(m.value.*);
                 defer self.alloc.free(v_type);
-                try self.writeI("{ uint32_t _mc;\n");
+                try self.printI("{{ auto &_map_target = {s}; uint32_t _mc;\n", .{lval});
                 self.indent_depth += 1;
                 try self.writeI("_rc = zidl_cdr_read_u32(_r, &_mc); if (_rc) return _rc;\n");
+                if (m.bound) |n| try self.printI("if (_mc > {d}u) return ZIDL_CDR_INVALID;\n", .{n});
+                try self.writeI("_map_target.clear();\n");
                 try self.writeI("for (uint32_t _mi = 0; _mi < _mc; _mi++) {\n");
                 self.indent_depth += 1;
                 try self.printI("{s} _mk{{}};\n", .{k_type});
                 try self.printI("{s} _mv{{}};\n", .{v_type});
+                self.coll_depth += 1;
                 try self.emitReadForTypeRef(m.key.*, field_name, "_mk");
                 try self.emitReadForTypeRef(m.value.*, field_name, "_mv");
-                try self.printI("{s}.emplace(std::move(_mk), std::move(_mv));\n", .{lval});
+                self.coll_depth -= 1;
+                try self.writeI("if (!_map_target.emplace(std::move(_mk), std::move(_mv)).second) return ZIDL_CDR_INVALID;\n");
                 self.indent_depth -= 1;
                 try self.writeI("}\n");
                 self.indent_depth -= 1;
                 try self.writeI("}\n");
+                try cdr_skip.closeReadWindow(self, window);
             },
         }
     }
@@ -8439,7 +8452,7 @@ test "cpp_backend: map cdr read" {
     try testing.expect(has(s, "for (uint32_t _mi = 0; _mi < _mc; _mi++)"));
     try testing.expect(has(s, "int32_t _mk{};"));
     try testing.expect(has(s, "std::string _mv{};"));
-    try testing.expect(has(s, "_v->m.emplace(std::move(_mk), std::move(_mv))"));
+    try testing.expect(has(s, "if (!_map_target.emplace(std::move(_mk), std::move(_mv)).second) return ZIDL_CDR_INVALID;"));
 }
 
 test "cpp_backend: native" {

@@ -6440,7 +6440,7 @@ const Generator = struct {
     /// sequences whose elements need generic ownership.
     fn usesGenericOwnership(self: *Generator, tr: ir.TypeRef, dims: []const u64) bool {
         if (!self.typeOwnsHeap(tr)) return false;
-        if (dims.len > 0 or arrayTypedefOf(tr) != null) return true;
+        if (dims.len > 0 or arrayTypedefOf(tr) != null or resolveAlias(tr) == .map) return true;
         const seq = resolvedSequence(tr) orelse return false;
         return self.elemUsesGenericOwnership(seq.element.*, seq.bound != null);
     }
@@ -6609,6 +6609,12 @@ const Generator = struct {
                 },
             },
             .map => |m| {
+                if (m.bound) |n| {
+                    try self.ind();
+                    try self.print("{s}if ({s}.count() > {d}) return error.MapTooLong;\n", .{ extra, access, n });
+                }
+                try self.ind();
+                try self.print("{s}if ({s}.count() > std.math.maxInt(u32)) return error.MapTooLong;\n", .{ extra, access });
                 const cdh = try self.openCollectionDheader(!(isPrimitiveElement(m.key.*) and isPrimitiveElement(m.value.*)), extra);
                 const body = if (cdh != null) try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra}) else try self.alloc.dupe(u8, extra);
                 defer self.alloc.free(body);
@@ -6812,8 +6818,25 @@ const Generator = struct {
                 }
                 try self.ind();
                 try self.print("{s}const {s} = try reader.readU32();\n", .{ ii, mn });
+                if (m.bound) |n| {
+                    try self.ind();
+                    try self.print("{s}if ({s} > {d}) return error.MapTooLong;\n", .{ ii, mn, n });
+                }
+                // Probe extents with stack state before reserving an untrusted count.
+                try self.ind();
+                try self.print("{s}{{ const _saved_map_reader = reader.*; defer reader.* = _saved_map_reader;\n", .{ii});
+                try self.ind();
+                try self.print("{s}for (0..{s}) |_| {{\n", .{ ii, mn });
+                self.coll_depth += 1;
+                try self.emitSkipForTypeRef(m.key.*, ii);
+                try self.emitSkipForTypeRef(m.value.*, ii);
+                self.coll_depth -= 1;
+                try self.ind();
+                try self.print("{s}}} }}\n", .{ii});
                 try self.ind();
                 try self.print("{s}{s} = .{{}};\n", .{ ii, out_expr });
+                try self.ind();
+                try self.print("{s}errdefer zidl_bindings.deinitOwned(&{s}, allocator);\n", .{ ii, out_expr });
                 try self.ind();
                 try self.print("{s}try {s}.ensureTotalCapacity(allocator, {s});\n", .{ ii, out_expr, mn });
                 try self.ind();
@@ -6827,13 +6850,23 @@ const Generator = struct {
                 try self.ind();
                 try self.print("{s}var {s}: {s} = undefined;\n", .{ iii, mk, key_zig });
                 try self.emitReadForTypeRef(m.key.*, mk, iii);
+                if (self.typeOwnsHeap(m.key.*)) {
+                    try self.ind();
+                    try self.print("{s}errdefer zidl_bindings.deinitOwned(&{s}, allocator);\n", .{ iii, mk });
+                }
                 const val_zig = try self.typeRefToZig(m.value.*);
                 defer self.alloc.free(val_zig);
                 try self.ind();
                 try self.print("{s}var {s}: {s} = undefined;\n", .{ iii, mv, val_zig });
                 try self.emitReadForTypeRef(m.value.*, mv, iii);
                 try self.ind();
-                try self.print("{s}try {s}.putNoClobber(allocator, {s}, {s});\n", .{ iii, out_expr, mk, mv });
+                if (self.typeOwnsHeap(m.value.*)) {
+                    try self.print("{s}errdefer zidl_bindings.deinitOwned(&{s}, allocator);\n", .{ iii, mv });
+                    try self.ind();
+                }
+                try self.print("{s}if ({s}.contains({s})) return error.DuplicateMapKey;\n", .{ iii, out_expr, mk });
+                try self.ind();
+                try self.print("{s}try {s}.put(allocator, {s}, {s});\n", .{ iii, out_expr, mk, mv });
                 try self.ind();
                 try self.print("{s}}}\n", .{ii});
                 try self.ind();
@@ -7486,8 +7519,8 @@ const Generator = struct {
             .map => |m| blk: {
                 // String keys need content-based equality; use StringArrayHashMapUnmanaged.
                 // All other key types use AutoArrayHashMapUnmanaged (hash/eq from key type).
-                const key_is_string = switch (m.key.*) {
-                    .string => true,
+                const key_is_string = switch (resolveAlias(m.key.*)) {
+                    .string => |bound| bound == null,
                     else => false,
                 };
                 if (key_is_string) {
@@ -7906,6 +7939,7 @@ fn memberIdAt(m: ir.StructMember, idx: usize) u32 {
 fn typeRefNeedsAllocator(tr: ir.TypeRef) bool {
     return switch (tr) {
         .string => |bound| bound == null,
+        .map => true,
         .wstring => true, // readWstring always allocates, even for bounded wstring
         // Bounded storage does not allocate, but its element decoder may
         // forward allocator. Match emitSequenceElementRead's supported shapes.
@@ -8489,7 +8523,7 @@ test "zig_backend: map cdr read" {
     try testing.expect(has(s, "try out.m.ensureTotalCapacity(allocator, _mn);"));
     try testing.expect(has(s, "var _mk: i32 = undefined;"));
     try testing.expect(has(s, "var _mv: i32 = undefined;"));
-    try testing.expect(has(s, "try out.m.putNoClobber(allocator, _mk, _mv);"));
+    try testing.expect(has(s, "if (out.m.contains(_mk)) return error.DuplicateMapKey;"));
 }
 
 test "zig_backend: array field" {

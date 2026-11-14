@@ -310,6 +310,13 @@ pub fn emitSkipForTypeRef(self: anytype, tr: ir.TypeRef) anyerror!void {
             self.indent_depth += 1;
             try self.printI("_rc = zidl_cdr_read_u32(_r, &{s});\n", .{ml});
             try readRcCheck(self);
+            if (m.bound) |bound| {
+                try self.printI("if ({s} > {d}u) {{\n", .{ ml, bound });
+                self.indent_depth += 1;
+                try invalidRead(self);
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            }
             try self.printI("for (uint32_t {s} = 0; {s} < {s}; {s}++) {{\n", .{ mi, mi, ml, mi });
             self.indent_depth += 1;
             self.coll_depth += 1;

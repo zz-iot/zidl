@@ -208,11 +208,14 @@ int main() {
 
             // Map decodes allocate both value strings and tree nodes.
             begin();
+            size_t map_header;
+            assert(zidl_cdr_reserve_dheader_maybe(&w, &map_header) == 0);
             assert(zidl_cdr_write_u32(&w, 2) == 0);
             for (int i = 0; i < 2; ++i) {
                 assert(zidl_cdr_write_i32(&w, i) == 0);
                 assert(zidl_cdr_write_string(&w, text, sizeof text - 1) == 0);
             }
+            if (map_header != (size_t)-1) assert(zidl_cdr_patch_dheader_checked(&w, map_header) == 0);
             failures<Allocation::MapValue>(bytes, w.len, Allocation_MapValue_deserialize);
 
             if (version == ZIDL_XCDR2) {

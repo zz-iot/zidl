@@ -1,0 +1,7 @@
+module MapAudit {
+    typedef string Key;
+    @final struct Numeric { map<long, long, 2> values; long tail; };
+    @final struct Owned { map<Key, string, 2> values; long tail; };
+    typedef map<Key, string, 2> Inner;
+    @final struct Nested { map<long, Inner, 2> values; };
+};

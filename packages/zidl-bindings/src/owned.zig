@@ -58,6 +58,11 @@ pub fn deinitOwned(ptr: anytype, alloc: std.mem.Allocator) void {
             } else if (comptime isBoundedSeq(T)) {
                 for (ptr.sliceMut()) |*e| deinitOwned(e, alloc);
                 ptr.clearRetainingCapacity();
+            } else if (comptime @hasDecl(T, "keys") and @hasDecl(T, "values") and @hasDecl(T, "deinit")) {
+                for (ptr.keys()) |*key| deinitOwned(key, alloc);
+                for (ptr.values()) |*value| deinitOwned(value, alloc);
+                ptr.deinit(alloc);
+                ptr.* = .{};
             } else if (comptime @hasDecl(T, "deinit")) {
                 ptr.deinit(alloc);
             }
@@ -105,6 +110,18 @@ pub fn cloneOwned(value: anytype, alloc: std.mem.Allocator) !@TypeOf(value) {
                 var result: T = .{};
                 errdefer deinitOwned(&result, alloc);
                 for (value.slice()) |e| result.appendAssumeCapacity(try cloneOwned(e, alloc));
+                return result;
+            } else if (comptime @hasDecl(T, "keys") and @hasDecl(T, "values") and @hasDecl(T, "put")) {
+                var result: T = .{};
+                errdefer deinitOwned(&result, alloc);
+                try result.ensureTotalCapacity(alloc, value.count());
+                for (value.keys(), value.values()) |key, val| {
+                    var new_key = try cloneOwned(key, alloc);
+                    errdefer deinitOwned(&new_key, alloc);
+                    var new_val = try cloneOwned(val, alloc);
+                    errdefer deinitOwned(&new_val, alloc);
+                    try result.put(alloc, new_key, new_val);
+                }
                 return result;
             } else if (comptime @hasDecl(T, "clone")) {
                 return value.clone(alloc);

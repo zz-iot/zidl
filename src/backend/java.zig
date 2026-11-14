@@ -2790,6 +2790,10 @@ const Generator = struct {
                 try self.print("{s}_cdrWriteFixed(_buf, {d}, {d}, {s});\n", .{ extra, fp.digits, fp.scale, access });
             },
             .map => |m| {
+                if (m.bound) |n| {
+                    try self.ind();
+                    try self.print("{s}if ({s}.size() > {d}) throw new IllegalArgumentException(\"map bound exceeded\");\n", .{ extra, access, n });
+                }
                 const key_elem = try self.typeRefToJavaElem(m.key.*);
                 defer self.alloc.free(key_elem);
                 const val_elem = try self.typeRefToJavaElem(m.value.*);
@@ -2968,6 +2972,8 @@ const Generator = struct {
                 try self.ind();
                 try self.print("{s}{s} {s};\n", .{ inner, val_elem, v_var });
                 try self.emitDeserializeForTypeRef(m.value.*, v_var, inner);
+                try self.ind();
+                try self.print("{s}if ({s}.containsKey({s})) throw new IllegalArgumentException(\"duplicate map key\");\n", .{ inner, out_expr, k_var });
                 try self.ind();
                 try self.print("{s}{s}.put({s}, {s});\n", .{ inner, out_expr, k_var, v_var });
                 try self.ind();
