@@ -1134,7 +1134,7 @@ pub fn build(b: *std.Build) void {
             cpp_consumer.addCSourceFile(.{ .file = dir.path(b, "shapes_cdr.cpp"), .flags = cpp_flags });
             cpp_consumer.addIncludePath(dir);
             cpp_consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
-            linkCdr(cpp_consumer, cdr_library);
+            linkCdr(cpp_consumer, allocation_cdr_library);
             const cpp_app = b.addExecutable(.{ .name = if (pmr) "union-admission-pmr" else "union-admission-stl", .root_module = cpp_consumer });
             admission_step.dependOn(&b.addRunArtifact(cpp_app).step);
         }
