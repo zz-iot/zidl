@@ -769,6 +769,37 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    // C bounded string aliases must remain inline storage in C and C++ consumers.
+    {
+        const step = b.step("test-c-bounded-typedefs", "Check bounded string typedef storage and decoding");
+        test_step.dependOn(step);
+        const fixture = "test/integration/c_bounded_typedefs/";
+        const gen = b.addRunArtifact(exe);
+        gen.addArgs(&.{ "-b", "c", "-o" });
+        const dir = gen.addOutputDirectoryArg("c-bounded-typedefs");
+        gen.addFileArg(b.path(fixture ++ "types.idl"));
+        for ([_]bool{ false, true }) |cpp| {
+            const consumer_mod = b.createModule(.{
+                .root_source_file = null,
+                .target = target,
+                .optimize = .Debug,
+                .link_libc = true,
+                .link_libcpp = cpp,
+            });
+            consumer_mod.addCSourceFile(.{ .file = b.path(if (cpp) fixture ++ "test.cpp" else fixture ++ "test.c"), .flags = if (cpp)
+                &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror", "-fno-exceptions", "-fno-rtti" }
+            else
+                &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" } });
+            consumer_mod.addCSourceFile(.{ .file = dir.path(b, "types_cdr.c"), .flags = &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" } });
+            consumer_mod.addIncludePath(dir);
+            consumer_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+            linkCdr(consumer_mod, cdr_library);
+            const check = b.addExecutable(.{ .name = if (cpp) "bounded-typedefs-cpp" else "bounded-typedefs-c", .root_module = consumer_mod });
+            step.dependOn(&b.addRunArtifact(check).step);
+        }
+    }
+
+
     // STL storage failures must stay inside generated C++ codec entry points.
     {
         const allocation_step = b.step("test-cpp-codec-allocation", "Inject C++ codec allocation failures");

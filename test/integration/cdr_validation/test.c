@@ -291,7 +291,35 @@ static void narrow_enums(void) {
 
 #include "sequence_validation.h"
 
+#ifndef __cplusplus
+static void bounded_array_layout(void) {
+    Validation_BoundedArrays value = {0}, decoded = {0};
+    assert(sizeof value.words[0] == 5);
+    assert(sizeof value.wide[0][0] == 3 * sizeof(uint16_t));
+    strcpy(value.words[0], "ABCD"); strcpy(value.words[1], "WXYZ");
+    value.wide[1][1][0] = 0x1234; value.wide[1][1][1] = 0x4567;
+    for (int version = ZIDL_XCDR1; version <= ZIDL_XCDR2; version++) {
+        for (int order = ZIDL_CDR_LE; order <= ZIDL_CDR_BE; order++) {
+            uint8_t bytes[128];
+            ZidlCdrWriter w;
+            zidl_cdr_writer_init_fixed(&w, bytes, sizeof bytes, version);
+            zidl_cdr_writer_set_byte_order(&w, order);
+            assert(zidl_cdr_write_encap(&w) == 0);
+            assert(Validation_BoundedArrays_serialize(&w, &value) == 0);
+            ZidlCdrReader r;
+            assert(zidl_cdr_reader_init(&r, bytes, w.len) == 0);
+            assert(Validation_BoundedArrays_deserialize(&r, &decoded) == 0);
+            assert(!memcmp(&value, &decoded, sizeof value));
+            assert(r.pos == w.len);
+        }
+    }
+}
+#endif
+
 int main(void) {
+#ifndef __cplusplus
+    bounded_array_layout();
+#endif
     sequence_validation();
     narrow_enums();
     patches();

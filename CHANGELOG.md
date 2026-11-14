@@ -18,6 +18,10 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- C declarations put bounded string/wstring capacity after member array
+  dimensions, matching codec indexing. Regenerate affected C bindings together;
+  native array strides change even though total storage size is unchanged.
+
 - C++ decoder entry points translate `std::bad_alloc` and `std::length_error`
   into `ZIDL_CDR_OVERFLOW` when exceptions are enabled. Failed decodes leave
   destructible, potentially partial output and bounded reader progress. Fault

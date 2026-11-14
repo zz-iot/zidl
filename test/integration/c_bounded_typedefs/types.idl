@@ -1,0 +1,21 @@
+module Bounded {
+    typedef string<4> Text;
+    typedef Text Alias;
+    typedef wstring<2> Wide;
+    typedef Wide WideAlias;
+    typedef string<4> Row[2];
+    typedef Row Grid[2];
+    typedef wstring<2> WideRow[2];
+    union Choice switch (long) { case 0: Alias text; default: WideAlias wide; };
+    struct Defaults { @default("ABCD") Alias text; @default("😀") WideAlias wide; @optional @default("WXYZ") Alias other; };
+    struct Sample {
+        Choice selected;
+        Alias text;
+        WideAlias wide;
+        Grid cells;
+        WideRow wides;
+        sequence<Alias> texts;
+        sequence<WideAlias> wideTexts;
+    };
+    struct Optional { @optional Alias text; @optional WideAlias wide; @optional Row rows; };
+};
