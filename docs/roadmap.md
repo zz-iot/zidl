@@ -229,18 +229,18 @@ Phase 1 (the Condition family) shipped in `v0.3.5`. Open:
   (listener-delivered entity args go through `_getOrCreate`-style wrapping) — not confirmed,
   not investigated.
 
-### Factory-less entity bootstrap
+### Standalone construction follow-ups
 
-- **`@factory_less_bootstrap(ctor=…)` annotation — decided, not implemented.** `WaitSet` /
-  `GuardCondition` have no factory operation in `dcps.idl` (per OMG spec, app-instantiated
-  directly), so each currently needs a hand-written C-ABI constructor, C++ friend-factory
-  wrapper, and Java JNI method — authored three times by mirroring
-  `DomainParticipantFactory`'s bootstrap. The decision: mark such interfaces with an
-  annotation and generate the C header decl, `--generate-c-api` export wrapper, C++
-  friend-factory, and Java JNI method + registration.
-- **`DomainParticipantFactory` is deliberately excluded** from that mechanism (its
-  DDS-base / vendor-extension duality + `FactoryOwner` complexity). Stays hand-written
-  ×3 until someone extends the mechanism for the vendor-extension case.
+`@standalone`/`@constructor`/`@destructor`/`@finalizer` replace the earlier
+`@factory_less_bootstrap(ctor=…)` decision; see
+[`design/standalone-construction.md`](design/standalone-construction.md).
+
+- **Java garbage-collection fallback** for an owner the application never closes:
+  a reference-queue thread, since the Java 8 runtime has no `Cleaner`.
+- **Constructors on a shared-box family root** (C++ `_getOrCreate` returns the
+  interface type there).
+- **`DomainParticipantFactory`** stays hand-written in zzdds: its DDS-base /
+  vendor-extension duality and `FactoryOwner` do not fit the mechanism yet.
 
 ### Listener / condition keep-alive across GC'd bindings
 

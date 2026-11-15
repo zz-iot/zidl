@@ -18,6 +18,13 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Generate construction for `@standalone` interfaces: `@constructor` operations
+  become C exports (plus `_with_allocator` forms), a Zig `exportCAbiConstructors`
+  for providers, C++ static factories and Java static factories with
+  `AutoCloseable`. The creator's wrapper owns the object: dropping or closing it
+  runs the `@finalizer`, or the `@destructor` when there is none, and a released
+  object is never released again. See `docs/design/standalone-construction.md`.
+
 - Release decoded/cloned Zig literal-default strings on cleanup and rejected
   validated messages while preserving untouched borrowed default literals.
 

@@ -1502,7 +1502,10 @@ const Generator = struct {
         const pfx = self.opts.type_prefix;
         try self.ind();
         try self.print("public interface {s}{s}", .{ pfx, iface.name });
-        if (iface.bases.len > 0) {
+        // A constructible interface's objects are owned by whoever created
+        // them: close() releases one, as try-with-resources expects.
+        const constructible = self.opts.generate_interfaces and iface.constructors.len > 0;
+        if (iface.bases.len > 0 or constructible) {
             try self.write(" extends ");
             for (iface.bases, 0..) |base, i| {
                 if (i > 0) try self.write(", ");
@@ -1510,9 +1513,11 @@ const Generator = struct {
                 defer self.alloc.free(qname);
                 try self.write(qname);
             }
+            if (constructible) try self.print("{s}AutoCloseable", .{if (iface.bases.len > 0) ", " else ""});
         }
         try self.write(" {\n");
         self.depth += 1;
+        if (constructible) try self.emitConstructorFactories(iface);
 
         // Nested type declarations
         for (iface.type_decls) |td| try self.emitTypeDecl(td);
@@ -1562,6 +1567,30 @@ const Generator = struct {
         self.depth -= 1;
         try self.ind();
         try self.print("}} // interface {s}{s}\n\n", .{ pfx, iface.name });
+    }
+
+    /// A constructible interface's static factories, one per `@constructor`,
+    /// each returning null when creation fails, and `close()`, which
+    /// releases an object its creator still owns (see
+    /// docs/design/standalone-construction.md). The generated `*Impl`
+    /// class implements both.
+    fn emitConstructorFactories(self: *Generator, iface: *const ir.Interface) !void {
+        const pfx = self.opts.type_prefix;
+        for (iface.constructors) |*op| {
+            try self.ind();
+            try self.print("static {s}{s} {s}(", .{ pfx, iface.name, op.name });
+            for (op.params, 0..) |p, i| {
+                const pt = try self.typeRefToJava(p.type_ref, &.{});
+                defer self.alloc.free(pt);
+                if (i > 0) try self.write(", ");
+                try self.print("{s} {s}", .{ pt, p.name });
+            }
+            try self.print(") {{ return {s}{s}Impl.{s}(", .{ pfx, iface.name, op.name });
+            for (op.params, 0..) |p, i| try self.print("{s}{s}", .{ if (i > 0) ", " else "", p.name });
+            try self.write("); }\n");
+        }
+        try self.ind();
+        try self.write("@Override void close();\n");
     }
 
     /// Interface-method declaration for one of `isWriteLoanBufferOp`'s three
@@ -4848,15 +4877,28 @@ const ImplFileGenerator = struct {
         try self.print("    static {{ System.loadLibrary(\"{s}\"); }}\n\n", .{self.opts.jni_library});
         // With the retire hook the JNI bridge zeroes ptr_ once the provider
         // frees the handle (retiredGuard).
-        if (self.opts.handle_retire_hook.len > 0) {
+        const constructible = iface.constructors.len > 0;
+        if (self.opts.handle_retire_hook.len > 0 or constructible) {
             try self.write("    private volatile long ptr_;\n\n");
         } else {
             try self.write("    private final long ptr_;\n\n");
         }
+        if (constructible) {
+            // Set on the wrapper a constructor returned: only that one
+            // releases the object on close().
+            try self.write("    private volatile boolean owned_;\n\n");
+        }
         try self.print("    public {s}{s}Impl(long ptr) {{ this.ptr_ = ptr; }}\n\n", .{ pfx, iface.name });
+        if (constructible) try self.emitConstruction();
 
         // @Override forwarding methods.
-        for (ops.items) |op| try self.emitForwardingOp(&op);
+        for (ops.items) |op| {
+            if (constructible and (ir.isDestructorOp(&op) or ir.isFinalizerOp(&op))) {
+                try self.emitReleaseForwardingOp(&op);
+                continue;
+            }
+            try self.emitForwardingOp(&op);
+        }
         for (attrs.items) |attr| try self.emitForwardingAttr(&attr);
 
         // private native declarations (supported ops/attrs only — see
@@ -4872,8 +4914,74 @@ const ImplFileGenerator = struct {
         for (attrs.items) |attr| {
             if (!is_callback and attrIsJniSupported(&attr)) try self.emitNativeAttrDecl(&attr);
         }
+        for (iface.constructors) |*op| {
+            try self.print("    private static native {s}{s}Impl n_{s}(", .{ pfx, iface.name, op.name });
+            for (op.params, 0..) |p, i| {
+                const pt = try self.typeRefToJava(p.type_ref);
+                defer self.alloc.free(pt);
+                try self.print("{s}{s} {s}", .{ if (i > 0) ", " else "", pt, p.name });
+            }
+            try self.write(");\n");
+        }
 
         try self.write("}\n");
+    }
+
+    /// For a `@standalone` interface: each constructor's static factory,
+    /// which marks the wrapper it returns as the object's owner, and
+    /// `close()`, which runs the fallback release on an object its owner
+    /// still holds. The JNI bridge boxes the new handle through the identity
+    /// cache, so the creator's wrapper is the one later boxing returns.
+    fn emitConstruction(self: *ImplFileGenerator) !void {
+        const iface = self.iface;
+        const pfx = self.opts.type_prefix;
+        for (iface.constructors) |*op| {
+            try self.print("    public static {s}{s}Impl {s}(", .{ pfx, iface.name, op.name });
+            for (op.params, 0..) |p, i| {
+                const pt = try self.typeRefToJava(p.type_ref);
+                defer self.alloc.free(pt);
+                try self.print("{s}{s} {s}", .{ if (i > 0) ", " else "", pt, p.name });
+            }
+            try self.print(") {{\n        {s}{s}Impl _o = n_{s}(", .{ pfx, iface.name, op.name });
+            for (op.params, 0..) |p, i| try self.print("{s}{s}", .{ if (i > 0) ", " else "", p.name });
+            try self.write(");\n        if (_o != null) _o.owned_ = true;\n        return _o;\n    }\n\n");
+        }
+        const fallback = ir.fallbackReleaseOp(iface).?;
+        try self.print(
+            "    @Override\n    public void close() {{\n        if (owned_ && ptr_ != 0) {s}();\n    }}\n\n",
+            .{fallback.name},
+        );
+    }
+
+    /// The `@destructor` or `@finalizer` of a `@standalone` interface: once
+    /// it has released the object, the wrapper forgets the handle, so
+    /// neither a later call nor `close()` reaches the provider for it.
+    fn emitReleaseForwardingOp(self: *ImplFileGenerator, op: *const ir.Operation) !void {
+        const rt = op.return_type orelse {
+            try self.print(
+                "    @Override\n    public void {[op]s}() {{\n" ++
+                    "        long _p = ptr_;\n" ++
+                    "        if (_p == 0) return;\n" ++
+                    "        n_{[op]s}(_p);\n" ++
+                    "        ptr_ = 0;\n" ++
+                    "    }}\n",
+                .{ .op = op.name },
+            );
+            return;
+        };
+        const jt = try self.typeRefToJava(rt);
+        defer self.alloc.free(jt);
+        const retired: i64 = ir.retiredResult(rt) orelse 0;
+        try self.print(
+            "    @Override\n    public {[t]s} {[op]s}() {{\n" ++
+                "        long _p = ptr_;\n" ++
+                "        if (_p == 0) return ({[t]s}) {[ret]d};\n" ++
+                "        {[t]s} _rc = n_{[op]s}(_p);\n" ++
+                "        if (_rc == {[ok]d}) ptr_ = 0;\n" ++
+                "        return _rc;\n" ++
+                "    }}\n",
+            .{ .t = jt, .op = op.name, .ret = retired, .ok = ir.successResult(rt).? },
+        );
     }
 
     /// Message for the rare operation/attribute the Java binding still can't
@@ -5941,6 +6049,10 @@ const JniBridgeGenerator = struct {
             for (attrs.items) |attr| {
                 if (!attrIsJniSupported(&attr)) continue;
                 try self.emitJniBridgeAttr(c_name, jni_class_prefix, &attr);
+            }
+            for (iface.constructors) |*op| {
+                if (!opIsJniSupported(op)) return error.UnsupportedConstructorParam;
+                try self.emitJniBridgeOpOrCtor(iface, c_name, jni_class_prefix, op, true);
             }
         }
     }
@@ -7045,6 +7157,21 @@ const JniBridgeGenerator = struct {
         jni_class_prefix: []const u8,
         op: *const ir.Operation,
     ) !void {
+        return self.emitJniBridgeOpOrCtor(iface, c_name, jni_class_prefix, op, false);
+    }
+
+    /// `ctor`: `op` is a `@constructor`, bridged as a static native with no
+    /// receiver. It calls the `_with_allocator` C export with the default
+    /// (NULL) allocator and boxes the new handle, or returns null when
+    /// creation failed.
+    fn emitJniBridgeOpOrCtor(
+        self: *JniBridgeGenerator,
+        iface: *const ir.Interface,
+        c_name: []const u8,
+        jni_class_prefix: []const u8,
+        op: *const ir.Operation,
+        ctor: bool,
+    ) !void {
         if (isWriteLoanBufferOp(iface.name, op.name)) return self.emitWriteLoanBufferJniOp(iface, c_name, jni_class_prefix, op);
         // See emitForwardingOp's matching comment -- iface may be a derived
         // interface here too.
@@ -7056,22 +7183,28 @@ const JniBridgeGenerator = struct {
         const jni_fn = try self.buildJniFnName(jni_class_prefix, native_name);
         defer self.alloc.free(jni_fn);
 
-        try self.print("JNIEXPORT {s} JNICALL {s}(\n    JNIEnv *env, jobject self, jlong ptr", .{
-            jni_ret, jni_fn,
-        });
+        if (ctor) {
+            try self.print("JNIEXPORT {s} JNICALL {s}(\n    JNIEnv *env, jclass cls", .{ jni_ret, jni_fn });
+        } else {
+            try self.print("JNIEXPORT {s} JNICALL {s}(\n    JNIEnv *env, jobject self, jlong ptr", .{
+                jni_ret, jni_fn,
+            });
+        }
         for (op.params) |p| {
             try self.print(", {s} {s}", .{ jniType(p.type_ref), p.name });
         }
-        try self.write(")\n{\n    (void)self;\n");
+        try self.write(if (ctor) ")\n{\n    (void)cls;\n" else ")\n{\n    (void)self;\n");
 
         // `op` may be inherited from a *cross-file* base rather than
         // declared directly on `iface` (or a same-file base) — see
         // `resolveCallTarget`'s doc for why that specifically needs a `self`
         // conversion + a different C symbol.
-        const call_target = try self.resolveCallTarget(iface, c_name, op.name);
-        defer call_target.deinit(self.alloc);
-        const call_c_name = call_target.c_name;
-        const self_expr = call_target.self_expr;
+        const call_target = if (ctor) null else try self.resolveCallTarget(iface, c_name, op.name);
+        defer if (call_target) |ct| ct.deinit(self.alloc);
+        const call_c_name = if (call_target) |ct| ct.c_name else c_name;
+        const self_expr = if (call_target) |ct| ct.self_expr else "NULL";
+        const call_op_name = if (ctor) try std.fmt.allocPrint(self.alloc, "{s}_with_allocator", .{op.name}) else try self.alloc.dupe(u8, op.name);
+        defer self.alloc.free(call_op_name);
 
         const ret_is_entity = if (op.return_type) |rt| classifyTypeRef(rt) == .entity else false;
         const ret_c_name: ?[]u8 = if (ret_is_entity) try self.typeRefToC(op.return_type.?) else null;
@@ -7246,17 +7379,17 @@ const JniBridgeGenerator = struct {
         defer if (ret_c) |c| self.alloc.free(c);
 
         if (ret_is_entity) {
-            try self.print("    void *_h = (void *){s}_{s}({s}", .{ call_c_name, op.name, self_expr });
+            try self.print("    void *_h = (void *){s}_{s}({s}", .{ call_c_name, call_op_name, self_expr });
         } else if (ret_c) |c| {
-            try self.print("    {s} _rc = {s}_{s}({s}", .{ c, call_c_name, op.name, self_expr });
+            try self.print("    {s} _rc = {s}_{s}({s}", .{ c, call_c_name, call_op_name, self_expr });
         } else if (ret_is_callback) {
-            try self.print("    {s} _l = {s}_{s}({s}", .{ ret_listener_c_name.?, call_c_name, op.name, self_expr });
+            try self.print("    {s} _l = {s}_{s}({s}", .{ ret_listener_c_name.?, call_c_name, call_op_name, self_expr });
         } else if (ret_is_string) {
-            try self.print("    const char *_rets = (const char *){s}_{s}({s}", .{ call_c_name, op.name, self_expr });
+            try self.print("    const char *_rets = (const char *){s}_{s}({s}", .{ call_c_name, call_op_name, self_expr });
         } else if (op.return_type != null) {
-            try self.print("    {s} _ret = ({s}){s}_{s}({s}", .{ jni_ret, jni_ret, call_c_name, op.name, self_expr });
+            try self.print("    {s} _ret = ({s}){s}_{s}({s}", .{ jni_ret, jni_ret, call_c_name, call_op_name, self_expr });
         } else {
-            try self.print("    {s}_{s}({s}", .{ call_c_name, op.name, self_expr });
+            try self.print("    {s}_{s}({s}", .{ call_c_name, call_op_name, self_expr });
         }
         for (op.params) |p| {
             switch (classifyTypeRef(p.type_ref)) {
@@ -7370,7 +7503,19 @@ const JniBridgeGenerator = struct {
             const ret_iface = resolveToNamedDecl(op.return_type.?).interface;
             const box_fn = try mostDerivedBoxFnName(self.alloc, self.all_entity_ifaces, ret_c_name.?, ret_iface);
             defer self.alloc.free(box_fn);
-            try self.print("    return {s}(env, _h);\n", .{box_fn});
+            if (ctor) {
+                // A handle the binding cannot box would leak: release it.
+                const fallback = ir.fallbackReleaseOp(iface).?;
+                try self.print(
+                    "    if (_h == NULL) return NULL;\n" ++
+                        "    jobject _o = {s}(env, _h);\n" ++
+                        "    if (_o == NULL) (void){s}_{s}(_h);\n" ++
+                        "    return _o;\n",
+                    .{ box_fn, c_name, fallback.name },
+                );
+            } else {
+                try self.print("    return {s}(env, _h);\n", .{box_fn});
+            }
         } else if (ret_is_callback) {
             // The core retained the context before handing it back
             // (retain_listener_data); take a local ref to the listener, then
@@ -11642,4 +11787,79 @@ test "java: retirement query protects boxing and callback exception cleanup" {
     try testing.expect(std.mem.indexOf(u8, src, "zidl_java_mark_retired(env, obj);\n        (*env)->DeleteLocalRef(env, obj);\n        return NULL;") != null);
     try testing.expect(std.mem.indexOf(u8, src, "if ((*env)->PushLocalFrame(env, 19) < 0) { zidl_java_callback_clear_exception(env); return; }") != null);
     try testing.expect(std.mem.indexOf(u8, src, "if (p0 != NULL && _a0 == NULL) { zidl_java_callback_clear_exception(env); (*env)->PopLocalFrame(env, NULL); return; }") != null);
+}
+
+const standalone_java_idl =
+    \\module M {
+    \\    const long OK = 0;
+    \\    const long GONE = 9;
+    \\    @success_result(OK) @retired_result(GONE) typedef long Code;
+    \\    @standalone interface Thing {
+    \\        @constructor Thing create();
+    \\        @constructor Thing create_with(in long n);
+    \\        @destructor Code destroy();
+    \\        @finalizer void release();
+    \\    };
+    \\};
+;
+
+test "java: a constructible interface has static factories and is AutoCloseable" {
+    const alloc = testing.allocator;
+    const opts = interface.Options{ .input_stem = "t", .generate_interfaces = true, .jni_library = "t_jni" };
+    try testGenOpts(alloc, standalone_java_idl, "t", opts, "public interface Thing extends AutoCloseable {");
+    try testGenOpts(alloc, standalone_java_idl, "t", opts, "static Thing create() { return ThingImpl.create(); }");
+    try testGenOpts(alloc, standalone_java_idl, "t", opts, "static Thing create_with(int n) { return ThingImpl.create_with(n); }");
+    try testGenOpts(alloc, standalone_java_idl, "t", opts, "@Override void close();");
+}
+
+test "java: a constructor's wrapper owns its object, and a release forgets the handle" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc, standalone_java_idl);
+    defer ir_spec.deinit();
+    var ifaces = std.ArrayListUnmanaged(*const ir.Interface).empty;
+    defer ifaces.deinit(alloc);
+    try collectInterfaces(alloc, ir_spec.items, &ifaces);
+    const stem_class = try stemToClassName(alloc, "t");
+    defer alloc.free(stem_class);
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    const opts = interface.Options{ .input_stem = "t", .jni_library = "t_jni" };
+    try generateImplFile(alloc, &ir_spec, ifaces.items[0], stem_class, opts, &out);
+    const s = out.items;
+    // Without the retire hook ptr_ is still volatile: a release clears it.
+    try testing.expect(std.mem.indexOf(u8, s, "    private volatile long ptr_;\n") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "    private volatile boolean owned_;\n") != null);
+    try testing.expect(std.mem.indexOf(u8, s,
+        \\    public static ThingImpl create_with(int n) {
+        \\        ThingImpl _o = n_create_with(n);
+        \\        if (_o != null) _o.owned_ = true;
+        \\        return _o;
+        \\    }
+    ) != null);
+    try testing.expect(std.mem.indexOf(u8, s, "        if (owned_ && ptr_ != 0) release();\n") != null);
+    try testing.expect(std.mem.indexOf(u8, s,
+        \\        if (_p == 0) return (int) 9;
+        \\        int _rc = n_destroy(_p);
+        \\        if (_rc == 0) ptr_ = 0;
+    ) != null);
+    try testing.expect(std.mem.indexOf(u8, s, "        n_release(_p);\n        ptr_ = 0;\n") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "    private static native ThingImpl n_create_with(int n);\n") != null);
+}
+
+test "java: a constructor's JNI bridge is a static native that boxes the new handle" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc, standalone_java_idl);
+    defer ir_spec.deinit();
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    try generateJniSource(alloc, &ir_spec, .{ .input_stem = "t" }, &out);
+    const s = out.items;
+    try testing.expect(std.mem.indexOf(u8, s, "JNIEXPORT jobject JNICALL Java_ThingImpl_n_1create_1with(\n    JNIEnv *env, jclass cls, jint n)\n{\n    (void)cls;\n") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "    void *_h = (void *)M_Thing_create_with_with_allocator(NULL, (int32_t)n);\n") != null);
+    try testing.expect(std.mem.indexOf(u8, s,
+        \\    if (_h == NULL) return NULL;
+        \\    jobject _o = zidl_java_box_M_Thing(env, _h);
+        \\    if (_o == NULL) (void)M_Thing_release(_h);
+        \\    return _o;
+    ) != null);
 }

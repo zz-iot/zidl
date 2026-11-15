@@ -117,6 +117,27 @@ and the bindings never release it after the call. The parameter is an integer
 constant expression, evaluated in the typedef's scope as for
 `@retired_result`, and the two may annotate the same typedef.
 
+### `@standalone`, `@constructor`, `@destructor`, `@finalizer`
+
+**Target:** `@standalone` on an `interface`; the other three on its operations.
+
+```idl
+@standalone interface Engine {
+    @constructor Engine create(in Config cfg);
+    @destructor  ReturnCode_t destroy();
+    @finalizer   void release();
+};
+```
+
+The application creates a `@standalone` interface's objects through its
+`@constructor` operations, not through a parent. `@destructor` destroys one and may
+refuse; a non-`void` result type must carry `@success_result`. The optional
+`@finalizer` cannot fail; a binding runs it, or the destructor when there is none,
+when the application drops an object it never destroyed. The C, Zig, C++ and Java
+backends generate constructors from these annotations, with ownership and
+release-once handling. See
+[`design/standalone-construction.md`](design/standalone-construction.md).
+
 ### `@pl_repeated`
 
 **Target:** `sequence<T>` struct member inside a `@mutable` struct.

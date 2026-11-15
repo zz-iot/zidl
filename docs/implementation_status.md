@@ -311,7 +311,7 @@ integration tests run as part of `zig build test`.
 | `@verbatim` and validation/codegen annotations (`@range`/`@min`/`@max`/`@unit`/…) | Parsed into the IR, no backend acts on them |
 | C-ABI entity identity across views | Phase 1 (`Condition` family, via `@shared_c_abi_box`) shipped in v0.3.5; `Entity`/`TopicDescription`/`DomainParticipantFactory` families and embedded-substruct impls open — see [`design/binding-c-abi-identity.md`](design/binding-c-abi-identity.md) |
 | Java `--generate-interfaces` residual stubs | A few parameter/return shapes (by-value `value_struct` return, anonymous inline `sequence<T>` param, `sequence<enum>` param, non-`get_listener` `.callback` return) throw `UnsupportedOperationException`; none occur in dcps.idl/zzdds.idl. QoS/status struct params + listener JNI upcalls are implemented |
-| Factory-less entity bootstrap (`WaitSet`/`GuardCondition`) | Hand-written per binding; `@factory_less_bootstrap` annotation decided, not implemented |
+| `@standalone` construction | C, Zig, C++ and Java generate constructors, ownership and release-once from `@constructor`/`@destructor`/`@finalizer`; no Java garbage-collection fallback yet, and no constructors on a shared-box family root — see [`design/standalone-construction.md`](design/standalone-construction.md) |
 
 ### Experimental wire typesupport libraries
 
