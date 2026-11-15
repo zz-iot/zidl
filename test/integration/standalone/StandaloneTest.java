@@ -9,6 +9,7 @@ public class StandaloneTest {
 
     static native int[] nStats();
     static native void nReset();
+    static native boolean nLoaded();
 
     static final int OK = Standalone.S.RETCODE_OK.value;
     static final int PRECONDITION_NOT_MET = Standalone.S.RETCODE_PRECONDITION_NOT_MET.value;
@@ -31,6 +32,8 @@ public class StandaloneTest {
     }
 
     public static void main(String[] args) {
+        check(nLoaded(), "JNI_OnLoad ran the --java-jni-onload-hook");
+
         nReset();
         try (Standalone.S.Engine e = Standalone.S.Engine.create()) {
             check(e != null, "create() returns an engine");

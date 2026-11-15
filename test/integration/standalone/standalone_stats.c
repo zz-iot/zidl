@@ -1,4 +1,5 @@
-/* Exposes the provider's counters (provider.zig) to StandaloneTest.java. */
+/* Exposes the provider's counters (provider.zig) to StandaloneTest.java,
+ * and is the library's --java-jni-onload-hook. */
 #include <jni.h>
 #include <stdint.h>
 
@@ -24,4 +25,19 @@ JNIEXPORT void JNICALL Java_StandaloneTest_nReset(JNIEnv *env, jclass cls) {
     (void)env;
     (void)cls;
     test_stats_reset();
+}
+
+static int loaded = 0;
+
+jint test_on_load(JavaVM *vm, JNIEnv *env) {
+    (void)vm;
+    (void)env;
+    loaded = 1;
+    return 0;
+}
+
+JNIEXPORT jboolean JNICALL Java_StandaloneTest_nLoaded(JNIEnv *env, jclass cls) {
+    (void)env;
+    (void)cls;
+    return loaded ? JNI_TRUE : JNI_FALSE;
 }

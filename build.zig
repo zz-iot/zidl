@@ -1848,7 +1848,7 @@ pub fn build(b: *std.Build) void {
                     const c_dir = gen_c.addOutputDirectoryArg(b.fmt("{s}-c", .{variant.name}));
                     gen_c.addFileArg(b.path(dir ++ "standalone.idl"));
                     const gen_java = b.addRunArtifact(exe);
-                    gen_java.addArgs(&.{ "-b", "java", "--generate-interfaces", "--no-typesupport", "--java-jni-library", "standalone_jni" });
+                    gen_java.addArgs(&.{ "-b", "java", "--generate-interfaces", "--no-typesupport", "--java-jni-library", "standalone_jni", "--java-jni-onload-hook", "test_on_load" });
                     gen_java.addArgs(variant.gen_args);
                     gen_java.addArg("-o");
                     const java_dir = gen_java.addOutputDirectoryArg(b.fmt("{s}-java", .{variant.name}));

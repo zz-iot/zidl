@@ -90,6 +90,11 @@ pub const Options = struct {
     /// Java: name passed to `System.loadLibrary()` in generated `*Impl` classes.
     /// Only used when `generate_interfaces` is true.
     jni_library: []const u8 = "zidl_dds_jni",
+    /// Java backend: a C function `jint <name>(JavaVM *, JNIEnv *)` the
+    /// generated `JNI_OnLoad` calls once the library loads, so a provider
+    /// can do its own load-time work (such as `RegisterNatives`) in the one
+    /// `JNI_OnLoad` a library may have. Nonzero fails the load. Empty: none.
+    java_jni_onload_hook: []const u8 = "",
     /// C++ (`--cpp-generate-impl`) and Java backends: base name of the C
     /// functions `<name>_observe`/`<name>_unobserve` through which the C ABI
     /// provider reports entity handles it frees (see

@@ -25,6 +25,10 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   runs the `@finalizer`, or the `@destructor` when there is none, and a released
   object is never released again. See `docs/design/standalone-construction.md`.
 
+- Add `--java-jni-onload-hook <name>`: the generated `JNI_OnLoad` calls the
+  provider's `jint <name>(JavaVM *, JNIEnv *)`, so a provider can do load-time
+  work such as `RegisterNatives` in the library's one `JNI_OnLoad`.
+
 - Release decoded/cloned Zig literal-default strings on cleanup and rejected
   validated messages while preserving untouched borrowed default literals.
 

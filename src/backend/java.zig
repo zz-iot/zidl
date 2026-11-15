@@ -5705,13 +5705,11 @@ const JniBridgeGenerator = struct {
                     "    (*env)->DeleteGlobalRef(env, ctx->ref);\n" ++
                     "    free(ctx);\n" ++
                     "}\n" ++
-                    "static JavaVM *zidl_java_vm = NULL;\n" ++
-                    "JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {\n" ++
-                    "    (void)reserved;\n" ++
-                    "    zidl_java_vm = vm;\n" ++
-                    "    return JNI_VERSION_1_6;\n" ++
-                    "}\n" ++
-                    "JNIEnv *zidl_java_get_env(void) {\n" ++
+                    "static JavaVM *zidl_java_vm = NULL;\n",
+            );
+            try self.emitJniOnLoad();
+            try self.write(
+                "JNIEnv *zidl_java_get_env(void) {\n" ++
                     "    JNIEnv *env = NULL;\n" ++
                     "    if (zidl_java_vm == NULL) return NULL;\n" ++
                     "    if ((*zidl_java_vm)->GetEnv(zidl_java_vm, (void **)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {\n" ++
@@ -5976,6 +5974,25 @@ const JniBridgeGenerator = struct {
         try seq_gen.emitSource(spec);
 
         try self.emitItems(spec.items);
+    }
+
+    /// `JNI_OnLoad`: records the VM, then calls `--java-jni-onload-hook`'s
+    /// function, if any, failing the load when it returns nonzero.
+    fn emitJniOnLoad(self: *JniBridgeGenerator) !void {
+        const hook = self.opts.java_jni_onload_hook;
+        if (hook.len > 0) try self.print("jint {s}(JavaVM *vm, JNIEnv *env);\n", .{hook});
+        try self.write(
+            "JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {\n" ++
+                "    (void)reserved;\n" ++
+                "    zidl_java_vm = vm;\n",
+        );
+        if (hook.len > 0) try self.print(
+            "    JNIEnv *env = NULL;\n" ++
+                "    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;\n" ++
+                "    if ({s}(vm, env) != 0) return JNI_ERR;\n",
+            .{hook},
+        );
+        try self.write("    return JNI_VERSION_1_6;\n}\n");
     }
 
     fn emitItems(self: *JniBridgeGenerator, items: []const ir.ModuleItem) anyerror!void {
@@ -11862,4 +11879,27 @@ test "java: a constructor's JNI bridge is a static native that boxes the new han
         \\    if (_o == NULL) (void)M_Thing_release(_h);
         \\    return _o;
     ) != null);
+}
+
+test "java: --java-jni-onload-hook is called from JNI_OnLoad, failing the load when it fails" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc, "interface Widget { long poke(); };");
+    defer ir_spec.deinit();
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    try generateJniSource(alloc, &ir_spec, .{ .input_stem = "w", .java_jni_onload_hook = "app_on_load" }, &out);
+    const s = out.items;
+    try testing.expect(std.mem.indexOf(u8, s, "jint app_on_load(JavaVM *vm, JNIEnv *env);\n") != null);
+    try testing.expect(std.mem.indexOf(u8, s,
+        \\    zidl_java_vm = vm;
+        \\    JNIEnv *env = NULL;
+        \\    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;
+        \\    if (app_on_load(vm, env) != 0) return JNI_ERR;
+        \\    return JNI_VERSION_1_6;
+    ) != null);
+
+    var plain = std.ArrayList(u8).empty;
+    defer plain.deinit(alloc);
+    try generateJniSource(alloc, &ir_spec, .{ .input_stem = "w" }, &plain);
+    try testing.expect(std.mem.indexOf(u8, plain.items, "    zidl_java_vm = vm;\n    return JNI_VERSION_1_6;\n}\n") != null);
 }

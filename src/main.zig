@@ -37,6 +37,7 @@
 //!                                  entity handles (C++ --cpp-generate-impl, Java)
 //!
 //!   --java-jni-library <name>      System.loadLibrary() name for JNI impls (Java backend)
+//!   --java-jni-onload-hook <name>  Provider function the generated JNI_OnLoad calls (Java backend)
 //!   --java-package <pkg>           Package prefix, e.g. com.example (Java backend)
 //!   --java-import-package <Mod>=<pkg>  Java package of an imported module's own output, if not this file's own --java-package (Java backend, repeatable)
 //!
@@ -80,6 +81,7 @@ const Opts = struct {
     java_package: []const u8 = "",
     default_extensibility: zidl.ir.Extensibility = .final,
     jni_library: []const u8 = "zidl_dds_jni",
+    java_jni_onload_hook: []const u8 = "",
     handle_retire_hook: []const u8 = "",
     /// Optional int query(void *handle); requires a retire hook.
     handle_retire_query: []const u8 = "",
@@ -273,6 +275,14 @@ pub fn main(init: std.process.Init) !void {
                 std.process.exit(1);
             }
             opts.handle_retire_query = args[i];
+        } else if (std.mem.eql(u8, arg, "--java-jni-onload-hook")) {
+            i += 1;
+            if (i >= args.len) {
+                try stderr.print("error: --java-jni-onload-hook requires an argument\n", .{});
+                try stderr.flush();
+                std.process.exit(1);
+            }
+            opts.java_jni_onload_hook = args[i];
         } else if (std.mem.eql(u8, arg, "--java-jni-library")) {
             i += 1;
             if (i >= args.len) {
@@ -709,6 +719,7 @@ fn processFile(
         .java_package = opts.java_package,
         .default_extensibility = opts.default_extensibility,
         .jni_library = opts.jni_library,
+        .java_jni_onload_hook = opts.java_jni_onload_hook,
         .handle_retire_hook = opts.handle_retire_hook,
         .handle_retire_query = opts.handle_retire_query,
         .split_files = opts.split_files,
@@ -843,6 +854,9 @@ fn printUsage(w: *Io.Writer) !void {
         \\                                 Java)
         \\
         \\  --java-jni-library <name>      System.loadLibrary() name for JNI impls (Java backend)
+        \\  --java-jni-onload-hook <name>  C function `jint <name>(JavaVM *, JNIEnv *)` the generated
+        \\                                 JNI_OnLoad calls once the library loads; nonzero fails the
+        \\                                 load (Java backend)
         \\  --java-package <pkg>           Package prefix, e.g. com.example (Java backend)
         \\  --java-import-package <Mod>=<pkg>  Java package of an imported module's own output, if not this file's own --java-package (Java backend, repeatable)
         \\
