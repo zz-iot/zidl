@@ -1,0 +1,7 @@
+module Traversal {
+    @mutable union Choice switch(long) { @id(10) case 0: long number; @id(20) case 1: long other; };
+    @mutable struct Item { @id(1) long number; };
+    @final struct MapTopic { map<long, Choice, 2> values; };
+    @final struct UnionTopic { @key long id; Choice payload; };
+    @final struct StructTopic { @key long id; Item payload; };
+};

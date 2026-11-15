@@ -29,6 +29,21 @@ public class ValidationTest {
         check(buffer.limit() == bytes.length);
     }
     public static void main(String[] args) throws Exception {
+        for (String name : new String[]{"Mut", "MutChoice"}) {
+            Class<?> mutable = Class.forName(args[0] + name);
+            for (String method : new String[]{"serialize", "deserializeFrom", "skip"}) {
+                if (name.equals("MutChoice") && method.equals("skip")) continue;
+                ByteBuffer bytes = ByteBuffer.allocate(64);
+                Object instance = method.equals("serialize") ? mutable.getConstructor().newInstance() : null;
+                try {
+                    mutable.getMethod(method,ByteBuffer.class,int.class,int.class).invoke(instance,bytes,0,1);
+                    throw new AssertionError("accepted mutable XCDR1: " + name + "." + method);
+                } catch (InvocationTargetException e) {
+                    check(e.getCause() instanceof IllegalArgumentException);
+                    check(bytes.position()==0);
+                }
+            }
+        }
         type = Class.forName(args[0] + "Narrow");
         for (String method : new String[]{"deserializeFrom", "skip", "deserializeSelected"}) {
             reject(method, new byte[]{0,0,0,0}, IllegalArgumentException.class, 4);

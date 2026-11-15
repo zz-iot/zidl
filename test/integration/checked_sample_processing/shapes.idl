@@ -1,0 +1,7 @@
+module Processing {
+    @final struct Owned { @key long id; @default("a constructor default longer than small string storage") string text; };
+    @final struct Keyless { string text; };
+    @mutable struct Evolving { @id(1) long number; };
+};
+
+module Processing { @appendable struct KeylessAppendable { long number; }; };

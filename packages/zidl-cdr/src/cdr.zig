@@ -318,6 +318,7 @@ pub fn CdrWriter(comptime xcdr_version: XcdrVersion) type {
         ///   w.patchDheader(dh);
         ///   ```
         pub fn reserveDheader(self: *Self) !usize {
+            if (xcdr_version != .xcdr2) return error.UnsupportedEncoding;
             var offset: usize = undefined;
             try framing.reserveDheader(self, &offset);
             return offset;
@@ -717,6 +718,8 @@ pub const CdrReader = struct {
     /// True when the stream uses PL_CDR (ParameterList) framing.
     /// xcdr_version is .xcdr1 for PL_CDR; this flag distinguishes PL_CDR from plain XCDR1.
     is_pl_cdr: bool,
+    /// Opt-in required-member and exact-known-member admission checks.
+    strict_validation: bool = false,
 
     // ── Construction ─────────────────────────────────────────────────────
 
@@ -954,6 +957,7 @@ pub const CdrReader = struct {
     }
 
     pub fn readMutableDheader(self: *CdrReader) !usize {
+        if (self.xcdr_version != .xcdr2) return error.UnsupportedEncoding;
         return framing.readDheaderEnd(self.data, &self.pos, if (self.xcdr_version == .xcdr1) 8 else 4, self.byte_order);
     }
 
@@ -2211,4 +2215,16 @@ test "key hash writer counters reject overflow before updating the digest" {
     try std.testing.expectEqual(std.math.maxInt(usize), writer.len);
     try std.testing.expectEqual(std.math.maxInt(usize), writer.pos);
     try std.testing.expectEqualSlices(u8, &(@as([16]u8, @splat(0))), &writer.first16);
+}
+
+test "mandatory XCDR2 framing rejects XCDR1 before touching the cursor" {
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(std.testing.allocator);
+    var writer = CdrWriter(.xcdr1).init(&bytes, std.testing.allocator);
+    try writer.writeEncapHeader();
+    try std.testing.expectError(error.UnsupportedEncoding, writer.reserveDheader());
+    try std.testing.expectEqual(@as(usize, 4), bytes.items.len);
+    var reader = try CdrReader.init(bytes.items);
+    try std.testing.expectError(error.UnsupportedEncoding, reader.readMutableDheader());
+    try std.testing.expectEqual(@as(usize, 4), reader.pos);
 }

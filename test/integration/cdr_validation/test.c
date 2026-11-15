@@ -44,6 +44,16 @@ static void patches(void) {
     char *items[] = { (char *)"hello" };
     Collections coll = { { 1, 1, items, false } };
 #endif
+    {
+        ZidlCdrWriter w;
+        zidl_cdr_writer_init_counting(&w,ZIDL_XCDR1);
+        assert(Validation_Mut_serialize(&w,&mut)==ZIDL_CDR_INVALID && w.len==0);
+        const uint8_t header[] = {0,1,0,0};
+        ZidlCdrReader r;
+        assert(zidl_cdr_reader_init(&r,header,sizeof header)==0);
+        assert(Validation_Mut_deserialize(&r,&mut)==ZIDL_CDR_INVALID && r.pos==4);
+        assert(Validation_Mut_skip(&r)==ZIDL_CDR_INVALID && r.pos==4);
+    }
     for (int version = ZIDL_XCDR1; version <= ZIDL_XCDR2; version++) {
         ZidlCdrWriter w;
         fail_dheader = 1;

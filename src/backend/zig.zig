@@ -68,6 +68,7 @@ pub const ZigBackend = struct {
         opts: interface.Options,
     ) anyerror!void {
         const self: *ZigBackend = @ptrCast(@alignCast(ctx));
+        try validateCodecMapping(self.alloc, spec, opts);
         try @import("typesupport_library.zig").validateOptions(opts);
         const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -112,6 +113,7 @@ pub fn generateFile(
     opts: interface.Options,
     out: *std.ArrayList(u8),
 ) !void {
+    try validateCodecMapping(alloc, spec, opts);
     var gen = Generator{ .alloc = alloc, .opts = opts, .out = out };
     defer gen.deinit();
     try gen.emitFile(spec);
@@ -156,6 +158,7 @@ pub fn generateSplitFiles(
     spec: *const ir.Spec,
     opts: interface.Options,
 ) !void {
+    try validateCodecMapping(alloc, spec, opts);
     // Collect names of non-empty top-level modules and emit their files.
     var module_names = std.ArrayListUnmanaged([]const u8).empty;
     defer module_names.deinit(alloc);
@@ -497,8 +500,15 @@ const Generator = struct {
             try self.ind();
             try self.write("    _toml_applied: bool = false,\n");
         }
-        for (s.members) |m| {
-            try self.emitField(m.name, m.type_ref, m.dimensions, m.annotations.is_optional, m.annotations.default_value);
+        for (s.members, 0..) |m, index| {
+            if (memberHasBorrowedStringDefault(m)) {
+                const name = try self.defaultLiteralName(s, index);
+                defer self.alloc.free(name);
+                const mapped = try self.typeRefToZig(m.type_ref);
+                defer self.alloc.free(mapped);
+                try self.ind();
+                try self.print("    {s}: {s}{s} = {s},\n", .{ m.name, if (m.annotations.is_optional) "?" else "", mapped, name });
+            } else try self.emitField(m.name, m.type_ref, m.dimensions, m.annotations.is_optional, m.annotations.default_value);
         }
         if (self.plRetainsUnknown(s)) {
             // The generated retention field would shadow an identically named
@@ -515,6 +525,19 @@ const Generator = struct {
             try self.write("    /// Owned; freed by `deinit`.\n");
             try self.ind();
             try self.write("    unknown_params: []zidl_cdr.RawParam = &.{},\n");
+        }
+        // A stable named literal distinguishes untouched borrowed defaults from
+        // allocated decoded/cloned strings without changing the value layout.
+        for (s.members, 0..) |m, index| {
+            if (!memberHasBorrowedStringDefault(m)) continue;
+            const name = try self.defaultLiteralName(s, index);
+            defer self.alloc.free(name);
+            const mapped = try self.typeRefToZig(m.type_ref);
+            defer self.alloc.free(mapped);
+            const initial = try self.formatDefaultValueZig(m.annotations.default_value.?, m.type_ref);
+            defer self.alloc.free(initial);
+            try self.ind();
+            try self.print("    const {s}: {s} = {s};\n", .{ name, mapped, initial });
         }
         // default() is always emitted; it relies only on field defaults, not CDR support.
         try self.ind();
@@ -660,6 +683,14 @@ const Generator = struct {
         try self.print("{s}{s}._u = .{{ .{s} = _tmp }};\n", .{ extra, out_expr, cas.name });
     }
 
+    /// Exact-extent admission is opt-in; ordinary DDS evolution decoding keeps
+    /// its omitted-member defaults. A local reader preserves caller state on error.
+    fn emitValidatedRead(self: *Generator, owns: bool) !void {
+        try self.write("    pub fn deserializeValidated(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {\n        var _reader = reader.*;\n        _reader.strict_validation = true;\n        try @This().deserializeInto(out, &_reader, allocator);\n");
+        if (owns) try self.write("        errdefer out.deinit(allocator);\n");
+        try self.write("        if (_reader.pos != _reader.data.len) return error.TrailingBytes;\n        _reader.strict_validation = reader.strict_validation;\n        reader.* = _reader;\n    }\n");
+    }
+
     fn emitUnionCdr(self: *Generator, u: *const ir.Union) anyerror!void {
         const ext = u.annotations.extensibility;
         const mutable = ext == .mutable;
@@ -688,6 +719,7 @@ const Generator = struct {
         const default_case: ?ir.UnionCase = if (default_case_index) |idx| u.cases[idx] else null;
 
         try self.emitCanonicalUnion(u, default_case);
+        try self.emitValidatedRead(self.unionNeedsCleanup(u));
 
         // ── serialize ────────────────────────────────────────────────────────
         try self.write("\n");
@@ -944,7 +976,7 @@ const Generator = struct {
             for (u.cases) |cas| {
                 if (isDefaultUnionCase(cas)) continue;
                 try self.emitZigUnionCaseArmPattern(u.discriminant, cas, "                ");
-                try self.write(" => {\n");
+                try self.write(" => {\n                    if (reader.strict_validation) return error.MissingUnionMember;\n");
                 const initial = try self.defaultForArrayRef(cas.type_ref, cas.dimensions);
                 defer self.alloc.free(initial);
                 try self.print("                    out._u = .{{ .{s} = {s} }}; out._d = _d;\n                }},\n", .{ cas.name, initial });
@@ -952,7 +984,7 @@ const Generator = struct {
             if (default_case) |cas| {
                 const initial = try self.defaultForArrayRef(cas.type_ref, cas.dimensions);
                 defer self.alloc.free(initial);
-                try self.print("                else => {{ out._u = .{{ .{s} = {s} }}; out._d = _d; }},\n", .{ cas.name, initial });
+                try self.print("                else => {{ if (reader.strict_validation) return error.MissingUnionMember; out._u = .{{ .{s} = {s} }}; out._d = _d; }},\n", .{ cas.name, initial });
             } else if (!unionLabelsExhaustive(u)) {
                 try self.write("                else => out._d = _d,\n");
             }
@@ -1007,7 +1039,7 @@ const Generator = struct {
         // ── skip ──────────────────────────────────────────────────────────────
         try self.write("\n");
         try self.ind();
-        try self.write("    pub fn skip(reader: *zidl_cdr.CdrReader) !void {\n");
+        try self.write("    /// Structural traversal only; success is not sample admission.\n    pub fn skip(reader: *zidl_cdr.CdrReader) !void {\n");
         if (mutable) {
             try self.ind();
             try self.write("        const _end = try reader.readMutableDheader();\n");
@@ -1447,7 +1479,7 @@ const Generator = struct {
                 try self.write("    }\n");
                 try self.write("\n");
                 try self.ind();
-                try self.write("    pub fn skip(reader: *zidl_cdr.CdrReader) !void {\n");
+                try self.write("    /// Structural traversal only; success is not sample admission.\n    pub fn skip(reader: *zidl_cdr.CdrReader) !void {\n");
                 try self.ind();
                 try self.print("        _ = try reader.{s}();\n", .{read_m});
                 try self.ind();
@@ -3854,6 +3886,7 @@ const Generator = struct {
     }
 
     fn emitStructValueFns(self: *Generator, s: *const ir.Struct, projection: bool) anyerror!void {
+        if (!projection) try self.emitValidatedRead(self.structNeedsCleanup(s));
         const mutable = s.annotations.extensibility == .mutable;
         const appendable = s.annotations.extensibility == .appendable;
         const wire_fields = try canonical.wireFields(self.alloc, s, projection);
@@ -3944,6 +3977,7 @@ const Generator = struct {
             try self.ind();
             try self.write("        const _em_end = try reader.readMutableDheader();\n");
             try self.emitReaderWindow("        ", "@as(?usize, _em_end)");
+            if (wire_fields.len > 0) try self.print("        var _seen: [{d}]bool = @splat(false);\n", .{wire_fields.len});
             try self.ind();
             try self.write("        while (reader.mutableHasMore(_em_end)) {\n");
             try self.ind();
@@ -3951,7 +3985,7 @@ const Generator = struct {
             try self.emitReaderWindow("            ", "@as(?usize, try reader.emheaderEnd(_emh))");
             try self.ind();
             try self.write("            switch (_emh.member_id) {\n");
-            for (wire_fields) |field| {
+            for (wire_fields, 0..) |field, seen_idx| {
                 var m = field.member.*;
                 const path = try canonical.zigMemberPath(self.alloc, field);
                 defer self.alloc.free(path);
@@ -3960,6 +3994,7 @@ const Generator = struct {
                 const member_id: u32 = memberIdAt(m, idx);
                 try self.ind();
                 try self.print("                {d} => {{\n", .{member_id});
+                try self.print("                    if (_seen[{d}]) return error.DuplicateMember; _seen[{d}] = true;\n", .{ seen_idx, seen_idx });
                 if (m.annotations.is_optional) {
                     // For @mutable+@optional: member appears → value is present.
                     try self.emitOptionalMemberDecode(m, "                    ");
@@ -3973,6 +4008,7 @@ const Generator = struct {
                     }
                 }
                 try self.ind();
+                try self.write("                    if (reader.strict_validation and reader.pos != reader.data.len) return error.InvalidMemberLength;\n");
                 try self.write("                },\n");
             }
             try self.ind();
@@ -3987,6 +4023,9 @@ const Generator = struct {
             try self.write("            }\n");
             try self.ind();
             try self.write("        }\n");
+            for (wire_fields, 0..) |field, seen_idx| {
+                if (!field.member.annotations.is_optional) try self.print("        if (reader.strict_validation and !_seen[{d}]) return error.MissingRequiredMember;\n", .{seen_idx});
+            }
         } else {
             if (appendable) {
                 try self.emitReaderWindow("        ", "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
@@ -4049,7 +4088,7 @@ const Generator = struct {
 
         // skip (allocation-free fast-forward over one full serialized sample)
         try self.ind();
-        try self.write("    pub fn skip(reader: *zidl_cdr.CdrReader) !void {\n");
+        try self.write("    /// Structural traversal only; success is not sample admission.\n    pub fn skip(reader: *zidl_cdr.CdrReader) !void {\n");
         if (mutable) {
             try self.ind();
             try self.write("        const _end = try reader.readMutableDheader();\n");
@@ -4487,7 +4526,7 @@ const Generator = struct {
         _ = s;
         try self.write("\n");
         try self.ind();
-        try self.write("    pub fn computeKeyHashFromCdr(ctx: *anyopaque, payload: []const u8) [16]u8 {\n");
+        try self.write("    /// Key extraction only; a returned hash is not sample admission.\n    pub fn computeKeyHashFromCdr(ctx: *anyopaque, payload: []const u8) [16]u8 {\n");
         try self.ind();
         try self.write("        const allocator: *const std.mem.Allocator = @ptrCast(@alignCast(ctx));\n");
         try self.ind();
@@ -4547,26 +4586,14 @@ const Generator = struct {
     /// real fix, not a style preference: `TypeSupport.get_field` existed but no
     /// binding ever populated it).
     ///
-    /// Unlike `computeKeyHashFromCdr` (which only ever needs `@key` members),
-    /// a filter expression can reference *any* simple-typed member, so this
-    /// fully deserializes `payload` via the struct's own `deserialize` (CDR
-    /// isn't randomly addressable — a partial/selective parse skipping ahead
-    /// to just the requested field isn't meaningfully simpler than a full
-    /// one) rather than reusing `deserializeKeyInto`'s member walk.
-    ///
-    /// `scratch` (see `TypeSupport.get_field`'s doc comment for why it
-    /// exists): a matched string member's bytes are copied there rather than
-    /// returned as a slice into the local `_v` — `_v` is freed (when it has a
-    /// generated `deinit()`) before this function returns, so a slice into it
-    /// would dangle. A string too long for `scratch` returns `null` (unknown
-    /// field) rather than truncating and risking a wrong comparison result —
-    /// `filter_mod.eval` already treats an evaluation error as "pass the
-    /// sample through", the same safe fallback either way.
+    /// This projects the requested field via `deserializeSelected`, structurally
+    /// skipping other fields. A returned filter value does not validate the full
+    /// sample and must not be used as an admission decision.
     fn emitGetFieldFromCdr(self: *Generator, s: *const ir.Struct) !void {
         const needs_cleanup = self.structNeedsCleanup(s);
         try self.write("\n");
         try self.ind();
-        try self.write("    pub fn getFieldFromCdr(ctx: *anyopaque, payload: []const u8, field: []const u8, scratch: []u8) ?_zzdds.dcps.filter.FilterValue {\n");
+        try self.write("    /// Field extraction only; a returned value is not sample admission.\n    pub fn getFieldFromCdr(ctx: *anyopaque, payload: []const u8, field: []const u8, scratch: []u8) ?_zzdds.dcps.filter.FilterValue {\n");
         // `field` is always used now (fieldIndex(field) below). `scratch` is
         // referenced only by string_like members' scratch-copy -- a struct
         // with no string_like member leaves it unreferenced, which Zig
@@ -4719,7 +4746,7 @@ const Generator = struct {
 
         // deserializeSelected
         try self.ind();
-        try self.write("    pub fn deserializeSelected(reader: *zidl_cdr.CdrReader, want: FieldMask, out: *@This(), allocator: std.mem.Allocator) !void {\n");
+        try self.write("    /// Field projection only; skipped content is not validated.\n    pub fn deserializeSelected(reader: *zidl_cdr.CdrReader, want: FieldMask, out: *@This(), allocator: std.mem.Allocator) !void {\n");
         if (fallback) {
             try self.ind();
             try self.write("        _ = want;\n");
@@ -5261,43 +5288,32 @@ const Generator = struct {
         try self.write("    }\n");
     }
 
-    /// `typeRefNeedsSeqDeinit(m.type_ref) or this type has an unbounded string,
-    /// directly or via a nested struct field` — matches the C backend's parity
-    /// fix (`structHasSequenceFields`/`emitStructFree`, see `zidl/CHANGELOG.md`
-    /// v0.3.5 — `{Type}_free()` body completeness): any unbounded string/wstring
-    /// or any sequence needs cleanup, not just unbounded sequences.
-    ///
-    /// One case the C fix doesn't have to consider: `m` is *itself* a plain
-    /// unbounded string (or a typedef chain to one) with a non-empty `@default`,
-    /// **and** we're not under `--zig-generate-toml-config`. `deserializeInto`
-    /// unconditionally dupes every required string field it actually reads —
-    /// same as `applyToml` does — so any *deserialized* value is always safe to
-    /// free. The risk is a value that was never deserialized at all (e.g. bare
-    /// `.{}`, or an `errdefer`-triggered `deinit()` firing before this field was
-    /// reached): its `[]const u8` field is still pointing at comptime-literal
-    /// storage, and `alloc.free()` on that is memory corruption, not a leak.
-    /// C sidesteps this because its runtime `_default()` calls `zidl_cdr_strdup`
-    /// unconditionally (always heap, never a raw literal pointer) — Zig's
-    /// comptime struct-literal field defaults can't do the equivalent at compile
-    /// time. `--zig-generate-toml-config` structs are exempt from this
-    /// exclusion: `emitFieldSeqCloneStmt`'s dupe and `_toml_applied` (see
-    /// `emitFieldSeqDeinit`) already track real per-value ownership for exactly
-    /// this case, flag-independently. Outside that flag, such a member is
-    /// deliberately left out of cleanup — a narrow, pre-existing gap (same as
-    /// before this fix), not a new regression — rather than risk freeing static
-    /// memory.
+    /// Give each borrowed default one stable identity without introducing a
+    /// hidden value field. Avoid collisions with user-declared field names.
+    fn defaultLiteralName(self: *Generator, value: *const ir.Struct, index: usize) ![]u8 {
+        var name = try std.fmt.allocPrint(self.alloc, "_zidl_default_{d}", .{index});
+        errdefer self.alloc.free(name);
+        while (true) {
+            var collision = false;
+            for (value.members) |m| if (std.mem.eql(u8, m.name, name)) {
+                collision = true;
+                break;
+            };
+            if (!collision) return name;
+            const next = try std.fmt.allocPrint(self.alloc, "{s}_", .{name});
+            self.alloc.free(name);
+            name = next;
+        }
+    }
+
+    /// Defaulted strings still own decoded/cloned data. Their deinitializer
+    /// distinguishes that data from the named borrowed default literal.
     fn memberNeedsCleanup(self: *Generator, m: ir.StructMember) bool {
         if (self.usesGenericOwnership(m.type_ref, m.dimensions)) return true;
         if (typeRefNeedsSeqDeinit(m.type_ref)) return true;
         if (self.boundedSeqNeedsElementCleanup(m.type_ref)) return true;
         if (self.aggregateNeedsCleanup(m.type_ref)) return true;
         if (!typeRefHasUnboundedString(m.type_ref)) return false;
-        if (typeRefIsDirectPlainString(m.type_ref) and
-            !self.opts.zig_generate_toml_config and
-            memberHasNonEmptyStringDefault(m))
-        {
-            return false;
-        }
         return true;
     }
 
@@ -5399,8 +5415,23 @@ const Generator = struct {
             },
             else => {},
         };
-        for (s.members) |m| {
+        for (s.members, 0..) |m, index| {
             if (!self.memberNeedsCleanup(m)) continue;
+            if (memberHasBorrowedStringDefault(m)) {
+                const name = try self.defaultLiteralName(s, index);
+                defer self.alloc.free(name);
+                try self.ind();
+                if (m.annotations.is_optional) {
+                    try self.print("        if (self.{s}) |_text| {{ if (_text.len != 0 and _text.ptr != {s}.ptr) alloc.free(_text); }}\n", .{ m.name, name });
+                    try self.ind();
+                    try self.print("        self.{s} = null;\n", .{m.name});
+                } else {
+                    try self.print("        if (self.{s}.len != 0 and self.{s}.ptr != {s}.ptr) alloc.free(self.{s});\n", .{ m.name, m.name, name, m.name });
+                    try self.ind();
+                    try self.print("        self.{s} = &.{{}};\n", .{m.name});
+                }
+                continue;
+            }
             if (m.annotations.is_optional) {
                 // `x: ?T` — clean the payload through `.?`, guarded on presence.
                 const fa = try std.fmt.allocPrint(self.alloc, "{s}.?", .{m.name});
@@ -5426,20 +5457,8 @@ const Generator = struct {
         try self.write("    }\n");
     }
 
-    /// Emit `if (self.field.len != 0) alloc.free(self.field);` followed by an
-    /// unconditional `self.field = "";`, gated on `self._toml_applied` under
-    /// `--zig-generate-toml-config` (a string field has no ownership flag of
-    /// its own, so without that guard, an untouched `T{}` whose non-empty
-    /// `@default` literal was never duped would have its static storage
-    /// passed to `alloc.free` here — undefined behavior; see
-    /// `Generator.memberNeedsCleanup`'s doc comment for why the *caller*
-    /// already excludes this exact risk outside that flag by never reaching
-    /// this function for such a field at all, so no equivalent guard is needed
-    /// here in that case). The unconditional reset makes a second `deinit()`
-    /// call a safe no-op (`len == 0` short-circuits the free) instead of a
-    /// double-free — the same idempotency `emitFieldSeqDeinit`'s `.sequence`
-    /// and `unknown_params` arms already have by resetting their field after
-    /// freeing.
+    /// Release an ordinary owned string and empty it for idempotent cleanup.
+    /// Literal-default fields use their separate identity guard in struct deinit.
     fn emitPlainStringFreeStmt(self: *Generator, field_name: []const u8, indent: []const u8) !void {
         try self.ind();
         if (self.opts.zig_generate_toml_config) {
@@ -5571,7 +5590,9 @@ const Generator = struct {
                 try self.ind();
                 try self.print("        if (self.{s} != null) {{\n", .{m.name});
                 try self.ind();
-                try self.print("            result.{s} = .{{}};\n", .{m.name});
+                const initial = try self.defaultForArrayRef(m.type_ref, m.dimensions);
+                defer self.alloc.free(initial);
+                try self.print("            result.{s} = {s};\n", .{ m.name, initial });
                 try self.emitFieldSeqCloneStmt(fa, m.type_ref, m.dimensions, "            ");
                 try self.ind();
                 try self.write("        }\n");
@@ -10855,12 +10876,9 @@ test "zig_backend: plain unbounded string field gets deinit/clone, general case"
     try testing.expect(has(s, "result.body = if (self.body.len != 0) try alloc.dupe(u8, self.body) else self.body;"));
 }
 
-test "zig_backend: non-empty @default string field excluded from cleanup outside toml config" {
-    // A member with a non-empty @default is left out of deinit()/clone(): its
-    // default is a comptime string literal, unsafe to alloc.free() if deinit()
-    // ever fires on a value that was never deserialized. Only `label` (with
-    // the risky non-empty default) is excluded; `note` (no default) still
-    // gets real cleanup, so deinit()/clone() are still emitted for the struct.
+test "zig_backend: literal defaults remain borrowed while decoded strings get cleanup" {
+    // Untouched literal storage stays borrowed; decoded and cloned strings
+    // are owned and must participate in cleanup, including failure paths.
     var out = try testGen(
         \\struct Cfg {
         \\    @default("unknown") string label;
@@ -10870,16 +10888,15 @@ test "zig_backend: non-empty @default string field excluded from cleanup outside
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {"));
-    try testing.expect(!has(s, "alloc.free(self.label)"));
+    try testing.expect(has(s, "self.label.ptr != _zidl_default_0.ptr) alloc.free(self.label)"));
     try testing.expect(has(s, "if (self.note.len != 0) alloc.free(self.note);"));
     try testing.expect(has(s, "pub fn clone(self: @This(), alloc: std.mem.Allocator) !@This() {"));
-    try testing.expect(!has(s, "result.label ="));
+    try testing.expect(has(s, "result.label ="));
     try testing.expect(has(s, "result.note = if (self.note.len != 0) try alloc.dupe(u8, self.note) else self.note;"));
 }
 
 test "zig_backend: empty @default string field still gets cleanup outside toml config" {
-    // @default("") is always safe to free (zero-length) -- only a *non-empty*
-    // default is excluded.
+    // Empty defaults need no identity guard; ordinary cleanup remains valid.
     var out = try testGen(
         \\struct Cfg2 { @default("") string label; };
     , "cfg2");
@@ -10941,7 +10958,8 @@ test "zig_backend: @default on non-optional field sets initializer" {
     const s = h.items;
     try testing.expect(has(s, "base_port: u16 = 7400,"));
     try testing.expect(has(s, "active: bool = true,"));
-    try testing.expect(has(s, "label: []const u8 = \"hello\","));
+    try testing.expect(has(s, "label: []const u8 = _zidl_default_2,"));
+    try testing.expect(has(s, "const _zidl_default_2: []const u8 = \"hello\";"));
 }
 
 test "zig_backend: @optional with @default sets typed optional initializer" {
@@ -11908,4 +11926,30 @@ fn booleanLabelsExhaustive(discriminant: ir.TypeRef, cases: []const ir.UnionCase
         if (label == .boolean) labels |= if (label.boolean) @as(u2, 2) else 1;
     };
     return labels == 3;
+}
+
+fn validateCodecMapping(alloc: std.mem.Allocator, spec: *const ir.Spec, opts: interface.Options) !void {
+    try @import("codec_validation.zig").validateWithOptions(alloc, spec, .{
+        .reject_dynamic = !opts.no_typesupport,
+        .reject_long_double = !opts.no_typesupport,
+        .zig_map_keys = true,
+    });
+}
+
+test "zig_backend: unsupported map keys fail before output even without codecs" {
+    const sources = [_][]const u8{
+        "struct S { map<string<4>, long> values; };",
+        "typedef wstring Key; struct S { map<Key, long> values; };",
+        "struct S { map<wstring<4>, long> values; };",
+    };
+    for (sources) |source| {
+        for ([_]bool{ false, true }) |no_typesupport| {
+            try testing.expectError(error.UnsupportedZigMapKey, testGenOpts(source, "unsupported", .{ .no_typesupport = no_typesupport }));
+        }
+    }
+}
+
+fn memberHasBorrowedStringDefault(m: ir.StructMember) bool {
+    if (m.dimensions.len != 0 or !memberHasNonEmptyStringDefault(m)) return false;
+    return typeRefIsDirectPlainString(m.type_ref);
 }

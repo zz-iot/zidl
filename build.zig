@@ -961,6 +961,77 @@ pub fn build(b: *std.Build) void {
     }
 
 
+    {
+        const step = b.step("test-skip-admission", "Check structural traversal and projection are distinct from admission");
+        test_step.dependOn(step);
+        const dir = "test/integration/skip_admission/";
+        const gen = b.addRunArtifact(exe);
+        gen.addArgs(&.{ "-b", "zig", "--generate-zzdds-wrappers", "-o" });
+        const out = gen.addOutputDirectoryArg("skip-admission-zig");
+        gen.addFileArg(b.path(dir ++ "shapes.idl"));
+        const middleware = b.createModule(.{ .root_source_file = b.path("test/integration/zig_wrapper_contract/fake_middleware.zig"), .target = target });
+        const fixture = b.createModule(.{ .root_source_file = out.path(b, "shapes.zig"), .target = target, .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings }, .{ .name = "zzdds", .module = middleware } } });
+        const tests = b.addTest(.{ .name = "skip-admission", .root_module = b.createModule(.{ .root_source_file = b.path(dir ++ "test.zig"), .target = target, .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "fixture", .module = fixture } } }) });
+        step.dependOn(&b.addRunArtifact(tests).step);
+        for ([_][]const u8{ "c", "cpp" }) |lang| {
+            const cpp = std.mem.eql(u8, lang, "cpp");
+            const g = b.addRunArtifact(exe);
+            g.addArgs(&.{ "-b", lang, "-o" });
+            const generated = g.addOutputDirectoryArg(b.fmt("skip-admission-{s}", .{lang}));
+            g.addFileArg(b.path(dir ++ "shapes.idl"));
+            const m = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = cpp });
+            const flags: []const []const u8 = if (cpp) &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" } else &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" };
+            m.addCSourceFile(.{ .file = b.path(if (cpp) dir ++ "test.cpp" else dir ++ "test.c"), .flags = flags });
+            m.addCSourceFile(.{ .file = generated.path(b, if (cpp) "shapes_cdr.cpp" else "shapes_cdr.c"), .flags = flags });
+            m.addIncludePath(generated);
+            m.addIncludePath(b.path("packages/zidl-cdr/include"));
+            linkCdr(m, cdr_library);
+            const app = b.addExecutable(.{ .name = b.fmt("skip-admission-{s}", .{lang}), .root_module = m });
+            step.dependOn(&b.addRunArtifact(app).step);
+        }
+        const javac = b.findProgram(.{ .names = &.{"javac"} });
+        const java = b.findProgram(.{ .names = &.{"java"} });
+        if (javac != null and java != null) {
+            const g = b.addRunArtifact(exe);
+            g.addArgs(&.{ "-b", "java", "-o" });
+            const generated = g.addOutputDirectoryArg("skip-admission-java");
+            g.addFileArg(b.path(dir ++ "shapes.idl"));
+            const compile = javaCommand(b, &.{ javac.?, "-Xlint:unchecked", "-Werror", "-d" }, java_cdr);
+            const classes = compile.addOutputDirectoryArg("classes");
+            compile.addFileArg(generated.path(b, "Shapes.java"));
+            compile.addFileArg(b.path(dir ++ "AdmissionTest.java"));
+            const run = javaCommand(b, &.{ java.?, "-cp" }, java_cdr);
+            run.addDirectoryArg(classes);
+            run.addArg("AdmissionTest");
+            step.dependOn(&run.step);
+        }
+    }
+
+
+    {
+        const step = b.step("test-checked-sample-processing", "Check native admission callbacks and allocation failure publication");
+        test_step.dependOn(step);
+        for (0..3) |mode| {
+            const cpp = mode != 0;
+            const gen = b.addRunArtifact(exe);
+            gen.addArgs(&.{ "-b", if (cpp) "cpp" else "c" });
+            if (mode == 2) gen.addArg("--cpp-pmr-containers");
+            gen.addArg("-o");
+            const dir = gen.addOutputDirectoryArg(b.fmt("checked-sample-processing-{d}", .{mode}));
+            gen.addFileArg(b.path("test/integration/checked_sample_processing/shapes.idl"));
+            const m = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = cpp });
+            const flags: []const []const u8 = if (cpp) &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" } else &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" };
+            m.addCSourceFile(.{ .file = b.path(if (cpp) "test/integration/checked_sample_processing/test.cpp" else "test/integration/checked_sample_processing/test.c"), .flags = flags });
+            m.addCSourceFile(.{ .file = dir.path(b, if (cpp) "shapes_cdr.cpp" else "shapes_cdr.c"), .flags = flags });
+            m.addIncludePath(dir);
+            m.addIncludePath(b.path("packages/zidl-cdr/include"));
+            linkCdr(m, if (cpp) allocation_cdr_library else cdr_library);
+            const app = b.addExecutable(.{ .name = b.fmt("checked-sample-processing-{d}", .{mode}), .root_module = m });
+            step.dependOn(&b.addRunArtifact(app).step);
+        }
+    }
+
+
     // STL storage failures must stay inside generated C++ codec entry points.
     {
         const allocation_step = b.step("test-cpp-codec-allocation", "Inject C++ codec allocation failures");
@@ -1268,6 +1339,15 @@ pub fn build(b: *std.Build) void {
             run.addArg("MapTest");
             step.dependOn(&run.step);
         }
+    }
+
+    {
+        const step = b.step("test-codec-diagnostics", "Check unsupported codecs fail before single/split output");
+        test_step.dependOn(step);
+        const run = b.addSystemCommand(&.{"python3"});
+        run.addFileArg(b.path("test/integration/codec_diagnostics/test.py"));
+        run.addArtifactArg(exe);
+        step.dependOn(&run.step);
     }
 
     // ── XCDR known-answer checks ──────────────────────────────────────────────

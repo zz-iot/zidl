@@ -177,16 +177,12 @@ series and require a separate consumer-driven investigation. See
 
 ### Zig backend
 
-- **Untrusted-input decoding for broker-style protocols:** generated mutable decoding
-  currently accepts absent required members and duplicate singleton members. The zzdds
-  broker draft keeps mutable encoding only for bootstrap bodies; its established bodies
-  are final and require exact-extent decoding (reject truncation and trailing bytes)
-  through bounded sub-readers. Provide generic required/duplicate-member validation or an
-  explicit validated-decoder facility, and expose consumed length for final bodies,
-  before consumers treat generated decoding as untrusted-message admission. Bounded
-  sequences use inline storage sized to the schema maximum; provide a bounded
-  allocator-backed or borrowed mapping for large wire ceilings so embedded consumers need
-  not reserve the maximum in every native value.
+- **Bounded Zig storage policy for large wire ceilings:** validated admission is
+  available through `deserializeValidated` (required mutable members, duplicate
+  rejection and exact message extent). Bounded sequences still use inline
+  schema-maximum storage; allocator-backed/borrowed bounded storage remains a
+  separate consumer-driven mapping investigation.
+
 - **`wstring` constants** emit only a comment — `[]const u16` literals are unsupported.
 - **`--zig-generate-toml-config`** (`applyToml`) — fixed-size arrays (incl. array typedefs),
   unions, bitmasks, bounded strings, and sequences of non-string turn the whole generated
@@ -428,3 +424,18 @@ scalable policy if consumers require very large maps. C++/Java/Zig map framing,
 bounds, duplicate rejection and recursive ownership are covered by the
 [map codec audit](design/map-codec-hardening.md), including independent wire
 witnesses for non-primitive XCDR2 maps.
+
+### Unsupported native codec values
+
+C/C++/Zig reject dynamic (`any`, `Object`, `ValueBase`) and opaque payload values
+with `UnsupportedDynamicCdrValue` / `UnsupportedOpaqueCdrValue`. Declarations-only
+mode is available when no wire codec is requested. This is a focused diagnostics
+slice, not a claim that every unsupported type family or backend is audited.
+
+### Ordinary XCDR1 mutable encoding
+
+Native mandatory DHEADER operations now reject XCDR1 (`UnsupportedEncoding` in
+Zig, `ZIDL_CDR_INVALID` in C/C++). Java mutable codecs similarly reject version 1.
+The previous DHEADER/EMHEADER output was not PL_CDR and must not be advertised as
+XCDR1 mutable support. Appendable XCDR1 and the discovery-specific PL_CDR helpers
+remain supported. Implementing ordinary PL_CDR mutable codecs is a separate feature.

@@ -330,6 +330,7 @@ export fn zidl_cdr_write_dheader(w: *Writer, size: u32) c_int {
     return writeUnsigned(w, u32, size);
 }
 export fn zidl_cdr_reserve_dheader(w: *Writer, out: *usize) c_int {
+    if (w.xcdr_version != 2) return -3;
     var sink = Sink{ .writer = w };
     rt.cdr_framing.reserveDheader(&sink, out) catch return sink.status;
     return 0;
@@ -378,6 +379,7 @@ export fn zidl_cdr_read_dheader(r: *Reader, out: *u32) c_int {
     return zidl_cdr_read_u32(r, out);
 }
 export fn zidl_cdr_read_mutable_dheader(r: *Reader, out: *usize) c_int {
+    if (r.xcdr_version != 2) return -3;
     const data = input(r) catch return -2;
     const end = rt.cdr_framing.readDheaderEnd(data, &r.pos, if (r.xcdr_version == 2) 4 else 8, if (r.byte_order == 0) .little else .big) catch return -2;
     out.* = end;

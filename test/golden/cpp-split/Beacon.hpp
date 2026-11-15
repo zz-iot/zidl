@@ -26,7 +26,10 @@ int Beacon_serialize_key_value(ZidlCdrWriter *_w, const ::Beacon *_v);
 int Beacon_deserialize_key_value(ZidlCdrReader *_r, ::Beacon *_v);
 int Beacon_skip_key_value(ZidlCdrReader *_r);
 int Beacon_deserialize(ZidlCdrReader *_r, ::Beacon *_v);
+/* Structural traversal only; success is not sample admission. */
 int Beacon_skip(ZidlCdrReader *_r);
+/* Checked ordinary decode and hash; output is untouched on failure. */
+int Beacon_process_sample_from_cdr(const uint8_t *, size_t, int key_only, uint8_t hash[16]);
 int Beacon_serialize_key(ZidlCdrWriter *_w, const ::Beacon *_v);
 int Beacon_deserialize_key(ZidlCdrReader *_r, ::Beacon *_v);
 int Beacon_compute_key_hash(const ::Beacon *_v, uint8_t _hash[16]);

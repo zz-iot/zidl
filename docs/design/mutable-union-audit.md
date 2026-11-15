@@ -7,7 +7,7 @@ shared canonical-key fixture's `UnionDefault` ordinary wire sample now expects
 `0xa0000000` for its four-byte discriminator header. Canonical key serialization
 has no such header and is unchanged.
 
-The remaining audit findings are separate from this flag correction:
+Admission fixes after the flag correction are summarized here:
 
 | Path | Member admission | Required follow-up |
 |---|---|---|
@@ -26,8 +26,8 @@ nonzero split instead reaches the default-arm payload decoder. Setting the
 unknown parameter's MU bit does not fix that dispatch. Duplicate owning values
 and a later discriminator change also need dedicated cleanup/reuse regressions.
 
-The C/C++/Java decoder work should be separate small PRs with the same independent
-malformed records used by the Zig fixture, plus owning/default and nested cases.
+The C/C++/Java decoder fixes are separate local commits with independent malformed
+records, owning/default cases and allocation-failure coverage.
 Changing skip semantics globally would conflate structural traversal with
 admission; a validated decoder is the explicit API for complete-message checks.
 

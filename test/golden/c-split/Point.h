@@ -19,7 +19,10 @@ int Point_serialize_key_value(ZidlCdrWriter *_w, const Point *_v);
 int Point_deserialize_key_value(ZidlCdrReader *_r, Point *_v);
 int Point_skip_key_value(ZidlCdrReader *_r);
 int Point_deserialize(ZidlCdrReader *_r, Point *_v);
+/* Structural traversal only; success is not sample admission. */
 int Point_skip(ZidlCdrReader *_r);
+/* Checked ordinary decode and hash; output is untouched on failure. */
+int Point_process_sample_from_cdr(const uint8_t *, size_t, int key_only, uint8_t hash[16]);
 
 /* Initialize uninitialized storage using IDL defaults and zero values. */
 void Point_default(Point *_v);
