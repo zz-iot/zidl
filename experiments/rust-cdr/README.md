@@ -24,9 +24,10 @@ second command additionally compiles a validation-only C layout probe, compares
 sizes/alignments/offsets, and checks expected Rust borrow-checker diagnostics.
 The probe is not part of downstream Cargo builds. On Linux, verification also
 builds/tests a relocated SDK with only Rust tools and a link-only driver on PATH;
-that driver rejects native source compilation and Zig is unavailable. On Windows run from an MSVC
-developer prompt and pass `--cc cl` to verify.py. Linux/macOS link `libm`; MSVC
-links `ntdll` as required by the native archive. The dedicated experiment workflow tests Rust 1.85.1 on Linux x86_64/ARM64,
+that driver rejects native source compilation and Zig is unavailable.
+On Windows run from an MSVC developer prompt and pass `--cc cl` to verify.py. Linux/macOS link `libm`; MSVC
+links `ntdll` as required by the native archive. The dedicated experiment
+workflow tests Rust 1.85.1 on Linux x86_64/ARM64,
 macOS ARM64 and Windows MSVC. Cross-target results must be measured, not
 inferred from the Linux run.
 
@@ -42,8 +43,7 @@ reference into arbitrary CDR bytes, or unsafe Send/Sync implementation.
 Native status codes become distinct Rust errors. Error returns do not promise
 transactional cursor rollback: invalid bool consumes its byte, and an aligned
 read/write can consume padding before failing for lack of value bytes. A reader
-truncated inside padding advances to the input limit. Tests
-record those contracts. A failed fixed write is not a complete serialized sample.
+truncated inside padding advances to the input limit. Tests record those contracts. A failed fixed write is not a complete serialized sample.
 
 Four independent vectors cover both XCDR versions and byte orders, with a u64
 alignment witness distinguishing the versions. Other vectors check signed
@@ -56,3 +56,22 @@ This does not validate strings/UTF-8, sequences, extensibility traversal, keys,
 TypeObjects, generated Rust declarations, native allocator integration, DDS
 loans, callbacks or performance. A first backend PR needs separate scope and
 mapping decisions after reviewing the results.
+
+## Results and next step
+
+The [first cross-platform run](https://github.com/zz-iot/zidl/actions/runs/43583869313)
+passed on all four runners using Rust 1.85.1. Each runner passed six wire/error
+checks, the C/Rust cursor layout comparison and four compile-fail lifetime
+checks. Linux also passed the relocated SDK check with native source compilation
+blocked and Zig unavailable. Local Debian Rust 1.85.1 repeated those checks.
+
+The experiment establishes a workable primitive C ABI and borrowed-buffer
+boundary. It does not establish a complete codec backend, a performance benefit,
+or a stable Rust crate API. No native allocator or per-topic native compilation
+was needed. Rust still uses its platform linker toolchain.
+
+Next, scope a minimal generated codec for final fixed-shape types over this
+wrapper. Define supported IDL mappings and unsupported-input diagnostics first,
+including unknown enum/discriminator values; keep strings, collections, keys and
+extensibility as explicit subsequent slices. DDS ownership and raw loans remain
+separate work in zzdds.

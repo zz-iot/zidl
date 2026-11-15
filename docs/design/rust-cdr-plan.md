@@ -1,6 +1,7 @@
 # Rust CDR follow-up proposal
 
-Date: 2026-11-12. Status: proposed; no Rust backend or crate exists yet.
+Date: 2026-11-12. Updated: 2026-11-15. Status: standalone primitive experiment
+validated; no Rust generator backend or supported crate is shipped.
 The [native consolidation](shared-native-cdr.md#consolidation-closeout) and
 shared Java delivery prerequisites are complete. This replaces the old roadmap
 sequence that started by adding a second pure Rust codec.
@@ -50,6 +51,11 @@ invariant supporting each unsafe operation; Rust declarations alone cannot
 validate a foreign ABI.
 
 ## First experiment and acceptance
+
+The [standalone experiment](../../experiments/rust-cdr/README.md#results-and-next-step)
+now validates the primitive ABI, buffer lifetimes and relocated consumption
+on Linux, macOS and Windows with Rust 1.85.1. The requirements below remain
+the scope boundary; broader codecs and DDS APIs are not implied by that result.
 
 Build the CDR archive with zidl's supported Zig toolchain, then compile a small
 Rust consumer with a Rust toolchain and prebuilt archive only. First inspect

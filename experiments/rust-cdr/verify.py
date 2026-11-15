@@ -37,7 +37,7 @@ def main():
         rustc = shutil.which('rustc')
         if not cargo or not rustc:
             parser.error('cargo and rustc must be on PATH')
-        run([rustc, '--version'])
+        run([rustc, '-vV'])
         run([cargo, 'test', '--offline', '--manifest-path', manifest], env=env)
         run([cargo, 'build', '--offline', '--lib', '--manifest-path', manifest], env=env)
         rust_layout = subprocess.check_output(
