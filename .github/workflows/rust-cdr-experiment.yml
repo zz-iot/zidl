@@ -5,11 +5,21 @@ on:
     paths:
       - 'experiments/rust-cdr/**'
       - 'packages/zidl-cdr/**'
+      - 'packages/zidl-cdr-rust/**'
+      - 'src/**'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - 'test/integration/rust_final/**'
       - '.github/workflows/rust-cdr-experiment.yml'
   pull_request:
     paths:
       - 'experiments/rust-cdr/**'
       - 'packages/zidl-cdr/**'
+      - 'packages/zidl-cdr-rust/**'
+      - 'src/**'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - 'test/integration/rust_final/**'
       - '.github/workflows/rust-cdr-experiment.yml'
 
 permissions:
@@ -45,9 +55,14 @@ jobs:
         if: runner.os != 'Windows'
         working-directory: packages/zidl-cdr
         run: zig build install --prefix "$ZIDL_CDR_PREFIX"
+      - name: Build generator (Unix)
+        if: runner.os != 'Windows'
+        run: zig build install --prefix "$ZIDL_CDR_PREFIX"
       - name: Verify Rust consumer (Unix)
         if: runner.os != 'Windows'
-        run: python experiments/rust-cdr/verify.py --prefix "$ZIDL_CDR_PREFIX"
+        run: |
+          python experiments/rust-cdr/verify.py --prefix "$ZIDL_CDR_PREFIX"
+          python test/integration/rust_final/test.py --prefix "$ZIDL_CDR_PREFIX" --zidl "$ZIDL_CDR_PREFIX/bin/zidl"
       - name: Build and verify Rust consumer (MSVC)
         if: runner.os == 'Windows'
         shell: cmd
@@ -57,4 +72,6 @@ jobs:
           cd packages\zidl-cdr
           zig build install -Dtarget=x86_64-windows-msvc --prefix "%ZIDL_CDR_PREFIX%" || exit /b 1
           cd ..\..
+          zig build install --prefix "%ZIDL_CDR_PREFIX%" || exit /b 1
           python experiments/rust-cdr/verify.py --prefix "%ZIDL_CDR_PREFIX%" --cc cl || exit /b 1
+          python test/integration/rust_final/test.py --prefix "%ZIDL_CDR_PREFIX%" --zidl "%ZIDL_CDR_PREFIX%/bin/zidl.exe" || exit /b 1

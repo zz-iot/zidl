@@ -4,7 +4,7 @@
 //!   zidl [options] <file.idl> [<file.idl>…]
 //!
 //! Options:
-//!   -b <lang>                      Backend language: c (default), cpp, java, zig
+//!   -b <lang>                      Backend language: c (default), cpp, java, zig, rust
 //!   -o <dir>                       Output directory (default: .)
 //!   -I <dir>                       Add include search path (repeatable)
 //!   -D <M>[=V]                     Define preprocessor macro (repeatable)
@@ -13,14 +13,14 @@
 //!   --default-extensibility <ext>  Default extensibility when no @extensibility present
 //!                                  (default: final, per IDL4 §8.3.1) (all backends)
 //!   --generate-zzdds-wrappers      Emit typed zzdds topic wrappers (Zig, C, C++)
-//!   --generate-interfaces          Emit binding layer for IDL interface declarations (all backends)
+//!   --generate-interfaces          Emit binding layer for IDL interface declarations (C/C++/Java/Zig)
 //!   --no-typeobject-support        Suppress TypeObject/TypeIdentifier (all backends, currently Zig only)
 //!   --no-typesupport               Suppress CDR serialize/deserialize (all backends)
 //!   --profile <full|xrce>          Target profile: full (default) or xrce (all backends)
 //!                                    xrce: XCDR1 only, @final types, bounded sequences/strings
 //!   --single-file                  Single monolithic output file — default (all backends)
-//!   --split-files                  One file per type (C/C++/Java) or per module (Zig) (all backends)
-//!   --type-prefix <pfx>            Prefix for all generated type names (all backends)
+//!   --split-files                  One file per type (C/C++/Java) or per module (Zig)
+//!   --type-prefix <pfx>            Prefix for generated type names (C/C++/Java/Zig)
 //!
 //!   --c-export-macro <macro>       DLL export macro for function declarations (C, C++ backends)
 //!   --c-extern-c                   Wrap header in extern "C" {} (C backend)
@@ -386,7 +386,7 @@ pub fn main(init: std.process.Init) !void {
     // Resolve backend.
     const backend_opt = try zidl.backend.findByLanguageId(arena, opts.backend);
     if (backend_opt == null) {
-        try stderr.print("error: unknown backend '{s}'; supported: c, cpp, java, zig\n", .{opts.backend});
+        try stderr.print("error: unknown backend '{s}'; supported: c, cpp, java, zig, rust\n", .{opts.backend});
         try stderr.flush();
         std.process.exit(1);
     }
@@ -794,7 +794,7 @@ fn printUsage(w: *Io.Writer) !void {
         \\Usage: zidl [options] <file.idl> [<file.idl>…]
         \\
         \\Options:
-        \\  -b <lang>                      Backend language: c (default), cpp, java, zig
+        \\  -b <lang>                      Backend language: c (default), cpp, java, zig, rust
         \\  -o <dir>                       Output directory (default: .)
         \\  -I <dir>                       Add include search path (repeatable)
         \\  -D <M>[=V]                     Define preprocessor macro (repeatable)
@@ -803,15 +803,15 @@ fn printUsage(w: *Io.Writer) !void {
         \\  --default-extensibility <ext>  Default extensibility when no @extensibility present
         \\                                 (default: final, per IDL4 §8.3.1) (all backends)
         \\  --generate-zzdds-wrappers      Emit typed zzdds topic wrappers (Zig, C, C++)
-        \\  --generate-interfaces          Emit binding layer for IDL interface declarations (all backends)
+        \\  --generate-interfaces          Emit binding layer for IDL interface declarations (C/C++/Java/Zig)
         \\  --experimental-typesupport-library Emit experimental Zig wire library descriptors
         \\  --no-typeobject-support        Suppress TypeObject/TypeIdentifier (all backends, currently Zig only)
         \\  --no-typesupport               Suppress CDR serialize/deserialize (all backends)
         \\  --profile <full|xrce>          Target profile: full (default) or xrce (all backends)
         \\                                   xrce: XCDR1 only, @final types, bounded sequences/strings
         \\  --single-file                  Single monolithic output file — default (all backends)
-        \\  --split-files                  One file per type (C/C++/Java) or per module (Zig) (all backends)
-        \\  --type-prefix <pfx>            Prefix for all generated type names (all backends)
+        \\  --split-files                  One file per type (C/C++/Java) or per module (Zig)
+        \\  --type-prefix <pfx>            Prefix for generated type names (C/C++/Java/Zig)
         \\
         \\  --c-export-macro <macro>       DLL export macro for function declarations (C, C++ backends)
         \\  --c-extern-c                   Wrap header in extern "C" {{}} (C backend)

@@ -1,7 +1,8 @@
 # Rust CDR follow-up proposal
 
 Date: 2026-11-12. Updated: 2026-11-15. Status: standalone primitive experiment
-validated; no Rust generator backend or supported crate is shipped.
+validated; an experimental final fixed-shape backend now uses the unpublished
+Rust wrapper. No supported Rust DDS binding or published crate is shipped.
 The [native consolidation](shared-native-cdr.md#consolidation-closeout) and
 shared Java delivery prerequisites are complete. This replaces the old roadmap
 sequence that started by adding a second pure Rust codec.
@@ -76,3 +77,12 @@ backend for final fixed-shape types. Expand to owned sequences/strings, keys,
 optionals and extensibility with independent vectors and an explicit supported
 feature table. Borrowed DDS loans belong to the separate middleware plan, not
 to the codec ownership model. Public API and backend scope remain open until the experiment is reviewed.
+
+## Initial generator slice
+
+The [experimental Rust mapping](../backend_rust.md) adds final scalar/nested
+structs, primitive arrays/aliases and integer-backed enums over the same runtime.
+It is intentionally narrower than a full fixed-shape codec: arrays of enums or
+structs require XCDR2 collection framing and fail explicitly in this slice.
+Unknown enum bits are retained. Imports, keys, variable-length values and DDS
+wrappers remain outside the supported table.

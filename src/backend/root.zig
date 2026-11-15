@@ -15,6 +15,7 @@ pub const c = @import("c.zig");
 pub const cpp = @import("cpp.zig");
 pub const java = @import("java.zig");
 pub const zig = @import("zig.zig");
+pub const rust = @import("rust.zig");
 pub const typesupport_library = @import("typesupport_library.zig");
 pub const zig_typeobject_proto = @import("zig_typeobject_proto.zig");
 pub const lifecycle_audit = @import("lifecycle_audit.zig");
@@ -28,6 +29,7 @@ pub const CBackend = c.CBackend;
 pub const CppBackend = cpp.CppBackend;
 pub const JavaBackend = java.JavaBackend;
 pub const ZigBackend = zig.ZigBackend;
+pub const RustBackend = rust.RustBackend;
 
 /// Create a `Backend` by language identifier (e.g. `"c"`, `"cpp"`, `"java"`).
 ///
@@ -51,6 +53,10 @@ pub fn findByLanguageId(
     }
     if (std.mem.eql(u8, language_id, "zig")) {
         const be = try ZigBackend.create(alloc);
+        return be.backend();
+    }
+    if (std.mem.eql(u8, language_id, "rust")) {
+        const be = try RustBackend.create(alloc);
         return be.backend();
     }
     return null;

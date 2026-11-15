@@ -14,7 +14,7 @@ for all supported targets.
   - Java — type definitions + serialization (formal/21-08-01 v1.0, desktop/server only, implemented)
   - Python 3.10+ — planned
   - C# / .NET — planned
-  - Rust — planned
+  - Rust — experimental final fixed-shape codecs ([mapping and limits](docs/backend_rust.md))
 - Generate DCPS abstract API from IDL for bootstrapping a Zig DDS runtime (`--generate-interfaces`)
 - Generate optional typed zzdds topic wrappers for DDS topic structs (`--generate-zzdds-wrappers`)
 - Extensible backend interface so new mappings can be added cleanly
@@ -36,7 +36,7 @@ zig build -Doptimize=ReleaseFast  # optimised release build
 |---|---|
 | `<file> [<file>...]` | Input IDL file(s) |
 | `-o <dir>` | Output directory |
-| `-b <backend>` | Target language (`c`, `cpp`, `java`, `zig`) |
+| `-b <backend>` | Target language (`c`, `cpp`, `java`, `zig`, experimental `rust`) |
 | `-I <dir>` | Preprocessor include path (repeatable) |
 | `-D <MACRO>[=value]` | Define preprocessor macro (repeatable) |
 | `-E` | Preprocess only; emit expanded IDL |
@@ -69,6 +69,6 @@ Full documentation, specification references, and a complete document index are 
 [`docs/overview.md`](docs/overview.md).
 
 Quick links:
-- [Zig backend](docs/backend_zig.md) · [C backend](docs/backend_c.md) · [C++ backend](docs/backend_cpp.md) · [Java backend](docs/backend_java.md)
+- [Zig backend](docs/backend_zig.md) · [C backend](docs/backend_c.md) · [C++ backend](docs/backend_cpp.md) · [Java backend](docs/backend_java.md) · [Experimental Rust backend](docs/backend_rust.md)
 - [Testing guide](docs/testing.md) · [Feature inventory](docs/features.md)
 - [Architecture](docs/architecture.md) · [DDS ecosystem](docs/ecosystem.md)

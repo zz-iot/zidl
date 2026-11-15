@@ -345,20 +345,18 @@ CDR + inline `CdrWriter`/`CdrReader`; (3) appendable/mutable/sequences/arrays/ma
 
 ### Rust backend (`-b rust`)
 
-Status: design reopened after native CDR consolidation and Java runtime delivery;
-no Rust backend or companion crate is implemented. The earlier pure/zig-ffi
-mode list is superseded by the [Rust CDR proposal](design/rust-cdr-plan.md).
+Status: [initial final fixed-shape codecs](backend_rust.md) implemented over the
+shared native CDR C ABI. The wrapper crate is unpublished; there is no supported
+Rust DDS binding or TypeObject implementation. The old pure/zig-ffi dual-mode
+proposal remains superseded by the [Rust CDR plan](design/rust-cdr-plan.md).
 
-Proposed first path: generate ordinary owned Rust values and schema traversal
-that calls the shared `zidl-cdr` C ABI through a small safe wrapper. Raw DDS
-loans and typed owned decoding have separate lifetime contracts. A pure Rust
-codec, `no_std`, custom collection allocators and zero-copy typed views require
-separate evidence and scope; they are not promised initial modes.
+Supported: scalar primitives, final nested structs, integer-backed enums that
+preserve unknown values, aliases and primitive fixed arrays. Runtime-free
+declarations use `--no-typesupport`. Unsupported mappings fail explicitly.
 
-Start with an ABI/layout and codec wrapper experiment before implementing
-`-b rust`. Preserve unknown enum values, wire endianness, malformed-input errors,
-allocator pairing and canonical key semantics. TypeObject support and DDS
-wrappers must be scoped explicitly rather than inferred from codec roundtrips.
+Next: non-primitive array framing, owned strings/sequences, keys, optionals and
+extensibility in separate slices with independent vectors. Imports/split output,
+public package distribution and DDS entity/loan ownership remain follow-up work.
 
 ### Haskell backend (`-b haskell`) — future consideration, not scheduled
 

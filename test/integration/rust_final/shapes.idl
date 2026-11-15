@@ -1,0 +1,22 @@
+module Types {
+    enum Status { OK, BAD };
+    typedef unsigned short Pair[2];
+    typedef Pair Matrix[2];
+    @final struct Point { long x; long y; };
+    @final struct Sample {
+        octet tag;
+        unsigned long long stamp;
+        Status state;
+        Matrix pairs;
+        Point position;
+        boolean valid;
+    };
+    module Inner { @final struct Ref { Sample value; }; };
+};
+module Types {
+    @final struct Scalars {
+        int8 a; uint8 b; int16 c; uint16 d; int32 e; uint32 f;
+        int64 g; uint64 h; float i; double j; char k; boolean l;
+    };
+};
+module mod { @final struct match { long await; }; };

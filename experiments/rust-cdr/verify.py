@@ -59,6 +59,7 @@ def main():
                                  ('writer_overlap', 'E0499'), ('reader_mutation', 'E0506')]:
             command = [rustc, '--edition=2021', '--emit=metadata', '--crate-type=bin',
                        '--extern', f'cdr_abi_experiment={library}',
+                       '-L', 'dependency=' + str(tmp / 'target/debug/deps'),
                        '-o', str(tmp / (name + '.rmeta')), str(ROOT / 'compile-fail' / (name + '.rs'))]
             result = subprocess.run(command, text=True, capture_output=True)
             if result.returncode == 0 or f'error[{diagnostic}]' not in result.stderr:

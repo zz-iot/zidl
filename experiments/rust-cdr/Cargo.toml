@@ -5,3 +5,4 @@ edition = "2021"
 publish = false
 
 [dependencies]
+zidl-cdr-rust = { path = "../../packages/zidl-cdr-rust" }

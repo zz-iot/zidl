@@ -2,7 +2,9 @@
 
 A dependency-free, unpublished experiment for the [Rust codec proposal](../../docs/design/rust-cdr-plan.md).
 It wraps the canonical native CDR archive through its C ABI. This is not a Rust
-backend or a second CDR implementation. The small public API is experimental.
+backend or a second CDR implementation. The small public API is experimental. The implementation now lives in
+`packages/zidl-cdr-rust`; this crate consumes that path dependency to retain the
+original ABI/lifetime checks without duplicating runtime declarations.
 
 Build/install the native archive separately with zidl's supported Zig compiler:
 
