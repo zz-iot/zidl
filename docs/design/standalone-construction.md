@@ -109,8 +109,11 @@ same handle do not own it.
 
 A successful `destroy()`, or any `release()`, retires the wrapper. Its later calls
 return `@retired_result` without reaching the provider, and dropping it releases
-nothing. This holds without `--handle-retire-hook`. The hook additionally retires
-every other wrapper of a freed handle.
+nothing. It also leaves the identity cache, so an object later created at the same
+address gets a wrapper of its own. The cache key, a family's root handle, is taken
+before the release, while the handle is still valid. All of this holds without
+`--handle-retire-hook`. The hook additionally retires every other wrapper of a freed
+handle.
 
 ### Java
 
@@ -127,7 +130,7 @@ the handle through the identity cache. If it cannot box the handle it releases i
 nothing leaks. The factory marks that wrapper as the owner. `close()` on the owner runs
 the finalizer, or the destructor when there is none. On any other wrapper it does
 nothing. As in C++, a successful `destroy()` or any `release()` makes the wrapper forget
-its handle.
+its handle, and the JNI bridge drops the handle from the identity cache.
 
 ## Not yet supported
 
@@ -155,5 +158,6 @@ driven three ways:
   hook, under `zig build integration-test`.
 
 They cover ownership, the strict destructor and the finalizer, release-once, the
-allocator forms, a failed constructor, and identity across a shared-box family. Each
+allocator forms, a failed constructor, identity across a shared-box family, and a new
+object created at a released one's address. Each
 backend also has unit tests of its output.
