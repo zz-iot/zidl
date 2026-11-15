@@ -4648,7 +4648,7 @@ const ConcreteImplGenerator = struct {
                 "    void _zidlAdopt() noexcept { _zidl_owned_.store(true, std::memory_order_release); }\n" ++
                     "private:\n" ++
                     "    std::atomic<bool> _zidl_owned_{false};\n" ++
-                    "    void _zidlReleased() noexcept;\n",
+                    "    void _zidlReleased(void* key) noexcept;\n",
             );
         }
         try self.hdrWrite("};\n\n");
@@ -4921,14 +4921,20 @@ const ConcreteImplGenerator = struct {
     fn emitReleaseMethod(self: *ConcreteImplGenerator, iface: *const ir.Interface, op: *const ir.Operation) !void {
         const c_name = try cNameOf(self.alloc, iface.qualified_name);
         defer self.alloc.free(c_name);
+        // The handle's identity-cache key, a family's root handle, is taken
+        // before the call: afterwards the handle may be freed.
+        const fam = self.familyOf(iface);
+        const key_expr = if (fam.size > 1) try self.handleExprForOwner(iface, fam.root, "ptr_") else try self.alloc.dupe(u8, "ptr_");
+        defer self.alloc.free(key_expr);
         const rt = op.return_type orelse {
             try self.srcPrint(
                 "void {[n]s}Impl::{[op]s}() {{\n" ++
                     "    if (_zidl_is_retired()) return;\n" ++
+                    "    void* _key = {[k]s};\n" ++
                     "    {[c]s}_{[op]s}(ptr_);\n" ++
-                    "    _zidlReleased();\n" ++
+                    "    _zidlReleased(_key);\n" ++
                     "}}\n\n",
-                .{ .n = iface.name, .op = op.name, .c = c_name },
+                .{ .n = iface.name, .op = op.name, .c = c_name, .k = key_expr },
             );
             return;
         };
@@ -4944,11 +4950,12 @@ const ConcreteImplGenerator = struct {
         try self.srcPrint(
             "{[r]s} {[n]s}Impl::{[op]s}() {{\n" ++
                 "    if (_zidl_is_retired()) return {[ret]s};\n" ++
+                "    void* _key = {[k]s};\n" ++
                 "    const auto _rc = {[c]s}_{[op]s}(ptr_);\n" ++
-                "    if (_rc == {[ok]d}) _zidlReleased();\n" ++
+                "    if (_rc == {[ok]d}) _zidlReleased(_key);\n" ++
                 "    return _rc;\n" ++
                 "}}\n\n",
-            .{ .r = ret_cpp, .n = iface.name, .op = op.name, .ret = retired, .c = c_name, .ok = ok },
+            .{ .r = ret_cpp, .n = iface.name, .op = op.name, .ret = retired, .k = key_expr, .c = c_name, .ok = ok },
         );
     }
 
@@ -4976,10 +4983,15 @@ const ConcreteImplGenerator = struct {
                 "}}\n\n",
             .{ .n = iface.name, .c = c_name, .f = fallback.name },
         );
-        // A family's other wrappers of the handle stay cached; the retire
-        // hook, when enabled, retires them once the provider frees it.
-        try self.srcPrint("void {s}Impl::_zidlReleased() noexcept {{\n    _zidl_retired_.store(true, std::memory_order_release);\n", .{iface.name});
-        if (fam.size <= 1) try self.srcWrite("    _zidlEvict(ptr_);\n");
+        // Drops the released handle, `key` in its identity cache, so an
+        // object later created at the same address gets a wrapper of its
+        // own, retire hook or not.
+        try self.srcPrint("void {s}Impl::_zidlReleased(void* key) noexcept {{\n    _zidl_retired_.store(true, std::memory_order_release);\n", .{iface.name});
+        if (fam.size <= 1) {
+            try self.srcWrite("    _zidlEvict(key);\n");
+        } else {
+            try self.srcPrint("    ::{s}Impl::_zidlEvict(key);\n", .{fam.root.qualified_name});
+        }
         try self.srcWrite("}\n\n");
 
         for (iface.constructors) |*op| {
@@ -11229,26 +11241,29 @@ test "cpp_backend: a constructor's wrapper owns its object and releases it once"
     try testing.expect(has(s,
         \\::M::Code ThingImpl::destroy() {
         \\    if (_zidl_is_retired()) return static_cast<::M::Code>(9);
+        \\    void* _key = ptr_;
         \\    const auto _rc = M_Thing_destroy(ptr_);
-        \\    if (_rc == 0) _zidlReleased();
+        \\    if (_rc == 0) _zidlReleased(_key);
         \\    return _rc;
         \\}
     ));
     try testing.expect(has(s,
         \\void ThingImpl::release() {
         \\    if (_zidl_is_retired()) return;
+        \\    void* _key = ptr_;
         \\    M_Thing_release(ptr_);
-        \\    _zidlReleased();
+        \\    _zidlReleased(_key);
         \\}
     ));
     try testing.expect(has(s,
         \\void BoxImpl::destroy() {
         \\    if (_zidl_is_retired()) return;
+        \\    void* _key = ptr_;
         \\    M_Box_destroy(ptr_);
-        \\    _zidlReleased();
+        \\    _zidlReleased(_key);
         \\}
     ));
-    try testing.expect(has(s, "void ThingImpl::_zidlReleased() noexcept {\n    _zidl_retired_.store(true, std::memory_order_release);\n    _zidlEvict(ptr_);\n}\n"));
+    try testing.expect(has(s, "void ThingImpl::_zidlReleased(void* key) noexcept {\n    _zidl_retired_.store(true, std::memory_order_release);\n    _zidlEvict(key);\n}\n"));
     try testing.expect(has(s, "std::shared_ptr<Thing> Thing::create() {\n    return create(nullptr);\n}\n"));
     try testing.expect(has(s, "std::shared_ptr<Thing> Thing::create_from(::M::Cfg c, int32_t n) {\n    return create_from(nullptr, c, n);\n}\n"));
     try testing.expect(has(s, "    M_Thing _h = M_Thing_create_from_with_allocator(allocator, &_c_c, n);\n"));

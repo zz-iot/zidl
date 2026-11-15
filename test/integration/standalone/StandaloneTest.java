@@ -60,6 +60,20 @@ public class StandaloneTest {
         released.close();
         stats(0, 0, 1, "close() after release() releases nothing more");
 
+        // A released engine's address comes back for the next one. Every old
+        // wrapper stays reachable, so a cache that kept released handles
+        // would hand one of them back.
+        nReset();
+        java.util.List<Standalone.S.Engine> kept = new java.util.ArrayList<>();
+        for (int i = 0; i < 16; i++) {
+            Standalone.S.Engine e = Standalone.S.Engine.create();
+            check(e != null && !kept.contains(e), "each create() returns a new wrapper");
+            check(e.get_workers() == 1, "a new engine at a reused address works");
+            if (i % 2 == 0) e.close(); else check(e.destroy() == OK, "destroy");
+            kept.add(e);
+        }
+        stats(0, 8, 8, "each engine was released once");
+
         nReset();
         check(Standalone.S.Engine.create_with(config(0), 0) == null, "a failed constructor returns null");
         stats(0, 0, 0, "a failed constructor leaves nothing");

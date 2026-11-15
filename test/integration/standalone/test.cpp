@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <new>
+#include <vector>
 
 namespace {
 
@@ -96,16 +98,16 @@ static void test_failed_constructor() {
 struct Counting {
     int allocs = 0;
     int frees = 0;
+    // Aligned operator new, not aligned_alloc, which the Windows CRT lacks.
     static void* alloc(void* ctx, size_t len, size_t alignment) {
         static_cast<Counting*>(ctx)->allocs++;
-        return std::aligned_alloc(alignment < sizeof(void*) ? sizeof(void*) : alignment,
-                                  (len + alignment - 1) / alignment * alignment);
+        return ::operator new(len, std::align_val_t(alignment), std::nothrow);
     }
     static bool resize(void*, void*, size_t, size_t, size_t) { return false; }
-    static void free(void* ctx, void* ptr, size_t, size_t) {
+    static void free(void* ctx, void* ptr, size_t, size_t alignment) {
         if (!ptr) return;
         static_cast<Counting*>(ctx)->frees++;
-        std::free(ptr);
+        ::operator delete(ptr, std::align_val_t(alignment));
     }
 };
 
@@ -141,6 +143,24 @@ static void test_family_identity() {
     expect_stats(0, 2, 0);
 }
 
+// A destroyed guard's address comes back for the next one. Every old
+// wrapper stays alive, so a family cache that kept released handles would
+// hand one of them back.
+static void test_reused_address() {
+    test_stats_reset();
+    std::vector<std::shared_ptr<S::Guard>> kept;
+    for (int i = 0; i < 16; i++) {
+        auto g = S::Guard::create();
+        CHECK(g);
+        for (auto& old : kept) CHECK(old != g);
+        CHECK(g->set_trigger_value(true) == S::RETCODE_OK);
+        CHECK(g->destroy() == S::RETCODE_OK);
+        kept.push_back(g);
+    }
+    kept.clear();
+    expect_stats(0, 16, 0);
+}
+
 int main() {
     test_drop_runs_finalizer();
     test_destroy_then_drop();
@@ -148,6 +168,7 @@ int main() {
     test_failed_constructor();
     test_allocator_overload();
     test_family_identity();
+    test_reused_address();
     std::puts("standalone construction: C++ checks passed");
     return 0;
 }

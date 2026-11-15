@@ -6074,6 +6074,25 @@ const JniBridgeGenerator = struct {
         }
     }
 
+    /// After a constructible interface's `@destructor` (when it succeeded) or
+    /// `@finalizer`: drops the released handle from its identity cache, so
+    /// an object later created at the same address gets a wrapper of its
+    /// own, retire hook or not.
+    fn emitReleaseEviction(self: *JniBridgeGenerator, iface: *const ir.Interface, op: *const ir.Operation) !void {
+        if (iface.constructors.len == 0) return;
+        const root_c = try interface.prefixedCNameFromQualified(self.alloc, self.cacheRootOf(iface).qualified_name, self.opts.type_prefix);
+        defer self.alloc.free(root_c);
+        if (ir.isFinalizerOp(op)) {
+            try self.print("    _zidl_family_{s}_evict(env, (void *)(intptr_t)ptr);\n", .{root_c});
+        } else if (ir.isDestructorOp(op)) {
+            if (op.return_type) |rt| {
+                try self.print("    if (_ret == {d}) _zidl_family_{s}_evict(env, (void *)(intptr_t)ptr);\n", .{ ir.successResult(rt).?, root_c });
+            } else {
+                try self.print("    _zidl_family_{s}_evict(env, (void *)(intptr_t)ptr);\n", .{root_c});
+            }
+        }
+    }
+
     /// Name of the unbox function to call for an entity-typed value of type
     /// `tr`: the plain `zidl_java_unbox` if no other entity interface in the
     /// spec widens to it, or the generated `zidl_java_unbox_as_<c_name>`
@@ -7432,6 +7451,7 @@ const JniBridgeGenerator = struct {
         }
         try self.write(");\n");
         if (ret_c != null) try self.print("    {s} _ret = ({s})_rc;\n", .{ jni_ret, jni_ret });
+        try self.emitReleaseEviction(iface, op);
 
         // `create_*`-shaped ops: the new entity has no "old" listener to
         // worry about, only whether ours actually got installed — a failed
@@ -11873,6 +11893,10 @@ test "java: a constructor's JNI bridge is a static native that boxes the new han
     const s = out.items;
     try testing.expect(std.mem.indexOf(u8, s, "JNIEXPORT jobject JNICALL Java_ThingImpl_n_1create_1with(\n    JNIEnv *env, jclass cls, jint n)\n{\n    (void)cls;\n") != null);
     try testing.expect(std.mem.indexOf(u8, s, "    void *_h = (void *)M_Thing_create_with_with_allocator(NULL, (int32_t)n);\n") != null);
+    // A released handle leaves the identity cache, so an object later made
+    // at its address is not handed the released one's wrapper.
+    try testing.expect(std.mem.indexOf(u8, s, "    if (_ret == 0) _zidl_family_M_Thing_evict(env, (void *)(intptr_t)ptr);\n") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "    M_Thing_release((void *)(intptr_t)ptr);\n    _zidl_family_M_Thing_evict(env, (void *)(intptr_t)ptr);\n") != null);
     try testing.expect(std.mem.indexOf(u8, s,
         \\    if (_h == NULL) return NULL;
         \\    jobject _o = zidl_java_box_M_Thing(env, _h);
