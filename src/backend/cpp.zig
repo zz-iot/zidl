@@ -4463,11 +4463,13 @@ const ConcreteImplGenerator = struct {
             const fam = self.familyOf(iface);
             if (fam.size <= 1) {
                 // The cache lives in class statics, not in _getOrCreate, so the
-                // retire observer can reach it (_zidlEvict).
+                // retire observer can reach it (_zidlEvict). A pmr map, like the
+                // family cache: its nodes come from the default resource in
+                // force at its first use, not from the global operator new.
                 try self.hdrPrint(
                     "    static std::shared_ptr<{s}Impl> _getOrCreate({s} h);\n" ++
                         "    static std::mutex& _soloMutex();\n" ++
-                        "    static std::unordered_map<{s}, std::weak_ptr<{s}Impl>>& _soloCache();\n" ++
+                        "    static std::pmr::unordered_map<{s}, std::weak_ptr<{s}Impl>>& _soloCache();\n" ++
                         "    static void _zidlEvict(void* h);\n",
                     .{ iface.name, c_name, c_name, iface.name },
                 );
@@ -4717,8 +4719,8 @@ const ConcreteImplGenerator = struct {
                         "    static auto* m = ::new (static_cast<void*>(s)) std::mutex;\n" ++
                         "    return *m;\n" ++
                         "}}\n" ++
-                        "std::unordered_map<{[c]s}, std::weak_ptr<{[n]s}Impl>>& {[n]s}Impl::_soloCache() {{\n" ++
-                        "    using T = std::unordered_map<{[c]s}, std::weak_ptr<{[n]s}Impl>>;\n" ++
+                        "std::pmr::unordered_map<{[c]s}, std::weak_ptr<{[n]s}Impl>>& {[n]s}Impl::_soloCache() {{\n" ++
+                        "    using T = std::pmr::unordered_map<{[c]s}, std::weak_ptr<{[n]s}Impl>>;\n" ++
                         "    alignas(T) static unsigned char s[sizeof(T)];\n" ++
                         "    static auto* c = ::new (static_cast<void*>(s)) T;\n" ++
                         "{[o]s}" ++
@@ -10033,7 +10035,7 @@ test "cpp_backend: B1+B3 — entity return wraps in Impl" {
     try testing.expect(has(src, "return ::DDS::BarImpl::_getOrCreate(_h);"));
     try testing.expect(has(src, "std::shared_ptr<BarImpl> BarImpl::_getOrCreate(DDS_Bar h) {"));
     try testing.expect(has(src, "if (!h) return nullptr;"));
-    try testing.expect(has(src, "    using T = std::unordered_map<DDS_Bar, std::weak_ptr<BarImpl>>;\n    alignas(T) static unsigned char s[sizeof(T)];\n    static auto* c = ::new (static_cast<void*>(s)) T;\n"));
+    try testing.expect(has(src, "    using T = std::pmr::unordered_map<DDS_Bar, std::weak_ptr<BarImpl>>;\n    alignas(T) static unsigned char s[sizeof(T)];\n    static auto* c = ::new (static_cast<void*>(s)) T;\n"));
     // The cache's singletons live in static storage: first use allocates
     // nothing on the heap.
     try testing.expect(!has(src, "= new std::"));
@@ -10061,7 +10063,7 @@ test "cpp_backend: entity wrapper identity — _getOrCreate declared and cache m
     try testing.expect(has(src, "if (auto _sp = _it->second.lock()) return _sp;"));
     try testing.expect(has(src, "std::lock_guard<std::mutex> _lock(_soloMutex());"));
     // The cache is reachable from the retire observer, not local to _getOrCreate.
-    try testing.expect(has(hdr, "static std::unordered_map<DDS_Bar, std::weak_ptr<BarImpl>>& _soloCache();"));
+    try testing.expect(has(hdr, "static std::pmr::unordered_map<DDS_Bar, std::weak_ptr<BarImpl>>& _soloCache();"));
     try testing.expect(has(src, "void BarImpl::_zidlEvict(void* h) {"));
     // Expired-but-present entries are updated via the already-found iterator
     // rather than a second hash lookup; only a genuinely new handle inserts.

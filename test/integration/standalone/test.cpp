@@ -3,6 +3,8 @@
 // destructor, the fallback release, and family identity.
 #include "standalone_impl.hpp"
 
+#include <atomic>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -32,6 +34,18 @@ extern "C" void test_stats_reset(void);
         }                                                                        \
     } while (0)
 
+// Counts the global operator new, which a create() under a pmr default
+// resource must not reach.
+static std::atomic<int> g_global_news{0};
+
+void* operator new(std::size_t n) {
+    g_global_news.fetch_add(1, std::memory_order_relaxed);
+    if (void* p = std::malloc(n ? n : 1)) return p;
+    throw std::bad_alloc();
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+
 static void expect_stats(int32_t live, int32_t destroys, int32_t releases) {
     Stats s = test_stats();
     if (s.live != live || s.destroys != destroys || s.releases != releases) {
@@ -51,6 +65,25 @@ static void test_drop_runs_finalizer() {
         expect_stats(1, 0, 0);
     }
     expect_stats(0, 0, 1);
+}
+
+// Holder's first create(), under a pmr default resource, allocates its
+// wrapper and its identity-cache entry from that resource, never from the
+// global operator new. The pool is never destroyed: Holder's cache keeps it.
+static void test_create_without_global_new() {
+    test_stats_reset();
+    alignas(std::max_align_t) static unsigned char buf[64 * 1024];
+    static std::pmr::monotonic_buffer_resource pool(buf, sizeof buf);
+    std::pmr::memory_resource* prev = std::pmr::set_default_resource(&pool);
+    const int before = g_global_news.load();
+    {
+        auto h = S::Holder::create();
+        CHECK(h);
+    }
+    const int after = g_global_news.load();
+    std::pmr::set_default_resource(prev);
+    CHECK(after == before);
+    expect_stats(0, 1, 0);
 }
 
 // A destroyed object is not released again when its wrapper goes, and the
@@ -182,6 +215,9 @@ static void test_boxing_throws() {
 }
 
 int main() {
+    // First: any earlier release would reach Holder's cache through the
+    // retire observer and create it under the old default resource.
+    test_create_without_global_new();
     test_drop_runs_finalizer();
     test_destroy_then_drop();
     test_release_then_drop();
