@@ -34,6 +34,20 @@ extern "C" void test_stats_reset(void);
         }                                                                        \
     } while (0)
 
+// TSan's runtime defines the global operator new/delete, so a replacement
+// cannot link there; the global-new check runs in the other builds.
+#if defined(__SANITIZE_THREAD__)
+#define STANDALONE_COUNT_GLOBAL_NEW 0
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define STANDALONE_COUNT_GLOBAL_NEW 0
+#endif
+#endif
+#ifndef STANDALONE_COUNT_GLOBAL_NEW
+#define STANDALONE_COUNT_GLOBAL_NEW 1
+#endif
+
+#if STANDALONE_COUNT_GLOBAL_NEW
 // Counts the global operator new, which a create() under a pmr default
 // resource must not reach.
 static std::atomic<int> g_global_news{0};
@@ -45,6 +59,7 @@ void* operator new(std::size_t n) {
 }
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+#endif
 
 static void expect_stats(int32_t live, int32_t destroys, int32_t releases) {
     Stats s = test_stats();
@@ -71,6 +86,7 @@ static void test_drop_runs_finalizer() {
 // wrapper and its identity-cache entry from that resource, never from the
 // global operator new. The pool is never destroyed: Holder's cache keeps it.
 static void test_create_without_global_new() {
+#if STANDALONE_COUNT_GLOBAL_NEW
     test_stats_reset();
     alignas(std::max_align_t) static unsigned char buf[64 * 1024];
     static std::pmr::monotonic_buffer_resource pool(buf, sizeof buf);
@@ -84,6 +100,7 @@ static void test_create_without_global_new() {
     std::pmr::set_default_resource(prev);
     CHECK(after == before);
     expect_stats(0, 1, 0);
+#endif
 }
 
 // A destroyed object is not released again when its wrapper goes, and the
