@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <memory_resource>
 #include <new>
 #include <vector>
 
@@ -67,10 +68,8 @@ static void test_destroy_then_drop() {
     CHECK(e->destroy() == S::RETCODE_OK);
     expect_stats(0, 1, 0);
     CHECK(e->destroy() == S::RETCODE_ALREADY_DELETED);
-#ifndef STANDALONE_NO_RETIRE_HOOK
-    // Only the retire hook guards the interface's other operations.
     CHECK(e->get_workers() == 0);
-#endif
+    CHECK(e->unpin() == S::RETCODE_ALREADY_DELETED);
     e.reset();
     expect_stats(0, 1, 0);
 }
@@ -83,6 +82,10 @@ static void test_release_then_drop() {
     auto e = S::Engine::create_with(cfg, 4);
     CHECK(e);
     e->release();
+    expect_stats(0, 0, 1);
+    e->release();
+    CHECK(e->get_workers() == 0);
+    CHECK(e->destroy() == S::RETCODE_ALREADY_DELETED);
     expect_stats(0, 0, 1);
     e.reset();
     expect_stats(0, 0, 1);
@@ -161,6 +164,23 @@ static void test_reused_address() {
     expect_stats(0, 16, 0);
 }
 
+// Boxing the new object throws: the factory releases the object before the
+// exception leaves it. The identity cache already exists (earlier tests), so
+// only the wrapper's allocation fails.
+static void test_boxing_throws() {
+    test_stats_reset();
+    std::pmr::memory_resource* prev = std::pmr::set_default_resource(std::pmr::null_memory_resource());
+    bool threw = false;
+    try {
+        (void)S::Engine::create();
+    } catch (const std::bad_alloc&) {
+        threw = true;
+    }
+    std::pmr::set_default_resource(prev);
+    CHECK(threw);
+    expect_stats(0, 0, 1);
+}
+
 int main() {
     test_drop_runs_finalizer();
     test_destroy_then_drop();
@@ -169,6 +189,7 @@ int main() {
     test_allocator_overload();
     test_family_identity();
     test_reused_address();
+    test_boxing_throws();
     std::puts("standalone construction: C++ checks passed");
     return 0;
 }

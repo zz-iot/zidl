@@ -22,8 +22,9 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   become C exports (plus `_with_allocator` forms), a Zig `exportCAbiConstructors`
   for providers, C++ static factories and Java static factories with
   `AutoCloseable`. The creator's wrapper owns the object: dropping or closing it
-  runs the `@finalizer`, or the `@destructor` when there is none, and a released
-  object is never released again. See `docs/design/standalone-construction.md`.
+  runs the `@finalizer`, or the `@destructor` when there is none. A released
+  object is never released again, and its wrapper's other operations return
+  without reaching the provider, with or without `--handle-retire-hook`. See `docs/design/standalone-construction.md`.
 
 - Add `--java-jni-onload-hook <name>`: the generated `JNI_OnLoad` calls the
   provider's `jint <name>(JavaVM *, JNIEnv *)`, so a provider can do load-time

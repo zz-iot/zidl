@@ -103,7 +103,8 @@ static std::shared_ptr<Engine> create(const ZidlAllocator* allocator);
 
 A factory boxes the new handle through the impl class's `_getOrCreate`, or through
 its `--cpp-impl-override` class, so the object joins the identity cache like any other.
-Then it marks that wrapper as the object's owner. Dropping the owner's last reference
+Then it marks that wrapper as the object's owner. If boxing throws, the factory releases
+the new object before the exception leaves it. Dropping the owner's last reference
 runs the finalizer, or the destructor when there is none. Wrappers boxed later for the
 same handle do not own it.
 
@@ -130,7 +131,8 @@ the handle through the identity cache. If it cannot box the handle it releases i
 nothing leaks. The factory marks that wrapper as the owner. `close()` on the owner runs
 the finalizer, or the destructor when there is none. On any other wrapper it does
 nothing. As in C++, a successful `destroy()` or any `release()` makes the wrapper forget
-its handle, and the JNI bridge drops the handle from the identity cache.
+its handle, so its later calls return `@retired_result` without reaching the provider,
+and the JNI bridge drops the handle from the identity cache.
 
 ## Not yet supported
 
@@ -157,7 +159,8 @@ driven three ways:
 - **Java** through the generated binding (`StandaloneTest.java`), with and without the
   hook, under `zig build integration-test`.
 
-They cover ownership, the strict destructor and the finalizer, release-once, the
-allocator forms, a failed constructor, identity across a shared-box family, and a new
+They cover ownership, the strict destructor and the finalizer, release-once, calls on
+a released wrapper, the allocator forms, a failed constructor, a C++ wrapper allocation
+that throws, identity across a shared-box family, and a new
 object created at a released one's address. Each
 backend also has unit tests of its output.

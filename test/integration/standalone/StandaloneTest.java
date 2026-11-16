@@ -51,12 +51,17 @@ public class StandaloneTest {
         check(pinned.destroy() == OK, "destroy() succeeds once unpinned");
         stats(0, 1, 0, "destroy() released the engine");
         check(pinned.destroy() == ALREADY_DELETED, "a second destroy() does not reach the provider");
+        check(pinned.get_workers() == 0, "a destroyed engine's other operations do not reach the provider");
+        check(pinned.unpin() == ALREADY_DELETED, "unpin() after destroy() does not reach the provider");
         pinned.close();
         stats(0, 1, 0, "close() after destroy() releases nothing");
 
         nReset();
         Standalone.S.Engine released = Standalone.S.Engine.create_with(config(2), 4);
         released.release();
+        released.release();
+        check(released.get_workers() == 0, "a released engine's other operations do not reach the provider");
+        check(released.destroy() == ALREADY_DELETED, "destroy() after release() does not reach the provider");
         released.close();
         stats(0, 0, 1, "close() after release() releases nothing more");
 

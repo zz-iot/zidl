@@ -4627,9 +4627,11 @@ const ConcreteImplGenerator = struct {
             .{ c_name, iface.name },
         );
         try self.hdrPrint("    {s} ptr_;\n", .{c_name});
-        // Set once the provider reports ptr_ freed (--handle-retire-hook; see
-        // emitRetireObserver). From then on no operation reaches the provider
-        // and every handle accessor returns null.
+        // Set once ptr_ is freed: when the provider reports it
+        // (--handle-retire-hook; see emitRetireObserver), or when this
+        // wrapper's own destroy or release frees it (_zidlReleased). From then
+        // on no guarded operation reaches the provider and every handle
+        // accessor returns null.
         try self.hdrWrite("    std::atomic<bool> _zidl_retired_{false};\n");
         try self.hdrWrite("public:\n");
         try self.hdrWrite("    bool _zidl_is_retired() const noexcept { return _zidl_retired_.load(std::memory_order_acquire); }\n");
@@ -5022,14 +5024,18 @@ const ConcreteImplGenerator = struct {
             try self.srcPrint("    {s} _h = {s}_{s}_with_allocator(allocator", .{ c_name, c_name, op.name });
             try self.emitAdaptedParams(op.params);
             try self.srcWrite(");\n");
+            // Until a wrapper owns the new object, `_g` releases it on every
+            // way out, including an exception from boxing it.
             try self.srcPrint(
                 "    if (!_h) return nullptr;\n" ++
+                    "    struct _Guard {{\n" ++
+                    "        {[c]s} h;\n" ++
+                    "        ~_Guard() {{ if (h) (void){[c]s}_{[f]s}(h); }}\n" ++
+                    "    }} _g{{_h}};\n" ++
                     "    auto _sp = {[i]s}::_getOrCreate(_h);\n" ++
-                    "    if (!_sp) {{\n" ++
-                    "        (void){[c]s}_{[f]s}(_h);\n" ++
-                    "        return nullptr;\n" ++
-                    "    }}\n" ++
+                    "    if (!_sp) return nullptr;\n" ++
                     "    _sp->_zidlAdopt();\n" ++
+                    "    _g.h = nullptr;\n" ++
                     "    return _sp;\n" ++
                     "}}\n\n",
                 .{ .i = impl_name, .c = c_name, .f = fallback.name },
@@ -5047,14 +5053,16 @@ const ConcreteImplGenerator = struct {
         }
     }
 
-    /// With `--handle-retire-hook`, the first statement of every generated
-    /// operation and attribute accessor: a retired wrapper returns without
-    /// reaching the provider, whose handle is freed. It returns the value
-    /// `@retired_result` names for the return type, null for an entity, and
-    /// a value-initialized result otherwise; out parameters are left as they
-    /// are (see docs/design/handle-lifetime.md).
-    fn emitRetiredGuard(self: *ConcreteImplGenerator, ret: ?ir.TypeRef) !void {
-        if (self.opts.handle_retire_hook.len == 0) return;
+    /// With `--handle-retire-hook`, or on a wrapper whose interface has
+    /// constructors (its own destroy or release retires it), the first
+    /// statement of every generated operation and attribute accessor: a
+    /// retired wrapper returns without reaching the provider, whose handle is
+    /// freed. It returns the value `@retired_result` names for the return
+    /// type, null for an entity, and a value-initialized result otherwise;
+    /// out parameters are left as they are (see docs/design/handle-lifetime.md).
+    fn emitRetiredGuard(self: *ConcreteImplGenerator, iface: ?*const ir.Interface, ret: ?ir.TypeRef) !void {
+        const constructible = if (iface) |i| i.constructors.len > 0 else false;
+        if (self.opts.handle_retire_hook.len == 0 and !constructible) return;
         const rt = ret orelse {
             try self.srcWrite("    if (_zidl_is_retired()) return;\n");
             return;
@@ -5223,7 +5231,7 @@ const ConcreteImplGenerator = struct {
         }
         try self.srcWrite(") {\n");
 
-        try self.emitRetiredGuard(op.return_type);
+        try self.emitRetiredGuard(iface, op.return_type);
 
         // The listener comes back from the core's own registration, so it is
         // whatever was installed last, through any create_* or set_listener
@@ -5468,7 +5476,7 @@ const ConcreteImplGenerator = struct {
 
         // Getter
         try self.srcPrint("{s} {s}Impl::{s}() const {{\n", .{ at, class_name, attr.name });
-        try self.emitRetiredGuard(attr.type_ref);
+        try self.emitRetiredGuard(iface, attr.type_ref);
         switch (returnAdaptKind(attr.type_ref)) {
             .entity => {
                 const ret_c = try self.typeRefToCType(attr.type_ref);
@@ -5499,7 +5507,7 @@ const ConcreteImplGenerator = struct {
 
         if (!attr.readonly) {
             try self.srcPrint("void {s}Impl::{s}({s} value) {{\n", .{ class_name, attr.name, at });
-            try self.emitRetiredGuard(null);
+            try self.emitRetiredGuard(iface, null);
             switch (paramAdaptKindForTypeRef(attr.type_ref, .in_)) {
                 .direct => {
                     if (typeRefIsEnumLike(attr.type_ref)) {
@@ -5604,7 +5612,7 @@ const ConcreteImplGenerator = struct {
             }
         }
         try self.srcWrite(") {\n");
-        try self.emitRetiredGuard(op.return_type);
+        try self.emitRetiredGuard(null, op.return_type);
 
         // Setup locals: only the non-raw `seq_in` params (e.g. publish_loan_raw's
         // `key_hash`) need one; raw-loan params are passed through directly below.
@@ -11269,14 +11277,30 @@ test "cpp_backend: a constructor's wrapper owns its object and releases it once"
     try testing.expect(has(s, "    M_Thing _h = M_Thing_create_from_with_allocator(allocator, &_c_c, n);\n"));
     try testing.expect(has(s,
         \\    if (!_h) return nullptr;
+        \\    struct _Guard {
+        \\        M_Thing h;
+        \\        ~_Guard() { if (h) (void)M_Thing_release(h); }
+        \\    } _g{_h};
         \\    auto _sp = ::M::ThingImpl::_getOrCreate(_h);
-        \\    if (!_sp) {
-        \\        (void)M_Thing_release(_h);
-        \\        return nullptr;
-        \\    }
+        \\    if (!_sp) return nullptr;
         \\    _sp->_zidlAdopt();
+        \\    _g.h = nullptr;
         \\    return _sp;
     ));
+    // Its own release retires the wrapper, so its other operations are
+    // guarded without --handle-retire-hook.
+    try testing.expect(has(s, "int32_t ThingImpl::poke() {\n    if (_zidl_is_retired()) return {};\n"));
+}
+
+test "cpp_backend: without the retire hook, only constructible wrappers guard their operations" {
+    var res = try testGenConcreteImpl(
+        \\module M {
+        \\    interface Plain { long poke(); };
+        \\};
+    );
+    defer res.deinit();
+    try testing.expect(has(res.src.items, "int32_t PlainImpl::poke() {\n"));
+    try testing.expect(!has(res.src.items, "if (_zidl_is_retired())"));
 }
 
 test "cpp_backend: a constructor boxes through the --cpp-impl-override class" {

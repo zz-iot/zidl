@@ -4819,14 +4819,20 @@ const ImplFileGenerator = struct {
         try self.out.appendSlice(self.alloc, s);
     }
 
-    /// With `--handle-retire-hook`, the statement a forwarding method runs
-    /// first: once the provider has freed this wrapper's handle (ptr_ zeroed
-    /// by the JNI bridge's retire observer), the method returns without
-    /// reaching it. The value is `@retired_result`'s for the return type, a
-    /// primitive's zero, or null; out parameters are left as they are. Empty
-    /// without the hook.
+    /// Whether ptr_ can be zeroed under this wrapper: by the JNI bridge's
+    /// retire observer (`--handle-retire-hook`), or by the wrapper's own
+    /// destroy or release when its interface has constructors.
+    fn guardsRetired(self: *const ImplFileGenerator) bool {
+        return self.opts.handle_retire_hook.len > 0 or self.iface.constructors.len > 0;
+    }
+
+    /// When `guardsRetired`, the statement a forwarding method runs first:
+    /// once this wrapper's handle is freed (ptr_ zeroed), the method returns
+    /// without reaching it. The value is `@retired_result`'s for the return
+    /// type, a primitive's zero, or null; out parameters are left as they
+    /// are. Empty otherwise.
     fn retiredGuard(self: *ImplFileGenerator, ret: ?ir.TypeRef) ![]u8 {
-        if (self.opts.handle_retire_hook.len == 0) return self.alloc.dupe(u8, "");
+        if (!self.guardsRetired()) return self.alloc.dupe(u8, "");
         const rt = ret orelse return self.alloc.dupe(u8, "if (ptr_ == 0) return; ");
         const jt = try self.typeRefToJava(rt);
         defer self.alloc.free(jt);
@@ -4875,10 +4881,10 @@ const ImplFileGenerator = struct {
         const pfx = self.opts.type_prefix;
         try self.print("public class {s}{s}Impl implements {s} {{\n", .{ pfx, iface.name, java_iface_path });
         try self.print("    static {{ System.loadLibrary(\"{s}\"); }}\n\n", .{self.opts.jni_library});
-        // With the retire hook the JNI bridge zeroes ptr_ once the provider
-        // frees the handle (retiredGuard).
+        // ptr_ is zeroed once the handle is freed: by the JNI bridge's retire
+        // observer, or by this wrapper's own destroy or release (retiredGuard).
         const constructible = iface.constructors.len > 0;
-        if (self.opts.handle_retire_hook.len > 0 or constructible) {
+        if (self.guardsRetired()) {
             try self.write("    private volatile long ptr_;\n\n");
         } else {
             try self.write("    private final long ptr_;\n\n");
@@ -5042,7 +5048,7 @@ const ImplFileGenerator = struct {
         try self.print("    public {s} {s}(", .{ ret_java, op.name });
         try self.writeLoanBufferParamDecls(op, null);
         try self.write(") {\n");
-        if (self.opts.handle_retire_hook.len > 0) {
+        if (self.guardsRetired()) {
             if (std.mem.eql(u8, ret_java, "int")) {
                 const guard = try self.retiredGuard(op.return_type);
                 defer self.alloc.free(guard);
@@ -11836,6 +11842,7 @@ const standalone_java_idl =
     \\        @constructor Thing create_with(in long n);
     \\        @destructor Code destroy();
     \\        @finalizer void release();
+    \\        long poke();
     \\    };
     \\};
 ;
@@ -11881,6 +11888,8 @@ test "java: a constructor's wrapper owns its object, and a release forgets the h
     ) != null);
     try testing.expect(std.mem.indexOf(u8, s, "        n_release(_p);\n        ptr_ = 0;\n") != null);
     try testing.expect(std.mem.indexOf(u8, s, "    private static native ThingImpl n_create_with(int n);\n") != null);
+    // Its other operations stop at the cleared handle, retire hook or not.
+    try testing.expect(std.mem.indexOf(u8, s, "        if (ptr_ == 0) return (int) 0;\n        return n_poke(ptr_);\n") != null);
 }
 
 test "java: a constructor's JNI bridge is a static native that boxes the new handle" {
