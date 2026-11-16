@@ -1,0 +1,45 @@
+// @standalone construction across the C ABI: a Zig provider built on the
+// generated exportCAbiConstructors, driven from Zig and from the generated
+// C++ binding. See docs/design/standalone-construction.md.
+module S {
+    const long RETCODE_OK = 0;
+    const long RETCODE_PRECONDITION_NOT_MET = 4;
+    const long RETCODE_ALREADY_DELETED = 9;
+    @success_result(RETCODE_OK) @retired_result(RETCODE_ALREADY_DELETED)
+    typedef long ReturnCode_t;
+
+    struct Config {
+        long workers;
+        string name;
+    };
+
+    @shared_c_abi_box interface Condition {
+        boolean get_trigger_value();
+    };
+
+    // Like a runtime: destroy() refuses while the engine is pinned;
+    // release() always gives it up.
+    @standalone interface Engine {
+        @constructor Engine create();
+        @constructor Engine create_with(in Config cfg, in long pins);
+        @destructor ReturnCode_t destroy();
+        @finalizer void release();
+        long get_workers();
+        ReturnCode_t unpin();
+    };
+
+    // A member of Condition's shared-box family, like a GuardCondition.
+    @shared_c_abi_box @standalone interface Guard : Condition {
+        @constructor Guard create();
+        @destructor ReturnCode_t destroy();
+        ReturnCode_t set_trigger_value(in boolean value);
+    };
+
+    // Hands a condition back, so the binding must box a handle it created.
+    @standalone interface Holder {
+        @constructor Holder create();
+        @destructor ReturnCode_t destroy();
+        ReturnCode_t hold(in Condition cond);
+        Condition held();
+    };
+};

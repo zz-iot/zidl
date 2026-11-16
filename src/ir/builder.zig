@@ -399,6 +399,7 @@ const Builder = struct {
                             // reads — except `.bases` and `.raw` (kept real;
                             // see doc comment above).
                             iface.operations = &.{};
+                            iface.constructors = &.{};
                             iface.attributes = &.{};
                             iface.type_decls = &.{};
                             iface.consts = &.{};
@@ -766,12 +767,72 @@ const Builder = struct {
         }
 
         p.bases = try bases.toOwnedSlice(self.alloc);
-        p.operations = try operations.toOwnedSlice(self.alloc);
         p.attributes = try attributes.toOwnedSlice(self.alloc);
         p.type_decls = try type_decls.toOwnedSlice(self.alloc);
         p.consts = try consts.toOwnedSlice(self.alloc);
         p.raw = try self.extractRaw(annotations);
+
+        var constructors: std.ArrayListUnmanaged(ir.Operation) = .empty;
+        var instance_ops: std.ArrayListUnmanaged(ir.Operation) = .empty;
+        for (operations.items) |op| {
+            if (ir.isConstructorOp(&op))
+                try constructors.append(self.alloc, op)
+            else
+                try instance_ops.append(self.alloc, op);
+        }
+        p.operations = try instance_ops.toOwnedSlice(self.alloc);
+        p.constructors = try constructors.toOwnedSlice(self.alloc);
+        try validateConstruction(p);
         return p;
+    }
+
+    /// Checks the `@standalone` construction annotations of `iface`: see
+    /// docs/design/standalone-construction.md.
+    fn validateConstruction(iface: *const ir.Interface) !void {
+        const standalone = ir.isStandaloneInterface(iface);
+        for (iface.constructors) |*op| {
+            if (!standalone) return error.ConstructorOutsideStandaloneInterface;
+            if (op.is_oneway) return error.OnewayConstructor;
+            const returns_self = if (op.return_type) |rt| switch (rt) {
+                .named => |td| switch (td) {
+                    .interface => |ri| std.mem.eql(u8, ri.qualified_name, iface.qualified_name),
+                    else => false,
+                },
+                else => false,
+            } else false;
+            if (!returns_self) return error.ConstructorMustReturnItsInterface;
+            for (op.params) |prm| {
+                if (prm.mode != .in_) return error.ConstructorParamNotIn;
+            }
+            if (isDestructorOrFinalizer(op)) return error.ConstructorAlsoDestructor;
+        }
+        var destructors: usize = 0;
+        var finalizers: usize = 0;
+        for (iface.operations) |*op| {
+            const is_d = ir.isDestructorOp(op);
+            const is_f = ir.isFinalizerOp(op);
+            if (!is_d and !is_f) continue;
+            if (!standalone) return error.DestructorOutsideStandaloneInterface;
+            if (is_d and is_f) return error.DestructorAlsoFinalizer;
+            if (op.params.len != 0) return error.DestructorTakesParams;
+            if (is_d) {
+                destructors += 1;
+                if (op.return_type) |rt| {
+                    if (ir.successResult(rt) == null) return error.DestructorResultNeedsSuccessResult;
+                }
+            } else {
+                finalizers += 1;
+                if (op.return_type != null) return error.FinalizerMustReturnVoid;
+            }
+        }
+        if (destructors > 1) return error.MultipleDestructors;
+        if (finalizers > 1) return error.MultipleFinalizers;
+        if (iface.constructors.len > 0 and destructors == 0) return error.ConstructorWithoutDestructor;
+        if (finalizers > 0 and destructors == 0) return error.FinalizerWithoutDestructor;
+    }
+
+    fn isDestructorOrFinalizer(op: *const ir.Operation) bool {
+        return ir.isDestructorOp(op) or ir.isFinalizerOp(op);
     }
 
     fn buildOperation(
@@ -2361,4 +2422,85 @@ test "builder: invalid, duplicate, reserved and overflowing member IDs are rejec
     try testing.expectError(error.DuplicateMemberId, testBuild("struct S { @id(0x0fa5dd70) long a; @hashid(\"color\") long b; };"));
     try testing.expectError(error.ConflictingModuleAutoId, testBuild("@autoid(HASH) module M {}; @autoid(SEQUENTIAL) module M {};"));
     try testing.expectError(error.DuplicateMemberId, testBuild("union U switch(long) { @id(0) case 1: long a; };"));
+}
+
+fn findInterface(items: []const ir.ModuleItem, name: []const u8) ?*const ir.Interface {
+    for (items) |item| switch (item) {
+        .type_decl => |td| switch (td) {
+            .interface => |i| if (std.mem.eql(u8, i.name, name)) return i,
+            else => {},
+        },
+        .module => |m| if (findInterface(m.items, name)) |i| return i,
+        .const_ => {},
+    };
+    return null;
+}
+
+const construction_prelude =
+    \\module A {
+    \\    const long OK = 0;
+    \\    @success_result(OK) typedef long Code;
+    \\    struct Cfg { long n; };
+;
+
+test "builder: @constructor operations move out of the instance operations" {
+    var ir_spec = try testBuild(construction_prelude ++
+        \\    @standalone interface Thing {
+        \\        @constructor Thing create();
+        \\        @constructor Thing create_from(in Cfg c, in long n);
+        \\        @destructor Code destroy();
+        \\        @finalizer void release();
+        \\        Code poke();
+        \\    };
+        \\    interface Plain { Code poke(); };
+        \\};
+    );
+    defer ir_spec.deinit();
+    const thing = findInterface(ir_spec.items, "Thing").?;
+    try testing.expectEqual(@as(usize, 2), thing.constructors.len);
+    try testing.expectEqualStrings("create", thing.constructors[0].name);
+    try testing.expectEqualStrings("create_from", thing.constructors[1].name);
+    try testing.expectEqual(@as(usize, 3), thing.operations.len);
+    for (thing.operations) |*op| try testing.expect(!ir.isConstructorOp(op));
+    try testing.expectEqualStrings("destroy", ir.destructorOp(thing).?.name);
+    try testing.expectEqualStrings("release", ir.fallbackReleaseOp(thing).?.name);
+    const plain = findInterface(ir_spec.items, "Plain").?;
+    try testing.expectEqual(@as(usize, 0), plain.constructors.len);
+    try testing.expect(ir.fallbackReleaseOp(plain) == null);
+}
+
+test "builder: without a @finalizer the @destructor is the fallback release" {
+    var ir_spec = try testBuild(construction_prelude ++
+        \\    @standalone interface Thing {
+        \\        @constructor Thing create();
+        \\        @destructor void destroy();
+        \\    };
+        \\};
+    );
+    defer ir_spec.deinit();
+    const thing = findInterface(ir_spec.items, "Thing").?;
+    try testing.expectEqualStrings("destroy", ir.fallbackReleaseOp(thing).?.name);
+}
+
+test "builder: construction annotations are checked" {
+    const Case = struct { err: anyerror, body: []const u8 };
+    const cases = [_]Case{
+        .{ .err = error.ConstructorOutsideStandaloneInterface, .body = "interface Thing { @constructor Thing create(); @destructor Code destroy(); };" },
+        .{ .err = error.ConstructorMustReturnItsInterface, .body = "@standalone interface Thing { @constructor Code create(); @destructor Code destroy(); };" },
+        .{ .err = error.ConstructorMustReturnItsInterface, .body = "@standalone interface Thing { @constructor void create(); @destructor Code destroy(); };" },
+        .{ .err = error.ConstructorParamNotIn, .body = "@standalone interface Thing { @constructor Thing create(inout Cfg c); @destructor Code destroy(); };" },
+        .{ .err = error.ConstructorAlsoDestructor, .body = "@standalone interface Thing { @constructor @destructor Thing create(); };" },
+        .{ .err = error.ConstructorWithoutDestructor, .body = "@standalone interface Thing { @constructor Thing create(); };" },
+        .{ .err = error.DestructorOutsideStandaloneInterface, .body = "interface Thing { @destructor Code destroy(); };" },
+        .{ .err = error.DestructorAlsoFinalizer, .body = "@standalone interface Thing { @constructor Thing create(); @destructor @finalizer void destroy(); };" },
+        .{ .err = error.DestructorTakesParams, .body = "@standalone interface Thing { @constructor Thing create(); @destructor Code destroy(in long how); };" },
+        .{ .err = error.DestructorResultNeedsSuccessResult, .body = "@standalone interface Thing { @constructor Thing create(); @destructor long destroy(); };" },
+        .{ .err = error.FinalizerMustReturnVoid, .body = "@standalone interface Thing { @constructor Thing create(); @destructor Code destroy(); @finalizer Code release(); };" },
+        .{ .err = error.MultipleDestructors, .body = "@standalone interface Thing { @constructor Thing create(); @destructor Code destroy(); @destructor Code close_it(); };" },
+        .{ .err = error.MultipleFinalizers, .body = "@standalone interface Thing { @constructor Thing create(); @destructor Code destroy(); @finalizer void a(); @finalizer void b(); };" },
+        .{ .err = error.FinalizerWithoutDestructor, .body = "@standalone interface Thing { @finalizer void release(); };" },
+    };
+    inline for (cases) |c| {
+        try testing.expectError(c.err, testBuild(construction_prelude ++ c.body ++ "};"));
+    }
 }

@@ -2058,12 +2058,76 @@ const Generator = struct {
             self.depth -= 1;
         }
 
+        if (self.opts.zig_generate_c_api and iface.constructors.len > 0) {
+            try self.emitCApiConstructors(iface, pfx);
+        }
+
         try self.ind();
         try self.print("}}; // {s}{s}\n\n", .{ pfx, iface.name });
 
         if (self.opts.zig_generate_c_api) {
             try self.emitCApiExports(iface, pfx, ops.items, attrs.items);
         }
+    }
+
+    /// `exportCAbiConstructors`, inside a `@standalone` interface's struct:
+    /// the provider calls it once, from a `comptime` block, with a type
+    /// declaring one `pub fn {op}(alloc: std.mem.Allocator, ...) !{Iface}`
+    /// per `@constructor`, and it exports `{C}_{op}` and
+    /// `{C}_{op}_with_allocator` calling them. The provider's own code stays
+    /// out of the generated file. See docs/design/standalone-construction.md.
+    fn emitCApiConstructors(self: *Generator, iface: *const ir.Interface, pfx: []const u8) anyerror!void {
+        const qual_c_name = try self.cApiQualName(iface.qualified_name, pfx);
+        defer self.alloc.free(qual_c_name);
+        for (iface.constructors) |*op| {
+            for (op.params) |p| {
+                if (typeRefIsEntitySequence(p.type_ref)) return error.UnsupportedConstructorParam;
+            }
+        }
+
+        try self.write("\n");
+        try self.ind();
+        try self.write("    /// Exports this interface's C constructors. Call once, from a `comptime`\n");
+        try self.ind();
+        try self.write("    /// block, with a type declaring each constructor as\n");
+        try self.ind();
+        try self.write("    /// `pub fn <name>(alloc: std.mem.Allocator, ...) !<interface>`.\n");
+        try self.ind();
+        try self.write("    pub fn exportCAbiConstructors(comptime _Ctors: type) void {\n");
+        try self.ind();
+        try self.write("        const _Exports = struct {\n");
+        self.depth += 3;
+        for (iface.constructors, 0..) |*op, ci| {
+            if (ci > 0) try self.write("\n");
+            // The default-allocator form forwards to the `_with_allocator` one.
+            try self.ind();
+            try self.print("fn {s}(", .{op.name});
+            for (op.params, 0..) |p, i| {
+                const pt = try self.cApiExportParamType(p);
+                defer self.alloc.free(pt);
+                const nullable = std.mem.startsWith(u8, pt, "*const ") or typeRefIsEntityInterface(p.type_ref);
+                try self.print("{s}{s}: {s}{s}", .{ if (i == 0) "" else ", ", p.name, if (nullable) "?" else "", pt });
+            }
+            try self.write(") callconv(.c) ?*anyopaque {\n");
+            try self.ind();
+            try self.print("    return {s}_with_allocator(null", .{op.name});
+            for (op.params) |p| try self.print(", {s}", .{p.name});
+            try self.write(");\n");
+            try self.ind();
+            try self.write("}\n\n");
+            try self.emitCApiOpOrCtor(qual_c_name, pfx, iface.name, "", op, true);
+        }
+        self.depth -= 3;
+        try self.ind();
+        try self.write("        };\n");
+        for (iface.constructors) |*op| {
+            try self.ind();
+            try self.print("        @export(&_Exports.{s}, .{{ .name = \"{s}_{s}\" }});\n", .{ op.name, qual_c_name, op.name });
+            try self.ind();
+            try self.print("        @export(&_Exports.{s}_with_allocator, .{{ .name = \"{s}_{s}_with_allocator\" }});\n", .{ op.name, qual_c_name, op.name });
+        }
+        try self.ind();
+        try self.write("    }\n");
     }
 
     // ── C-API exports (--zig-generate-c-api) ─────────────────────────────────
@@ -2742,12 +2806,34 @@ const Generator = struct {
         self_unbox_fn: []const u8,
         op: *const ir.Operation,
     ) anyerror!void {
-        const c_ret = try self.cApiExportOptRetType(op.return_type);
+        return self.emitCApiOpOrCtor(c_name, pfx, iface_name, self_unbox_fn, op, false);
+    }
+
+    /// `ctor`: emit `op`, a `@constructor`, as the `_with_allocator` form of
+    /// its export inside `exportCAbiConstructors` (see
+    /// `emitCApiConstructors`): a plain `fn` with no receiver that resolves
+    /// the caller's allocator, calls `_Ctors.{op}(alloc, ...)` and returns
+    /// null when it fails. Parameter conversion is shared with instance
+    /// operations.
+    fn emitCApiOpOrCtor(
+        self: *Generator,
+        c_name: []const u8,
+        pfx: []const u8,
+        iface_name: []const u8,
+        self_unbox_fn: []const u8,
+        op: *const ir.Operation,
+        ctor: bool,
+    ) anyerror!void {
+        const c_ret = if (ctor) try self.alloc.dupe(u8, "?*anyopaque") else try self.cApiExportOptRetType(op.return_type);
         defer self.alloc.free(c_ret);
         const is_void_ret = std.mem.eql(u8, c_ret, "void");
 
         try self.ind();
-        try self.print("pub export fn {s}_{s}(self: *anyopaque", .{ c_name, op.name });
+        if (ctor) {
+            try self.print("fn {s}_with_allocator(allocator: ?*const zidl_bindings.ZidlAllocator", .{op.name});
+        } else {
+            try self.print("pub export fn {s}_{s}(self: *anyopaque", .{ c_name, op.name });
+        }
         for (op.params) |p| {
             const pt = try self.cApiExportParamType(p);
             defer self.alloc.free(pt);
@@ -2767,7 +2853,11 @@ const Generator = struct {
         try self.print(") callconv(.c) {s} {{\n", .{c_ret});
 
         try self.ind();
-        try self.print("    const _self: {s}{s} = {s}({s}{s}, self);\n", .{ pfx, iface_name, self_unbox_fn, pfx, iface_name });
+        if (ctor) {
+            try self.write("    const _alloc = if (allocator) |_a| zidl_bindings.toAllocator(_a) else zidlCAbiFreeAllocator();\n");
+        } else {
+            try self.print("    const _self: {s}{s} = {s}({s}{s}, self);\n", .{ pfx, iface_name, self_unbox_fn, pfx, iface_name });
+        }
 
         // Entity-sequence params (DataReaderSeq, ConditionSeq, ...) need a
         // native-shaped temporary to call the vtable slot through -- its
@@ -2896,7 +2986,11 @@ const Generator = struct {
         } else {
             try self.write("    ");
         }
-        try self.print("_self.vtable.{s}(_self.ptr", .{op.name});
+        if (ctor) {
+            try self.print("_Ctors.{s}(_alloc", .{op.name});
+        } else {
+            try self.print("_self.vtable.{s}(_self.ptr", .{op.name});
+        }
         for (op.params) |p| {
             const pt = try self.cApiExportParamType(p);
             defer self.alloc.free(pt);
@@ -2933,7 +3027,7 @@ const Generator = struct {
                 try self.print(", {s}", .{p.name});
             }
         }
-        try self.write(");\n");
+        try self.write(if (ctor) ") catch return null;\n" else ");\n");
 
         // Write the (now vtable-updated, for inout/out) local internal value
         // back into the caller's mirror buffer -- see the pre-call comment
@@ -11952,4 +12046,49 @@ test "zig_backend: unsupported map keys fail before output even without codecs" 
 fn memberHasBorrowedStringDefault(m: ir.StructMember) bool {
     if (m.dimensions.len != 0 or !memberHasNonEmptyStringDefault(m)) return false;
     return typeRefIsDirectPlainString(m.type_ref);
+}
+
+test "zig: @standalone constructors are exported through exportCAbiConstructors, outside the vtable" {
+    var out = try testGenOpts(
+        \\module M {
+        \\    const long OK = 0;
+        \\    @success_result(OK) typedef long Code;
+        \\    struct Cfg { long n; string name; };
+        \\    @standalone interface Thing {
+        \\        @constructor Thing create();
+        \\        @constructor Thing create_from(in Cfg c, in long n);
+        \\        @destructor Code destroy();
+        \\        @finalizer void release();
+        \\    };
+        \\};
+    , "t", .{ .generate_interfaces = true, .zig_generate_c_api = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "pub fn exportCAbiConstructors(comptime _Ctors: type) void {"));
+    try testing.expect(has(s, "fn create() callconv(.c) ?*anyopaque {"));
+    try testing.expect(has(s, "return create_with_allocator(null);"));
+    try testing.expect(has(s, "fn create_with_allocator(allocator: ?*const zidl_bindings.ZidlAllocator) callconv(.c) ?*anyopaque {"));
+    try testing.expect(has(s, "const _alloc = if (allocator) |_a| zidl_bindings.toAllocator(_a) else zidlCAbiFreeAllocator();"));
+    try testing.expect(has(s, "const _r = _Ctors.create(_alloc) catch return null;"));
+    try testing.expect(has(s, "fn create_from(c: ?*const M.CfgCAbi, n: i32) callconv(.c) ?*anyopaque {"));
+    try testing.expect(has(s, "const _r = _Ctors.create_from(_alloc, &_mir_c, n) catch return null;"));
+    try testing.expect(has(s, "@export(&_Exports.create, .{ .name = \"M_Thing_create\" });"));
+    try testing.expect(has(s, "@export(&_Exports.create_from_with_allocator, .{ .name = \"M_Thing_create_from_with_allocator\" });"));
+    // Constructors take no vtable slot; the destructor and finalizer do.
+    try testing.expect(!has(s, "create: *const fn"));
+    try testing.expect(has(s, "destroy: *const fn (*anyopaque) M.Code,"));
+    try testing.expect(has(s, "release: *const fn (*anyopaque) void,"));
+}
+
+test "zig: constructors are only exported with --zig-generate-c-api" {
+    var out = try testGenOpts(
+        \\module M {
+        \\    @standalone interface Thing {
+        \\        @constructor Thing create();
+        \\        @destructor void destroy();
+        \\    };
+        \\};
+    , "t", .{ .generate_interfaces = true });
+    defer out.deinit(testing.allocator);
+    try testing.expect(!has(out.items, "exportCAbiConstructors"));
 }

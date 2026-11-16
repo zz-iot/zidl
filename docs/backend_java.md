@@ -168,6 +168,7 @@ Pass the library name with `--java-jni-library <name>`.
 | `--java-package <pkg>` | Java package for generated types (e.g. `com.example`) |
 | `--split-files` | One `.java` file per top-level type |
 | `--java-jni-library <name>` | `System.loadLibrary()` name for `--generate-interfaces` JNI bridge |
+| `--java-jni-onload-hook <name>` | C function `jint <name>(JavaVM *, JNIEnv *)` the generated `JNI_OnLoad` calls; nonzero fails the load |
 | `--no-typesupport` | Suppress CDR serialize/deserialize output |
 
 ---

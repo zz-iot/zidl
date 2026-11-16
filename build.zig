@@ -425,6 +425,90 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    // ── @standalone construction, end to end ──────────────────────────────────
+    // A Zig provider exports standalone.idl's constructors through the
+    // generated exportCAbiConstructors; a Zig test calls them through their C
+    // signatures, and a C++ test through the generated binding (ownership,
+    // destructor and finalizer, family identity).
+    {
+        const dir = "test/integration/standalone/";
+        const gen_zig = b.addRunArtifact(exe);
+        gen_zig.addArgs(&.{ "-b", "zig", "--generate-interfaces", "--zig-generate-c-api", "--no-typesupport", "--no-typeobject-support", "-o" });
+        const zig_dir = gen_zig.addOutputDirectoryArg("standalone-zig");
+        gen_zig.addFileArg(b.path(dir ++ "standalone.idl"));
+        const standalone_mod = b.createModule(.{
+            .root_source_file = zig_dir.path(b, "standalone.zig"),
+            .target = target,
+            .sanitize_thread = sanitize_thread,
+            .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings } },
+        });
+        const provider_mod = b.createModule(.{
+            .root_source_file = b.path(dir ++ "provider.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .sanitize_thread = sanitize_thread,
+            .link_libc = true,
+            .imports = &.{ .{ .name = "standalone", .module = standalone_mod }, .{ .name = "zidl_bindings", .module = runtimes.bindings } },
+        });
+        const zig_test = b.addTest(.{ .name = "zidl-standalone-zig", .root_module = b.createModule(.{
+            .root_source_file = b.path(dir ++ "zig_test.zig"),
+            .target = target,
+            .sanitize_thread = sanitize_thread,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "provider", .module = provider_mod },
+                .{ .name = "standalone", .module = standalone_mod },
+                .{ .name = "zidl_bindings", .module = runtimes.bindings },
+            },
+        }) });
+        test_step.dependOn(&b.addRunArtifact(zig_test).step);
+
+        const provider_lib = b.addLibrary(.{ .linkage = .static, .name = "standalone-provider", .root_module = provider_mod });
+        const gen_c = b.addRunArtifact(exe);
+        gen_c.addArgs(&.{ "-b", "c", "--generate-interfaces", "--no-typesupport", "-o" });
+        const c_dir = gen_c.addOutputDirectoryArg("standalone-c");
+        gen_c.addFileArg(b.path(dir ++ "standalone.idl"));
+        // With and without the retire hook: without it, the wrapper alone
+        // must keep a released object from being released again.
+        const variants = [_]struct { name: []const u8, gen_args: []const []const u8, flags: []const []const u8 }{
+            .{
+                .name = "zidl-standalone-cpp",
+                .gen_args = &.{ "--handle-retire-hook", "test_retire", "--handle-retire-query", "test_retire_is_retired" },
+                .flags = &.{ "-std=c++17", "-Wall", "-Werror" },
+            },
+            .{
+                .name = "zidl-standalone-cpp-no-retire-hook",
+                .gen_args = &.{},
+                .flags = &.{ "-std=c++17", "-Wall", "-Werror", "-DSTANDALONE_NO_RETIRE_HOOK" },
+            },
+        };
+        for (variants) |variant| {
+            const gen_cpp = b.addRunArtifact(exe);
+            gen_cpp.addArgs(&.{ "-b", "cpp", "--generate-interfaces", "--cpp-generate-impl", "--no-typesupport" });
+            gen_cpp.addArgs(variant.gen_args);
+            gen_cpp.addArg("-o");
+            const cpp_dir = gen_cpp.addOutputDirectoryArg(variant.name);
+            gen_cpp.addFileArg(b.path(dir ++ "standalone.idl"));
+            const cpp_mod = b.createModule(.{
+                .root_source_file = null,
+                .target = target,
+                .optimize = .Debug,
+                .sanitize_thread = sanitize_thread,
+                .link_libc = true,
+                .link_libcpp = true,
+            });
+            cpp_mod.addCSourceFile(.{ .file = b.path(dir ++ "test.cpp"), .flags = variant.flags });
+            cpp_mod.addCSourceFile(.{ .file = cpp_dir.path(b, "standalone_impl.cpp"), .flags = variant.flags });
+            cpp_mod.addIncludePath(cpp_dir);
+            cpp_mod.addIncludePath(c_dir);
+            cpp_mod.addIncludePath(b.path(dir));
+            cpp_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+            cpp_mod.linkLibrary(provider_lib);
+            const cpp_test = b.addExecutable(.{ .name = variant.name, .root_module = cpp_mod });
+            test_step.dependOn(&b.addRunArtifact(cpp_test).step);
+        }
+    }
+
     // ── PL_CDR retention / strict-mode compile-and-run check ──────────────────
     // src/backend/zig.zig's PL_CDR tests only substring-match. This generates
     // test/integration/zig_pl_cdr/fixture.idl with --zig-pl-cdr, compiles the
@@ -925,7 +1009,6 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-
     {
         const map_step = b.step("test-c-maps", "Check primitive C map storage, wire bytes and allocation failures");
         test_step.dependOn(map_step);
@@ -959,7 +1042,6 @@ pub fn build(b: *std.Build) void {
         const cpp_app = b.addExecutable(.{ .name = "c-maps-cpp", .root_module = cpp_consumer });
         map_step.dependOn(&b.addRunArtifact(cpp_app).step);
     }
-
 
     {
         const step = b.step("test-skip-admission", "Check structural traversal and projection are distinct from admission");
@@ -1007,7 +1089,6 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-
     {
         const step = b.step("test-checked-sample-processing", "Check native admission callbacks and allocation failure publication");
         test_step.dependOn(step);
@@ -1030,7 +1111,6 @@ pub fn build(b: *std.Build) void {
             step.dependOn(&b.addRunArtifact(app).step);
         }
     }
-
 
     // STL storage failures must stay inside generated C++ codec entry points.
     {
@@ -1745,6 +1825,64 @@ pub fn build(b: *std.Build) void {
             // touches `*Impl.java`/the JNI bridge at all.
             const jni_include = findJniIncludeDir(b, java);
             if (jni_include) |jni_inc| {
+                // Java half of the @standalone construction test: the same
+                // Zig provider, linked into the JNI library. With and without
+                // the retire hook: without it, the wrapper alone must keep a
+                // released object from being released again.
+                for ([_]struct { name: []const u8, gen_args: []const []const u8 }{
+                    .{ .name = "integ-java-standalone", .gen_args = &.{ "--handle-retire-hook", "test_retire", "--handle-retire-query", "test_retire_is_retired" } },
+                    .{ .name = "integ-java-standalone-no-retire-hook", .gen_args = &.{} },
+                }) |variant| {
+                    const dir = "test/integration/standalone/";
+                    const gen_zig = b.addRunArtifact(exe);
+                    gen_zig.addArgs(&.{ "-b", "zig", "--generate-interfaces", "--zig-generate-c-api", "--no-typesupport", "--no-typeobject-support", "-o" });
+                    const zig_dir = gen_zig.addOutputDirectoryArg(b.fmt("{s}-zig", .{variant.name}));
+                    gen_zig.addFileArg(b.path(dir ++ "standalone.idl"));
+                    const standalone_mod = b.createModule(.{
+                        .root_source_file = zig_dir.path(b, "standalone.zig"),
+                        .target = target,
+                        .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings } },
+                    });
+                    const gen_c = b.addRunArtifact(exe);
+                    gen_c.addArgs(&.{ "-b", "c", "--generate-interfaces", "--no-typesupport", "-o" });
+                    const c_dir = gen_c.addOutputDirectoryArg(b.fmt("{s}-c", .{variant.name}));
+                    gen_c.addFileArg(b.path(dir ++ "standalone.idl"));
+                    const gen_java = b.addRunArtifact(exe);
+                    gen_java.addArgs(&.{ "-b", "java", "--generate-interfaces", "--no-typesupport", "--java-jni-library", "standalone_jni", "--java-jni-onload-hook", "test_on_load" });
+                    gen_java.addArgs(variant.gen_args);
+                    gen_java.addArg("-o");
+                    const java_dir = gen_java.addOutputDirectoryArg(b.fmt("{s}-java", .{variant.name}));
+                    gen_java.addFileArg(b.path(dir ++ "standalone.idl"));
+
+                    const jni_mod = b.createModule(.{
+                        .root_source_file = b.path(dir ++ "provider.zig"),
+                        .target = target,
+                        .optimize = .Debug,
+                        .link_libc = true,
+                        .imports = &.{ .{ .name = "standalone", .module = standalone_mod }, .{ .name = "zidl_bindings", .module = runtimes.bindings } },
+                    });
+                    jni_mod.addCSourceFile(.{ .file = java_dir.path(b, "standalone_jni.c"), .flags = &.{"-std=c99"} });
+                    jni_mod.addCSourceFile(.{ .file = b.path(dir ++ "standalone_stats.c"), .flags = &.{"-std=c99"} });
+                    jni_mod.addIncludePath(c_dir);
+                    jni_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+                    jni_mod.addIncludePath(.{ .cwd_relative = jni_inc.base });
+                    jni_mod.addIncludePath(.{ .cwd_relative = jni_inc.platform });
+                    const jni_lib = b.addLibrary(.{ .name = "standalone_jni", .linkage = .dynamic, .root_module = jni_mod });
+
+                    const classes = b.fmt("build-tmp/{s}", .{variant.name});
+                    const compile = javaCommand(b, &.{ javac, "-d", classes }, java_cdr);
+                    compile.addArgs(&.{dir ++ "StandaloneTest.java"});
+                    for (&[_][]const u8{ "Standalone.java", "ConditionImpl.java", "EngineImpl.java", "GuardImpl.java", "HolderImpl.java" }) |f| {
+                        compile.addFileArg(java_dir.path(b, f));
+                    }
+                    const run = javaCommand(b, &.{ java, "-cp", classes }, java_cdr);
+                    run.addPrefixedDirectoryArg("-Djava.library.path=", jni_lib.getEmittedBinDirectory());
+                    run.addArg("StandaloneTest");
+                    run.step.dependOn(&compile.step);
+                    run.step.dependOn(&jni_lib.step);
+                    integ_step.dependOn(&run.step);
+                }
+
                 const gen_entity_c = b.addRunArtifact(exe);
                 gen_entity_c.addArgs(&.{ "-b", "c", "--generate-interfaces", "-o" });
                 const gen_entity_c_dir = gen_entity_c.addOutputDirectoryArg("integ-java-entity-c");

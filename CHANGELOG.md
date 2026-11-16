@@ -18,6 +18,22 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Generate construction for `@standalone` interfaces: `@constructor` operations
+  become C exports (plus `_with_allocator` forms), a Zig `exportCAbiConstructors`
+  for providers, C++ static factories and Java static factories with
+  `AutoCloseable`. The creator's wrapper owns the object: dropping or closing it
+  runs the `@finalizer`, or the `@destructor` when there is none. A released
+  object is never released again, and its wrapper's other operations return
+  without reaching the provider, with or without `--handle-retire-hook`. See `docs/design/standalone-construction.md`.
+
+- C++ identity caches of interfaces outside a `@shared_c_abi_box` family now allocate
+  their entries through the pmr default resource, as family caches already did, so a
+  binding under a custom memory resource never reaches the global `operator new` there.
+
+- Add `--java-jni-onload-hook <name>`: the generated `JNI_OnLoad` calls the
+  provider's `jint <name>(JavaVM *, JNIEnv *)`, so a provider can do load-time
+  work such as `RegisterNatives` in the library's one `JNI_OnLoad`.
+
 - Release decoded/cloned Zig literal-default strings on cleanup and rejected
   validated messages while preserving untouched borrowed default literals.
 

@@ -1003,6 +1003,7 @@ const Generator = struct {
         for (iface.attributes) |attr| {
             try self.emitAttribute(&attr);
         }
+        if (self.opts.generate_interfaces) try self.emitConstructorDecls(iface);
         try self.print("}}; // class {s}\n\n", .{iface.name});
 
         // After the abstract interface, emit the concrete listener base class.
@@ -1086,6 +1087,28 @@ const Generator = struct {
         }
 
         try self.print("}}; // class {s}Base\n\n", .{iface.name});
+    }
+
+    /// Static factories for each `@constructor` of a `@standalone`
+    /// interface, defined by `--cpp-generate-impl`: one allocating through
+    /// the provider's default allocator, and an overload taking a
+    /// `ZidlAllocator` that must outlive the object. Each returns an empty
+    /// pointer when creation fails. Dropping the last reference runs the
+    /// interface's fallback release. See docs/design/standalone-construction.md.
+    fn emitConstructorDecls(self: *Generator, iface: *const ir.Interface) !void {
+        for (iface.constructors) |*op| {
+            for ([_]bool{ false, true }) |with_allocator| {
+                try self.print("    static std::shared_ptr<{s}> {s}(", .{ iface.name, op.name });
+                if (with_allocator) try self.write("const ZidlAllocator* allocator");
+                for (op.params, 0..) |p, i| {
+                    if (i > 0 or with_allocator) try self.write(", ");
+                    const p_cpp = try self.typeRefToCpp(p.type_ref);
+                    defer self.alloc.free(p_cpp);
+                    try self.print("{s} {s}", .{ p_cpp, p.name });
+                }
+                try self.write(");\n");
+            }
+        }
     }
 
     fn emitOperation(self: *Generator, op: *const ir.Operation) !void {
@@ -4417,7 +4440,12 @@ const ConcreteImplGenerator = struct {
             "    explicit {s}Impl({s} h) noexcept : ptr_(h) {{}}\n",
             .{ iface.name, c_name },
         );
-        try self.hdrPrint("    ~{s}Impl() override = default;\n", .{iface.name});
+        if (iface.constructors.len > 0) {
+            // Releases the object when this wrapper created it (see _zidlAdopt).
+            try self.hdrPrint("    ~{s}Impl() override;\n", .{iface.name});
+        } else {
+            try self.hdrPrint("    ~{s}Impl() override = default;\n", .{iface.name});
+        }
         // Returns the cached wrapper for `h` if one is still alive, otherwise
         // constructs and caches a new one. Identity-preserving: repeated calls
         // for the same C handle return the same shared_ptr instance, matching
@@ -4435,11 +4463,13 @@ const ConcreteImplGenerator = struct {
             const fam = self.familyOf(iface);
             if (fam.size <= 1) {
                 // The cache lives in class statics, not in _getOrCreate, so the
-                // retire observer can reach it (_zidlEvict).
+                // retire observer can reach it (_zidlEvict). A pmr map, like the
+                // family cache: its nodes come from the default resource in
+                // force at its first use, not from the global operator new.
                 try self.hdrPrint(
                     "    static std::shared_ptr<{s}Impl> _getOrCreate({s} h);\n" ++
                         "    static std::mutex& _soloMutex();\n" ++
-                        "    static std::unordered_map<{s}, std::weak_ptr<{s}Impl>>& _soloCache();\n" ++
+                        "    static std::pmr::unordered_map<{s}, std::weak_ptr<{s}Impl>>& _soloCache();\n" ++
                         "    static void _zidlEvict(void* h);\n",
                     .{ iface.name, c_name, c_name, iface.name },
                 );
@@ -4599,9 +4629,11 @@ const ConcreteImplGenerator = struct {
             .{ c_name, iface.name },
         );
         try self.hdrPrint("    {s} ptr_;\n", .{c_name});
-        // Set once the provider reports ptr_ freed (--handle-retire-hook; see
-        // emitRetireObserver). From then on no operation reaches the provider
-        // and every handle accessor returns null.
+        // Set once ptr_ is freed: when the provider reports it
+        // (--handle-retire-hook; see emitRetireObserver), or when this
+        // wrapper's own destroy or release frees it (_zidlReleased). From then
+        // on no guarded operation reaches the provider and every handle
+        // accessor returns null.
         try self.hdrWrite("    std::atomic<bool> _zidl_retired_{false};\n");
         try self.hdrWrite("public:\n");
         try self.hdrWrite("    bool _zidl_is_retired() const noexcept { return _zidl_retired_.load(std::memory_order_acquire); }\n");
@@ -4612,6 +4644,17 @@ const ConcreteImplGenerator = struct {
             "    static void _zidlRetire(void* obj) noexcept {{ static_cast<{s}Impl*>(obj)->_zidl_retired_.store(true, std::memory_order_release); }}\n",
             .{iface.name},
         );
+        if (iface.constructors.len > 0) {
+            // A constructor's wrapper owns the object it created: dropping
+            // the wrapper runs the fallback release, unless the application
+            // destroyed or released the object through it first.
+            try self.hdrWrite(
+                "    void _zidlAdopt() noexcept { _zidl_owned_.store(true, std::memory_order_release); }\n" ++
+                    "private:\n" ++
+                    "    std::atomic<bool> _zidl_owned_{false};\n" ++
+                    "    void _zidlReleased(void* key) noexcept;\n",
+            );
+        }
         try self.hdrWrite("};\n\n");
     }
 
@@ -4676,8 +4719,8 @@ const ConcreteImplGenerator = struct {
                         "    static auto* m = ::new (static_cast<void*>(s)) std::mutex;\n" ++
                         "    return *m;\n" ++
                         "}}\n" ++
-                        "std::unordered_map<{[c]s}, std::weak_ptr<{[n]s}Impl>>& {[n]s}Impl::_soloCache() {{\n" ++
-                        "    using T = std::unordered_map<{[c]s}, std::weak_ptr<{[n]s}Impl>>;\n" ++
+                        "std::pmr::unordered_map<{[c]s}, std::weak_ptr<{[n]s}Impl>>& {[n]s}Impl::_soloCache() {{\n" ++
+                        "    using T = std::pmr::unordered_map<{[c]s}, std::weak_ptr<{[n]s}Impl>>;\n" ++
                         "    alignas(T) static unsigned char s[sizeof(T)];\n" ++
                         "    static auto* c = ::new (static_cast<void*>(s)) T;\n" ++
                         "{[o]s}" ++
@@ -4864,21 +4907,164 @@ const ConcreteImplGenerator = struct {
                 try self.emitRawLoanImplOp(op.owner, iface.name, op.op);
                 continue;
             }
+            if (op.owner == iface and iface.constructors.len > 0 and (ir.isDestructorOp(op.op) or ir.isFinalizerOp(op.op))) {
+                try self.emitReleaseMethod(iface, op.op);
+                continue;
+            }
             try self.emitEntityMethod(iface, op.owner, iface.name, op.op);
         }
         for (attrs.items) |attr| {
             try self.emitEntityAttr(iface, attr.owner, iface.name, attr.attr);
         }
+        if (iface.constructors.len > 0) try self.emitConstruction(iface);
     }
 
-    /// With `--handle-retire-hook`, the first statement of every generated
-    /// operation and attribute accessor: a retired wrapper returns without
-    /// reaching the provider, whose handle is freed. It returns the value
-    /// `@retired_result` names for the return type, null for an entity, and
-    /// a value-initialized result otherwise; out parameters are left as they
-    /// are (see docs/design/handle-lifetime.md).
-    fn emitRetiredGuard(self: *ConcreteImplGenerator, ret: ?ir.TypeRef) !void {
-        if (self.opts.handle_retire_hook.len == 0) return;
+    /// The `@destructor` or `@finalizer` of a `@standalone` interface. Once
+    /// either has released the object, this wrapper is retired: no later
+    /// call, nor dropping it, reaches the provider for that handle again.
+    fn emitReleaseMethod(self: *ConcreteImplGenerator, iface: *const ir.Interface, op: *const ir.Operation) !void {
+        const c_name = try cNameOf(self.alloc, iface.qualified_name);
+        defer self.alloc.free(c_name);
+        // The handle's identity-cache key, a family's root handle, is taken
+        // before the call: afterwards the handle may be freed.
+        const fam = self.familyOf(iface);
+        const key_expr = if (fam.size > 1) try self.handleExprForOwner(iface, fam.root, "ptr_") else try self.alloc.dupe(u8, "ptr_");
+        defer self.alloc.free(key_expr);
+        const rt = op.return_type orelse {
+            try self.srcPrint(
+                "void {[n]s}Impl::{[op]s}() {{\n" ++
+                    "    if (_zidl_is_retired()) return;\n" ++
+                    "    void* _key = {[k]s};\n" ++
+                    "    {[c]s}_{[op]s}(ptr_);\n" ++
+                    "    _zidlReleased(_key);\n" ++
+                    "}}\n\n",
+                .{ .n = iface.name, .op = op.name, .c = c_name, .k = key_expr },
+            );
+            return;
+        };
+        const ret_cpp = try self.typeRefToCpp(rt);
+        defer self.alloc.free(ret_cpp);
+        // The builder accepts a non-void @destructor only with @success_result.
+        const ok = ir.successResult(rt).?;
+        const retired = if (ir.retiredResult(rt)) |v|
+            try std.fmt.allocPrint(self.alloc, "static_cast<{s}>({d})", .{ ret_cpp, v })
+        else
+            try self.alloc.dupe(u8, "{}");
+        defer self.alloc.free(retired);
+        try self.srcPrint(
+            "{[r]s} {[n]s}Impl::{[op]s}() {{\n" ++
+                "    if (_zidl_is_retired()) return {[ret]s};\n" ++
+                "    void* _key = {[k]s};\n" ++
+                "    const auto _rc = {[c]s}_{[op]s}(ptr_);\n" ++
+                "    if (_rc == {[ok]d}) _zidlReleased(_key);\n" ++
+                "    return _rc;\n" ++
+                "}}\n\n",
+            .{ .r = ret_cpp, .n = iface.name, .op = op.name, .ret = retired, .k = key_expr, .c = c_name, .ok = ok },
+        );
+    }
+
+    /// For a `@standalone` interface with constructors: the wrapper
+    /// destructor's fallback release, `_zidlReleased`, and the static
+    /// constructors the abstract class declares (see
+    /// `Generator.emitConstructorDecls`). A constructor boxes its new handle
+    /// through `_getOrCreate` of the interface's impl class, or its
+    /// `--cpp-impl-override`, so the object joins the identity cache like
+    /// any other, then marks that wrapper as its owner.
+    fn emitConstruction(self: *ConcreteImplGenerator, iface: *const ir.Interface) !void {
+        const c_name = try cNameOf(self.alloc, iface.qualified_name);
+        defer self.alloc.free(c_name);
+        const fallback = ir.fallbackReleaseOp(iface).?;
+        const fam = self.familyOf(iface);
+        if (fam.size > 1 and fam.root == iface) return error.UnsupportedConstructorOnFamilyRoot;
+        const self_tr: ir.TypeRef = .{ .named = .{ .interface = @constCast(iface) } };
+        try self.markWrapped(self_tr);
+        const impl_name = try self.entityImplName(self_tr);
+        defer self.alloc.free(impl_name);
+
+        try self.srcPrint(
+            "{[n]s}Impl::~{[n]s}Impl() {{\n" ++
+                "    if (_zidl_owned_.load(std::memory_order_acquire) && !_zidl_is_retired()) (void){[c]s}_{[f]s}(ptr_);\n" ++
+                "}}\n\n",
+            .{ .n = iface.name, .c = c_name, .f = fallback.name },
+        );
+        // Drops the released handle, `key` in its identity cache, so an
+        // object later created at the same address gets a wrapper of its
+        // own, retire hook or not.
+        try self.srcPrint("void {s}Impl::_zidlReleased(void* key) noexcept {{\n    _zidl_retired_.store(true, std::memory_order_release);\n", .{iface.name});
+        if (fam.size <= 1) {
+            try self.srcWrite("    _zidlEvict(key);\n");
+        } else {
+            try self.srcPrint("    ::{s}Impl::_zidlEvict(key);\n", .{fam.root.qualified_name});
+        }
+        try self.srcWrite("}\n\n");
+
+        for (iface.constructors) |*op| {
+            for (op.params) |p| switch (paramAdaptKind(p)) {
+                .direct, .str_in, .struct_in, .complex_struct_in, .seq_in, .entity_in => {},
+                else => return error.UnsupportedConstructorParam,
+            };
+            // The default-allocator form forwards to the allocator one.
+            try self.srcPrint("std::shared_ptr<{s}> {s}::{s}(", .{ iface.name, iface.name, op.name });
+            try self.emitCtorParams(op, false);
+            try self.srcPrint(") {{\n    return {s}(nullptr", .{op.name});
+            for (op.params) |p| try self.srcPrint(", {s}", .{p.name});
+            try self.srcWrite(");\n}\n\n");
+
+            try self.srcPrint("std::shared_ptr<{s}> {s}::{s}(", .{ iface.name, iface.name, op.name });
+            try self.emitCtorParams(op, true);
+            try self.srcWrite(") {\n");
+            var seq_ctr: usize = 0;
+            for (op.params) |p| switch (paramAdaptKind(p)) {
+                .complex_struct_in => {
+                    const c_var = try std.fmt.allocPrint(self.alloc, "_c_{s}", .{p.name});
+                    defer self.alloc.free(c_var);
+                    try self.emitComplexStructAdaptIn(c_var, p.name, p.type_ref, &seq_ctr);
+                },
+                .seq_in => try self.emitSeqParamAdaptIn(p, &seq_ctr),
+                else => {},
+            };
+            try self.srcPrint("    {s} _h = {s}_{s}_with_allocator(allocator", .{ c_name, c_name, op.name });
+            try self.emitAdaptedParams(op.params);
+            try self.srcWrite(");\n");
+            // Until a wrapper owns the new object, `_g` releases it on every
+            // way out, including an exception from boxing it.
+            try self.srcPrint(
+                "    if (!_h) return nullptr;\n" ++
+                    "    struct _Guard {{\n" ++
+                    "        {[c]s} h;\n" ++
+                    "        ~_Guard() {{ if (h) (void){[c]s}_{[f]s}(h); }}\n" ++
+                    "    }} _g{{_h}};\n" ++
+                    "    auto _sp = {[i]s}::_getOrCreate(_h);\n" ++
+                    "    if (!_sp) return nullptr;\n" ++
+                    "    _sp->_zidlAdopt();\n" ++
+                    "    _g.h = nullptr;\n" ++
+                    "    return _sp;\n" ++
+                    "}}\n\n",
+                .{ .i = impl_name, .c = c_name, .f = fallback.name },
+            );
+        }
+    }
+
+    fn emitCtorParams(self: *ConcreteImplGenerator, op: *const ir.Operation, with_allocator: bool) !void {
+        if (with_allocator) try self.srcWrite("const ZidlAllocator* allocator");
+        for (op.params, 0..) |p, i| {
+            if (i > 0 or with_allocator) try self.srcWrite(", ");
+            const pt = try self.typeRefToCpp(p.type_ref);
+            defer self.alloc.free(pt);
+            try self.srcPrint("{s} {s}", .{ pt, p.name });
+        }
+    }
+
+    /// With `--handle-retire-hook`, or on a wrapper whose interface has
+    /// constructors (its own destroy or release retires it), the first
+    /// statement of every generated operation and attribute accessor: a
+    /// retired wrapper returns without reaching the provider, whose handle is
+    /// freed. It returns the value `@retired_result` names for the return
+    /// type, null for an entity, and a value-initialized result otherwise;
+    /// out parameters are left as they are (see docs/design/handle-lifetime.md).
+    fn emitRetiredGuard(self: *ConcreteImplGenerator, iface: ?*const ir.Interface, ret: ?ir.TypeRef) !void {
+        const constructible = if (iface) |i| i.constructors.len > 0 else false;
+        if (self.opts.handle_retire_hook.len == 0 and !constructible) return;
         const rt = ret orelse {
             try self.srcWrite("    if (_zidl_is_retired()) return;\n");
             return;
@@ -5047,7 +5233,7 @@ const ConcreteImplGenerator = struct {
         }
         try self.srcWrite(") {\n");
 
-        try self.emitRetiredGuard(op.return_type);
+        try self.emitRetiredGuard(iface, op.return_type);
 
         // The listener comes back from the core's own registration, so it is
         // whatever was installed last, through any create_* or set_listener
@@ -5292,7 +5478,7 @@ const ConcreteImplGenerator = struct {
 
         // Getter
         try self.srcPrint("{s} {s}Impl::{s}() const {{\n", .{ at, class_name, attr.name });
-        try self.emitRetiredGuard(attr.type_ref);
+        try self.emitRetiredGuard(iface, attr.type_ref);
         switch (returnAdaptKind(attr.type_ref)) {
             .entity => {
                 const ret_c = try self.typeRefToCType(attr.type_ref);
@@ -5323,7 +5509,7 @@ const ConcreteImplGenerator = struct {
 
         if (!attr.readonly) {
             try self.srcPrint("void {s}Impl::{s}({s} value) {{\n", .{ class_name, attr.name, at });
-            try self.emitRetiredGuard(null);
+            try self.emitRetiredGuard(iface, null);
             switch (paramAdaptKindForTypeRef(attr.type_ref, .in_)) {
                 .direct => {
                     if (typeRefIsEnumLike(attr.type_ref)) {
@@ -5428,7 +5614,7 @@ const ConcreteImplGenerator = struct {
             }
         }
         try self.srcWrite(") {\n");
-        try self.emitRetiredGuard(op.return_type);
+        try self.emitRetiredGuard(null, op.return_type);
 
         // Setup locals: only the non-raw `seq_in` params (e.g. publish_loan_raw's
         // `key_hash`) need one; raw-loan params are passed through directly below.
@@ -9849,7 +10035,7 @@ test "cpp_backend: B1+B3 — entity return wraps in Impl" {
     try testing.expect(has(src, "return ::DDS::BarImpl::_getOrCreate(_h);"));
     try testing.expect(has(src, "std::shared_ptr<BarImpl> BarImpl::_getOrCreate(DDS_Bar h) {"));
     try testing.expect(has(src, "if (!h) return nullptr;"));
-    try testing.expect(has(src, "    using T = std::unordered_map<DDS_Bar, std::weak_ptr<BarImpl>>;\n    alignas(T) static unsigned char s[sizeof(T)];\n    static auto* c = ::new (static_cast<void*>(s)) T;\n"));
+    try testing.expect(has(src, "    using T = std::pmr::unordered_map<DDS_Bar, std::weak_ptr<BarImpl>>;\n    alignas(T) static unsigned char s[sizeof(T)];\n    static auto* c = ::new (static_cast<void*>(s)) T;\n"));
     // The cache's singletons live in static storage: first use allocates
     // nothing on the heap.
     try testing.expect(!has(src, "= new std::"));
@@ -9877,7 +10063,7 @@ test "cpp_backend: entity wrapper identity — _getOrCreate declared and cache m
     try testing.expect(has(src, "if (auto _sp = _it->second.lock()) return _sp;"));
     try testing.expect(has(src, "std::lock_guard<std::mutex> _lock(_soloMutex());"));
     // The cache is reachable from the retire observer, not local to _getOrCreate.
-    try testing.expect(has(hdr, "static std::unordered_map<DDS_Bar, std::weak_ptr<BarImpl>>& _soloCache();"));
+    try testing.expect(has(hdr, "static std::pmr::unordered_map<DDS_Bar, std::weak_ptr<BarImpl>>& _soloCache();"));
     try testing.expect(has(src, "void BarImpl::_zidlEvict(void* h) {"));
     // Expired-but-present entries are updated via the already-found iterator
     // rather than a second hash lookup; only a genuinely new handle inserts.
@@ -11014,4 +11200,126 @@ test "cpp_backend: retirement query guards cache lookup and callback arguments" 
     try testing.expect(has(src, "::_zidl_observe_retire();\n    std::lock_guard<std::mutex> _lock(_soloMutex());\n    if (::is_retired(h)) return nullptr;"));
     try testing.expect(has(src, "auto _entity_entity = ::M::EntityImpl::_getOrCreate(entity);\n    if (entity && !_entity_entity) return;"));
     try testing.expect(has(src, "owner->on_entity(_entity_entity, count)"));
+}
+
+const standalone_test_idl =
+    \\module M {
+    \\    const long OK = 0;
+    \\    const long GONE = 9;
+    \\    @success_result(OK) @retired_result(GONE) typedef long Code;
+    \\    struct Cfg { long n; string name; };
+    \\    @standalone interface Thing {
+    \\        @constructor Thing create();
+    \\        @constructor Thing create_from(in Cfg c, in long n);
+    \\        @destructor Code destroy();
+    \\        @finalizer void release();
+    \\        long poke();
+    \\    };
+    \\    @standalone interface Box {
+    \\        @constructor Box create();
+    \\        @destructor void destroy();
+    \\    };
+    \\};
+;
+
+test "cpp_backend: @standalone constructors are static factories on the interface" {
+    var out = try testGenOpts(standalone_test_idl, "t", .{ .generate_interfaces = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "    static std::shared_ptr<Thing> create();\n"));
+    try testing.expect(has(s, "    static std::shared_ptr<Thing> create(const ZidlAllocator* allocator);\n"));
+    try testing.expect(has(s, "    static std::shared_ptr<Thing> create_from(::M::Cfg c, int32_t n);\n"));
+    try testing.expect(has(s, "    static std::shared_ptr<Thing> create_from(const ZidlAllocator* allocator, ::M::Cfg c, int32_t n);\n"));
+    try testing.expect(has(s, "    virtual ::M::Code destroy() = 0;\n"));
+    try testing.expect(!has(s, "virtual std::shared_ptr<::M::Thing> create("));
+}
+
+test "cpp_backend: a constructor's wrapper owns its object and releases it once" {
+    var res = try testGenConcreteImpl(standalone_test_idl);
+    defer res.deinit();
+    const h = res.hdr.items;
+    const s = res.src.items;
+    try testing.expect(has(h, "    ~ThingImpl() override;\n"));
+    try testing.expect(has(h, "    void _zidlAdopt() noexcept { _zidl_owned_.store(true, std::memory_order_release); }\n"));
+    try testing.expect(has(h, "    std::atomic<bool> _zidl_owned_{false};\n"));
+    // Dropping an owning wrapper runs the finalizer, or the destructor
+    // when there is none.
+    try testing.expect(has(s, "    if (_zidl_owned_.load(std::memory_order_acquire) && !_zidl_is_retired()) (void)M_Thing_release(ptr_);\n"));
+    try testing.expect(has(s, "    if (_zidl_owned_.load(std::memory_order_acquire) && !_zidl_is_retired()) (void)M_Box_destroy(ptr_);\n"));
+    // A successful destroy, or any release, retires the wrapper even
+    // without the retire hook.
+    try testing.expect(has(s,
+        \\::M::Code ThingImpl::destroy() {
+        \\    if (_zidl_is_retired()) return static_cast<::M::Code>(9);
+        \\    void* _key = ptr_;
+        \\    const auto _rc = M_Thing_destroy(ptr_);
+        \\    if (_rc == 0) _zidlReleased(_key);
+        \\    return _rc;
+        \\}
+    ));
+    try testing.expect(has(s,
+        \\void ThingImpl::release() {
+        \\    if (_zidl_is_retired()) return;
+        \\    void* _key = ptr_;
+        \\    M_Thing_release(ptr_);
+        \\    _zidlReleased(_key);
+        \\}
+    ));
+    try testing.expect(has(s,
+        \\void BoxImpl::destroy() {
+        \\    if (_zidl_is_retired()) return;
+        \\    void* _key = ptr_;
+        \\    M_Box_destroy(ptr_);
+        \\    _zidlReleased(_key);
+        \\}
+    ));
+    try testing.expect(has(s, "void ThingImpl::_zidlReleased(void* key) noexcept {\n    _zidl_retired_.store(true, std::memory_order_release);\n    _zidlEvict(key);\n}\n"));
+    try testing.expect(has(s, "std::shared_ptr<Thing> Thing::create() {\n    return create(nullptr);\n}\n"));
+    try testing.expect(has(s, "std::shared_ptr<Thing> Thing::create_from(::M::Cfg c, int32_t n) {\n    return create_from(nullptr, c, n);\n}\n"));
+    try testing.expect(has(s, "    M_Thing _h = M_Thing_create_from_with_allocator(allocator, &_c_c, n);\n"));
+    try testing.expect(has(s,
+        \\    if (!_h) return nullptr;
+        \\    struct _Guard {
+        \\        M_Thing h;
+        \\        ~_Guard() { if (h) (void)M_Thing_release(h); }
+        \\    } _g{_h};
+        \\    auto _sp = ::M::ThingImpl::_getOrCreate(_h);
+        \\    if (!_sp) return nullptr;
+        \\    _sp->_zidlAdopt();
+        \\    _g.h = nullptr;
+        \\    return _sp;
+    ));
+    // Its own release retires the wrapper, so its other operations are
+    // guarded without --handle-retire-hook.
+    try testing.expect(has(s, "int32_t ThingImpl::poke() {\n    if (_zidl_is_retired()) return {};\n"));
+}
+
+test "cpp_backend: without the retire hook, only constructible wrappers guard their operations" {
+    var res = try testGenConcreteImpl(
+        \\module M {
+        \\    interface Plain { long poke(); };
+        \\};
+    );
+    defer res.deinit();
+    try testing.expect(has(res.src.items, "int32_t PlainImpl::poke() {\n"));
+    try testing.expect(!has(res.src.items, "if (_zidl_is_retired())"));
+}
+
+test "cpp_backend: a constructor boxes through the --cpp-impl-override class" {
+    var res = try testGenConcreteImplOpts(standalone_test_idl, .{ .cpp_impl_overrides = &.{"M::Thing=::app::ThingSupport"} });
+    defer res.deinit();
+    try testing.expect(has(res.src.items, "    auto _sp = ::app::ThingSupport::_getOrCreate(_h);\n"));
+}
+
+test "cpp_backend: a constructor on a family root is rejected" {
+    try testing.expectError(error.UnsupportedConstructorOnFamilyRoot, testGenConcreteImpl(
+        \\module M {
+        \\    @shared_c_abi_box @standalone interface Root {
+        \\        @constructor Root create();
+        \\        @destructor void destroy();
+        \\    };
+        \\    @shared_c_abi_box interface Leaf : Root {};
+        \\    interface Maker { Root make(); Leaf leaf(); };
+        \\};
+    ));
 }

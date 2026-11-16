@@ -317,13 +317,69 @@ pub const Interface = struct {
     span: ast.Span,
     /// Base interfaces in declaration order.
     bases: []const TypeDecl,
+    /// Instance operations, including `@destructor` and `@finalizer` ones.
     operations: []const Operation,
+    /// `@constructor` operations of a `@standalone` interface, in
+    /// declaration order. Kept apart from `operations`: they have no
+    /// receiver, are not inherited and take no vtable slot.
+    constructors: []const Operation = &.{},
     attributes: []const Attribute,
     /// Type declarations nested inside the interface body.
     type_decls: []const TypeDecl,
     consts: []const Const,
     raw: []const RawAnnotation,
 };
+
+fn hasRaw(raw: []const RawAnnotation, name: []const u8) bool {
+    for (raw) |ann| {
+        if (std.mem.eql(u8, ann.name, name)) return true;
+    }
+    return false;
+}
+
+/// True for a `@standalone` interface: the application creates its objects
+/// through the interface's own `@constructor` operations and destroys them
+/// through its `@destructor`, instead of through a parent's operations. See
+/// docs/design/standalone-construction.md.
+pub fn isStandaloneInterface(iface: *const Interface) bool {
+    return hasRaw(iface.raw, "standalone");
+}
+
+/// True for a `@constructor` operation: it creates an object of its
+/// `@standalone` interface and has no receiver.
+pub fn isConstructorOp(op: *const Operation) bool {
+    return hasRaw(op.raw, "constructor");
+}
+
+/// True for a `@destructor` operation: the strict destroy, whose result
+/// says whether the object was destroyed.
+pub fn isDestructorOp(op: *const Operation) bool {
+    return hasRaw(op.raw, "destructor");
+}
+
+/// True for a `@finalizer` operation: the release a binding runs when the
+/// application drops an object it never destroyed. It cannot fail.
+pub fn isFinalizerOp(op: *const Operation) bool {
+    return hasRaw(op.raw, "finalizer");
+}
+
+/// The `@destructor` operation of `iface`, or null.
+pub fn destructorOp(iface: *const Interface) ?*const Operation {
+    for (iface.operations) |*op| {
+        if (isDestructorOp(op)) return op;
+    }
+    return null;
+}
+
+/// What a binding calls when the application drops an object of `iface`
+/// without destroying it: the `@finalizer` operation if there is one,
+/// otherwise the `@destructor`. Null for an interface with neither.
+pub fn fallbackReleaseOp(iface: *const Interface) ?*const Operation {
+    for (iface.operations) |*op| {
+        if (isFinalizerOp(op)) return op;
+    }
+    return destructorOp(iface);
+}
 
 /// True for `@callback`-annotated interfaces (listener interfaces), which get a
 /// plain C callback struct instead of an entity opaque handle / vtable. Only

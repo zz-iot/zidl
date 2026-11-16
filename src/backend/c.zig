@@ -247,6 +247,9 @@ const Generator = struct {
         if (!self.opts.no_typesupport) {
             try self.write("#include \"zidl_cdr.h\"\n");
         }
+        if (self.opts.generate_interfaces and itemsHaveConstructors(spec.items)) {
+            try self.write("#include \"zidl_allocator.h\"\n");
+        }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructC(spec.items)) {
             try self.write("#include \"zzdds_c.h\"\n");
         }
@@ -976,10 +979,39 @@ const Generator = struct {
         try self.collectInterfaceMembers(iface, &ops, &attrs);
 
         try self.print("/* IDL interface: {s} */\n", .{c_name});
+        try self.emitConstructorDecls(c_name, iface);
         for (ops.items) |op| try self.emitFreeFunctionDecl(c_name, &op);
         for (attrs.items) |attr| try self.emitFreeAttrDecls(c_name, &attr);
         try self.emitInterfaceCastDecls(iface);
         try self.write("\n");
+    }
+
+    /// Declares each `@constructor` of a `@standalone` interface twice: once
+    /// allocating through the provider's default allocator, and once through
+    /// a caller's `ZidlAllocator`, which must outlive the object. Both
+    /// return NULL on failure. See docs/design/standalone-construction.md.
+    fn emitConstructorDecls(self: *Generator, c_name: []const u8, iface: *const ir.Interface) !void {
+        if (iface.constructors.len == 0) return;
+        const dtor = ir.destructorOp(iface).?;
+        try self.print("/* Constructors return NULL on failure. Destroy the object with {s}_{s}. */\n", .{ c_name, dtor.name });
+        for (iface.constructors) |*op| {
+            for ([_]bool{ false, true }) |with_allocator| {
+                try self.print("{s} {s}_{s}{s}(", .{ c_name, c_name, op.name, if (with_allocator) "_with_allocator" else "" });
+                var first = true;
+                if (with_allocator) {
+                    try self.write("const ZidlAllocator *allocator");
+                    first = false;
+                }
+                for (op.params) |p| {
+                    const pt = try self.vtableParamC(p);
+                    defer self.alloc.free(pt);
+                    try self.print("{s}{s}{s}{s}", .{ if (first) "" else ", ", pt, ptrSep(pt), p.name });
+                    first = false;
+                }
+                if (first) try self.write("void");
+                try self.write(");\n");
+            }
+        }
     }
 
     /// Emit per-inheritance-edge C helper declarations.
@@ -1656,6 +1688,20 @@ fn isZzddsTopicStructC(s: *const ir.Struct) bool {
     return !s.annotations.is_nested and s.annotations.extensibility != .mutable;
 }
 
+fn itemsHaveConstructors(items: []const ir.ModuleItem) bool {
+    for (items) |item| {
+        switch (item) {
+            .type_decl => |td| switch (td) {
+                .interface => |i| if (i.constructors.len > 0) return true,
+                else => {},
+            },
+            .module => |m| if (itemsHaveConstructors(m.items)) return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
 fn itemsHaveZzddsTopicStructC(items: []const ir.ModuleItem) bool {
     for (items) |item| {
         switch (item) {
@@ -2081,10 +2127,16 @@ const CdrGenerator = struct {
         );
         try self.print("#include \"{s}.h\"\n", .{self.opts.input_stem});
         try self.write("#include \"zidl_cdr.h\"\n");
+        if (self.opts.generate_interfaces and itemsHaveConstructors(spec.items)) {
+            try self.write("#include \"zidl_allocator.h\"\n");
+        }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructC(spec.items)) {
             try self.write("#include \"zzdds_c.h\"\n");
         }
         try self.write("#include <string.h>\n");
+        if (self.opts.generate_interfaces and itemsHaveConstructors(spec.items)) {
+            try self.write("#include \"zidl_allocator.h\"\n");
+        }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructC(spec.items)) {
             try self.print("#define ZZDDS_KEY_VALUE_BUF_SIZE {d}\n", .{key_value_buf_size});
         }
@@ -7484,4 +7536,38 @@ test "codecs reject long double without writing partial output" {
             try testing.expect(out.items.len != 0);
         };
     }
+}
+
+test "c_backend: @standalone constructors are declared with an allocator overload" {
+    var out = try testGenFullOpts(
+        \\module M {
+        \\    const long OK = 0;
+        \\    @success_result(OK) typedef long Code;
+        \\    struct Cfg { long n; };
+        \\    @standalone interface Thing {
+        \\        @constructor Thing create();
+        \\        @constructor Thing create_from(in Cfg c, in long n);
+        \\        @destructor Code destroy();
+        \\        @finalizer void release();
+        \\    };
+        \\};
+    , "t", .{ .generate_interfaces = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "#include \"zidl_allocator.h\""));
+    try testing.expect(has(s, "/* Constructors return NULL on failure. Destroy the object with M_Thing_destroy. */"));
+    try testing.expect(has(s, "M_Thing M_Thing_create(void);"));
+    try testing.expect(has(s, "M_Thing M_Thing_create_with_allocator(const ZidlAllocator *allocator);"));
+    try testing.expect(has(s, "M_Thing M_Thing_create_from(const M_Cfg *c, int32_t n);"));
+    try testing.expect(has(s, "M_Thing M_Thing_create_from_with_allocator(const ZidlAllocator *allocator, const M_Cfg *c, int32_t n);"));
+    // The destructor and finalizer are ordinary instance operations.
+    try testing.expect(has(s, "M_Code M_Thing_destroy(M_Thing self);"));
+    try testing.expect(has(s, "void M_Thing_release(M_Thing self);"));
+    try testing.expect(!has(s, "M_Thing_create(M_Thing self"));
+}
+
+test "c_backend: a header without constructors does not include zidl_allocator.h" {
+    var out = try testGenFullOpts("interface Plain { long poke(); };", "t", .{ .generate_interfaces = true });
+    defer out.deinit(testing.allocator);
+    try testing.expect(!has(out.items, "zidl_allocator.h"));
 }
