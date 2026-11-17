@@ -18,6 +18,13 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- **Breaking** for providers: C++ and Java no longer read a new object's
+  callback back after an operation that returns one (a `create_*`) to release
+  a registration it did not install. A provider owns every callback passed to
+  an operation without `@success_result`, installed or not, and releases one it
+  does not install, failed creation included. The read-back could also release
+  a registration twice when a callback of the new object replaced it first.
+
 - Generate construction for `@standalone` interfaces: `@constructor` operations
   become C exports (plus `_with_allocator` forms), a Zig `exportCAbiConstructors`
   for providers, C++ static factories and Java static factories with

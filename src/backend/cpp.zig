@@ -5357,7 +5357,8 @@ const ConcreteImplGenerator = struct {
                 try self.srcPrint("    {s} _h = {s}_{s}({s}", .{ ret_c, owner_c_name, op.name, handle_expr });
                 try self.emitAdaptedParams(op.params);
                 try self.srcWrite(");\n");
-                try self.emitCreatedListenerRelease(op, ret_c);
+                // The created entity's provider releases a listener it does
+                // not install, so the registration is never ours to release.
                 try self.srcPrint("    return {s}::_getOrCreate(_h);\n", .{impl_name});
             },
             .str_ret => {
@@ -5419,47 +5420,6 @@ const ConcreteImplGenerator = struct {
             },
         }
         try self.srcWrite("}\n\n");
-    }
-
-    /// After a `create_*`-shaped call: releases each listener registration
-    /// the new entity did not install. A failed create returns a nil entity
-    /// rather than null and never releases the listener it was given, so
-    /// reading the entity's listener back is what tells (as zidl's Java
-    /// bridge does).
-    fn emitCreatedListenerRelease(self: *ConcreteImplGenerator, op: *const ir.Operation, ret_c: []const u8) !void {
-        const created = switch (op.return_type.?) {
-            .named => |td| switch (td) {
-                .interface => |i| i,
-                else => return,
-            },
-            else => return,
-        };
-        var ops = std.ArrayListUnmanaged(ir.Operation).empty;
-        defer ops.deinit(self.alloc);
-        var attrs = std.ArrayListUnmanaged(ir.Attribute).empty;
-        defer attrs.deinit(self.alloc);
-        try collectIfaceMembers(self.alloc, created, &ops, &attrs);
-        for (op.params) |p| {
-            if (paramAdaptKind(p) != .listener_in) continue;
-            const cb = interface.callbackInterfaceOf(p.type_ref) orelse continue;
-            // Without exactly one getter for this callback there is nothing
-            // safe to read back, so a failed create leaks the registration
-            // rather than risk freeing one the entity holds.
-            const getter = interface.callbackGetterFor(ops.items, cb) orelse continue;
-            const bridge_name = try self.listenerBridgeName(p.type_ref);
-            defer self.alloc.free(bridge_name);
-            // The read-back is retained by the core (retain_listener_data),
-            // so it is released whether or not it is ours.
-            try self.srcPrint(
-                "    if (_lp_{[n]s}) {{\n" ++
-                    "        auto _gl = {[c]s}_{[g]s}(_h);\n" ++
-                    "        const bool _installed = _gl.listener_data == _l_{[n]s}.listener_data;\n" ++
-                    "        if (_gl.listener_data && _gl.retain_listener_data && _gl.release_listener_data) _gl.release_listener_data(_gl.listener_data);\n" ++
-                    "        if (!_installed) {[b]s}::release_c_listener(_l_{[n]s}.listener_data);\n" ++
-                    "    }}\n",
-                .{ .n = p.name, .c = ret_c, .g = getter.name, .b = bridge_name },
-            );
-        }
     }
 
     fn emitEntityAttr(
@@ -10353,10 +10313,11 @@ test "cpp_backend: listener registrations own the listener; a call that installs
     try testing.expect(!has(src, "dynamic_cast<::DDS::FooListenerBase*>"));
     // set_listener: a failed call installs nothing, so nothing else releases it.
     try testing.expect(has(src, "if (_rc != 0 && _lp_a_listener) ::DDS::FooListenerBase::release_c_listener(_l_a_listener.listener_data);"));
-    // create_*: a failed create returns a nil entity, whose listener is not ours.
-    // The read-back is retained by the core, so it is released either way.
-    try testing.expect(has(src, "        auto _gl = DDS_Foo_get_listener(_h);\n        const bool _installed = _gl.listener_data == _l_a_listener.listener_data;\n"));
-    try testing.expect(has(src, "        if (!_installed) ::DDS::FooListenerBase::release_c_listener(_l_a_listener.listener_data);\n"));
+    // create_*: the provider owns the registration, installed or not, so
+    // nothing reads it back or releases it here.
+    try testing.expect(has(src, "DDS_Factory_create_foo(ptr_, _lp_a_listener, mask);"));
+    try testing.expect(!has(src, "DDS_Foo_get_listener(_h)"));
+    try testing.expect(!has(src, "_installed"));
     try testing.expect(!has(src, "TODO"));
 }
 
@@ -10448,7 +10409,7 @@ test "cpp_backend: @shared_base on an interface with operations is rejected" {
     ));
 }
 
-test "cpp_backend: a callback getter is known by its shape; the create_* read-back needs exactly one" {
+test "cpp_backend: a callback getter is known by its shape; a create_* reads none back" {
     var res = try testGenConcreteImpl(
         \\module M {
         \\    @callback interface FooListener { void on_event(); };
@@ -10474,15 +10435,14 @@ test "cpp_backend: a callback getter is known by its shape; the create_* read-ba
     // Whatever its name, a no-argument op returning a callback is a getter.
     try testing.expect(has(src, "M_FooListener _l = M_Child_current_listener(ptr_);"));
     try testing.expect(has(src, "M_FooListener _l = M_Twin_second_listener(ptr_);"));
-    // The getter of a base type reads back a FooListenerEx registration.
-    try testing.expect(has(src, "    if (_lp_a_l) {\n        auto _gl = M_Child_current_listener(_h);\n"));
-    try testing.expect(has(src, "    if (_lp_a_b) {\n        auto _gl = M_Child_bar_listener(_h);\n"));
-    // Two getters could each be the one: no read-back, rather than a guess.
-    try testing.expect(!has(src, "if (_lp_a_t) {"));
+    // A create_* leaves its registration to the provider: no getter is called
+    // on the new entity.
+    try testing.expect(!has(src, "M_Child_current_listener(_h)"));
+    try testing.expect(!has(src, "M_Child_bar_listener(_h)"));
     try testing.expect(!has(src, "get_listener"));
 }
 
-test "cpp_backend: callback aliases are callbacks to getters, read-backs and @success_result" {
+test "cpp_backend: callback aliases are callbacks to getters and @success_result" {
     var res = try testGenConcreteImpl(
         \\module M {
         \\    const long OK = 0;
@@ -10501,7 +10461,6 @@ test "cpp_backend: callback aliases are callbacks to getters, read-backs and @su
     defer res.deinit();
     const src = res.src.items;
     try testing.expect(has(src, "M_FooListener _l = M_Child_get_listener(ptr_);"));
-    try testing.expect(has(src, "    if (_lp_a_c) {\n        auto _gl = M_Child_get_listener(_h);\n"));
     try testing.expect(has(src, "if (_rc != 0 && _lp_a_l) ::M::FooListenerBase::release_c_listener(_l_a_l.listener_data);"));
     // An aliased argument registers through the aliased callback's bridge.
     try testing.expect(has(src, "_l_a_l = ::M::FooListenerBase::c_listener(a_l);"));

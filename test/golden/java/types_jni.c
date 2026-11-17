@@ -99,8 +99,8 @@ zidl_java_listener_ctx *zidl_java_listener_ctx_acquire(JNIEnv *env, jobject obj)
  * entity/slot that never had a listener installed. Called by
  * `zidl_java_release_listener_data` below (the hook zzdds's own core
  * calls generically, once per registration) and directly by
- * `emitJniBridgeOp`'s `created_listener_params` handling for a
- * `create_*` call whose listener never actually got installed. */
+ * `emitJniBridgeOp` for a failed `@success_result` call, which
+ * registered nothing. */
 void zidl_java_release_listener_ctx(JNIEnv *env, void *listener_data) {
     if (listener_data == NULL) return;
     zidl_java_listener_ctx *ctx = (zidl_java_listener_ctx *)listener_data;
