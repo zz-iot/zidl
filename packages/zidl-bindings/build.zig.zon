@@ -1,6 +1,6 @@
 .{
     .name = .zidl_bindings,
-    .version = "0.3.32-zig.0.17.0-dev",
+    .version = "0.3.33-zig.0.17.0",
     .minimum_zig_version = "0.15.1",
     .fingerprint = 0x8962174811871111,
     .dependencies = .{
