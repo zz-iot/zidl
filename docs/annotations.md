@@ -113,7 +113,10 @@ was given. So the C++ and Java bindings release the registration they built
 for each `in` `@callback` argument when such an operation returns anything
 else: no provider will release a callback it never registered. Without the
 annotation, a return value says nothing about whether the callback was kept,
-and the bindings never release it after the call. The parameter is an integer
+and the bindings never release it after the call: the provider owns it,
+installed or not, and releases one it does not install. That includes an
+operation returning a new object, such as a `create_*` that fails and returns
+a nil object. The parameter is an integer
 constant expression, evaluated in the typedef's scope as for
 `@retired_result`, and the two may annotate the same typedef.
 

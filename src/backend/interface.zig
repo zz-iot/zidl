@@ -587,32 +587,6 @@ pub fn callbackInterfaceOf(type_ref: ir.TypeRef) ?*const ir.Interface {
     }
 }
 
-/// Among `ops`, the callback getter that can hand back a registration of
-/// `cb`: one whose type is `cb` or a base of it. Null when none can, or when
-/// several can: a guess could read a different callback than the one
-/// registered as `cb`. An operation inherited along two paths is one getter.
-pub fn callbackGetterFor(ops: []const ir.Operation, cb: *const ir.Interface) ?*const ir.Operation {
-    var found: ?*const ir.Operation = null;
-    for (ops) |*o| {
-        const t = callbackGetterType(o) orelse continue;
-        if (!isSameOrBase(t, cb)) continue;
-        if (found) |f| {
-            if (!std.mem.eql(u8, f.name, o.name)) return null;
-        } else found = o;
-    }
-    return found;
-}
-
-/// Whether `base` is `iface` or one of its bases, at any depth.
-fn isSameOrBase(base: *const ir.Interface, iface: *const ir.Interface) bool {
-    if (std.mem.eql(u8, base.qualified_name, iface.qualified_name)) return true;
-    for (iface.bases) |b| {
-        if (b != .interface) continue;
-        if (isSameOrBase(base, b.interface)) return true;
-    }
-    return false;
-}
-
 /// Thin re-export of the canonical `ir.hasSharedCAbiBox`, for the same reason
 /// as `isCallbackInterface` above.
 pub fn hasSharedCAbiBox(iface: *const ir.Interface) bool {

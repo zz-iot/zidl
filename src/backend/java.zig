@@ -5694,8 +5694,8 @@ const JniBridgeGenerator = struct {
                     " * entity/slot that never had a listener installed. Called by\n" ++
                     " * `zidl_java_release_listener_data` below (the hook zzdds's own core\n" ++
                     " * calls generically, once per registration) and directly by\n" ++
-                    " * `emitJniBridgeOp`'s `created_listener_params` handling for a\n" ++
-                    " * `create_*` call whose listener never actually got installed. */\n" ++
+                    " * `emitJniBridgeOp` for a failed `@success_result` call, which\n" ++
+                    " * registered nothing. */\n" ++
                     "void zidl_java_release_listener_ctx(JNIEnv *env, void *listener_data) {\n" ++
                     "    if (listener_data == NULL) return;\n" ++
                     "    zidl_java_listener_ctx *ctx = (zidl_java_listener_ctx *)listener_data;\n" ++
@@ -6828,9 +6828,9 @@ const JniBridgeGenerator = struct {
     /// cleared or its owning entity is destroyed (see that function's own
     /// doc comment). Releasing whatever listener *this* replaces is
     /// therefore not this function's (or any of this generator's) job
-    /// anymore; the only remaining leaks this generator itself guards
-    /// against are a `create_*` call or a failed `@success_result` call whose
-    /// listener never actually got installed at all — see
+    /// anymore; the only remaining leak this generator itself guards
+    /// against is a failed `@success_result` call, which registered nothing
+    /// (a `create_*` provider releases a listener it does not install) — see
     /// `emitJniBridgeOp`.
     fn emitListenerParamPrep(self: *JniBridgeGenerator, p: *const ir.Parameter) !void {
         const iface = resolveToNamedDecl(p.type_ref).interface;
@@ -7272,34 +7272,11 @@ const JniBridgeGenerator = struct {
         const ret_listener_c_name: ?[]u8 = if (ret_is_callback) try self.typeRefToC(op.return_type.?) else null;
         defer if (ret_listener_c_name) |n| self.alloc.free(n);
 
-        // `.callback` params on a `create_*`-shaped op need a post-call
-        // listener_data readback — see the post-call block below. The core
-        // now releases a listener's context automatically the moment it's
-        // replaced/cleared via `set_listener`, or when its owning entity is
-        // destroyed (individually or swept up by `delete_contained_entities`
-        // — see zzdds's `release_listener_data` hook on the listener struct
-        // itself), so the leaks this generator still has to guard against
-        // directly are a failed `@success_result` call (see the post-call block) and
-        // a `create_*` call whose listener param never actually got installed
-        // anywhere (creation failed, or was rejected)
-        // — nothing will ever call that context's release hook, since no
-        // entity exists to eventually call it via `deinit()`. A *readback*
-        // (comparing what the new entity's own `get_listener()` reports
-        // against what we built), not the return code, is the only way to
-        // detect this: a failed create still returns *some* boxable handle
-        // in this ABI convention (a "nil" sentinel entity, not literal NULL
-        // — see zzdds's `nil.zig`), so checking `_h == NULL` would never
-        // catch it.
-        const ListenerParam = struct { name: []const u8, listener_c: []const u8, getter: []const u8 };
-        var created_listener_params = std.ArrayListUnmanaged(ListenerParam).empty;
-        defer {
-            for (created_listener_params.items) |lp| {
-                self.alloc.free(lp.name);
-                self.alloc.free(lp.listener_c);
-                self.alloc.free(lp.getter);
-            }
-            created_listener_params.deinit(self.alloc);
-        }
+        // A `.callback` param is the provider's once passed: a `create_*`
+        // provider releases one it does not install (the core calls the
+        // listener struct's `release_listener_data` hook), so the only
+        // registration this generator releases itself is one a failed
+        // `@success_result` call never took (see the post-call block).
 
         // Prep: unbox entity params; marshal `value_struct` params — `in`
         // builds a (possibly NULL, if the Java caller passed null for "use
@@ -7314,31 +7291,6 @@ const JniBridgeGenerator = struct {
                     try self.print("    void *_n_{s} = {s}(env, {s});\n", .{ p.name, unbox_fn, p.name });
                 },
                 .callback => {
-                    // Only a `create_*` op's listener param needs the
-                    // failure-detection readback (see the doc comment
-                    // above) — a self-referential `set_listener`-style op
-                    // needs only its return code checked after the call:
-                    // the core releases whatever it replaces on its own.
-                    if (ret_is_entity) {
-                        const target = resolveToNamedDecl(op.return_type.?).interface;
-                        var t_ops = std.ArrayListUnmanaged(ir.Operation).empty;
-                        defer t_ops.deinit(self.alloc);
-                        var t_attrs = std.ArrayListUnmanaged(ir.Attribute).empty;
-                        defer t_attrs.deinit(self.alloc);
-                        try self.collectMembers(target, &t_ops, &t_attrs);
-                        // Without exactly one getter for this callback there
-                        // is nothing safe to read back, so a failed create
-                        // leaks the registration rather than risk freeing one
-                        // the entity holds (`interface.callbackGetterFor`).
-                        const cb = interface.callbackInterfaceOf(p.type_ref);
-                        if (if (cb) |c| interface.callbackGetterFor(t_ops.items, c) else null) |glo| {
-                            try created_listener_params.append(self.alloc, .{
-                                .name = try self.alloc.dupe(u8, p.name),
-                                .listener_c = try self.typeRefToC(glo.return_type.?),
-                                .getter = try self.alloc.dupe(u8, glo.name),
-                            });
-                        }
-                    }
                     try self.emitListenerParamPrep(&p);
                 },
                 .string => try self.print(
@@ -7458,24 +7410,6 @@ const JniBridgeGenerator = struct {
         try self.write(");\n");
         if (ret_c != null) try self.print("    {s} _ret = ({s})_rc;\n", .{ jni_ret, jni_ret });
         try self.emitReleaseEviction(iface, op);
-
-        // `create_*`-shaped ops: the new entity has no "old" listener to
-        // worry about, only whether ours actually got installed — a failed
-        // create still returns *some* boxable handle in this ABI convention
-        // (a "nil" sentinel entity, not literal NULL — see zzdds's
-        // `nil.zig`), so checking `_h == NULL` would never catch this;
-        // reading the new entity's own listener back and comparing does.
-        for (created_listener_params.items) |lp| {
-            try self.print(
-                "    if (_p_{[name]s} != NULL) {{\n" ++
-                    "        {[lc]s} _now_{[name]s} = {[rc]s}_{[g]s}(_h);\n" ++
-                    "        int _installed_{[name]s} = _now_{[name]s}.listener_data == _c_{[name]s}.listener_data;\n" ++
-                    "        if (_now_{[name]s}.listener_data != NULL && _now_{[name]s}.retain_listener_data != NULL && _now_{[name]s}.release_listener_data != NULL) _now_{[name]s}.release_listener_data(_now_{[name]s}.listener_data);\n" ++
-                    "        if (!_installed_{[name]s}) zidl_java_release_listener_ctx(env, _c_{[name]s}.listener_data);\n" ++
-                    "    }}\n",
-                .{ .lc = lp.listener_c, .name = lp.name, .rc = ret_c_name.?, .g = lp.getter },
-            );
-        }
 
         // A call that fails registers none of its callbacks, so the provider
         // never releases the context references taken for them: drop them
@@ -10404,7 +10338,7 @@ test "java: a failed callback registration drops its context reference only with
     try testing.expect(std.mem.indexOf(u8, s, "zidl_java_release_listener_ctx(env, _c_r.listener_data)") == null);
 }
 
-test "java: callback aliases are callbacks to getters, read-backs and @success_result" {
+test "java: callback aliases are callbacks to getters and @success_result" {
     const alloc = testing.allocator;
     var ir_spec = try buildIrSpec(alloc,
         \\const long OK = 0;
@@ -10429,7 +10363,7 @@ test "java: callback aliases are callbacks to getters, read-backs and @success_r
 
     try testing.expect(std.mem.indexOf(u8, s, "Java_ChildImpl_n_1get_1listener") != null);
     try testing.expect(std.mem.indexOf(u8, s, "UnsupportedOperationException") == null);
-    try testing.expect(std.mem.indexOf(u8, s, "_now_c = Child_get_listener(_h);") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "Child_get_listener(_h)") == null);
     try testing.expect(std.mem.indexOf(u8, s, "    if (_rc != 0 && _p_l != NULL) zidl_java_release_listener_ctx(env, _c_l.listener_data);\n") != null);
 }
 
@@ -10558,7 +10492,7 @@ test "java: get_listener() is a real round-trip, not a stub" {
     try testing.expect(std.mem.indexOf(u8, c, "if (_l.listener_data != NULL && _l.retain_listener_data != NULL && _l.release_listener_data != NULL) _l.release_listener_data(_l.listener_data);") != null);
 }
 
-test "java: create_* listener param has no old-listener capture, but does verify installation" {
+test "java: a create_* listener param is the provider's: no old-listener capture, no read-back" {
     const alloc = testing.allocator;
     var ir_spec = try buildIrSpec(alloc,
         \\@callback interface FooListener { void on_event(); };
@@ -10584,18 +10518,14 @@ test "java: create_* listener param has no old-listener capture, but does verify
     try testing.expect(std.mem.indexOf(u8, s, "Java_ParentImpl_n_1create_1child") != null);
     try testing.expect(std.mem.indexOf(u8, s, "Parent_get_listener") == null);
 
-    // But it must still verify the newly-built context actually got
-    // installed on the *new* Child entity (via Child's own get_listener,
-    // called on `_h` — the just-created handle, before it's boxed) —
-    // otherwise a failed `create_child` (this ABI convention returns some
-    // boxable "nil" sentinel entity on failure, never literal NULL, so
-    // `_h == NULL` could never be used to detect this) leaks the context
-    // forever.
-    try testing.expect(std.mem.indexOf(u8, s, "Child_get_listener(_h)") != null);
-    try testing.expect(std.mem.indexOf(u8, s, "zidl_java_release_listener_ctx(env, _c_l.listener_data)") != null);
+    // Nor read the new Child's back: the provider releases a listener it
+    // does not install, failed create or not, so the context is never the
+    // bridge's to release.
+    try testing.expect(std.mem.indexOf(u8, s, "Child_get_listener(_h)") == null);
+    try testing.expect(std.mem.indexOf(u8, s, "zidl_java_release_listener_ctx(env, _c_l.listener_data)") == null);
 }
 
-test "java: a callback getter is known by its shape; the create_* read-back needs exactly one" {
+test "java: a callback getter is known by its shape; a create_* reads none back" {
     const alloc = testing.allocator;
     var ir_spec = try buildIrSpec(alloc,
         \\@callback interface FooListener { void on_event(); };
@@ -10625,11 +10555,10 @@ test "java: a callback getter is known by its shape; the create_* read-back need
 
     // Whatever its name, a no-argument op returning a callback is a getter.
     try testing.expect(std.mem.indexOf(u8, s, "Java_ChildImpl_n_1current_1listener") != null);
-    // The getter of a base type reads back a FooListenerEx registration.
-    try testing.expect(std.mem.indexOf(u8, s, "FooListener _now_l = Child_current_listener(_h);") != null);
-    try testing.expect(std.mem.indexOf(u8, s, "_now_b = Child_bar_listener(_h);") != null);
-    // Two getters could each be the one: no read-back, rather than a guess.
-    try testing.expect(std.mem.indexOf(u8, s, "_now_t") == null);
+    // A create_* calls no getter on the new entity.
+    try testing.expect(std.mem.indexOf(u8, s, "_now_") == null);
+    try testing.expect(std.mem.indexOf(u8, s, "Child_current_listener(_h)") == null);
+    try testing.expect(std.mem.indexOf(u8, s, "Child_bar_listener(_h)") == null);
 }
 
 test "java: delete_<entity> emits no listener bookkeeping of its own anymore" {
