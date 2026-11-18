@@ -1,4 +1,4 @@
-//! Drives the C constructors exportCAbiConstructors generated for
+//! Drives the C functions exportCAbi exports for
 //! standalone.idl, through their C signatures.
 
 const std = @import("std");
@@ -15,15 +15,19 @@ extern fn S_Engine_create() H;
 extern fn S_Engine_create_with_allocator(allocator: ?*const zb.ZidlAllocator) H;
 extern fn S_Engine_create_with(cfg: ?*const S.ConfigCAbi, pins: i32) H;
 extern fn S_Engine_create_with_with_allocator(allocator: ?*const zb.ZidlAllocator, cfg: ?*const S.ConfigCAbi, pins: i32) H;
-extern fn S_Engine_destroy(self: *anyopaque) S.ReturnCode_t;
-extern fn S_Engine_release(self: *anyopaque) void;
-extern fn S_Engine_get_workers(self: *anyopaque) i32;
-extern fn S_Engine_unpin(self: *anyopaque) S.ReturnCode_t;
+extern fn S_Engine_destroy(self: H) S.ReturnCode_t;
+extern fn S_Engine_release(self: H) void;
+extern fn S_Engine_get_workers(self: H) i32;
+extern fn S_Engine_unpin(self: H) S.ReturnCode_t;
 extern fn S_Guard_create() H;
-extern fn S_Guard_destroy(self: *anyopaque) S.ReturnCode_t;
-extern fn S_Guard_as_S_Condition(self: *anyopaque) *anyopaque;
-extern fn S_Condition_get_trigger_value(self: *anyopaque) bool;
-extern fn S_Guard_set_trigger_value(self: *anyopaque, value: bool) S.ReturnCode_t;
+extern fn S_Guard_destroy(self: H) S.ReturnCode_t;
+extern fn S_Guard_as_S_Condition(self: H) H;
+extern fn S_Condition_get_trigger_value(self: H) bool;
+extern fn S_Guard_set_trigger_value(self: H, value: bool) S.ReturnCode_t;
+extern fn S_Holder_create() H;
+extern fn S_Holder_destroy(self: H) S.ReturnCode_t;
+extern fn S_Holder_hold(self: H, cond: H) S.ReturnCode_t;
+extern fn S_Holder_held(self: H) H;
 
 const testing = std.testing;
 
@@ -116,10 +120,44 @@ test "a shared-box family member's constructor returns its family's one handle" 
     provider.test_stats_reset();
     const g = S_Guard_create().?;
     // Upcasting a shared box returns the same handle, not a second one.
-    const c = S_Guard_as_S_Condition(g);
+    const c = S_Guard_as_S_Condition(g).?;
     try testing.expectEqual(g, c);
     try testing.expectEqual(S.RETCODE_OK, S_Guard_set_trigger_value(g, true));
     try testing.expect(S_Condition_get_trigger_value(c));
     try testing.expectEqual(S.RETCODE_OK, S_Guard_destroy(g));
     try expectStats(0, 1, 0);
+}
+
+test "a NULL object is the provider's nil" {
+    provider.test_stats_reset();
+    try testing.expectEqual(@as(i32, -1), S_Engine_get_workers(null));
+    try testing.expectEqual(S.RETCODE_BAD_PARAMETER, S_Engine_destroy(null));
+    try testing.expectEqual(S.RETCODE_BAD_PARAMETER, S_Engine_unpin(null));
+    S_Engine_release(null);
+    try testing.expect(!S_Condition_get_trigger_value(null));
+    try testing.expectEqual(S.RETCODE_BAD_PARAMETER, S_Guard_set_trigger_value(null, true));
+    try testing.expect(S_Holder_held(null) == null);
+    try expectStats(0, 0, 0);
+}
+
+test "an upcast of NULL is NULL" {
+    try testing.expect(S_Guard_as_S_Condition(null) == null);
+}
+
+test "a nil result goes out as NULL, and a NULL argument comes in as the nil" {
+    provider.test_stats_reset();
+    const h = S_Holder_create().?;
+    // Nothing held yet: the provider's nil Condition.
+    try testing.expect(S_Holder_held(h) == null);
+    // The provider calls through the nil a NULL condition becomes.
+    try testing.expectEqual(S.RETCODE_OK, S_Holder_hold(h, null));
+    try testing.expect(S_Holder_held(h) == null);
+
+    const g = S_Guard_create().?;
+    const c = S_Guard_as_S_Condition(g).?;
+    try testing.expectEqual(S.RETCODE_OK, S_Holder_hold(h, c));
+    try testing.expectEqual(c, S_Holder_held(h).?);
+    try testing.expectEqual(S.RETCODE_OK, S_Guard_destroy(g));
+    try testing.expectEqual(S.RETCODE_OK, S_Holder_destroy(h));
+    try expectStats(0, 2, 0);
 }

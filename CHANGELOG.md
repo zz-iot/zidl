@@ -18,6 +18,28 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- **Breaking** for providers of a `--zig-generate-c-api` module: its C functions are no
+  longer exported on their own. Each module scope has `exportCAbi(comptime Provider:
+  type)`, which the provider calls once, from a `comptime` block, and which exports the
+  C functions of every interface declared directly in it. It replaces each
+  `@standalone` interface's `exportCAbiConstructors`: the provider's
+  `constructors(comptime I: type) type` gives each interface's constructors. See
+  `docs/design/standalone-construction.md`.
+
+- NULL is every interface's nil at the C ABI. The provider's `exportCAbi` type must
+  declare `nil(comptime I: type) I`, its nil of each interface type (`.ptr` is
+  `zidl_bindings.NIL_PTR`). A NULL handle passed as a function's object, an entity
+  argument or an entity attribute value becomes that nil, and the call goes through it;
+  a nil result, entity attribute or sequence element goes out as NULL, and an upcast of
+  NULL is NULL. A failed `create_*` used to return a boxed nil, a non-NULL handle C
+  callers could not tell from a real one, so their NULL checks never fired; a NULL
+  object crashed, and a NULL entity argument reached the provider with an undefined
+  vtable. C++ and Java already map NULL to `nullptr` and `null`, so their failed
+  `create_*` now returns that too. **Breaking** for providers, which must supply the
+  nils, and for C callers that called through a failed `create_*`'s result unchecked:
+  it is now NULL, which still reaches the provider's nil. See
+  `docs/design/c-abi-provider.md`.
+
 - **Breaking** for providers: C++ and Java no longer read a new object's
   callback back after an operation that returns one (a `create_*`) to release
   a registration it did not install. A provider owns every callback passed to

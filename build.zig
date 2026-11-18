@@ -427,7 +427,7 @@ pub fn build(b: *std.Build) void {
 
     // ── @standalone construction, end to end ──────────────────────────────────
     // A Zig provider exports standalone.idl's constructors through the
-    // generated exportCAbiConstructors; a Zig test calls them through their C
+    // generated exportCAbi; a Zig test calls them through their C
     // signatures, and a C++ test through the generated binding (ownership,
     // destructor and finalizer, family identity).
     {

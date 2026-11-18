@@ -1045,11 +1045,11 @@ const Generator = struct {
                     base_name, child_name, base_name, child_name,
                 });
             } else {
-                try self.print("/* Upcast {s} to {s}. */\n", .{ child_name, base_name });
+                try self.print("/* Upcast {s} to {s}; NULL for NULL. */\n", .{ child_name, base_name });
                 try self.print("{s} {s}_as_{s}({s} child);\n", .{
                     base_name, child_name, base_name, child_name,
                 });
-                try self.print("/* Downcast {s} to {s}; returns a null handle when the base object is not an instance of {s}. */\n", .{ base_name, child_name, child_name });
+                try self.print("/* Downcast {s} to {s}; returns a null handle when the base object is NULL or not an instance of {s}. */\n", .{ base_name, child_name, child_name });
                 try self.print("{s} {s}_as_{s}({s} base);\n", .{
                     child_name, base_name, child_name, base_name,
                 });

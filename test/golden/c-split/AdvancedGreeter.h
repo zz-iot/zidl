@@ -15,9 +15,9 @@ void AdvancedGreeter_reset(AdvancedGreeter self);
 void AdvancedGreeter_greetAdvanced(AdvancedGreeter self, const char *name);
 int32_t AdvancedGreeter_get_count(AdvancedGreeter self);
 /* Cast helpers are emitted for direct inheritance edges; compose helpers for transitive casts. */
-/* Upcast AdvancedGreeter to Greeter. */
+/* Upcast AdvancedGreeter to Greeter; NULL for NULL. */
 Greeter AdvancedGreeter_as_Greeter(AdvancedGreeter child);
-/* Downcast Greeter to AdvancedGreeter; returns a null handle when the base object is not an instance of AdvancedGreeter. */
+/* Downcast Greeter to AdvancedGreeter; returns a null handle when the base object is NULL or not an instance of AdvancedGreeter. */
 AdvancedGreeter Greeter_as_AdvancedGreeter(Greeter base);
 
 #endif /* ADVANCEDGREETER_H */

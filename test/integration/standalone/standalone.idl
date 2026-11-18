@@ -1,8 +1,9 @@
 // @standalone construction across the C ABI: a Zig provider built on the
-// generated exportCAbiConstructors, driven from Zig and from the generated
+// generated exportCAbi, driven from Zig and from the generated
 // C++ binding. See docs/design/standalone-construction.md.
 module S {
     const long RETCODE_OK = 0;
+    const long RETCODE_BAD_PARAMETER = 3;
     const long RETCODE_PRECONDITION_NOT_MET = 4;
     const long RETCODE_ALREADY_DELETED = 9;
     @success_result(RETCODE_OK) @retired_result(RETCODE_ALREADY_DELETED)
@@ -36,6 +37,7 @@ module S {
     };
 
     // Hands a condition back, so the binding must box a handle it created.
+    // Until one is held, held() is nil.
     @standalone interface Holder {
         @constructor Holder create();
         @destructor ReturnCode_t destroy();
