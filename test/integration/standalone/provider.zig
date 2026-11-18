@@ -8,10 +8,18 @@ const S = @import("standalone").S;
 
 comptime {
     zb.exportHandleRetireHook("test_retire");
-    S.Engine.exportCAbiConstructors(EngineCtors);
-    S.Guard.exportCAbiConstructors(GuardCtors);
-    S.Holder.exportCAbiConstructors(HolderCtors);
+    S.exportCAbi(Provider);
 }
+
+/// What the generated C API needs from this provider.
+const Provider = struct {
+    pub fn constructors(comptime I: type) type {
+        if (I == S.Engine) return EngineCtors;
+        if (I == S.Guard) return GuardCtors;
+        if (I == S.Holder) return HolderCtors;
+        @compileError("no constructors for " ++ @typeName(I));
+    }
+};
 
 pub const Stats = extern struct {
     live: i32 = 0,

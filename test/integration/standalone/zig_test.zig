@@ -1,4 +1,4 @@
-//! Drives the C constructors exportCAbiConstructors generated for
+//! Drives the C functions exportCAbi exports for
 //! standalone.idl, through their C signatures.
 
 const std = @import("std");

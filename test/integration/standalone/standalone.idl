@@ -1,5 +1,5 @@
 // @standalone construction across the C ABI: a Zig provider built on the
-// generated exportCAbiConstructors, driven from Zig and from the generated
+// generated exportCAbi, driven from Zig and from the generated
 // C++ binding. See docs/design/standalone-construction.md.
 module S {
     const long RETCODE_OK = 0;

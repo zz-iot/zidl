@@ -18,6 +18,14 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- **Breaking** for providers of a `--zig-generate-c-api` module: its C functions are no
+  longer exported on their own. Each module scope has `exportCAbi(comptime Provider:
+  type)`, which the provider calls once, from a `comptime` block, and which exports the
+  C functions of every interface declared directly in it. It replaces each
+  `@standalone` interface's `exportCAbiConstructors`: the provider's
+  `constructors(comptime I: type) type` gives each interface's constructors. See
+  `docs/design/standalone-construction.md`.
+
 - **Breaking** for providers: C++ and Java no longer read a new object's
   callback back after an operation that returns one (a `create_*`) to release
   a registration it did not install. A provider owns every callback passed to

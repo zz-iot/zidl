@@ -74,14 +74,21 @@ ordinary instance functions (`S_Engine_destroy`, `S_Engine_release`).
 
 ### Zig provider (`--zig-generate-c-api`)
 
-The interface struct gains `exportCAbiConstructors`. The provider calls it once, from a
-`comptime` block, with a type declaring each constructor:
+A module's C functions, constructors included, are exported by its `exportCAbi`. The
+provider calls it once, from a `comptime` block, with a type whose
+`constructors(comptime I: type) type` returns, for each `@standalone` interface, a type
+declaring its constructors:
 
 ```zig
 comptime {
-    S.Engine.exportCAbiConstructors(struct {
-        pub fn create(alloc: std.mem.Allocator) !S.Engine { ... }
-        pub fn create_with(alloc: std.mem.Allocator, cfg: *const S.Config, pins: i32) !S.Engine { ... }
+    S.exportCAbi(struct {
+        pub fn constructors(comptime I: type) type {
+            if (I == S.Engine) return struct {
+                pub fn create(alloc: std.mem.Allocator) !S.Engine { ... }
+                pub fn create_with(alloc: std.mem.Allocator, cfg: *const S.Config, pins: i32) !S.Engine { ... }
+            };
+            @compileError("no constructors for " ++ @typeName(I));
+        }
     });
 }
 ```
@@ -150,7 +157,7 @@ and the JNI bridge drops the handle from the identity cache.
 
 ## Tests
 
-`test/integration/standalone/` has a Zig provider built on `exportCAbiConstructors`,
+`test/integration/standalone/` has a Zig provider built on `exportCAbi`,
 driven three ways:
 
 - **Zig** through the C signatures (`zig_test.zig`).
