@@ -1979,7 +1979,7 @@ pub fn build(b: *std.Build) void {
                 for (&[_][]const u8{ "Core.java", "TopicDescriptionImpl.java", "TopicImpl.java", "ContentFilteredTopicImpl.java", "FactoryImpl.java" }) |f| {
                     compile_xfw_java.addFileArg(xfw_java_base_dir.path(b, f));
                 }
-                for (&[_][]const u8{ "Plugin.java", "ReaderImpl.java" }) |f| {
+                for (&[_][]const u8{ "Plugin.java", "TopicImpl.java", "ReaderImpl.java" }) |f| {
                     compile_xfw_java.addFileArg(xfw_java_ext_dir.path(b, f));
                 }
                 const run_xfw_java = javaCommand(b, &.{ java, "-cp", "build-tmp/integ-java-xfw" }, java_cdr);

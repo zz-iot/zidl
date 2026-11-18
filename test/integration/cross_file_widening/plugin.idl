@@ -1,11 +1,19 @@
 // Importing module: `id_of` declares an imported base interface parameter,
-// and this file never names the imported subtypes. A caller passing a
+// and this file names no imported subtype in it. A caller passing a
 // core::Topic or core::ContentFilteredTopic must still have its handle
 // converted to the TopicDescription view (see native.c).
 import "core.idl";
 
 module plugin {
+    // An extension of an imported entity, as zzdds::Topic extends DDS::Topic:
+    // the generated C++ and Java classes must implement the imported bases'
+    // operations (get_id) by converting their handle to that base's view.
+    interface Topic : core::Topic {
+        long plugin_id();
+    };
+
     interface Reader {
         long id_of(in core::TopicDescription t);
+        Topic create_plugin_topic(in long id);
     };
 };

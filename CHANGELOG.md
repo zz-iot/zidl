@@ -18,6 +18,13 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- C++: a class extending an entity interface declared in an imported IDL file (zzdds's
+  `zzdds::DataReader : DDS::DataReader`) now implements the imported bases' operations,
+  forwarding each to the base's C function through the generated upcast, as Java already
+  did. The generated class is concrete, so it can be constructed (a `@standalone`
+  extension, or a wrapper of an extension handle) without a hand-written subclass that
+  forwards them. Inherited raw-loan operations convert the handle too.
+
 - **Breaking** for providers of a `--zig-generate-c-api` module: its C functions are no
   longer exported on their own. Each module scope has `exportCAbi(comptime Provider:
   type)`, which the provider calls once, from a `comptime` block, and which exports the

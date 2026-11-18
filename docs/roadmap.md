@@ -79,8 +79,8 @@ Features*.
 - **Import limitations** — transitive imports are unsupported pipeline-wide (`processFile`
   only scans the primary file's own top-level `import_dcl`s; `fillFromImportedAst` only
   fills directly imported units). Scoped-name imports (`import ::Foo;`) are rejected with a
-  "use `import "file.idl";`" diagnostic. Cross-module *entity*-interface flattening relies
-  on there never being real cross-module content (see `decisions.md`). `ir/builder.zig:119`,
+  "use `import "file.idl";`" diagnostic. Cross-module *entity*-interface flattening is limited
+  to the Java and C++ backends (see `decisions.md`). `ir/builder.zig:119`,
   `semantic/analyzer.zig:1034`.
 - **Semantic validation gaps** — no type-checking of const assignments
   (`const long x = "hello"` is not caught); union-discriminant *type* validation accepts

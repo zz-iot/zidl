@@ -4,6 +4,8 @@
  * member, reached only through core_Topic_as_core_TopicDescription. Every
  * struct starts with a tag, so plugin_Reader_id_of can tell whether a binding
  * passed the TopicDescription view or an unconverted Topic/CFT handle (-1).
+ * A plugin::Topic embeds its core::Topic view the same way, so an inherited
+ * core operation called with an unconverted plugin::Topic handle returns -1.
  */
 #include "core.h"
 #include "plugin.h"
@@ -12,7 +14,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-enum { TAG_TD = 0x7D7D, TAG_TOPIC = 0x7070, TAG_CFT = 0xCF7C };
+enum { TAG_TD = 0x7D7D, TAG_TOPIC = 0x7070, TAG_CFT = 0xCF7C, TAG_PLUGIN_TOPIC = 0x9797 };
 
 struct core_TopicDescription_s {
     int tag;
@@ -23,6 +25,7 @@ struct core_TopicDescription_s {
 struct core_Topic_s {
     int tag;
     struct core_TopicDescription_s td;
+    struct plugin_Topic_s *ext; /* the plugin::Topic this view belongs to, if any */
 };
 struct core_ContentFilteredTopic_s {
     int tag;
@@ -30,6 +33,11 @@ struct core_ContentFilteredTopic_s {
 };
 struct core_Factory_s {
     int unused;
+};
+struct plugin_Topic_s {
+    int tag;
+    struct core_Topic_s topic;
+    int32_t plugin_id;
 };
 struct plugin_Reader_s {
     int unused;
@@ -47,6 +55,7 @@ core_Topic core_Factory_create_topic(core_Factory self, int32_t id) {
     struct core_Topic_s *t = malloc(sizeof *t);
     t->tag = TAG_TOPIC;
     init_td(&t->td, id, TAG_TOPIC, t);
+    t->ext = NULL;
     return t;
 }
 
@@ -85,6 +94,27 @@ core_ContentFilteredTopic core_TopicDescription_as_core_ContentFilteredTopic(cor
 int32_t plugin_Reader_id_of(plugin_Reader self, core_TopicDescription t) {
     (void)self;
     return core_TopicDescription_get_id(t);
+}
+
+plugin_Topic plugin_Reader_create_plugin_topic(plugin_Reader self, int32_t id) {
+    (void)self;
+    struct plugin_Topic_s *p = malloc(sizeof *p);
+    p->tag = TAG_PLUGIN_TOPIC;
+    p->topic.tag = TAG_TOPIC;
+    init_td(&p->topic.td, id, TAG_TOPIC, &p->topic);
+    p->topic.ext = p;
+    p->plugin_id = id * 10;
+    return p;
+}
+
+int32_t plugin_Topic_plugin_id(plugin_Topic self) {
+    return (self && self->tag == TAG_PLUGIN_TOPIC) ? self->plugin_id : -1;
+}
+core_Topic plugin_Topic_as_core_Topic(plugin_Topic child) {
+    return (child && child->tag == TAG_PLUGIN_TOPIC) ? &child->topic : NULL;
+}
+plugin_Topic core_Topic_as_plugin_Topic(core_Topic base) {
+    return (base && base->tag == TAG_TOPIC) ? base->ext : NULL;
 }
 
 static struct core_Factory_s g_factory;

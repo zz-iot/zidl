@@ -3,6 +3,9 @@
 // core::TopicDescription parameter, must accept the imported subtypes
 // core::Topic and core::ContentFilteredTopic and pass their TopicDescription
 // view to the C ABI (native.c returns -1 for any other handle).
+// plugin::Topic extends the imported core::Topic: its generated class must be
+// concrete, implementing get_id (declared in core.idl) by converting its
+// handle to the core view.
 #include "core_impl.hpp"
 #include "plugin_impl.hpp"
 
@@ -33,6 +36,12 @@ int main() {
 
     CHECK(reader->id_of(topic) == 11);
     CHECK(reader->id_of(cft) == 22);
+
+    std::shared_ptr<::plugin::Topic> ptopic = reader->create_plugin_topic(33);
+    CHECK(ptopic);
+    CHECK(ptopic->plugin_id() == 330);
+    CHECK(ptopic->get_id() == 33);
+    CHECK(reader->id_of(ptopic) == 33);
 
     std::printf("cross_file_widening C++: all checks passed\n");
     return 0;

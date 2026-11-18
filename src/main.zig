@@ -659,12 +659,12 @@ fn processFile(
     for (imported_ast_specs.items, imported_analyzers.items) |iu_ast, iu_az| {
         try imported_units.append(ialloc, .{ .ast_spec = iu_ast, .scope = iu_az.global_scope });
     }
-    // Only the Java backend's generators (ImplFileGenerator/JniBridgeGenerator
-    // collectMembers) walk a cross-module *entity* interface base's real
-    // member list — see `buildWithImportedUnits`'s `fill_entity_bases` doc.
-    // Every other backend keeps the existing reset (its own per-backend
-    // mechanism was never built to handle real content here).
-    const fill_entity_bases = std.mem.eql(u8, opts.backend, "java");
+    // The Java and C++ backends implement an interface's inherited
+    // operations, including those of a base declared in an imported file, so
+    // they need that base's real member list — see
+    // `buildWithImportedUnits`'s `fill_entity_bases` doc. Every other backend
+    // keeps the reset.
+    const fill_entity_bases = std.mem.eql(u8, opts.backend, "java") or std.mem.eql(u8, opts.backend, "cpp");
     var ir_spec = try zidl.ir.buildWithImportedUnits(
         alloc,
         &ast_spec,

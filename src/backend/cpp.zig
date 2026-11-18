@@ -4268,20 +4268,12 @@ const ConcreteImplGenerator = struct {
         //
         // Some entity interfaces are never wrapped anywhere: typically ones
         // that add only a few operations on top of an inherited, cross-module
-        // abstract interface (e.g. zzdds.idl's extension interfaces over
-        // dcps.idl's DDS.* base interfaces). Entity interfaces don't get
-        // cross-module operation flattening (only `@callback` interfaces do —
-        // see `resetNonCallbackInterfaces` in `ir/builder.zig`), so such a
-        // class's generated Impl never implements the inherited base's pure
-        // virtuals and is left intentionally abstract, completed instead by
-        // a hand-written subclass elsewhere (e.g. zzdds_cpp.hpp's
-        // DomainParticipantFactorySupport, composing a fully-implemented
-        // DDS::DomainParticipantFactoryImpl rather than inheriting from the
-        // generated one). Emitting _getOrCreate unconditionally for such a
-        // class would try to std::make_shared an abstract type the moment
-        // the generated .cpp is compiled, even though nothing ever calls it —
-        // confirmed by a real build: every one of zzdds.idl's five entity
-        // classes failed this way before this pre-scan was added.
+        // interface (e.g. zzdds.idl's extension interfaces over dcps.idl's
+        // DDS.* base interfaces), whose objects a provider hands out through
+        // a --cpp-impl-override class instead. Emitting _getOrCreate for a
+        // class nothing wraps would generate code no caller needs. (Before
+        // the C++ backend received imported bases' operations, such a class
+        // was also abstract, and _getOrCreate failed to compile.)
         {
             var scratch_hdr = std.ArrayList(u8).empty;
             var scratch_src = std.ArrayList(u8).empty;
@@ -4904,7 +4896,7 @@ const ConcreteImplGenerator = struct {
 
         for (ops.items) |op| {
             if (Generator.isRawLoanOp(op.owner.qualified_name, op.op.name)) {
-                try self.emitRawLoanImplOp(op.owner, iface.name, op.op);
+                try self.emitRawLoanImplOp(iface, op.owner, iface.name, op.op);
                 continue;
             }
             if (op.owner == iface and iface.constructors.len > 0 and (ir.isDestructorOp(op.op) or ir.isFinalizerOp(op.op))) {
@@ -5553,7 +5545,13 @@ const ConcreteImplGenerator = struct {
     /// reuses the exact same per-kind adaptation `emitAdaptedParams` uses,
     /// just invoked directly here since this function only ever sees that
     /// small known set of non-raw params across all 8 `isRawLoanOp` ops.
-    fn emitRawLoanImplOp(self: *ConcreteImplGenerator, owner: *const ir.Interface, class_name: []const u8, op: *const ir.Operation) !void {
+    /// `iface` is the class being generated and `owner` the interface that
+    /// declares `op`; when they differ (zzdds::DataReader inheriting
+    /// DDS::DataReader's raw-loan operations), `ptr_` is converted to the
+    /// owner's handle, as for every other inherited operation.
+    fn emitRawLoanImplOp(self: *ConcreteImplGenerator, iface: *const ir.Interface, owner: *const ir.Interface, class_name: []const u8, op: *const ir.Operation) !void {
+        const handle_expr = try self.handleExprForOwner(iface, owner, "ptr_");
+        defer self.alloc.free(handle_expr);
         const owner_c_name = try cNameOf(self.alloc, owner.qualified_name);
         defer self.alloc.free(owner_c_name);
         const ret_cpp = if (op.return_type) |rt| try self.typeRefToCpp(rt) else try self.alloc.dupe(u8, "void");
@@ -5585,9 +5583,9 @@ const ConcreteImplGenerator = struct {
         }
 
         if (op.return_type != null) {
-            try self.srcPrint("    return {s}_{s}(ptr_", .{ owner_c_name, op.name });
+            try self.srcPrint("    return {s}_{s}({s}", .{ owner_c_name, op.name, handle_expr });
         } else {
-            try self.srcPrint("    {s}_{s}(ptr_", .{ owner_c_name, op.name });
+            try self.srcPrint("    {s}_{s}({s}", .{ owner_c_name, op.name, handle_expr });
         }
         for (op.params) |p| {
             try self.srcWrite(", ");
@@ -11050,6 +11048,24 @@ test "cpp_backend: raw-loan ops pass identity-preserving params straight through
     // passthrough -- same regression test as the interface-level one above,
     // at the impl layer.
     try testing.expect(has(src, "Foo_DataWriter_loan_raw(ptr_, size, &_c_cdr_payload)"));
+}
+
+test "cpp_backend: an extension Impl forwards inherited raw-loan ops through the generated C casts" {
+    var res = try testGenConcreteImpl(raw_loan_fixture ++
+        \\module zzdds {
+        \\    interface DataWriter : DDS::DataWriter {};
+        \\    interface DataReader : DDS::DataReader {};
+        \\};
+    );
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "DDS_DataWriter_loan_raw(zzdds_DataWriter_as_DDS_DataWriter(ptr_), size, &cdr_payload)"));
+    try testing.expect(has(src, "DDS_DataWriter_publish_loan_raw(zzdds_DataWriter_as_DDS_DataWriter(ptr_), &cdr_payload,"));
+    try testing.expect(has(src, "DDS_DataWriter_return_loan_raw(zzdds_DataWriter_as_DDS_DataWriter(ptr_), &cdr_payload)"));
+    try testing.expect(has(src, "DDS_DataReader_take_raw(zzdds_DataReader_as_DDS_DataReader(ptr_), &cdr_payloads, &key_hashes, &sample_infos,"));
+    try testing.expect(has(src, "DDS_DataReader_return_loan_raw(zzdds_DataReader_as_DDS_DataReader(ptr_), &cdr_payloads, &key_hashes, &sample_infos)"));
+    // The base's own Impl still calls its own functions with its own handle.
+    try testing.expect(has(src, "DDS_DataReader_take_raw(ptr_, &cdr_payloads, &key_hashes, &sample_infos,"));
 }
 
 test "cpp_backend: union CDR prototypes are declared once, with C linkage" {
