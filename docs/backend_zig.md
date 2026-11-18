@@ -394,7 +394,9 @@ Entity interfaces (those NOT annotated with `@callback`) emit a C-ABI-compatible
 fat-pointer vtable struct.  Vtable slots use C-ABI types throughout: strings are
 `[*:0]const u8`, struct params are `*const T`, and callback interfaces are
 `?*const CallbackStruct`.  The C export functions (`--zig-generate-c-api`) are trivial
-one-line forwarders — no conversion code is emitted.
+one-line forwarders — no conversion code is emitted. The provider exports them by calling
+each module's `exportCAbi`, which also takes its nils and constructors; NULL is every
+interface's nil at the C ABI. See [`design/c-abi-provider.md`](design/c-abi-provider.md).
 
 ```zig
 pub const MyInterface = extern struct {

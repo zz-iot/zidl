@@ -179,6 +179,20 @@ static void test_allocator_overload() {
 
 // The wrapper Guard::create returns is the one its family's cache hands
 // back for the same handle, through the Condition root.
+// A nil result comes back as nullptr, and nullptr goes in as the provider's
+// nil, which the provider can call through.
+static void test_nil() {
+    test_stats_reset();
+    {
+        auto h = S::Holder::create();
+        CHECK(h);
+        CHECK(!h->held());
+        CHECK(h->hold(nullptr) == S::RETCODE_OK);
+        CHECK(!h->held());
+    }
+    expect_stats(0, 1, 0);
+}
+
 static void test_family_identity() {
     test_stats_reset();
     {
@@ -240,6 +254,7 @@ int main() {
     test_release_then_drop();
     test_failed_constructor();
     test_allocator_overload();
+    test_nil();
     test_family_identity();
     test_reused_address();
     test_boxing_throws();

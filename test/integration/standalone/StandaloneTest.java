@@ -84,6 +84,14 @@ public class StandaloneTest {
         stats(0, 0, 0, "a failed constructor leaves nothing");
 
         nReset();
+        try (Standalone.S.Holder h = Standalone.S.Holder.create()) {
+            check(h.held() == null, "a nil result is null");
+            check(h.hold(null) == OK, "null goes in as the provider's nil");
+            check(h.held() == null, "and comes back as null");
+        }
+        stats(0, 1, 0, "the holder was destroyed");
+
+        nReset();
         try (Standalone.S.Guard g = Standalone.S.Guard.create();
              Standalone.S.Holder h = Standalone.S.Holder.create()) {
             check(h.hold(g) == OK, "hold");

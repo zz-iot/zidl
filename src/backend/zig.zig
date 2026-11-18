@@ -455,22 +455,33 @@ const Generator = struct {
     /// With --zig-generate-c-api: a module scope's `exportCAbi`, which
     /// exports the C functions of every interface declared directly in it.
     /// The provider calls it once per module, from a `comptime` block, with
-    /// a type supplying what only the provider knows: when the module has a
-    /// `@standalone` interface with `@constructor`s, `pub fn
-    /// constructors(comptime I: type) type`, a type declaring each as
-    /// `pub fn <name>(alloc: std.mem.Allocator, ...) !I`.
+    /// a type supplying what only the provider knows (see
+    /// docs/design/c-abi-provider.md):
+    ///   - `pub fn nil(comptime I: type) I`: its nil value of each interface
+    ///     type these functions take or return, whose `.ptr` is
+    ///     `zidl_bindings.NIL_PTR`. A NULL handle coming in becomes that nil,
+    ///     and a nil going out becomes NULL.
+    ///   - `pub fn constructors(comptime I: type) type`, when the module has
+    ///     a `@standalone` interface with `@constructor`s: a type declaring
+    ///     each as `pub fn <name>(alloc: std.mem.Allocator, ...) !I`.
     fn emitModuleCApiExport(self: *Generator) anyerror!void {
         if (self.cabi_helpers.items.len == 0) return;
         try self.ind();
         try self.write("/// Exports this module's C API. Call once, from a `comptime` block, with a\n");
         try self.ind();
-        try self.write("/// type declaring, for `@standalone` interfaces, `pub fn constructors(comptime\n");
+        try self.write("/// type declaring `pub fn nil(comptime I: type) I` (the provider's nil value of\n");
         try self.ind();
-        try self.write("/// I: type) type` (each `@constructor` as `pub fn <name>(alloc:\n");
+        try self.write("/// each interface type: NULL handles coming in become it, and it goes out as\n");
         try self.ind();
-        try self.write("/// std.mem.Allocator, ...) !I`).\n");
+        try self.write("/// NULL) and, for `@standalone` interfaces, `pub fn constructors(comptime I:\n");
+        try self.ind();
+        try self.write("/// type) type` (each `@constructor` as `pub fn <name>(alloc: std.mem.Allocator,\n");
+        try self.ind();
+        try self.write("/// ...) !I`). See zidl's docs/design/c-abi-provider.md.\n");
         try self.ind();
         try self.write("pub fn exportCAbi(comptime _Provider: type) void {\n");
+        try self.ind();
+        try self.write("    if (!@hasDecl(_Provider, \"nil\")) @compileError(\"exportCAbi: the provider must declare `pub fn nil(comptime I: type) I`\");\n");
         for (self.cabi_helpers.items) |h| {
             try self.ind();
             try self.print("    {s}(_Provider);\n", .{h});
@@ -2592,8 +2603,8 @@ const Generator = struct {
         self.depth -= 2;
         try self.ind();
         try self.write("    };\n");
-        // Only constructors refer to `_Provider`.
-        if (iface.constructors.len == 0) {
+        // Upcasts alone never refer to `_Provider`.
+        if (ops.len == 0 and attrs.len == 0 and iface.constructors.len == 0) {
             try self.ind();
             try self.write("    _ = _Provider;\n");
         }
@@ -2636,7 +2647,9 @@ const Generator = struct {
     /// from `emitCApiOp` because the two names involved — the native vtable
     /// slot (simple base name, e.g. `as_Entity`) and the exported C symbol
     /// (fully qualified, e.g. `DDS_Topic_as_DDS_Entity`) — are deliberately
-    /// different, unlike every other operation where both names match.
+    /// different, unlike every other operation where both names match. An
+    /// upcast of NULL, or of a nil, is NULL, so upcasts compose with any
+    /// handle a C caller holds.
     fn emitCApiAsBase(
         self: *Generator,
         c_name: []const u8,
@@ -2650,13 +2663,12 @@ const Generator = struct {
         defer self.alloc.free(base_qual_c_name);
 
         try self.ind();
-        try self.print("fn {s}_as_{s}(self: *anyopaque) callconv(.c) *anyopaque {{\n", .{ c_name, base_qual_c_name });
+        try self.print("fn {s}_as_{s}(self: ?*anyopaque) callconv(.c) ?*anyopaque {{\n", .{ c_name, base_qual_c_name });
         try self.ind();
-        try self.print("    const _self: {s}{s} = {s}({s}{s}, self);\n", .{ pfx, iface_name, self_unbox_fn, pfx, iface_name });
+        try self.print("    const _self: {s}{s} = {s}({s}{s}, self orelse return null);\n", .{ pfx, iface_name, self_unbox_fn, pfx, iface_name });
         try self.ind();
         try self.print("    const _r = _self.vtable.as_{s}(_self.ptr);\n", .{base_iface.name});
-        try self.ind();
-        try self.write("    return _r.vtable.get_c_abi_handle(_r.ptr);\n");
+        try self.emitCApiEntityReturn();
         try self.ind();
         try self.write("}\n\n");
     }
@@ -2908,7 +2920,7 @@ const Generator = struct {
         if (ctor) {
             try self.print("fn {s}_{s}_with_allocator(allocator: ?*const zidl_bindings.ZidlAllocator", .{ c_name, op.name });
         } else {
-            try self.print("fn {s}_{s}(self: *anyopaque", .{ c_name, op.name });
+            try self.print("fn {s}_{s}(self: ?*anyopaque", .{ c_name, op.name });
         }
         for (op.params) |p| {
             const pt = try self.cApiExportParamType(p);
@@ -2917,9 +2929,9 @@ const Generator = struct {
             // (DDS convention: null QoS means "use entity-type default QoS").
             // Entity-interface in-params are similarly nullable -- an optional
             // filter/condition param (e.g. dcps.idl's raw op family's
-            // `a_condition`) may legitimately have no entity at all, unlike a
-            // receiver/required param; see the unboxing call site below for
-            // how a null one is reconstructed as a nil-sentinel native value.
+            // `a_condition`) may legitimately have no entity at all; see the
+            // unboxing call site below for how a null one becomes the
+            // provider's nil.
             if (p.mode == .in_ and (std.mem.startsWith(u8, pt, "*const ") or typeRefIsEntityInterface(p.type_ref))) {
                 try self.print(", {s}: ?{s}", .{ p.name, pt });
             } else {
@@ -2932,7 +2944,7 @@ const Generator = struct {
         if (ctor) {
             try self.write("    const _alloc = if (allocator) |_a| zidl_bindings.toAllocator(_a) else zidlCAbiFreeAllocator();\n");
         } else {
-            try self.print("    const _self: {s}{s} = {s}({s}{s}, self);\n", .{ pfx, iface_name, self_unbox_fn, pfx, iface_name });
+            try self.emitCApiSelf(pfx, iface_name, self_unbox_fn);
         }
 
         // Entity-sequence params (DataReaderSeq, ConditionSeq, ...) need a
@@ -3078,15 +3090,10 @@ const Generator = struct {
                 const p_unbox_fn = cAbiUnboxFnName(typeRefEntityInterface(p.type_ref).?);
                 if (p.mode == .in_) {
                     // A NULL entity in-param means "no entity" (see the
-                    // signature-emission comment above) -- reconstruct it as
-                    // a nil-sentinel native value instead of unboxing a null
-                    // handle. `.vtable = undefined`: any well-behaved native
-                    // callee taking an optional entity param must check
-                    // `.ptr == zidl_bindings.NIL_PTR` (zzdds's `nil.isNil` does)
-                    // before ever touching `.vtable` on a value that might be
-                    // nil, the same discipline already required for a nil
-                    // entity returned by a failed create_*.
-                    try self.print(", if ({s}) |_h| {s}({s}, _h) else .{{ .ptr = zidl_bindings.NIL_PTR, .vtable = undefined }}", .{ p.name, p_unbox_fn, pzig });
+                    // signature-emission comment above): the provider's nil
+                    // of the parameter's type, which a callee can call
+                    // through like any other value.
+                    try self.print(", if ({s}) |_h| {s}({s}, _h) else _Provider.nil({s})", .{ p.name, p_unbox_fn, pzig, pzig });
                 } else {
                     try self.print(", {s}({s}, {s})", .{ p_unbox_fn, pzig, p.name });
                 }
@@ -3165,7 +3172,7 @@ const Generator = struct {
             try self.ind();
             try self.print("        const _bb = zidlCAbiFreeAllocator().alloc(?*anyopaque, _native_{s}._length) catch @panic(\"out of memory boxing entity sequence\");\n", .{p.name});
             try self.ind();
-            try self.print("        for (_native_{s}._buffer.?[0.._native_{s}._length], 0..) |_e, _i| {{ _bb[_i] = _e.vtable.get_c_abi_handle(_e.ptr); }}\n", .{ p.name, p.name });
+            try self.print("        for (_native_{s}._buffer.?[0.._native_{s}._length], 0..) |_e, _i| {{ _bb[_i] = if (_e.ptr == zidl_bindings.NIL_PTR) null else _e.vtable.get_c_abi_handle(_e.ptr); }}\n", .{ p.name, p.name });
             try self.ind();
             try self.print("        _boxed_{s} = _bb.ptr;\n", .{p.name});
             try self.ind();
@@ -3177,8 +3184,7 @@ const Generator = struct {
         }
 
         if (ret_is_entity) {
-            try self.ind();
-            try self.write("    return _r.vtable.get_c_abi_handle(_r.ptr);\n");
+            try self.emitCApiEntityReturn();
         } else if (ret_mirror_name) |mn| {
             const inner = try self.typeRefToZig(op.return_type.?);
             defer self.alloc.free(inner);
@@ -3219,7 +3225,8 @@ const Generator = struct {
     }
 
     /// Emit trivial `callconv(.c)` getter and optional setter forwarders for
-    /// an attribute, inside its interface's `_exportCAbi_{C}` helper. See `emitCApiOp` for the entity boxing/unboxing convention.
+    /// an attribute, inside its interface's `_exportCAbi_{C}` helper. See
+    /// `emitCApiOp` for the entity boxing/unboxing convention.
     fn emitCApiAttr(
         self: *Generator,
         c_name: []const u8,
@@ -3233,14 +3240,13 @@ const Generator = struct {
         const at_is_entity = typeRefIsEntityInterface(attr.type_ref);
 
         try self.ind();
-        try self.print("fn {s}_get_{s}(self: *anyopaque) callconv(.c) {s} {{\n", .{ c_name, attr.name, c_at });
+        try self.print("fn {s}_get_{s}(self: ?*anyopaque) callconv(.c) {s} {{\n", .{ c_name, attr.name, c_at });
         try self.ind();
-        try self.print("    const _self: {s}{s} = {s}({s}{s}, self);\n", .{ pfx, iface_name, self_unbox_fn, pfx, iface_name });
+        try self.emitCApiSelf(pfx, iface_name, self_unbox_fn);
         try self.ind();
         if (at_is_entity) {
             try self.print("    const _r = _self.vtable.get_{s}(_self.ptr);\n", .{attr.name});
-            try self.ind();
-            try self.write("    return _r.vtable.get_c_abi_handle(_r.ptr);\n");
+            try self.emitCApiEntityReturn();
         } else {
             try self.print("    return _self.vtable.get_{s}(_self.ptr);\n", .{attr.name});
         }
@@ -3251,21 +3257,36 @@ const Generator = struct {
             const c_param = try self.cApiExportTypeRef(attr.type_ref, .in_);
             defer self.alloc.free(c_param);
             try self.ind();
-            try self.print("fn {s}_set_{s}(self: *anyopaque, value: {s}) callconv(.c) void {{\n", .{ c_name, attr.name, c_param });
+            // An entity value, like an entity in-param, may be NULL.
+            try self.print("fn {s}_set_{s}(self: ?*anyopaque, value: {s}{s}) callconv(.c) void {{\n", .{ c_name, attr.name, if (at_is_entity) "?" else "", c_param });
             try self.ind();
-            try self.print("    const _self: {s}{s} = {s}({s}{s}, self);\n", .{ pfx, iface_name, self_unbox_fn, pfx, iface_name });
+            try self.emitCApiSelf(pfx, iface_name, self_unbox_fn);
             try self.ind();
             if (at_is_entity) {
                 const at_zig = try self.typeRefToZig(attr.type_ref);
                 defer self.alloc.free(at_zig);
                 const val_unbox_fn = cAbiUnboxFnName(typeRefEntityInterface(attr.type_ref).?);
-                try self.print("    _self.vtable.set_{s}(_self.ptr, {s}({s}, value));\n", .{ attr.name, val_unbox_fn, at_zig });
+                try self.print("    _self.vtable.set_{s}(_self.ptr, if (value) |_h| {s}({s}, _h) else _Provider.nil({s}));\n", .{ attr.name, val_unbox_fn, at_zig, at_zig });
             } else {
                 try self.print("    _self.vtable.set_{s}(_self.ptr, value);\n", .{attr.name});
             }
             try self.ind();
             try self.write("}\n\n");
         }
+    }
+
+    /// The `_self` line of a C function, already indented: its handle
+    /// unboxed, or the provider's nil when the handle is NULL.
+    fn emitCApiSelf(self: *Generator, pfx: []const u8, iface_name: []const u8, self_unbox_fn: []const u8) anyerror!void {
+        try self.print("    const _self: {s}{s} = if (self) |_h| {s}({s}{s}, _h) else _Provider.nil({s}{s});\n", .{ pfx, iface_name, self_unbox_fn, pfx, iface_name, pfx, iface_name });
+    }
+
+    /// Returns `_r`, an entity result: NULL for a nil, else its handle.
+    fn emitCApiEntityReturn(self: *Generator) anyerror!void {
+        try self.ind();
+        try self.write("    if (_r.ptr == zidl_bindings.NIL_PTR) return null;\n");
+        try self.ind();
+        try self.write("    return _r.vtable.get_c_abi_handle(_r.ptr);\n");
     }
 
     /// If `tr` refers to a listener interface, return that interface; else null.
@@ -3390,7 +3411,8 @@ const Generator = struct {
     }
 
     fn cApiExportRetType(self: *Generator, ret: ir.TypeRef) ![]u8 {
-        if (typeRefIsEntityInterface(ret)) return self.alloc.dupe(u8, "*anyopaque");
+        // NULL stands for a nil entity.
+        if (typeRefIsEntityInterface(ret)) return self.alloc.dupe(u8, "?*anyopaque");
         // A by-value return of a plain struct needing a C-ABI mirror (see
         // that section's doc comment) must use the mirror's own type here
         // too, not just for params -- otherwise the exported function's
@@ -9783,13 +9805,13 @@ test "zig_backend: --zig-generate-c-api emits callconv(.c) wrappers for entity i
     const s = out.items;
     // Every entity crosses the C-ABI as a single boxed opaque pointer,
     // unboxed at the top of the export function before dispatch.
-    try testing.expect(has(s, "fn Writer_write_val(self: *anyopaque, x: i32, label: [*:0]const u8) callconv(.c) i32"));
-    try testing.expect(has(s, "const _self: Writer = zidl_bindings.unboxAs(Writer, self);"));
+    try testing.expect(has(s, "fn Writer_write_val(self: ?*anyopaque, x: i32, label: [*:0]const u8) callconv(.c) i32"));
+    try testing.expect(has(s, "const _self: Writer = if (self) |_h| zidl_bindings.unboxAs(Writer, _h) else _Provider.nil(Writer);"));
     try testing.expect(has(s, "return _self.vtable.write_val(_self.ptr, x, label);"));
     // No span conversion — vtable already uses C types
     try testing.expect(!has(s, "std.mem.span(label)"));
     // Void op
-    try testing.expect(has(s, "fn Writer_reset(self: *anyopaque) callconv(.c) void"));
+    try testing.expect(has(s, "fn Writer_reset(self: ?*anyopaque) callconv(.c) void"));
 }
 
 test "zig_backend: --zig-generate-c-api entity-returning op boxes the result via get_c_abi_handle" {
@@ -9809,9 +9831,10 @@ test "zig_backend: --zig-generate-c-api entity-returning op boxes the result via
     // must be boxed via the returned value's own vtable before returning,
     // never a hardcoded/assumed vtable, and no allocation call in generated
     // code at all (that's the concrete impl's own responsibility).
-    try testing.expect(has(s, "fn Factory_create_writer(self: *anyopaque, qos: i32) callconv(.c) *anyopaque {"));
-    try testing.expect(has(s, "const _self: Factory = zidl_bindings.unboxAs(Factory, self);"));
+    try testing.expect(has(s, "fn Factory_create_writer(self: ?*anyopaque, qos: i32) callconv(.c) ?*anyopaque {"));
+    try testing.expect(has(s, "const _self: Factory = if (self) |_h| zidl_bindings.unboxAs(Factory, _h) else _Provider.nil(Factory);"));
     try testing.expect(has(s, "const _r = _self.vtable.create_writer(_self.ptr, qos);"));
+    try testing.expect(has(s, "if (_r.ptr == zidl_bindings.NIL_PTR) return null;"));
     try testing.expect(has(s, "return _r.vtable.get_c_abi_handle(_r.ptr);"));
     try testing.expect(!has(s, "zidl_bindings.boxEntity"));
     // The *native* vtable slot (used for internal Zig-to-Zig dispatch, e.g. a
@@ -9844,8 +9867,8 @@ test "zig_backend: --zig-generate-c-api entity-typed param unboxes before dispat
     // uniformly — regardless of whether the parameter's interface has one
     // implementation or several. A null incoming pointer reconstructs as a
     // nil-sentinel native value instead of dereferencing a null box.
-    try testing.expect(has(s, "fn Publisher_create_writer(self: *anyopaque, a_topic: ?*anyopaque) callconv(.c) i32 {"));
-    try testing.expect(has(s, "return _self.vtable.create_writer(_self.ptr, if (a_topic) |_h| zidl_bindings.unboxAs(Topic, _h) else .{ .ptr = zidl_bindings.NIL_PTR, .vtable = undefined });"));
+    try testing.expect(has(s, "fn Publisher_create_writer(self: ?*anyopaque, a_topic: ?*anyopaque) callconv(.c) i32 {"));
+    try testing.expect(has(s, "return _self.vtable.create_writer(_self.ptr, if (a_topic) |_h| zidl_bindings.unboxAs(Topic, _h) else _Provider.nil(Topic));"));
     // Native vtable slot keeps the real Topic fat-pointer param type.
     try testing.expect(has(s, "create_writer: *const fn (*anyopaque, a_topic: Topic) i32,"));
     try testing.expect(!has(s, "create_writer: *const fn (*anyopaque, a_topic: *anyopaque) i32,"));
@@ -9877,7 +9900,7 @@ test "zig_backend: --zig-generate-c-api bare sequence<EntityInterface> param box
     // Export signature: the whole seq pointer is opaque, matching the C
     // header's own (independently-generated) single-opaque-pointer-per-
     // element layout, not the native fat-pointer-element one.
-    try testing.expect(has(s, "fn Sub_get_readers(self: *anyopaque, readers: *anyopaque) callconv(.c) i32 {"));
+    try testing.expect(has(s, "fn Sub_get_readers(self: ?*anyopaque, readers: *anyopaque) callconv(.c) i32 {"));
     // Reinterprets the caller's buffer, frees any prior content, calls the
     // vtable through a native-shaped temporary (fat-pointer elements) --
     // never handing the caller's raw buffer straight to the vtable.
@@ -9891,7 +9914,7 @@ test "zig_backend: --zig-generate-c-api bare sequence<EntityInterface> param box
     // Each native fat-pointer element is boxed via the same
     // `.vtable.get_c_abi_handle(.ptr)` convention used everywhere else an
     // entity crosses this boundary -- not passed through raw.
-    try testing.expect(has(s, "for (_native_readers._buffer.?[0.._native_readers._length], 0..) |_e, _i| { _bb[_i] = _e.vtable.get_c_abi_handle(_e.ptr); }"));
+    try testing.expect(has(s, "for (_native_readers._buffer.?[0.._native_readers._length], 0..) |_e, _i| { _bb[_i] = if (_e.ptr == zidl_bindings.NIL_PTR) null else _e.vtable.get_c_abi_handle(_e.ptr); }"));
     try testing.expect(has(s, "_cseq_readers.* = .{ ._maximum = _native_readers._length, ._length = _native_readers._length, ._buffer = _boxed_readers, ._release = _native_readers._length > 0 };"));
     try testing.expect(has(s, "return _ret_status;"));
 }
@@ -10013,8 +10036,8 @@ test "zig_backend: --zig-generate-c-api struct in-params use ?*const T (null = d
     defer out.deinit(testing.allocator);
     const s = out.items;
     // Export signature: optional pointer so C callers can pass null for default QoS.
-    try testing.expect(has(s, "fn Topic_set_qos(self: *anyopaque, qos: ?*const TopicQos) callconv(.c) i32"));
-    try testing.expect(has(s, "fn Topic_create_with_qos(self: *anyopaque, qos: ?*const TopicQos, mask: i32) callconv(.c) i32"));
+    try testing.expect(has(s, "fn Topic_set_qos(self: ?*anyopaque, qos: ?*const TopicQos) callconv(.c) i32"));
+    try testing.expect(has(s, "fn Topic_create_with_qos(self: ?*anyopaque, qos: ?*const TopicQos, mask: i32) callconv(.c) i32"));
     // Vtable call: substitute default when null.
     try testing.expect(has(s, "return _self.vtable.set_qos(_self.ptr, qos orelse &.{});"));
     try testing.expect(has(s, "return _self.vtable.create_with_qos(_self.ptr, qos orelse &.{}, mask);"));
@@ -10172,7 +10195,7 @@ test "zig_backend: --zig-generate-c-api struct in-param passed by pointer" {
     // Vtable slot: non-optional *const T (vtable always gets a valid pointer).
     try testing.expect(has(s, "set_qos: *const fn (*anyopaque, qos: *const Qos) i32,"));
     // C-ABI export: boxed self, ?*const T so C callers can pass null for defaults.
-    try testing.expect(has(s, "fn Writer_set_qos(self: *anyopaque, qos: ?*const Qos) callconv(.c) i32"));
+    try testing.expect(has(s, "fn Writer_set_qos(self: ?*anyopaque, qos: ?*const Qos) callconv(.c) i32"));
     // Forwarder substitutes type default when null.
     try testing.expect(has(s, "return _self.vtable.set_qos(_self.ptr, qos orelse &.{});"));
     try testing.expect(!has(s, "qos.*"));
@@ -11426,13 +11449,13 @@ test "zig_backend: --zig-generate-c-api generates an as_Base export per direct b
     });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "fn Topic_as_Entity(self: *anyopaque) callconv(.c) *anyopaque {"));
-    try testing.expect(has(s, "const _self: Topic = zidl_bindings.unboxAs(Topic, self);"));
+    try testing.expect(has(s, "fn Topic_as_Entity(self: ?*anyopaque) callconv(.c) ?*anyopaque {"));
+    try testing.expect(has(s, "const _self: Topic = zidl_bindings.unboxAs(Topic, self orelse return null);"));
     try testing.expect(has(s, "const _r = _self.vtable.as_Entity(_self.ptr);"));
     // Two separate export functions share the unbox line pattern; check both
     // bodies dispatch through their own `as_*` slot and box via the result's
     // own vtable, never a hardcoded one.
-    try testing.expect(has(s, "fn Topic_as_TopicDescription(self: *anyopaque) callconv(.c) *anyopaque {"));
+    try testing.expect(has(s, "fn Topic_as_TopicDescription(self: ?*anyopaque) callconv(.c) ?*anyopaque {"));
     try testing.expect(has(s, "const _r = _self.vtable.as_TopicDescription(_self.ptr);"));
     try testing.expect(has(s, "return _r.vtable.get_c_abi_handle(_r.ptr);"));
 }
@@ -11607,13 +11630,13 @@ test "zig_backend: --zig-generate-c-api struct in/inout params route through the
     const s = out.items;
     // `in` mirror params are nullable (null == "use the type default"),
     // same convention as every other optional struct in-param.
-    try testing.expect(has(s, "fn Iface_set_val(self: *anyopaque, v: ?*const NamedCAbi) callconv(.c) void {"));
+    try testing.expect(has(s, "fn Iface_set_val(self: ?*anyopaque, v: ?*const NamedCAbi) callconv(.c) void {"));
     try testing.expect(has(s, "var _mir_v: Named = if (v) |_m| NamedFromCAbi(_m) else .{};"));
     try testing.expect(has(s, "_self.vtable.set_val(_self.ptr, &_mir_v);"));
 
     // `inout`: the caller's value is a real, meaningful input (read then
     // overwritten), so it's converted via FromCAbi same as `in`.
-    try testing.expect(has(s, "fn Iface_update_val(self: *anyopaque, v: *NamedCAbi) callconv(.c) void {"));
+    try testing.expect(has(s, "fn Iface_update_val(self: ?*anyopaque, v: *NamedCAbi) callconv(.c) void {"));
     try testing.expect(has(s, "var _mir_v: Named = NamedFromCAbi(v);"));
     try testing.expect(has(s, "_self.vtable.update_val(_self.ptr, &_mir_v);"));
     try testing.expect(has(s, "NamedToCAbi(&_mir_v, v);"));
@@ -11639,7 +11662,7 @@ test "zig_backend: --zig-generate-c-api struct out mirror param starts from the 
     });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "fn Iface_get_val(self: *anyopaque, v: *NamedCAbi) callconv(.c) void {"));
+    try testing.expect(has(s, "fn Iface_get_val(self: ?*anyopaque, v: *NamedCAbi) callconv(.c) void {"));
     try testing.expect(has(s, "var _mir_v: Named = .{};"));
     try testing.expect(!has(s, "var _mir_v: Named = NamedFromCAbi(v);"));
     // The post-call write-back (`NamedToCAbi(&_mir_v, v)`) frees `v`'s
@@ -11675,7 +11698,7 @@ test "zig_backend: --zig-generate-c-api by-value struct return routes through th
     });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "fn Iface_get_val(self: *anyopaque) callconv(.c) NamedCAbi {"));
+    try testing.expect(has(s, "fn Iface_get_val(self: ?*anyopaque) callconv(.c) NamedCAbi {"));
     try testing.expect(has(s, "const _r = _self.vtable.get_val(_self.ptr);"));
     try testing.expect(has(s, "var _mir_ret: NamedCAbi = .{};"));
     try testing.expect(has(s, "NamedToCAbi(&_r, &_mir_ret);"));
@@ -12155,6 +12178,37 @@ test "zig: @standalone constructors are exported by the module's exportCAbi, out
     try testing.expect(!has(s, "create: *const fn"));
     try testing.expect(has(s, "destroy: *const fn (*anyopaque) M.Code,"));
     try testing.expect(has(s, "release: *const fn (*anyopaque) void,"));
+}
+
+test "zig: --zig-generate-c-api maps NULL handles to the provider's nil, and nils to NULL" {
+    var out = try testGenOpts(
+        \\module M {
+        \\    interface Base { long id(); };
+        \\    interface Item : Base {
+        \\        attribute Base peer;
+        \\        Item next(in Item after);
+        \\    };
+        \\};
+    , "t", .{ .generate_interfaces = true, .zig_generate_c_api = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // The provider must say what nil is.
+    try testing.expect(has(s, "if (!@hasDecl(_Provider, \"nil\")) @compileError("));
+    // A NULL object, or a NULL argument, is the provider's nil of its type.
+    try testing.expect(has(s, "fn M_Item_next(self: ?*anyopaque, after: ?*anyopaque) callconv(.c) ?*anyopaque {"));
+    try testing.expect(has(s, "const _self: Item = if (self) |_h| zidl_bindings.unboxAs(Item, _h) else _Provider.nil(Item);"));
+    try testing.expect(has(s, "if (after) |_h| zidl_bindings.unboxAs(M.Item, _h) else _Provider.nil(M.Item)"));
+    // A nil result goes out as NULL.
+    try testing.expect(has(s, "if (_r.ptr == zidl_bindings.NIL_PTR) return null;"));
+    // Entity attributes follow the same rules.
+    try testing.expect(has(s, "fn M_Item_get_peer(self: ?*anyopaque) callconv(.c) ?*anyopaque {"));
+    try testing.expect(has(s, "fn M_Item_set_peer(self: ?*anyopaque, value: ?*anyopaque) callconv(.c) void {"));
+    try testing.expect(has(s, "_self.vtable.set_peer(_self.ptr, if (value) |_h| zidl_bindings.unboxAs(M.Base, _h) else _Provider.nil(M.Base));"));
+    // An upcast of NULL is NULL, and needs no nil.
+    try testing.expect(has(s, "fn M_Item_as_M_Base(self: ?*anyopaque) callconv(.c) ?*anyopaque {"));
+    try testing.expect(has(s, "const _self: Item = zidl_bindings.unboxAs(Item, self orelse return null);"));
+    // Nothing is left that calls through an undefined vtable.
+    try testing.expect(!has(s, ".vtable = undefined"));
 }
 
 test "zig: --zig-generate-c-api gives an interface with no C functions no helper" {

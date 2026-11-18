@@ -13,6 +13,13 @@ comptime {
 
 /// What the generated C API needs from this provider.
 const Provider = struct {
+    pub fn nil(comptime I: type) I {
+        if (I == S.Condition) return Nil.condition;
+        if (I == S.Engine) return Nil.engine;
+        if (I == S.Guard) return Nil.guard;
+        if (I == S.Holder) return Nil.holder;
+        @compileError("no nil for " ++ @typeName(I));
+    }
     pub fn constructors(comptime I: type) type {
         if (I == S.Engine) return EngineCtors;
         if (I == S.Guard) return GuardCtors;
@@ -46,6 +53,80 @@ pub export fn test_stats_reset() callconv(.c) void {
     defer stats_mu.unlock();
     stats = .{};
 }
+
+// ── Nils ────────────────────────────────────────────────────────────────────
+
+/// Each interface's nil: what a NULL handle stands for. Its operations
+/// report BAD_PARAMETER, or a nil or zero result. A nil never goes out as a
+/// handle, so it is never boxed.
+const Nil = struct {
+    const condition: S.Condition = .{ .ptr = zb.NIL_PTR, .vtable = &condition_vtable };
+    const engine: S.Engine = .{ .ptr = zb.NIL_PTR, .vtable = &engine_vtable };
+    const guard: S.Guard = .{ .ptr = zb.NIL_PTR, .vtable = &guard_vtable };
+    const holder: S.Holder = .{ .ptr = zb.NIL_PTR, .vtable = &holder_vtable };
+
+    const condition_vtable: S.Condition.Vtable = .{
+        .get_trigger_value = falseOf,
+        .deinit = noop,
+        .get_c_abi_handle = neverBoxed,
+        .get_allocator = allocatorOf,
+    };
+    const engine_vtable: S.Engine.Vtable = .{
+        .destroy = badParameter,
+        .release = noop,
+        .get_workers = minusOne,
+        .unpin = badParameter,
+        .deinit = noop,
+        .get_c_abi_handle = neverBoxed,
+        .get_allocator = allocatorOf,
+    };
+    const guard_vtable: S.Guard.Vtable = .{
+        .get_trigger_value = falseOf,
+        .destroy = badParameter,
+        .set_trigger_value = setTrigger,
+        .deinit = noop,
+        .get_c_abi_handle = neverBoxed,
+        .get_allocator = allocatorOf,
+        .as_Condition = asCondition,
+    };
+    const holder_vtable: S.Holder.Vtable = .{
+        .destroy = badParameter,
+        .hold = hold,
+        .held = held,
+        .deinit = noop,
+        .get_c_abi_handle = neverBoxed,
+        .get_allocator = allocatorOf,
+    };
+
+    fn badParameter(_: *anyopaque) S.ReturnCode_t {
+        return S.RETCODE_BAD_PARAMETER;
+    }
+    fn setTrigger(_: *anyopaque, _: bool) S.ReturnCode_t {
+        return S.RETCODE_BAD_PARAMETER;
+    }
+    fn hold(_: *anyopaque, _: S.Condition) S.ReturnCode_t {
+        return S.RETCODE_BAD_PARAMETER;
+    }
+    fn held(_: *anyopaque) S.Condition {
+        return condition;
+    }
+    fn asCondition(_: *anyopaque) S.Condition {
+        return condition;
+    }
+    fn falseOf(_: *anyopaque) bool {
+        return false;
+    }
+    fn minusOne(_: *anyopaque) i32 {
+        return -1;
+    }
+    fn noop(_: *anyopaque) void {}
+    fn neverBoxed(_: *anyopaque) *anyopaque {
+        @panic("a nil went out as a handle");
+    }
+    fn allocatorOf(_: *anyopaque) std.mem.Allocator {
+        return std.heap.c_allocator;
+    }
+};
 
 // ── Engine ──────────────────────────────────────────────────────────────────
 
@@ -222,11 +303,13 @@ const Holder = struct {
         return S.RETCODE_OK;
     }
     fn hold(p: *anyopaque, cond: S.Condition) S.ReturnCode_t {
+        // A NULL condition arrives as the nil, which can be called.
+        _ = cond.vtable.get_trigger_value(cond.ptr);
         of(p).cond = cond;
         return S.RETCODE_OK;
     }
     fn held(p: *anyopaque) S.Condition {
-        return of(p).cond.?;
+        return of(p).cond orelse Nil.condition;
     }
     fn deinit(p: *anyopaque) void {
         const self = of(p);

@@ -74,14 +74,15 @@ ordinary instance functions (`S_Engine_destroy`, `S_Engine_release`).
 
 ### Zig provider (`--zig-generate-c-api`)
 
-A module's C functions, constructors included, are exported by its `exportCAbi`. The
-provider calls it once, from a `comptime` block, with a type whose
-`constructors(comptime I: type) type` returns, for each `@standalone` interface, a type
-declaring its constructors:
+A module's C functions, constructors included, are exported by its `exportCAbi` (see
+[`c-abi-provider.md`](c-abi-provider.md)). The provider calls it once, from a `comptime`
+block, with a type whose `constructors(comptime I: type) type` returns, for each
+`@standalone` interface, a type declaring its constructors:
 
 ```zig
 comptime {
     S.exportCAbi(struct {
+        pub fn nil(comptime I: type) I { ... }
         pub fn constructors(comptime I: type) type {
             if (I == S.Engine) return struct {
                 pub fn create(alloc: std.mem.Allocator) !S.Engine { ... }

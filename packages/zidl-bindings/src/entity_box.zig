@@ -22,16 +22,11 @@ pub const EntityBox = struct {
     vtable: *const anyopaque,
 };
 
-/// Shared "no entity" sentinel address. A generated C-ABI export wrapper for
-/// an entity-interface `.in_` op param that's allowed to be absent (an
-/// optional filter/condition, not a required receiver) constructs a fat
-/// pointer whose `.ptr` is this exact address when the incoming C-ABI
-/// pointer was NULL, instead of ever dereferencing a null box — see
-/// `emitCApiOp` in the Zig backend. Consuming native code's own nil-entity
-/// check (comparing `.ptr` against this same address — e.g. zzdds's
-/// `nil.isNil`, which reuses this exact constant) must run before it ever
-/// touches such a value's `.vtable`, which is deliberately left `undefined`
-/// in that case.
+/// Shared "no entity" sentinel address: the `.ptr` of every provider's nil
+/// value (zzdds's `nil.isNil` compares against this same constant). The
+/// generated C functions turn a NULL handle into the provider's nil, and a
+/// value whose `.ptr` is this address back into NULL — see
+/// docs/design/c-abi-provider.md.
 pub var nil_storage: u8 = 0;
 pub const NIL_PTR: *anyopaque = @ptrCast(&nil_storage);
 
