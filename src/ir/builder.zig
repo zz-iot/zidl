@@ -401,6 +401,7 @@ const Builder = struct {
                             // see doc comment above).
                             iface.operations = &.{};
                             iface.constructors = &.{};
+                            iface.statics = &.{};
                             iface.attributes = &.{};
                             iface.type_decls = &.{};
                             iface.consts = &.{};
@@ -774,17 +775,98 @@ const Builder = struct {
         p.raw = try self.extractRaw(annotations);
 
         var constructors: std.ArrayListUnmanaged(ir.Operation) = .empty;
+        var statics: std.ArrayListUnmanaged(ir.Operation) = .empty;
         var instance_ops: std.ArrayListUnmanaged(ir.Operation) = .empty;
         for (operations.items) |op| {
             if (ir.isConstructorOp(&op))
                 try constructors.append(self.alloc, op)
+            else if (ir.isStaticOp(&op))
+                try statics.append(self.alloc, op)
             else
                 try instance_ops.append(self.alloc, op);
         }
         p.operations = try instance_ops.toOwnedSlice(self.alloc);
         p.constructors = try constructors.toOwnedSlice(self.alloc);
+        p.statics = try statics.toOwnedSlice(self.alloc);
         try validateConstruction(p);
+        try validateStatics(p);
         return p;
+    }
+
+    /// Checks the `@static` operations of `iface`: see
+    /// docs/design/static-operations.md.
+    fn validateStatics(iface: *const ir.Interface) !void {
+        if (iface.statics.len > 0 and ir.isCallbackInterface(iface)) return error.StaticOnCallbackInterface;
+        for (iface.statics, 0..) |*op, i| {
+            if (op.is_oneway) return error.OnewayStatic;
+            if (isDestructorOrFinalizer(op)) return error.StaticAlsoDestructor;
+            for (op.params) |prm| {
+                if (prm.mode != .in_) return error.StaticParamNotIn;
+                if (isInterfaceSequence(prm.type_ref)) return error.UnsupportedStaticParam;
+            }
+            if (op.return_type) |rt| {
+                if (!isStaticResultType(rt)) return error.UnsupportedStaticResult;
+            }
+            // The C functions `{C}_{name}` would collide.
+            for (iface.statics[0..i]) |*prev| {
+                if (std.mem.eql(u8, prev.name, op.name)) return error.DuplicateStatic;
+            }
+            for (iface.constructors) |*ctor| {
+                if (std.mem.eql(u8, ctor.name, op.name)) return error.StaticNameCollision;
+            }
+            if (interfaceHasMember(iface, op.name)) return error.StaticNameCollision;
+        }
+    }
+
+    /// A `@static`'s result: an interface, which is borrowed, or a value
+    /// every binding passes as is (a primitive or an enum, through any
+    /// typedef). Anything else would need an owner to free it.
+    fn isStaticResultType(tr: ir.TypeRef) bool {
+        var t = tr;
+        while (true) switch (t) {
+            .base => return true,
+            .named => |td| switch (td) {
+                .typedef => |tdef| {
+                    if (tdef.dimensions.len != 0) return false;
+                    t = tdef.type_ref;
+                },
+                .interface, .enum_ => return true,
+                else => return false,
+            },
+            else => return false,
+        };
+    }
+
+    fn isInterfaceSequence(tr: ir.TypeRef) bool {
+        var t = tr;
+        while (true) switch (t) {
+            .named => |td| switch (td) {
+                .typedef => |tdef| t = tdef.type_ref,
+                else => return false,
+            },
+            .sequence => |s| {
+                var e = s.element.*;
+                while (e == .named and e.named == .typedef) e = e.named.typedef.type_ref;
+                return e == .named and e.named == .interface;
+            },
+            else => return false,
+        };
+    }
+
+    /// True when `iface` or a base has an operation or attribute accessor
+    /// named `name`.
+    fn interfaceHasMember(iface: *const ir.Interface, name: []const u8) bool {
+        for (iface.operations) |*op| {
+            if (std.mem.eql(u8, op.name, name)) return true;
+        }
+        for (iface.attributes) |*attr| {
+            if (std.mem.startsWith(u8, name, "get_") and std.mem.eql(u8, name[4..], attr.name)) return true;
+            if (std.mem.startsWith(u8, name, "set_") and std.mem.eql(u8, name[4..], attr.name)) return true;
+        }
+        for (iface.bases) |base| {
+            if (base == .interface and interfaceHasMember(base.interface, name)) return true;
+        }
+        return false;
     }
 
     /// Checks the `@standalone` construction annotations of `iface`: see
@@ -806,6 +888,7 @@ const Builder = struct {
                 if (prm.mode != .in_) return error.ConstructorParamNotIn;
             }
             if (isDestructorOrFinalizer(op)) return error.ConstructorAlsoDestructor;
+            if (ir.isStaticOp(op)) return error.ConstructorAlsoStatic;
         }
         var destructors: usize = 0;
         var finalizers: usize = 0;
@@ -2500,6 +2583,49 @@ test "builder: construction annotations are checked" {
         .{ .err = error.MultipleDestructors, .body = "@standalone interface Thing { @constructor Thing create(); @destructor Code destroy(); @destructor Code close_it(); };" },
         .{ .err = error.MultipleFinalizers, .body = "@standalone interface Thing { @constructor Thing create(); @destructor Code destroy(); @finalizer void a(); @finalizer void b(); };" },
         .{ .err = error.FinalizerWithoutDestructor, .body = "@standalone interface Thing { @finalizer void release(); };" },
+    };
+    inline for (cases) |c| {
+        try testing.expectError(c.err, testBuild(construction_prelude ++ c.body ++ "};"));
+    }
+}
+
+test "builder: @static operations move out of the instance operations" {
+    var ir_spec = try testBuild(construction_prelude ++
+        \\    enum Mode { ON, OFF };
+        \\    interface Thing {
+        \\        @static Thing get_instance();
+        \\        @static Code delete_instance();
+        \\        @static Mode mode_of(in Thing t, in Cfg c, in string s);
+        \\        @static void reset();
+        \\        Code poke();
+        \\    };
+        \\};
+    );
+    defer ir_spec.deinit();
+    const thing = findInterface(ir_spec.items, "Thing").?;
+    try testing.expectEqual(@as(usize, 4), thing.statics.len);
+    try testing.expectEqualStrings("get_instance", thing.statics[0].name);
+    try testing.expectEqualStrings("reset", thing.statics[3].name);
+    try testing.expectEqual(@as(usize, 1), thing.operations.len);
+    try testing.expectEqual(@as(usize, 0), thing.constructors.len);
+}
+
+test "builder: @static operations are checked" {
+    const Case = struct { err: anyerror, body: []const u8 };
+    const cases = [_]Case{
+        .{ .err = error.OnewayStatic, .body = "interface Thing { @static oneway void ping(); };" },
+        .{ .err = error.StaticParamNotIn, .body = "interface Thing { @static Code get(out long n); };" },
+        .{ .err = error.UnsupportedStaticParam, .body = "interface Thing; typedef sequence<Thing> ThingSeq; interface Thing { @static Code all(in ThingSeq s); };" },
+        .{ .err = error.UnsupportedStaticResult, .body = "interface Thing { @static Cfg config(); };" },
+        .{ .err = error.UnsupportedStaticResult, .body = "interface Thing { @static string name(); };" },
+        .{ .err = error.StaticAlsoDestructor, .body = "@standalone interface Thing { @constructor Thing create(); @destructor Code destroy(); @static @finalizer void release(); };" },
+        .{ .err = error.ConstructorAlsoStatic, .body = "@standalone interface Thing { @constructor @static Thing create(); @destructor Code destroy(); };" },
+        .{ .err = error.DuplicateStatic, .body = "interface Thing { @static Code reset(); @static Code reset(in long n); };" },
+        .{ .err = error.StaticNameCollision, .body = "interface Thing { @static Code poke(); Code poke(); };" },
+        .{ .err = error.StaticNameCollision, .body = "interface Base { Code poke(); }; interface Thing : Base { @static Code poke(); };" },
+        .{ .err = error.StaticNameCollision, .body = "interface Thing { attribute long level; @static long get_level(); };" },
+        .{ .err = error.StaticNameCollision, .body = "@standalone interface Thing { @constructor Thing create(); @destructor Code destroy(); @static Thing create(); };" },
+        .{ .err = error.StaticOnCallbackInterface, .body = "@callback interface Thing { @static void reset(); };" },
     };
     inline for (cases) |c| {
         try testing.expectError(c.err, testBuild(construction_prelude ++ c.body ++ "};"));

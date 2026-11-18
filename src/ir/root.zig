@@ -47,6 +47,7 @@ pub const retiredResult = types.retiredResult;
 pub const successResult = types.successResult;
 pub const isStandaloneInterface = types.isStandaloneInterface;
 pub const isConstructorOp = types.isConstructorOp;
+pub const isStaticOp = types.isStaticOp;
 pub const isDestructorOp = types.isDestructorOp;
 pub const isFinalizerOp = types.isFinalizerOp;
 pub const destructorOp = types.destructorOp;

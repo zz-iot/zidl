@@ -1004,6 +1004,7 @@ const Generator = struct {
             try self.emitAttribute(&attr);
         }
         if (self.opts.generate_interfaces) try self.emitConstructorDecls(iface);
+        if (self.opts.generate_interfaces) try self.emitStaticDecls(iface);
         try self.print("}}; // class {s}\n\n", .{iface.name});
 
         // After the abstract interface, emit the concrete listener base class.
@@ -1108,6 +1109,24 @@ const Generator = struct {
                 }
                 try self.write(");\n");
             }
+        }
+    }
+
+    /// Static members for each `@static` operation, defined by
+    /// `--cpp-generate-impl`. An interface one returns is borrowed: dropping
+    /// it releases nothing. See docs/design/static-operations.md.
+    fn emitStaticDecls(self: *Generator, iface: *const ir.Interface) !void {
+        for (iface.statics) |*op| {
+            const ret = if (op.return_type) |rt| try self.typeRefToCpp(rt) else try self.alloc.dupe(u8, "void");
+            defer self.alloc.free(ret);
+            try self.print("    static {s} {s}(", .{ ret, op.name });
+            for (op.params, 0..) |p, i| {
+                if (i > 0) try self.write(", ");
+                const p_cpp = try self.typeRefToCpp(p.type_ref);
+                defer self.alloc.free(p_cpp);
+                try self.print("{s} {s}", .{ p_cpp, p.name });
+            }
+            try self.write(");\n");
         }
     }
 
@@ -4909,6 +4928,66 @@ const ConcreteImplGenerator = struct {
             try self.emitEntityAttr(iface, attr.owner, iface.name, attr.attr);
         }
         if (iface.constructors.len > 0) try self.emitConstruction(iface);
+        try self.emitStatics(iface);
+    }
+
+    /// The `@static` operations the abstract class declares (see
+    /// `Generator.emitStaticDecls`): each calls its C function, which has no
+    /// receiver. An interface result is boxed through `_getOrCreate`, like
+    /// any operation's, and never adopted, so dropping it releases nothing.
+    fn emitStatics(self: *ConcreteImplGenerator, iface: *const ir.Interface) !void {
+        if (iface.statics.len == 0) return;
+        const c_name = try cNameOf(self.alloc, iface.qualified_name);
+        defer self.alloc.free(c_name);
+        for (iface.statics) |*op| {
+            for (op.params) |p| switch (paramAdaptKind(p)) {
+                .direct, .str_in, .struct_in, .complex_struct_in, .seq_in, .entity_in => {},
+                else => return error.UnsupportedStaticParam,
+            };
+            const ret_cpp = if (op.return_type) |rt| try self.typeRefToCpp(rt) else try self.alloc.dupe(u8, "void");
+            defer self.alloc.free(ret_cpp);
+            try self.srcPrint("{s} {s}::{s}(", .{ ret_cpp, iface.name, op.name });
+            try self.emitCtorParams(op, false);
+            try self.srcWrite(") {\n");
+            var seq_ctr: usize = 0;
+            for (op.params) |p| switch (paramAdaptKind(p)) {
+                .complex_struct_in => {
+                    const c_var = try std.fmt.allocPrint(self.alloc, "_c_{s}", .{p.name});
+                    defer self.alloc.free(c_var);
+                    try self.emitComplexStructAdaptIn(c_var, p.name, p.type_ref, &seq_ctr);
+                },
+                .seq_in => try self.emitSeqParamAdaptIn(p, &seq_ctr),
+                else => {},
+            };
+            switch (returnAdaptKind(op.return_type)) {
+                .entity => {
+                    const ret_c = try self.typeRefToCType(op.return_type.?);
+                    defer self.alloc.free(ret_c);
+                    const impl_name = try self.entityImplName(op.return_type.?);
+                    defer self.alloc.free(impl_name);
+                    try self.markWrapped(op.return_type.?);
+                    try self.srcPrint("    {s} _h = {s}_{s}(", .{ ret_c, c_name, op.name });
+                    try self.emitStaticArgs(op.params);
+                    try self.srcPrint(");\n    return {s}::_getOrCreate(_h);\n", .{impl_name});
+                },
+                .direct => {
+                    try self.srcPrint("    {s}{s}_{s}(", .{ if (op.return_type != null) "return " else "", c_name, op.name });
+                    try self.emitStaticArgs(op.params);
+                    try self.srcWrite(");\n");
+                },
+                // The builder admits only interface, primitive and enum results.
+                .str_ret, .todo => return error.UnsupportedStaticResult,
+            }
+            try self.srcWrite("}\n\n");
+        }
+    }
+
+    /// `emitAdaptedParams` without its leading separator: a static's C
+    /// function has no receiver before its first argument.
+    fn emitStaticArgs(self: *ConcreteImplGenerator, params: []const ir.Parameter) !void {
+        const start = self.src.items.len;
+        try self.emitAdaptedParams(params);
+        if (params.len > 0) self.src.replaceRangeAssumeCapacity(start, 2, "");
     }
 
     /// The `@destructor` or `@finalizer` of a `@standalone` interface. Once
@@ -11297,4 +11376,47 @@ test "cpp_backend: a constructor on a family root is rejected" {
         \\    interface Maker { Root make(); Leaf leaf(); };
         \\};
     ));
+}
+
+const static_test_idl =
+    \\module M {
+    \\    const long OK = 0;
+    \\    @success_result(OK) typedef long Code;
+    \\    struct Cfg { long n; };
+    \\    interface Thing {
+    \\        @static Thing get_instance();
+    \\        @static Code delete_instance();
+    \\        @static long count_with(in Thing t, in Cfg c, in long n);
+    \\        @static void reset();
+    \\        long poke();
+    \\    };
+    \\};
+;
+
+test "cpp_backend: @static operations are static members of the interface" {
+    var out = try testGenOpts(static_test_idl, "t", .{ .generate_interfaces = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "    static std::shared_ptr<::M::Thing> get_instance();\n"));
+    try testing.expect(has(s, "    static ::M::Code delete_instance();\n"));
+    try testing.expect(has(s, "    static int32_t count_with(std::shared_ptr<::M::Thing> t, ::M::Cfg c, int32_t n);\n"));
+    try testing.expect(has(s, "    static void reset();\n"));
+    try testing.expect(!has(s, "virtual std::shared_ptr<::M::Thing> get_instance("));
+}
+
+test "cpp_backend: a @static's interface result is borrowed" {
+    var res = try testGenConcreteImpl(static_test_idl);
+    defer res.deinit();
+    const s = res.src.items;
+    try testing.expect(has(s,
+        \\std::shared_ptr<::M::Thing> Thing::get_instance() {
+        \\    M_Thing _h = M_Thing_get_instance();
+        \\    return ::M::ThingImpl::_getOrCreate(_h);
+        \\}
+    ));
+    try testing.expect(has(s, "return M_Thing_count_with((t ? t->_zidl_handle_M_Thing() : nullptr), reinterpret_cast<const M_Cfg*>(&c), n);"));
+    try testing.expect(has(s, "::M::Code Thing::delete_instance() {\n    return M_Thing_delete_instance();\n}"));
+    try testing.expect(has(s, "void Thing::reset() {\n    M_Thing_reset();\n}"));
+    // Not adopted: dropping the result releases nothing.
+    try testing.expect(!has(s, "_zidlAdopt"));
 }

@@ -1,4 +1,4 @@
-// @standalone construction across the C ABI: a Zig provider built on the
+// @standalone construction and @static operations across the C ABI: a Zig provider built on the
 // generated exportCAbi, driven from Zig and from the generated
 // C++ binding. See docs/design/standalone-construction.md.
 module S {
@@ -43,5 +43,17 @@ module S {
         @destructor ReturnCode_t destroy();
         ReturnCode_t hold(in Condition cond);
         Condition held();
+    };
+
+    // A process-wide singleton reached through @static operations, like the
+    // DDS DomainParticipantFactory: get_instance() creates it on first use
+    // and returns it, borrowed, until delete_instance(), which refuses while
+    // it is pinned. A later get_instance() creates a new one.
+    interface Registry {
+        @static Registry get_instance();
+        @static ReturnCode_t delete_instance();
+        @static boolean is_trigger_set(in Condition cond);
+        long get_generation();
+        ReturnCode_t pin(in boolean on);
     };
 };

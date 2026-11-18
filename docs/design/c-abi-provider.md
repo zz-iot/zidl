@@ -48,6 +48,8 @@ need no provider, such as a sequence's `_free`, are exported on their own as bef
 - `pub fn constructors(comptime I: type) type`, when the module has a `@standalone`
   interface with `@constructor`s: see
   [`standalone-construction.md`](standalone-construction.md).
+- `pub fn statics(comptime I: type) type`, when the module has an interface with
+  `@static` operations: see [`static-operations.md`](static-operations.md).
 
 A missing `nil` is a compile error from `exportCAbi`, and a type the provider has no nil
 for is the provider's own compile error where it is used. Both are keyed by type, not

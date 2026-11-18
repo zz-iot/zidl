@@ -28,6 +28,11 @@ extern fn S_Holder_create() H;
 extern fn S_Holder_destroy(self: H) S.ReturnCode_t;
 extern fn S_Holder_hold(self: H, cond: H) S.ReturnCode_t;
 extern fn S_Holder_held(self: H) H;
+extern fn S_Registry_get_instance() H;
+extern fn S_Registry_delete_instance() S.ReturnCode_t;
+extern fn S_Registry_is_trigger_set(cond: H) bool;
+extern fn S_Registry_get_generation(self: H) i32;
+extern fn S_Registry_pin(self: H, on: bool) S.ReturnCode_t;
 
 const testing = std.testing;
 
@@ -160,4 +165,33 @@ test "a nil result goes out as NULL, and a NULL argument comes in as the nil" {
     try testing.expectEqual(S.RETCODE_OK, S_Guard_destroy(g));
     try testing.expectEqual(S.RETCODE_OK, S_Holder_destroy(h));
     try expectStats(0, 2, 0);
+}
+
+test "a static returns the provider's singleton until delete_instance" {
+    provider.test_stats_reset();
+    try testing.expectEqual(S.RETCODE_OK, S_Registry_delete_instance());
+    const r = S_Registry_get_instance().?;
+    try testing.expectEqual(r, S_Registry_get_instance().?);
+    try expectStats(1, 0, 0);
+    const generation = S_Registry_get_generation(r);
+    try testing.expectEqual(S.RETCODE_OK, S_Registry_pin(r, true));
+    try testing.expectEqual(S.RETCODE_PRECONDITION_NOT_MET, S_Registry_delete_instance());
+    try expectStats(1, 0, 0);
+    try testing.expectEqual(S.RETCODE_OK, S_Registry_pin(r, false));
+    try testing.expectEqual(S.RETCODE_OK, S_Registry_delete_instance());
+    try expectStats(0, 1, 0);
+    const next = S_Registry_get_instance().?;
+    try testing.expectEqual(generation + 1, S_Registry_get_generation(next));
+    try testing.expectEqual(S.RETCODE_OK, S_Registry_delete_instance());
+    try expectStats(0, 2, 0);
+}
+
+test "a static's arguments cross the C ABI, NULL as the provider's nil" {
+    provider.test_stats_reset();
+    try testing.expect(!S_Registry_is_trigger_set(null));
+    const g = S_Guard_create().?;
+    try testing.expect(!S_Registry_is_trigger_set(S_Guard_as_S_Condition(g)));
+    try testing.expectEqual(S.RETCODE_OK, S_Guard_set_trigger_value(g, true));
+    try testing.expect(S_Registry_is_trigger_set(S_Guard_as_S_Condition(g)));
+    try testing.expectEqual(S.RETCODE_OK, S_Guard_destroy(g));
 }

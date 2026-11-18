@@ -25,6 +25,13 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   extension, or a wrapper of an extension handle) without a hand-written subclass that
   forwards them. Inherited raw-loan operations convert the handle too.
 
+- **`@static` operations.** An operation marked `@static` belongs to its interface, not
+  to an object, as DDS's `DomainParticipantFactory::get_instance()` and XTypes'
+  `delete_instance()` do. C gets a function with no receiver, C++ a static member, and
+  Java a static interface method; the Zig provider supplies them through
+  `statics(comptime I: type) type` beside `nil` and `constructors`. An interface one
+  returns is borrowed. See `docs/design/static-operations.md`.
+
 - **Breaking** for providers of a `--zig-generate-c-api` module: its C functions are no
   longer exported on their own. Each module scope has `exportCAbi(comptime Provider:
   type)`, which the provider calls once, from a `comptime` block, and which exports the

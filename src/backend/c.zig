@@ -980,6 +980,7 @@ const Generator = struct {
 
         try self.print("/* IDL interface: {s} */\n", .{c_name});
         try self.emitConstructorDecls(c_name, iface);
+        try self.emitStaticDecls(c_name, iface);
         for (ops.items) |op| try self.emitFreeFunctionDecl(c_name, &op);
         for (attrs.items) |attr| try self.emitFreeAttrDecls(c_name, &attr);
         try self.emitInterfaceCastDecls(iface);
@@ -1011,6 +1012,27 @@ const Generator = struct {
                 if (first) try self.write("void");
                 try self.write(");\n");
             }
+        }
+    }
+
+    /// Declares each `@static` operation of `iface`: a function with no
+    /// receiver. An interface it returns is borrowed, and NULL when there is
+    /// none. See docs/design/static-operations.md.
+    fn emitStaticDecls(self: *Generator, c_name: []const u8, iface: *const ir.Interface) !void {
+        for (iface.statics) |*op| {
+            const ret = if (op.return_type) |rt|
+                try self.typeRefToC(rt)
+            else
+                try self.alloc.dupe(u8, "void");
+            defer self.alloc.free(ret);
+            try self.print("{s}{s}{s}_{s}(", .{ ret, ptrSep(ret), c_name, op.name });
+            for (op.params, 0..) |p, i| {
+                const pt = try self.vtableParamC(p);
+                defer self.alloc.free(pt);
+                try self.print("{s}{s}{s}{s}", .{ if (i > 0) ", " else "", pt, ptrSep(pt), p.name });
+            }
+            if (op.params.len == 0) try self.write("void");
+            try self.write(");\n");
         }
     }
 
@@ -7570,4 +7592,24 @@ test "c_backend: a header without constructors does not include zidl_allocator.h
     var out = try testGenFullOpts("interface Plain { long poke(); };", "t", .{ .generate_interfaces = true });
     defer out.deinit(testing.allocator);
     try testing.expect(!has(out.items, "zidl_allocator.h"));
+}
+
+test "c_backend: @static operations are declared with no receiver" {
+    var out = try testGenFullOpts(
+        \\module M {
+        \\    struct Cfg { long n; };
+        \\    interface Thing {
+        \\        @static Thing get_instance();
+        \\        @static long count_with(in Thing t, in Cfg c, in long n);
+        \\        @static void reset();
+        \\    };
+        \\};
+    , "t", .{ .generate_interfaces = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "M_Thing M_Thing_get_instance(void);\n"));
+    try testing.expect(has(s, "int32_t M_Thing_count_with(M_Thing t, const M_Cfg *c, int32_t n);\n"));
+    try testing.expect(has(s, "void M_Thing_reset(void);\n"));
+    // Nothing to own, so nothing pulls in the allocator header.
+    try testing.expect(!has(s, "#include \"zidl_allocator.h\""));
 }
