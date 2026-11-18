@@ -74,9 +74,10 @@ pub const ImportedUnit = struct {
 /// actually needs a cross-module entity base's real member list (currently:
 /// the Java backend, which flattens inherited ops/attrs into `*Impl.java`
 /// via each generator's own `collectMembers`, the same mechanism `@callback`
-/// interfaces already relied on this fill for). Defaults to false, preserving
-/// the reset for every other backend exactly as before — see the reset's own
-/// doc comment for why they can't currently handle real content here.
+/// interfaces already relied on this fill for, and the C++ backend, whose
+/// concrete `*Impl` forwards every inherited operation to the C ABI). Defaults
+/// to false, preserving the reset for every other backend — see the reset's
+/// own doc comment for why they can't currently handle real content here.
 pub fn buildWithImportedUnits(
     backing_alloc: std.mem.Allocator,
     ast_spec: *const ast.Specification,

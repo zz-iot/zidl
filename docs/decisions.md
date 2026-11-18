@@ -62,14 +62,15 @@ Inferring "which concrete class backs interface X" from another IDL file is exac
 of policy a future implementation-owned plugin should own; building it into core now would
 have to be unwound later. See roadmap "Plugin architecture".
 
-**Cross-module flattening is scoped to `@callback` interfaces only.** `ir.build` fills an
-imported unit's own skeletons from its own AST (`buildWithImportedUnits`/`ImportedUnit`) so a
-`@callback interface` inheriting a cross-module base gets its real member list. Entity
-interfaces share the same flattening code (`collectInterfaceMembers`) but
-`resetNonCallbackInterfaces` undoes the fill for them, because they rely on it never having
-real cross-module content (native Zig vtable literals, C++'s `nativeHandleBase`
-single-candidate assumption). Making cross-module entity-interface content work is separate,
-unscoped work.
+**Cross-module entity flattening is scoped to the Java and C++ backends.** `ir.build` fills
+an imported unit's own skeletons from its own AST (`buildWithImportedUnits`/`ImportedUnit`) so
+a `@callback interface` inheriting a cross-module base gets its real member list. For entity
+interfaces, `resetNonCallbackInterfaces` undoes that fill unless the backend asks for it
+(`fill_entity_bases`). Java and C++ do: their concrete classes implement every inherited
+operation, a cross-module base's included, by converting the handle to that base's view (an
+extension such as `zzdds::DataReader : DDS::DataReader` is then concrete without a
+hand-written subclass). The other backends keep the reset: for them the fill would only grow
+providers' hand-written Zig vtable literals and member lists that nothing asks for.
 
 **Transitive imports are unsupported pipeline-wide.** `main.zig`'s `processFile` only scans
 the primary file's own top-level `import_dcl`s; `fillFromImportedAst` only fills directly

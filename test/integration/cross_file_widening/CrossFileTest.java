@@ -2,7 +2,8 @@
 // native.c: plugin::Reader::id_of, declared with an imported
 // core::TopicDescription parameter, must accept core::Topic and
 // core::ContentFilteredTopic objects and pass their TopicDescription view to
-// the C ABI (native.c returns -1 for an unconverted handle).
+// the C ABI (native.c returns -1 for an unconverted handle). plugin::Topic
+// extends the imported core::Topic, and its get_id must reach the core view.
 //
 // Compiled and run by `zig build integration-test`.
 public class CrossFileTest {
@@ -26,6 +27,11 @@ public class CrossFileTest {
 
         check(reader.id_of(topic) == 11, "id_of(core::Topic) passes the TopicDescription view");
         check(reader.id_of(cft) == 22, "id_of(core::ContentFilteredTopic) passes the TopicDescription view");
+
+        xfw.plugin.Plugin.plugin.Topic ptopic = reader.create_plugin_topic(33);
+        check(ptopic.plugin_id() == 330, "ptopic.plugin_id()");
+        check(ptopic.get_id() == 33, "inherited get_id() passes the core view");
+        check(reader.id_of(ptopic) == 33, "id_of(plugin::Topic) passes the TopicDescription view");
 
         System.out.println("cross_file_widening Java: all checks passed");
     }
