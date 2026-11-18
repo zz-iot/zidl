@@ -1872,7 +1872,7 @@ pub fn build(b: *std.Build) void {
                     const classes = b.fmt("build-tmp/{s}", .{variant.name});
                     const compile = javaCommand(b, &.{ javac, "-d", classes }, java_cdr);
                     compile.addArgs(&.{dir ++ "StandaloneTest.java"});
-                    for (&[_][]const u8{ "Standalone.java", "ConditionImpl.java", "EngineImpl.java", "GuardImpl.java", "HolderImpl.java" }) |f| {
+                    for (&[_][]const u8{ "Standalone.java", "ConditionImpl.java", "EngineImpl.java", "GuardImpl.java", "HolderImpl.java", "RegistryImpl.java" }) |f| {
                         compile.addFileArg(java_dir.path(b, f));
                     }
                     const run = javaCommand(b, &.{ java, "-cp", classes }, java_cdr);

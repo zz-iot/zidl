@@ -101,6 +101,36 @@ public class StandaloneTest {
         }
         stats(0, 2, 0, "close() without a finalizer runs the destructor");
 
+        // The @static singleton: borrowed, so there is nothing to close;
+        // delete_instance() refuses while it is pinned.
+        nReset();
+        check(Standalone.S.Registry.delete_instance() == OK, "delete_instance() with no instance");
+        Standalone.S.Registry r = Standalone.S.Registry.get_instance();
+        check(r != null, "get_instance() creates the instance");
+        check(Standalone.S.Registry.get_instance() == r, "get_instance() returns the same wrapper");
+        int generation = r.get_generation();
+        stats(1, 0, 0, "one instance is live");
+        check(r.pin(true) == OK, "pin");
+        check(Standalone.S.Registry.delete_instance() == PRECONDITION_NOT_MET, "delete_instance() refuses a pinned instance");
+        check(r.pin(false) == OK, "unpin");
+        check(Standalone.S.Registry.delete_instance() == OK, "delete_instance()");
+        stats(0, 1, 0, "delete_instance() freed it");
+        // Not called through `r` again: without the retire hook its handle is
+        // freed but not retired.
+        Standalone.S.Registry next = Standalone.S.Registry.get_instance();
+        check(next.get_generation() == generation + 1, "get_instance() after delete_instance() creates a new one");
+        check(Standalone.S.Registry.delete_instance() == OK, "delete_instance() again");
+        stats(0, 2, 0, "both instances were freed");
+
+        nReset();
+        check(!Standalone.S.Registry.is_trigger_set(null), "null goes in to a static as the provider's nil");
+        try (Standalone.S.Guard g = Standalone.S.Guard.create()) {
+            check(!Standalone.S.Registry.is_trigger_set(g), "a static takes an interface argument");
+            check(g.set_trigger_value(true) == OK, "set_trigger_value");
+            check(Standalone.S.Registry.is_trigger_set(g), "and reaches the provider with it");
+        }
+        stats(0, 1, 0, "the guard was destroyed");
+
         System.out.println("standalone construction: Java checks passed");
     }
 }

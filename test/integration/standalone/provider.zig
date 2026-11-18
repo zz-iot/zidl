@@ -18,6 +18,7 @@ const Provider = struct {
         if (I == S.Engine) return Nil.engine;
         if (I == S.Guard) return Nil.guard;
         if (I == S.Holder) return Nil.holder;
+        if (I == S.Registry) return Nil.registry;
         @compileError("no nil for " ++ @typeName(I));
     }
     pub fn constructors(comptime I: type) type {
@@ -25,6 +26,10 @@ const Provider = struct {
         if (I == S.Guard) return GuardCtors;
         if (I == S.Holder) return HolderCtors;
         @compileError("no constructors for " ++ @typeName(I));
+    }
+    pub fn statics(comptime I: type) type {
+        if (I == S.Registry) return RegistryStatics;
+        @compileError("no statics for " ++ @typeName(I));
     }
 };
 
@@ -64,6 +69,7 @@ const Nil = struct {
     const engine: S.Engine = .{ .ptr = zb.NIL_PTR, .vtable = &engine_vtable };
     const guard: S.Guard = .{ .ptr = zb.NIL_PTR, .vtable = &guard_vtable };
     const holder: S.Holder = .{ .ptr = zb.NIL_PTR, .vtable = &holder_vtable };
+    const registry: S.Registry = .{ .ptr = zb.NIL_PTR, .vtable = &registry_vtable };
 
     const condition_vtable: S.Condition.Vtable = .{
         .get_trigger_value = falseOf,
@@ -93,6 +99,14 @@ const Nil = struct {
         .destroy = badParameter,
         .hold = hold,
         .held = held,
+        .deinit = noop,
+        .get_c_abi_handle = neverBoxed,
+        .get_allocator = allocatorOf,
+    };
+
+    const registry_vtable: S.Registry.Vtable = .{
+        .get_generation = minusOne,
+        .pin = setTrigger,
         .deinit = noop,
         .get_c_abi_handle = neverBoxed,
         .get_allocator = allocatorOf,
@@ -333,5 +347,82 @@ const HolderCtors = struct {
         self.* = .{ .alloc = alloc };
         bump("live", 1);
         return .{ .ptr = self, .vtable = &Holder.vtable };
+    }
+};
+
+// ── Registry: the singleton behind the @static operations ───────────────────
+
+const Registry = struct {
+    alloc: std.mem.Allocator,
+    box: ?*anyopaque = null,
+    generation: i32,
+    pinned: bool = false,
+
+    const vtable: S.Registry.Vtable = .{
+        .get_generation = getGeneration,
+        .pin = pin,
+        .deinit = deinit,
+        .get_c_abi_handle = handle,
+        .get_allocator = getAllocator,
+    };
+
+    fn of(p: *anyopaque) *Registry {
+        return @ptrCast(@alignCast(p));
+    }
+    fn getGeneration(p: *anyopaque) i32 {
+        return of(p).generation;
+    }
+    fn pin(p: *anyopaque, on: bool) S.ReturnCode_t {
+        of(p).pinned = on;
+        return S.RETCODE_OK;
+    }
+    fn deinit(p: *anyopaque) void {
+        const self = of(p);
+        // Retires every binding's wrapper of it (the retire hook).
+        if (self.box) |b| zb.freeEntityBox(self.alloc, b);
+        bump("live", -1);
+        self.alloc.destroy(self);
+    }
+    fn handle(p: *anyopaque) *anyopaque {
+        const self = of(p);
+        if (self.box == null) self.box = zb.boxEntity(self.alloc, p, &vtable) catch @panic("out of memory boxing a Registry");
+        return self.box.?;
+    }
+    fn getAllocator(p: *anyopaque) std.mem.Allocator {
+        return of(p).alloc;
+    }
+};
+
+var registry: ?*Registry = null;
+var registry_generations: i32 = 0;
+var registry_mu: std.atomic.Mutex = .unlocked;
+
+const RegistryStatics = struct {
+    pub fn get_instance() S.Registry {
+        while (!registry_mu.tryLock()) {}
+        defer registry_mu.unlock();
+        const self = registry orelse blk: {
+            const r = std.heap.c_allocator.create(Registry) catch return Nil.registry;
+            registry_generations += 1;
+            r.* = .{ .alloc = std.heap.c_allocator, .generation = registry_generations };
+            bump("live", 1);
+            registry = r;
+            break :blk r;
+        };
+        return .{ .ptr = self, .vtable = &Registry.vtable };
+    }
+    pub fn delete_instance() S.ReturnCode_t {
+        while (!registry_mu.tryLock()) {}
+        defer registry_mu.unlock();
+        const self = registry orelse return S.RETCODE_OK;
+        if (self.pinned) return S.RETCODE_PRECONDITION_NOT_MET;
+        registry = null;
+        bump("destroys", 1);
+        Registry.deinit(self);
+        return S.RETCODE_OK;
+    }
+    pub fn is_trigger_set(cond: S.Condition) bool {
+        // A NULL condition arrives as the nil, which can be called.
+        return cond.vtable.get_trigger_value(cond.ptr);
     }
 };

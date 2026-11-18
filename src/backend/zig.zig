@@ -464,6 +464,10 @@ const Generator = struct {
     ///   - `pub fn constructors(comptime I: type) type`, when the module has
     ///     a `@standalone` interface with `@constructor`s: a type declaring
     ///     each as `pub fn <name>(alloc: std.mem.Allocator, ...) !I`.
+    ///   - `pub fn statics(comptime I: type) type`, when the module has an
+    ///     interface with `@static` operations: a type declaring each as
+    ///     `pub fn <name>(...) R`, with the operation's own parameters and
+    ///     result (see docs/design/static-operations.md).
     fn emitModuleCApiExport(self: *Generator) anyerror!void {
         if (self.cabi_helpers.items.len == 0) return;
         try self.ind();
@@ -477,7 +481,11 @@ const Generator = struct {
         try self.ind();
         try self.write("/// type) type` (each `@constructor` as `pub fn <name>(alloc: std.mem.Allocator,\n");
         try self.ind();
-        try self.write("/// ...) !I`). See zidl's docs/design/c-abi-provider.md.\n");
+        try self.write("/// ...) !I`), and for interfaces with `@static` operations, `pub fn\n");
+        try self.ind();
+        try self.write("/// statics(comptime I: type) type` (each as `pub fn <name>(...) R`). See zidl's\n");
+        try self.ind();
+        try self.write("/// docs/design/c-abi-provider.md.\n");
         try self.ind();
         try self.write("pub fn exportCAbi(comptime _Provider: type) void {\n");
         try self.ind();
@@ -2145,7 +2153,7 @@ const Generator = struct {
         try self.write(");\n");
         try self.ind();
         try self.write("}\n\n");
-        try self.emitCApiOpOrCtor(qual_c_name, pfx, iface.name, "", op, true);
+        try self.emitCApiOpOrCtor(qual_c_name, pfx, iface.name, "", op, .ctor);
     }
 
     // ── C-API exports (--zig-generate-c-api) ─────────────────────────────────
@@ -2558,13 +2566,13 @@ const Generator = struct {
         // depends on `iface` itself, not on any one operation/attribute/base.
         const self_unbox_fn = cAbiUnboxFnName(iface);
 
-        // An interface with no operations, attributes, bases or constructors
-        // has no C functions, so no helper.
+        // An interface with no operations, attributes, bases, constructors or
+        // statics has no C functions, so no helper.
         var interface_bases: usize = 0;
         for (iface.bases) |base| {
             if (base == .interface) interface_bases += 1;
         }
-        if (ops.len == 0 and attrs.len == 0 and interface_bases == 0 and iface.constructors.len == 0) return;
+        if (ops.len == 0 and attrs.len == 0 and interface_bases == 0 and iface.constructors.len == 0 and iface.statics.len == 0) return;
 
         // The C functions live in a helper the module's `exportCAbi` calls
         // with the provider (see `emitModuleCApiExport`), so they can use what
@@ -2597,6 +2605,7 @@ const Generator = struct {
         }
 
         for (iface.constructors) |*op| try self.emitCApiConstructor(qual_c_name, pfx, iface, op);
+        for (iface.statics) |*op| try self.emitCApiOpOrCtor(qual_c_name, pfx, iface.name, "", op, .static);
 
         // Each function ends with a blank line; not the last.
         if (std.mem.endsWith(u8, self.out.items, "\n\n")) self.out.items.len -= 1;
@@ -2604,7 +2613,7 @@ const Generator = struct {
         try self.ind();
         try self.write("    };\n");
         // Upcasts alone never refer to `_Provider`.
-        if (ops.len == 0 and attrs.len == 0 and iface.constructors.len == 0) {
+        if (ops.len == 0 and attrs.len == 0 and iface.constructors.len == 0 and iface.statics.len == 0) {
             try self.ind();
             try self.write("    _ = _Provider;\n");
         }
@@ -2633,6 +2642,7 @@ const Generator = struct {
             defer self.alloc.free(with_allocator);
             try self.emitCApiExportLine(qual_c_name, with_allocator);
         }
+        for (iface.statics) |*op| try self.emitCApiExportLine(qual_c_name, op.name);
         try self.ind();
         try self.write("}\n\n");
     }
@@ -2895,14 +2905,19 @@ const Generator = struct {
         self_unbox_fn: []const u8,
         op: *const ir.Operation,
     ) anyerror!void {
-        return self.emitCApiOpOrCtor(c_name, pfx, iface_name, self_unbox_fn, op, false);
+        return self.emitCApiOpOrCtor(c_name, pfx, iface_name, self_unbox_fn, op, .instance);
     }
 
-    /// `ctor`: emit `op`, a `@constructor`, as the `_with_allocator` form of
-    /// its export (see `emitCApiConstructor`): a function with no receiver
-    /// that resolves the caller's allocator, calls the provider's
-    /// `constructors(I).{op}(alloc, ...)` and returns null when it fails.
-    /// Parameter conversion is shared with instance operations.
+    /// `mode`:
+    ///   - `.instance`: an operation called through the object passed as `self`.
+    ///   - `.ctor`: `op`, a `@constructor`, as the `_with_allocator` form of
+    ///     its export (see `emitCApiConstructor`): a function with no receiver
+    ///     that resolves the caller's allocator, calls the provider's
+    ///     `constructors(I).{op}(alloc, ...)` and returns null when it fails.
+    ///   - `.static`: `op`, a `@static`: a function with no receiver that
+    ///     calls the provider's `statics(I).{op}(...)`. The builder limits
+    ///     its parameters and result to those that need no receiver here.
+    /// Parameter and result conversion is shared with instance operations.
     fn emitCApiOpOrCtor(
         self: *Generator,
         c_name: []const u8,
@@ -2910,19 +2925,22 @@ const Generator = struct {
         iface_name: []const u8,
         self_unbox_fn: []const u8,
         op: *const ir.Operation,
-        ctor: bool,
+        mode: enum { instance, ctor, static },
     ) anyerror!void {
+        const ctor = mode == .ctor;
         const c_ret = if (ctor) try self.alloc.dupe(u8, "?*anyopaque") else try self.cApiExportOptRetType(op.return_type);
         defer self.alloc.free(c_ret);
         const is_void_ret = std.mem.eql(u8, c_ret, "void");
 
         try self.ind();
-        if (ctor) {
-            try self.print("fn {s}_{s}_with_allocator(allocator: ?*const zidl_bindings.ZidlAllocator", .{ c_name, op.name });
-        } else {
-            try self.print("fn {s}_{s}(self: ?*anyopaque", .{ c_name, op.name });
+        switch (mode) {
+            .ctor => try self.print("fn {s}_{s}_with_allocator(allocator: ?*const zidl_bindings.ZidlAllocator", .{ c_name, op.name }),
+            .instance => try self.print("fn {s}_{s}(self: ?*anyopaque", .{ c_name, op.name }),
+            .static => try self.print("fn {s}_{s}(", .{ c_name, op.name }),
         }
-        for (op.params) |p| {
+        for (op.params, 0..) |p, pi| {
+            // A static has no leading receiver to follow.
+            const sep: []const u8 = if (mode == .static and pi == 0) "" else ", ";
             const pt = try self.cApiExportParamType(p);
             defer self.alloc.free(pt);
             // Struct in-params use ?*const T so C callers can pass null for defaults
@@ -2933,18 +2951,23 @@ const Generator = struct {
             // unboxing call site below for how a null one becomes the
             // provider's nil.
             if (p.mode == .in_ and (std.mem.startsWith(u8, pt, "*const ") or typeRefIsEntityInterface(p.type_ref))) {
-                try self.print(", {s}: ?{s}", .{ p.name, pt });
+                try self.print("{s}{s}: ?{s}", .{ sep, p.name, pt });
             } else {
-                try self.print(", {s}: {s}", .{ p.name, pt });
+                try self.print("{s}{s}: {s}", .{ sep, p.name, pt });
             }
         }
         try self.print(") callconv(.c) {s} {{\n", .{c_ret});
 
-        try self.ind();
-        if (ctor) {
-            try self.write("    const _alloc = if (allocator) |_a| zidl_bindings.toAllocator(_a) else zidlCAbiFreeAllocator();\n");
-        } else {
-            try self.emitCApiSelf(pfx, iface_name, self_unbox_fn);
+        switch (mode) {
+            .ctor => {
+                try self.ind();
+                try self.write("    const _alloc = if (allocator) |_a| zidl_bindings.toAllocator(_a) else zidlCAbiFreeAllocator();\n");
+            },
+            .instance => {
+                try self.ind();
+                try self.emitCApiSelf(pfx, iface_name, self_unbox_fn);
+            },
+            .static => {},
         }
 
         // Entity-sequence params (DataReaderSeq, ConditionSeq, ...) need a
@@ -3074,16 +3097,17 @@ const Generator = struct {
         } else {
             try self.write("    ");
         }
-        if (ctor) {
-            try self.print("_Provider.constructors({s}{s}).{s}(_alloc", .{ pfx, iface_name, op.name });
-        } else {
-            try self.print("_self.vtable.{s}(_self.ptr", .{op.name});
+        switch (mode) {
+            .ctor => try self.print("_Provider.constructors({s}{s}).{s}(_alloc", .{ pfx, iface_name, op.name }),
+            .instance => try self.print("_self.vtable.{s}(_self.ptr", .{op.name}),
+            .static => try self.print("_Provider.statics({s}{s}).{s}(", .{ pfx, iface_name, op.name }),
         }
-        for (op.params) |p| {
+        for (op.params, 0..) |p, pi| {
             const pt = try self.cApiExportParamType(p);
             defer self.alloc.free(pt);
+            if (mode != .static or pi > 0) try self.write(", ");
             if (typeRefIsEntitySequence(p.type_ref)) {
-                try self.print(", &_native_{s}", .{p.name});
+                try self.print("&_native_{s}", .{p.name});
             } else if (typeRefIsEntityInterface(p.type_ref)) {
                 const pzig = try self.typeRefToZig(p.type_ref);
                 defer self.alloc.free(pzig);
@@ -3093,21 +3117,21 @@ const Generator = struct {
                     // signature-emission comment above): the provider's nil
                     // of the parameter's type, which a callee can call
                     // through like any other value.
-                    try self.print(", if ({s}) |_h| {s}({s}, _h) else _Provider.nil({s})", .{ p.name, p_unbox_fn, pzig, pzig });
+                    try self.print("if ({s}) |_h| {s}({s}, _h) else _Provider.nil({s})", .{ p.name, p_unbox_fn, pzig, pzig });
                 } else {
-                    try self.print(", {s}({s}, {s})", .{ p_unbox_fn, pzig, p.name });
+                    try self.print("{s}({s}, {s})", .{ p_unbox_fn, pzig, p.name });
                 }
             } else if (try self.cApiMirrorTypeName(p.type_ref)) |mn| {
                 self.alloc.free(mn);
                 // `_mir_{name}` (declared above) is the real internal-typed
                 // value the vtable slot expects -- call through its address,
                 // never the mirror pointer the exported signature took.
-                try self.print(", &_mir_{s}", .{p.name});
+                try self.print("&_mir_{s}", .{p.name});
             } else if (p.mode == .in_ and std.mem.startsWith(u8, pt, "*const ")) {
                 // Substitute the type default when caller passes null.
-                try self.print(", {s} orelse &.{{}}", .{p.name});
+                try self.print("{s} orelse &.{{}}", .{p.name});
             } else {
-                try self.print(", {s}", .{p.name});
+                try self.print("{s}", .{p.name});
             }
         }
         try self.write(if (ctor) ") catch return null;\n" else ");\n");
@@ -12235,4 +12259,32 @@ test "zig: constructors are only exported with --zig-generate-c-api" {
     , "t", .{ .generate_interfaces = true });
     defer out.deinit(testing.allocator);
     try testing.expect(!has(out.items, "exportCAbi"));
+}
+
+test "zig: @static operations are exported by the module's exportCAbi, with no receiver" {
+    var out = try testGenOpts(
+        \\module M {
+        \\    const long OK = 0;
+        \\    @success_result(OK) typedef long Code;
+        \\    struct Cfg { long n; };
+        \\    interface Thing {
+        \\        @static Thing get_instance();
+        \\        @static long count_with(in Thing t, in Cfg c, in long n);
+        \\        @static void reset();
+        \\        Code poke();
+        \\    };
+        \\};
+    , "t", .{ .generate_interfaces = true, .zig_generate_c_api = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "fn M_Thing_get_instance() callconv(.c) ?*anyopaque {"));
+    try testing.expect(has(s, "const _r = _Provider.statics(Thing).get_instance();"));
+    try testing.expect(has(s, "if (_r.ptr == zidl_bindings.NIL_PTR) return null;"));
+    try testing.expect(has(s, "fn M_Thing_count_with(t: ?*anyopaque, c: ?*const M.Cfg, n: i32) callconv(.c) i32 {"));
+    try testing.expect(has(s, "return _Provider.statics(Thing).count_with(if (t) |_h| zidl_bindings.unboxAs(M.Thing, _h) else _Provider.nil(M.Thing), c orelse &.{}, n);"));
+    try testing.expect(has(s, "    _Provider.statics(Thing).reset();\n"));
+    try testing.expect(has(s, "@export(&_Exports.M_Thing_get_instance, .{ .name = \"M_Thing_get_instance\" });"));
+    // A static takes no vtable slot.
+    try testing.expect(!has(s, "get_instance: *const fn"));
+    try testing.expect(has(s, "poke: *const fn"));
 }

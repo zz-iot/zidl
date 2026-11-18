@@ -1,6 +1,6 @@
 // Drives standalone.idl's generated C++ binding against the Zig provider:
 // static constructors, ownership by the creating wrapper, the strict
-// destructor, the fallback release, and family identity.
+// destructor, the fallback release, family identity, and @static operations.
 #include "standalone_impl.hpp"
 
 #include <atomic>
@@ -245,6 +245,53 @@ static void test_boxing_throws() {
     expect_stats(0, 0, 1);
 }
 
+// The @static singleton: every get_instance() returns the same, borrowed
+// wrapper, which dropping does not release; delete_instance() refuses while
+// it is pinned, and the next get_instance() creates a new one.
+static void test_static_singleton() {
+    test_stats_reset();
+    CHECK(S::Registry::delete_instance() == S::RETCODE_OK);
+    std::shared_ptr<S::Registry> r = S::Registry::get_instance();
+    CHECK(r);
+    CHECK(S::Registry::get_instance() == r);
+    const int32_t generation = r->get_generation();
+    r.reset();
+    expect_stats(1, 0, 0);
+    r = S::Registry::get_instance();
+    CHECK(r->get_generation() == generation);
+    CHECK(r->pin(true) == S::RETCODE_OK);
+    CHECK(S::Registry::delete_instance() == S::RETCODE_PRECONDITION_NOT_MET);
+    CHECK(r->pin(false) == S::RETCODE_OK);
+    CHECK(S::Registry::delete_instance() == S::RETCODE_OK);
+    expect_stats(0, 1, 0);
+#ifndef STANDALONE_NO_RETIRE_HOOK
+    // The provider freed it: the retire hook retired the wrapper.
+    CHECK(r->pin(true) == S::RETCODE_ALREADY_DELETED);
+#endif
+    // Without the retire hook, nothing evicts the deleted instance's wrapper,
+    // so drop it before its address can come back.
+    r.reset();
+    r = S::Registry::get_instance();
+    CHECK(r && r->get_generation() == generation + 1);
+    CHECK(S::Registry::delete_instance() == S::RETCODE_OK);
+    expect_stats(0, 2, 0);
+}
+
+// A static's interface argument converts like any operation's, and an empty
+// pointer goes in as the provider's nil.
+static void test_static_arguments() {
+    test_stats_reset();
+    CHECK(!S::Registry::is_trigger_set(nullptr));
+    {
+        auto g = S::Guard::create();
+        CHECK(g);
+        CHECK(!S::Registry::is_trigger_set(g));
+        CHECK(g->set_trigger_value(true) == S::RETCODE_OK);
+        CHECK(S::Registry::is_trigger_set(g));
+    }
+    expect_stats(0, 1, 0);
+}
+
 int main() {
     // First: any earlier release would reach Holder's cache through the
     // retire observer and create it under the old default resource.
@@ -258,6 +305,8 @@ int main() {
     test_family_identity();
     test_reused_address();
     test_boxing_throws();
+    test_static_singleton();
+    test_static_arguments();
     std::puts("standalone construction: C++ checks passed");
     return 0;
 }

@@ -1518,6 +1518,7 @@ const Generator = struct {
         try self.write(" {\n");
         self.depth += 1;
         if (constructible) try self.emitConstructorFactories(iface);
+        if (self.opts.generate_interfaces) try self.emitStaticMethods(iface);
 
         // Nested type declarations
         for (iface.type_decls) |td| try self.emitTypeDecl(td);
@@ -1591,6 +1592,30 @@ const Generator = struct {
         }
         try self.ind();
         try self.write("@Override void close();\n");
+    }
+
+    /// Each `@static` operation as a static interface method, implemented by
+    /// the generated `*Impl` class. Java does not inherit static interface
+    /// methods, so a derived interface has none of these. An interface one
+    /// returns is borrowed: closing it releases nothing. See
+    /// docs/design/static-operations.md.
+    fn emitStaticMethods(self: *Generator, iface: *const ir.Interface) !void {
+        const pfx = self.opts.type_prefix;
+        for (iface.statics) |*op| {
+            const ret_java = if (op.return_type) |rt| try self.typeRefToJava(rt, &.{}) else try self.alloc.dupe(u8, "void");
+            defer self.alloc.free(ret_java);
+            try self.ind();
+            try self.print("static {s} {s}(", .{ ret_java, op.name });
+            for (op.params, 0..) |p, i| {
+                const pt = try self.typeRefToJava(p.type_ref, &.{});
+                defer self.alloc.free(pt);
+                if (i > 0) try self.write(", ");
+                try self.print("{s} {s}", .{ pt, p.name });
+            }
+            try self.print(") {{ {s}{s}{s}Impl.{s}(", .{ if (op.return_type != null) "return " else "", pfx, iface.name, op.name });
+            for (op.params, 0..) |p, i| try self.print("{s}{s}", .{ if (i > 0) ", " else "", p.name });
+            try self.write("); }\n");
+        }
     }
 
     /// Interface-method declaration for one of `isWriteLoanBufferOp`'s three
@@ -4896,6 +4921,7 @@ const ImplFileGenerator = struct {
         }
         try self.print("    public {s}{s}Impl(long ptr) {{ this.ptr_ = ptr; }}\n\n", .{ pfx, iface.name });
         if (constructible) try self.emitConstruction();
+        try self.emitStatics();
 
         // @Override forwarding methods.
         for (ops.items) |op| {
@@ -4919,6 +4945,17 @@ const ImplFileGenerator = struct {
         }
         for (attrs.items) |attr| {
             if (!is_callback and attrIsJniSupported(&attr)) try self.emitNativeAttrDecl(&attr);
+        }
+        for (iface.statics) |*op| {
+            const ret_java = if (op.return_type) |rt| try self.typeRefToJava(rt) else try self.alloc.dupe(u8, "void");
+            defer self.alloc.free(ret_java);
+            try self.print("    private static native {s} n_{s}(", .{ ret_java, op.name });
+            for (op.params, 0..) |p, i| {
+                const pt = try self.typeRefToJava(p.type_ref);
+                defer self.alloc.free(pt);
+                try self.print("{s}{s} {s}", .{ if (i > 0) ", " else "", pt, p.name });
+            }
+            try self.write(");\n");
         }
         for (iface.constructors) |*op| {
             try self.print("    private static native {s}{s}Impl n_{s}(", .{ pfx, iface.name, op.name });
@@ -4957,6 +4994,25 @@ const ImplFileGenerator = struct {
             "    @Override\n    public void close() {{\n        if (owned_ && ptr_ != 0) {s}();\n    }}\n\n",
             .{fallback.name},
         );
+    }
+
+    /// Each `@static` operation's static method, which the interface's own
+    /// static method calls. A returned interface is boxed like any other
+    /// operation's result, and never owned.
+    fn emitStatics(self: *ImplFileGenerator) !void {
+        for (self.iface.statics) |*op| {
+            const ret_java = if (op.return_type) |rt| try self.typeRefToJava(rt) else try self.alloc.dupe(u8, "void");
+            defer self.alloc.free(ret_java);
+            try self.print("    public static {s} {s}(", .{ ret_java, op.name });
+            for (op.params, 0..) |p, i| {
+                const pt = try self.typeRefToJava(p.type_ref);
+                defer self.alloc.free(pt);
+                try self.print("{s}{s} {s}", .{ if (i > 0) ", " else "", pt, p.name });
+            }
+            try self.print(") {{\n        {s}n_{s}(", .{ if (op.return_type != null) "return " else "", op.name });
+            for (op.params, 0..) |p, i| try self.print("{s}{s}", .{ if (i > 0) ", " else "", p.name });
+            try self.write(");\n    }\n\n");
+        }
     }
 
     /// The `@destructor` or `@finalizer` of a `@standalone` interface: once
@@ -6075,7 +6131,11 @@ const JniBridgeGenerator = struct {
             }
             for (iface.constructors) |*op| {
                 if (!opIsJniSupported(op)) return error.UnsupportedConstructorParam;
-                try self.emitJniBridgeOpOrCtor(iface, c_name, jni_class_prefix, op, true);
+                try self.emitJniBridgeOpOrCtor(iface, c_name, jni_class_prefix, op, .ctor);
+            }
+            for (iface.statics) |*op| {
+                if (!opIsJniSupported(op)) return error.UnsupportedStaticParam;
+                try self.emitJniBridgeOpOrCtor(iface, c_name, jni_class_prefix, op, .static);
             }
         }
     }
@@ -7199,7 +7259,7 @@ const JniBridgeGenerator = struct {
         jni_class_prefix: []const u8,
         op: *const ir.Operation,
     ) !void {
-        return self.emitJniBridgeOpOrCtor(iface, c_name, jni_class_prefix, op, false);
+        return self.emitJniBridgeOpOrCtor(iface, c_name, jni_class_prefix, op, .instance);
     }
 
     /// `ctor`: `op` is a `@constructor`, bridged as a static native with no
@@ -7212,8 +7272,12 @@ const JniBridgeGenerator = struct {
         c_name: []const u8,
         jni_class_prefix: []const u8,
         op: *const ir.Operation,
-        ctor: bool,
+        mode: enum { instance, ctor, static },
     ) !void {
+        // A constructor calls `{C}_{op}_with_allocator(NULL, ...)` and a
+        // static `{C}_{op}(...)`; neither has a receiver.
+        const ctor = mode == .ctor;
+        const no_self = mode != .instance;
         if (isWriteLoanBufferOp(iface.name, op.name)) return self.emitWriteLoanBufferJniOp(iface, c_name, jni_class_prefix, op);
         // See emitForwardingOp's matching comment -- iface may be a derived
         // interface here too.
@@ -7225,7 +7289,7 @@ const JniBridgeGenerator = struct {
         const jni_fn = try self.buildJniFnName(jni_class_prefix, native_name);
         defer self.alloc.free(jni_fn);
 
-        if (ctor) {
+        if (no_self) {
             try self.print("JNIEXPORT {s} JNICALL {s}(\n    JNIEnv *env, jclass cls", .{ jni_ret, jni_fn });
         } else {
             try self.print("JNIEXPORT {s} JNICALL {s}(\n    JNIEnv *env, jobject self, jlong ptr", .{
@@ -7235,16 +7299,18 @@ const JniBridgeGenerator = struct {
         for (op.params) |p| {
             try self.print(", {s} {s}", .{ jniType(p.type_ref), p.name });
         }
-        try self.write(if (ctor) ")\n{\n    (void)cls;\n" else ")\n{\n    (void)self;\n");
+        try self.write(if (no_self) ")\n{\n    (void)cls;\n" else ")\n{\n    (void)self;\n");
 
         // `op` may be inherited from a *cross-file* base rather than
         // declared directly on `iface` (or a same-file base) — see
         // `resolveCallTarget`'s doc for why that specifically needs a `self`
         // conversion + a different C symbol.
-        const call_target = if (ctor) null else try self.resolveCallTarget(iface, c_name, op.name);
+        const call_target = if (no_self) null else try self.resolveCallTarget(iface, c_name, op.name);
         defer if (call_target) |ct| ct.deinit(self.alloc);
         const call_c_name = if (call_target) |ct| ct.c_name else c_name;
-        const self_expr = if (call_target) |ct| ct.self_expr else "NULL";
+        // A constructor's first argument is its allocator (NULL: the
+        // provider's default); a static has none.
+        const self_expr = if (call_target) |ct| ct.self_expr else if (mode == .static) "" else "NULL";
         const call_op_name = if (ctor) try std.fmt.allocPrint(self.alloc, "{s}_with_allocator", .{op.name}) else try self.alloc.dupe(u8, op.name);
         defer self.alloc.free(call_op_name);
 
@@ -7385,14 +7451,15 @@ const JniBridgeGenerator = struct {
         } else {
             try self.print("    {s}_{s}({s}", .{ call_c_name, call_op_name, self_expr });
         }
-        for (op.params) |p| {
+        for (op.params, 0..) |p, pi| {
+            if (mode != .static or pi > 0) try self.write(", ");
             switch (classifyTypeRef(p.type_ref)) {
-                .entity => try self.print(", _n_{s}", .{p.name}),
-                .callback => try self.print(", _p_{s}", .{p.name}),
-                .string => try self.print(", _cs_{s}", .{p.name}),
+                .entity => try self.print("_n_{s}", .{p.name}),
+                .callback => try self.print("_p_{s}", .{p.name}),
+                .string => try self.print("_cs_{s}", .{p.name}),
                 .value_struct => switch (p.mode) {
-                    .in_ => try self.print(", _p_{s}", .{p.name}),
-                    .out, .inout => try self.print(", &_c_{s}", .{p.name}),
+                    .in_ => try self.print("_p_{s}", .{p.name}),
+                    .out, .inout => try self.print("&_c_{s}", .{p.name}),
                 },
                 else => {
                     const ct = try self.typeRefToC(p.type_ref);
@@ -7400,9 +7467,9 @@ const JniBridgeGenerator = struct {
                     // Mirror the prep loop's `.scalar` + enum special case:
                     // pass the unboxed `jint` local, not the raw `jobject`.
                     if (resolveMemberShape(p.type_ref) == .enum_) {
-                        try self.print(", ({s})_n_{s}", .{ ct, p.name });
+                        try self.print("({s})_n_{s}", .{ ct, p.name });
                     } else {
-                        try self.print(", ({s}){s}", .{ ct, p.name });
+                        try self.print("({s}){s}", .{ ct, p.name });
                     }
                 },
             }
@@ -11864,4 +11931,64 @@ test "java: --java-jni-onload-hook is called from JNI_OnLoad, failing the load w
     defer plain.deinit(alloc);
     try generateJniSource(alloc, &ir_spec, .{ .input_stem = "w" }, &plain);
     try testing.expect(std.mem.indexOf(u8, plain.items, "    zidl_java_vm = vm;\n    return JNI_VERSION_1_6;\n}\n") != null);
+}
+
+const static_java_idl =
+    \\module M {
+    \\    struct Cfg { long n; };
+    \\    interface Thing {
+    \\        @static Thing get_instance();
+    \\        @static long count_with(in Thing t, in Cfg c, in long n);
+    \\        @static void reset();
+    \\        long poke();
+    \\    };
+    \\};
+;
+
+test "java: @static operations are static interface methods, and confer no ownership" {
+    const alloc = testing.allocator;
+    const opts = interface.Options{ .input_stem = "t", .generate_interfaces = true, .jni_library = "t_jni" };
+    try testGenOpts(alloc, static_java_idl, "t", opts, "static M.Thing get_instance() { return ThingImpl.get_instance(); }");
+    try testGenOpts(alloc, static_java_idl, "t", opts, "static int count_with(M.Thing t, M.Cfg c, int n) { return ThingImpl.count_with(t, c, n); }");
+    try testGenOpts(alloc, static_java_idl, "t", opts, "static void reset() { ThingImpl.reset(); }");
+    try testGenOpts(alloc, static_java_idl, "t", opts, "public interface Thing {");
+}
+
+test "java: a @static's Impl method calls a static native" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc, static_java_idl);
+    defer ir_spec.deinit();
+    var ifaces = std.ArrayListUnmanaged(*const ir.Interface).empty;
+    defer ifaces.deinit(alloc);
+    try collectInterfaces(alloc, ir_spec.items, &ifaces);
+    const stem_class = try stemToClassName(alloc, "t");
+    defer alloc.free(stem_class);
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    try generateImplFile(alloc, &ir_spec, ifaces.items[0], stem_class, .{ .input_stem = "t", .jni_library = "t_jni" }, &out);
+    const s = out.items;
+    try testing.expect(std.mem.indexOf(u8, s, "    public static T.M.Thing get_instance() {\n        return n_get_instance();\n    }\n") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "    public static void reset() {\n        n_reset();\n    }\n") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "    private static native T.M.Thing n_get_instance();\n") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "owned_") == null);
+}
+
+test "java: a @static's JNI bridge has no receiver and boxes a borrowed result" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc, static_java_idl);
+    defer ir_spec.deinit();
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    try generateJniSource(alloc, &ir_spec, .{ .input_stem = "t" }, &out);
+    const s = out.items;
+    try testing.expect(std.mem.indexOf(u8, s,
+        \\JNIEXPORT jobject JNICALL Java_ThingImpl_n_1get_1instance(
+        \\    JNIEnv *env, jclass cls)
+        \\{
+        \\    (void)cls;
+        \\    void *_h = (void *)M_Thing_get_instance();
+        \\    return zidl_java_box_M_Thing(env, _h);
+    ) != null);
+    try testing.expect(std.mem.indexOf(u8, s, "    jint _ret = (jint)M_Thing_count_with(_n_t, _p_c, (int32_t)n);\n") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "    M_Thing_reset();\n") != null);
 }

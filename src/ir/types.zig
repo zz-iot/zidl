@@ -323,6 +323,11 @@ pub const Interface = struct {
     /// declaration order. Kept apart from `operations`: they have no
     /// receiver, are not inherited and take no vtable slot.
     constructors: []const Operation = &.{},
+    /// `@static` operations, in declaration order. Like constructors they
+    /// have no receiver, are not inherited and take no vtable slot, but they
+    /// confer no ownership: an interface one returns is borrowed. See
+    /// docs/design/static-operations.md.
+    statics: []const Operation = &.{},
     attributes: []const Attribute,
     /// Type declarations nested inside the interface body.
     type_decls: []const TypeDecl,
@@ -349,6 +354,12 @@ pub fn isStandaloneInterface(iface: *const Interface) bool {
 /// `@standalone` interface and has no receiver.
 pub fn isConstructorOp(op: *const Operation) bool {
     return hasRaw(op.raw, "constructor");
+}
+
+/// True for a `@static` operation: it belongs to its interface, not to an
+/// object, and has no receiver.
+pub fn isStaticOp(op: *const Operation) bool {
+    return hasRaw(op.raw, "static");
 }
 
 /// True for a `@destructor` operation: the strict destroy, whose result
