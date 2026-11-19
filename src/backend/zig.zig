@@ -8875,6 +8875,17 @@ test "zig_backend: union CDR serialize/deserialize" {
     try testing.expect(has(s, "else => {"));
 }
 
+test "zig_backend: union with an enum discriminator converts through the backing int" {
+    var out = try testGen(
+        \\enum Kind { NUM, TEXT };
+        \\union Var switch (Kind) { case NUM: long i; case TEXT: string s; };
+    , "var_t");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "try writer.writeU32(@backingInt(value._d));"));
+    try testing.expect(has(s, "_d = @fromBackingInt(@intCast(try reader.readU32()));"));
+}
+
 test "zig_backend: union CDR appendable adds DHEADER" {
     var out = try testGen(
         \\@appendable union Var switch (long) { case 0: long i; };
@@ -10910,6 +10921,16 @@ test "zig_backend: getFieldFromCdr converts bool/enum/float members correctly" {
     try testing.expect(has(s, "if (std.mem.eql(u8, field, \"active\")) return .{ .int = @intFromBool(_v.active) };"));
     try testing.expect(has(s, "if (std.mem.eql(u8, field, \"color\")) return .{ .int = @intCast(@backingInt(_v.color)) };"));
     try testing.expect(has(s, "if (std.mem.eql(u8, field, \"ratio\")) return .{ .float = @floatCast(_v.ratio) };"));
+}
+
+test "zig_backend: getFieldFromCdr follows a typedef to an enum member" {
+    var out = try testGenOpts(
+        \\enum Color { RED, GREEN, BLUE };
+        \\typedef Color Shade;
+        \\struct Swatch { @key long id; Shade shade; };
+    , "swatch", .{ .generate_zzdds_wrappers = true });
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "if (std.mem.eql(u8, field, \"shade\")) return .{ .int = @intCast(@backingInt(_v.shade)) };"));
 }
 
 test "zig_backend: getFieldFromCdr emitted for keyless struct too" {
