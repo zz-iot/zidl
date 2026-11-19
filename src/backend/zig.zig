@@ -8591,7 +8591,6 @@ test "zig_backend: file header" {
     try testing.expect(has(s, "const std = @import(\"std\");"));
 }
 
-
 test "zig_backend: simple struct" {
     var out = try testGen("struct Point { long x; long y; };", "point");
     defer out.deinit(testing.allocator);
@@ -12008,7 +12007,6 @@ test "zig_backend: nested collections, array typedefs and bounded-sequence eleme
     try testing.expect(has(s, "for (_buf[0..self._length]) |*_e| zidl_bindings.deinitOwned(_e, alloc);"));
     try testing.expect(has(s, "_buf[_n] = try zidl_bindings.cloneOwned(_src, alloc);"));
 }
-
 
 test "toml config rejects generated authoring declaration collisions" {
     try testing.expectError(error.TomlGeneratedNameCollision, testGenOpts(
