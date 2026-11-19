@@ -2458,9 +2458,8 @@ const CdrGenerator = struct {
 
         // Unlike write/dispose/unregister_w_timestamp below (which thread
         // `timestamp` through to DDS_DataWriter_write_raw), zzdds's own
-        // instance registration (zzdds_register_instance_raw) is a pure,
-        // stateless key-hash-to-handle computation with no source-timestamp
-        // involvement -- `timestamp` is accepted here only for spec-shape
+        // instance registration (zzdds_register_instance_raw) takes no source
+        // timestamp -- `timestamp` is accepted here only for spec-shape
         // compliance and is genuinely unused; delegates straight to
         // register_instance() so the instance_handles_ bookkeeping stays in
         // one place.

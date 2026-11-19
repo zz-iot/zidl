@@ -18,6 +18,12 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Zig: a generated DataWriter's `register_instance` and `lookup_instance` pass the writer to
+  zzdds (`registerInstanceRaw(dw, key_hash)`, `lookupInstanceWriter(dw, key_hash)`), and a
+  DataReader's `lookup_instance` passes the key hash (`lookupInstanceReader(dr, key_hash)`),
+  since zzdds now allocates instance handles per entity rather than hashing the key. Needs
+  the zzdds that does.
+
 - `zidl_bindings.toAllocator` passes a `ZidlAllocator` at least 8-byte alignment, as
   zidl-cdr's C side always does, so generated C and Zig code can free each other's blocks
   with an allocator that checks alignment on free.
