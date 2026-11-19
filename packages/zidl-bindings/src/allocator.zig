@@ -200,8 +200,8 @@ test "toAllocator: passes at least zidl-cdr's eight-byte alignment, the same on 
     const c_alloc: ZidlAllocator = .{ .ctx = &rec, .alloc = AlignmentRecorder.alloc, .resize = AlignmentRecorder.resize, .free = AlignmentRecorder.free };
     const alloc = toAllocator(&c_alloc);
 
-    // A string, as zidl-cdr's C side would free it.
-    const s = try alloc.dupeSentinel(u8, "abc", 0);
+    // A string's bytes, as zidl-cdr's C side would free them.
+    const s = try alloc.alloc(u8, 4);
     try testing.expectEqual(min_alignment, rec.alloc_alignment);
     alloc.free(s);
     try testing.expectEqual(min_alignment, rec.free_alignment);
