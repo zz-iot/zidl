@@ -18,6 +18,8 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Build zidl and its native packages with Zig 0.17.1 (`minimum_zig_version`), so release
+  tags end in `-zig.0.17.1`.
 - Zig: a generated DataWriter's `register_instance` and `lookup_instance` pass the writer to
   zzdds (`registerInstanceRaw(dw, key_hash)`, `lookupInstanceWriter(dw, key_hash)`), and a
   DataReader's `lookup_instance` passes the key hash (`lookupInstanceReader(dr, key_hash)`),

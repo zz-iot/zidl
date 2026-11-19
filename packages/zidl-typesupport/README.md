@@ -13,7 +13,7 @@ The C header is the layout authority; Zig uses build-time translation of that he
 
 ## Generate and build
 
-With Zig 0.17.0, from the zidl repository root:
+With Zig 0.17.1, from the zidl repository root:
 
 ```sh
 zig build

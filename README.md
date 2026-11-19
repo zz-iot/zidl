@@ -23,7 +23,7 @@ for all supported targets.
 
 ## Build
 
-Requires Zig 0.17.0.
+Requires Zig 0.17.1.
 
 ```sh
 zig build                         # build the zidl binary (output: zig-out/bin/zidl)
