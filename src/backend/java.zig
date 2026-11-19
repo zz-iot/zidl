@@ -5677,6 +5677,22 @@ const JniBridgeGenerator = struct {
         // marshaling/trampoline declarations below already rely on.
         const owns_common_runtime = spec.imports.len == 0;
         if (owns_common_runtime) {
+            // What `_from_java` builds is released by the generated C
+            // `<Type>_free`, so it comes from the allocator that frees it:
+            // zidl-cdr's process-wide one if the C API frees through it.
+            if (self.opts.java_jni_cdr_allocator) {
+                try self.write(
+                    "/* Allocates what a generated `<Type>_free` releases: through\n" ++
+                        " * zidl-cdr's process-wide allocator, which those frees use. */\n" ++
+                        "void *zidl_cdr_alloc(size_t n);\n" ++
+                        "void *zidl_java_alloc(size_t n) { return zidl_cdr_alloc(n); }\n\n",
+                );
+            } else {
+                try self.write(
+                    "/* Allocates what a generated `<Type>_free` releases. */\n" ++
+                        "void *zidl_java_alloc(size_t n) { return malloc(n); }\n\n",
+                );
+            }
             try self.write(
                 "/* Unboxes a generated entity `*Impl` object's native handle via its\n" ++
                     " * `private final long ptr_` field. NULL-safe. */\n" ++
@@ -5689,7 +5705,7 @@ const JniBridgeGenerator = struct {
                     "/* Portable strdup — plain `strdup` is POSIX, not C99/MSVC. */\n" ++
                     "char *zidl_java_strdup(const char *s) {\n" ++
                     "    size_t n = strlen(s) + 1;\n" ++
-                    "    char *p = malloc(n);\n" ++
+                    "    char *p = zidl_java_alloc(n);\n" ++
                     "    if (p) memcpy(p, s, n);\n" ++
                     "    return p;\n" ++
                     "}\n\n" ++
@@ -5810,6 +5826,7 @@ const JniBridgeGenerator = struct {
                     " * the same shared library) already defines these — see the\n" ++
                     " * definitions this mirrors, above. */\n" ++
                     "extern void *zidl_java_unbox(JNIEnv *env, jobject obj);\n" ++
+                    "extern void *zidl_java_alloc(size_t n);\n" ++
                     "extern char *zidl_java_strdup(const char *s);\n" ++
                     "extern zidl_java_listener_ctx *zidl_java_listener_ctx_acquire(JNIEnv *env, jobject obj);\n" ++
                     "extern void zidl_java_release_listener_ctx(JNIEnv *env, void *listener_data);\n" ++
@@ -8260,7 +8277,7 @@ const StructMarshalGenerator = struct {
                 "       jmethodID _sz = (*env)->GetMethodID(env, _lc, \"size\", \"()I\");\n" ++
                 "       jmethodID _get = (*env)->GetMethodID(env, _lc, \"get\", \"(I)Ljava/lang/Object;\");\n" ++
                 "       int32_t _n = (*env)->CallIntMethod(env, _l, _sz);\n" ++
-                "       out->{[name]s}._buffer = _n > 0 ? malloc(_n * sizeof(*out->{[name]s}._buffer)) : NULL;\n" ++
+                "       out->{[name]s}._buffer = _n > 0 ? zidl_java_alloc(_n * sizeof(*out->{[name]s}._buffer)) : NULL;\n" ++
                 "       out->{[name]s}._length = _n; out->{[name]s}._maximum = _n; out->{[name]s}._release = _n > 0;\n" ++
                 "       for (int32_t _i = 0; _i < _n; _i++) {{\n" ++
                 "           jobject _box = (*env)->CallObjectMethod(env, _l, _get, _i);\n" ++
@@ -8280,7 +8297,7 @@ const StructMarshalGenerator = struct {
                 "       jmethodID _sz = (*env)->GetMethodID(env, _lc, \"size\", \"()I\");\n" ++
                 "       jmethodID _get = (*env)->GetMethodID(env, _lc, \"get\", \"(I)Ljava/lang/Object;\");\n" ++
                 "       int32_t _n = (*env)->CallIntMethod(env, _l, _sz);\n" ++
-                "       out->{[name]s}._buffer = _n > 0 ? malloc(_n * sizeof(*out->{[name]s}._buffer)) : NULL;\n" ++
+                "       out->{[name]s}._buffer = _n > 0 ? zidl_java_alloc(_n * sizeof(*out->{[name]s}._buffer)) : NULL;\n" ++
                 "       out->{[name]s}._length = _n; out->{[name]s}._maximum = _n; out->{[name]s}._release = _n > 0;\n" ++
                 "       for (int32_t _i = 0; _i < _n; _i++) {{\n" ++
                 "           jstring _s = (jstring)(*env)->CallObjectMethod(env, _l, _get, _i);\n" ++
@@ -8302,7 +8319,7 @@ const StructMarshalGenerator = struct {
                 "       jmethodID _sz = (*env)->GetMethodID(env, _lc, \"size\", \"()I\");\n" ++
                 "       jmethodID _get = (*env)->GetMethodID(env, _lc, \"get\", \"(I)Ljava/lang/Object;\");\n" ++
                 "       int32_t _n = (*env)->CallIntMethod(env, _l, _sz);\n" ++
-                "       out->{[name]s}._buffer = _n > 0 ? malloc(_n * sizeof(*out->{[name]s}._buffer)) : NULL;\n" ++
+                "       out->{[name]s}._buffer = _n > 0 ? zidl_java_alloc(_n * sizeof(*out->{[name]s}._buffer)) : NULL;\n" ++
                 "       out->{[name]s}._length = _n; out->{[name]s}._maximum = _n; out->{[name]s}._release = _n > 0;\n" ++
                 "       for (int32_t _i = 0; _i < _n; _i++) {{\n" ++
                 "           jobject _el = (*env)->CallObjectMethod(env, _l, _get, _i);\n" ++
@@ -8644,7 +8661,7 @@ const SeqParamMarshalGenerator = struct {
                 "    jmethodID _sz = (*env)->GetMethodID(env, _lc, \"size\", \"()I\");\n" ++
                 "    jmethodID _get = (*env)->GetMethodID(env, _lc, \"get\", \"(I)Ljava/lang/Object;\");\n" ++
                 "    int32_t _n = (*env)->CallIntMethod(env, list, _sz);\n" ++
-                "    out->_buffer = _n > 0 ? malloc(_n * sizeof(*out->_buffer)) : NULL;\n" ++
+                "    out->_buffer = _n > 0 ? zidl_java_alloc(_n * sizeof(*out->_buffer)) : NULL;\n" ++
                 "    out->_length = _n; out->_maximum = _n; out->_release = _n > 0;\n" ++
                 "    for (int32_t _i = 0; _i < _n; _i++) {{\n" ++
                 "        jobject _box = (*env)->CallObjectMethod(env, list, _get, _i);\n" ++
@@ -8678,7 +8695,7 @@ const SeqParamMarshalGenerator = struct {
                 "    jmethodID _sz = (*env)->GetMethodID(env, _lc, \"size\", \"()I\");\n" ++
                 "    jmethodID _get = (*env)->GetMethodID(env, _lc, \"get\", \"(I)Ljava/lang/Object;\");\n" ++
                 "    int32_t _n = (*env)->CallIntMethod(env, list, _sz);\n" ++
-                "    out->_buffer = _n > 0 ? malloc(_n * sizeof(*out->_buffer)) : NULL;\n" ++
+                "    out->_buffer = _n > 0 ? zidl_java_alloc(_n * sizeof(*out->_buffer)) : NULL;\n" ++
                 "    out->_length = _n; out->_maximum = _n; out->_release = _n > 0;\n" ++
                 "    for (int32_t _i = 0; _i < _n; _i++) {{\n" ++
                 "        jstring _s = (jstring)(*env)->CallObjectMethod(env, list, _get, _i);\n" ++
@@ -8730,7 +8747,7 @@ const SeqParamMarshalGenerator = struct {
                 "    jmethodID _sz = (*env)->GetMethodID(env, _lc, \"size\", \"()I\");\n" ++
                 "    jmethodID _get = (*env)->GetMethodID(env, _lc, \"get\", \"(I)Ljava/lang/Object;\");\n" ++
                 "    int32_t _n = (*env)->CallIntMethod(env, list, _sz);\n" ++
-                "    out->_buffer = _n > 0 ? malloc(_n * sizeof(*out->_buffer)) : NULL;\n" ++
+                "    out->_buffer = _n > 0 ? zidl_java_alloc(_n * sizeof(*out->_buffer)) : NULL;\n" ++
                 "    out->_length = _n; out->_maximum = _n; out->_release = _n > 0;\n" ++
                 "    for (int32_t _i = 0; _i < _n; _i++) {{\n" ++
                 "        jobject _el = (*env)->CallObjectMethod(env, list, _get, _i);\n" ++
@@ -8817,7 +8834,7 @@ const SeqParamMarshalGenerator = struct {
                 "    jmethodID _sz = (*env)->GetMethodID(env, _lc, \"size\", \"()I\");\n" ++
                 "    jmethodID _get = (*env)->GetMethodID(env, _lc, \"get\", \"(I)Ljava/lang/Object;\");\n" ++
                 "    int32_t _n = (*env)->CallIntMethod(env, list, _sz);\n" ++
-                "    out->_buffer = _n > 0 ? malloc(_n * sizeof(*out->_buffer)) : NULL;\n" ++
+                "    out->_buffer = _n > 0 ? zidl_java_alloc(_n * sizeof(*out->_buffer)) : NULL;\n" ++
                 "    out->_length = _n; out->_maximum = _n; out->_release = _n > 0;\n" ++
                 "    for (int32_t _i = 0; _i < _n; _i++) {{\n" ++
                 "        jobject _el = (*env)->CallObjectMethod(env, list, _get, _i);\n" ++
@@ -11062,6 +11079,37 @@ test "java: bare sequence<T> params get real JNI marshaling, not a stub throw" {
     try testing.expect(std.mem.indexOf(u8, c, "LongSeq_from_java(env, values, &_c_values);") != null);
     try testing.expect(std.mem.indexOf(u8, c, "Widget_get_values((void *)(intptr_t)ptr, &_c_values);") != null);
     try testing.expect(std.mem.indexOf(u8, c, "LongSeq_fill_java(env, &_c_values, values); LongSeq_free(&_c_values);") != null);
+}
+
+test "java: what JNI glue hands a generated _free comes from the allocator that frees it" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc,
+        \\typedef sequence<string> StrSeq;
+        \\struct Named { string name; sequence<long> ids; };
+        \\interface Widget {
+        \\    void set_params(in StrSeq params);
+        \\    void set_named(in Named n);
+        \\};
+    );
+    defer ir_spec.deinit();
+
+    for ([_]bool{ false, true }) |cdr_allocator| {
+        var jni_out = std.ArrayList(u8).empty;
+        defer jni_out.deinit(alloc);
+        try generateJniSource(alloc, &ir_spec, .{ .input_stem = "widget", .java_jni_cdr_allocator = cdr_allocator }, &jni_out);
+        const c = jni_out.items;
+
+        const helper = if (cdr_allocator)
+            "void *zidl_java_alloc(size_t n) { return zidl_cdr_alloc(n); }"
+        else
+            "void *zidl_java_alloc(size_t n) { return malloc(n); }";
+        try testing.expect(std.mem.indexOf(u8, c, helper) != null);
+        try testing.expect(std.mem.indexOf(u8, c, "char *p = zidl_java_alloc(n);") != null);
+        // Sequence parameters and sequence members alike.
+        try testing.expect(std.mem.indexOf(u8, c, "out->_buffer = _n > 0 ? zidl_java_alloc(_n * sizeof(*out->_buffer)) : NULL;") != null);
+        try testing.expect(std.mem.indexOf(u8, c, "out->ids._buffer = _n > 0 ? zidl_java_alloc(_n * sizeof(*out->ids._buffer)) : NULL;") != null);
+        try testing.expect(std.mem.indexOf(u8, c, "._buffer = _n > 0 ? malloc(") == null);
+    }
 }
 
 test "java: bare sequence<Entity> param (DataReaderSeq-shaped, no multi-implementor) gets real JNI marshaling" {

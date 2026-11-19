@@ -169,6 +169,7 @@ Pass the library name with `--java-jni-library <name>`.
 | `--split-files` | One `.java` file per top-level type |
 | `--java-jni-library <name>` | `System.loadLibrary()` name for `--generate-interfaces` JNI bridge |
 | `--java-jni-onload-hook <name>` | C function `jint <name>(JavaVM *, JNIEnv *)` the generated `JNI_OnLoad` calls; nonzero fails the load |
+| `--java-jni-cdr-allocator` | The JNI bridge allocates the native values it builds from Java arguments with `zidl_cdr_alloc`, not `malloc`. The generated C `<Type>_free` releases them, so pass it when those frees use zidl-cdr's process-wide allocator (`--zig-generate-c-api-cdr-allocator`). Needs `libzidl_cdr` linked |
 | `--no-typesupport` | Suppress CDR serialize/deserialize output |
 
 ---
