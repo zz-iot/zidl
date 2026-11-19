@@ -95,6 +95,13 @@ pub const Options = struct {
     /// can do its own load-time work (such as `RegisterNatives`) in the one
     /// `JNI_OnLoad` a library may have. Nonzero fails the load. Empty: none.
     java_jni_onload_hook: []const u8 = "",
+    /// Java backend: allocate the native values the JNI glue builds from
+    /// Java arguments through `zidl_cdr_alloc` instead of `malloc`. They are
+    /// released by the generated C `<Type>_free`, so this must match how
+    /// those free: pass it when the C API was generated with
+    /// `zig_generate_c_api_cdr_allocator` (or is the C backend's, which
+    /// frees through zidl-cdr). Needs `libzidl_cdr` linked. Default off.
+    java_jni_cdr_allocator: bool = false,
     /// C++ (`--cpp-generate-impl`) and Java backends: base name of the C
     /// functions `<name>_observe`/`<name>_unobserve` through which the C ABI
     /// provider reports entity handles it frees (see

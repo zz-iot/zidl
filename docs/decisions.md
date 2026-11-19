@@ -39,7 +39,10 @@ final one — so a size-class or slab allocator never receives a short size on f
 frees use the already-stored `_maximum * sizeof(elem)`.
 
 **Every `zidl_cdr_alloc` call requests 8-byte alignment** — provably sufficient for any IDL
-scalar, and cheap enough that per-type alignment tracking isn't worth it.
+scalar, and cheap enough that per-type alignment tracking isn't worth it. The Zig adapter
+(`zidl_bindings.toAllocator`) requests the type's alignment but at least 8, so a block the
+generated C code allocates and the generated Zig code frees (or the other way round) carries
+one alignment throughout, which an allocator checking it on free needs.
 
 ## Backend policy
 

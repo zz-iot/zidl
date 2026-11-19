@@ -23,6 +23,9 @@ typedef struct zidl_java_listener_ctx {
     struct zidl_java_listener_ctx *next;
 } zidl_java_listener_ctx;
 
+/* Allocates what a generated `<Type>_free` releases. */
+void *zidl_java_alloc(size_t n) { return malloc(n); }
+
 /* Unboxes a generated entity `*Impl` object's native handle via its
  * `private final long ptr_` field. NULL-safe. */
 void *zidl_java_unbox(JNIEnv *env, jobject obj) {
@@ -35,7 +38,7 @@ void *zidl_java_unbox(JNIEnv *env, jobject obj) {
 /* Portable strdup — plain `strdup` is POSIX, not C99/MSVC. */
 char *zidl_java_strdup(const char *s) {
     size_t n = strlen(s) + 1;
-    char *p = malloc(n);
+    char *p = zidl_java_alloc(n);
     if (p) memcpy(p, s, n);
     return p;
 }
@@ -467,7 +470,7 @@ void Sample_from_java(JNIEnv *env, jobject obj, Sample *out) {
        jmethodID _sz = (*env)->GetMethodID(env, _lc, "size", "()I");
        jmethodID _get = (*env)->GetMethodID(env, _lc, "get", "(I)Ljava/lang/Object;");
        int32_t _n = (*env)->CallIntMethod(env, _l, _sz);
-       out->nums._buffer = _n > 0 ? malloc(_n * sizeof(*out->nums._buffer)) : NULL;
+       out->nums._buffer = _n > 0 ? zidl_java_alloc(_n * sizeof(*out->nums._buffer)) : NULL;
        out->nums._length = _n; out->nums._maximum = _n; out->nums._release = _n > 0;
        for (int32_t _i = 0; _i < _n; _i++) {
            jobject _box = (*env)->CallObjectMethod(env, _l, _get, _i);

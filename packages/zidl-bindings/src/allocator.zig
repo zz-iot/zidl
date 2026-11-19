@@ -31,16 +31,28 @@ fn asZidlAllocator(ptr: *anyopaque) *const ZidlAllocator {
     return @ptrCast(@alignCast(ptr));
 }
 
+/// The least alignment this adapter passes to a `ZidlAllocator`: the eight
+/// bytes zidl-cdr's C side passes for every block it allocates or frees.
+/// Generated C and Zig code free each other's blocks (a C caller frees a
+/// sequence a Zig provider filled, and the other way round), and an
+/// allocator may need a block's free to carry the alignment it was
+/// allocated with.
+pub const min_alignment: usize = 8;
+
+fn cAlignment(alignment: std.mem.Alignment) usize {
+    return @max(alignment.toByteUnits(), min_alignment);
+}
+
 fn vtAlloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
     _ = ret_addr;
     const z = asZidlAllocator(ptr);
-    return z.alloc(z.ctx, len, alignment.toByteUnits());
+    return z.alloc(z.ctx, len, cAlignment(alignment));
 }
 
 fn vtResize(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
     _ = ret_addr;
     const z = asZidlAllocator(ptr);
-    return z.resize(z.ctx, memory.ptr, memory.len, new_len, alignment.toByteUnits());
+    return z.resize(z.ctx, memory.ptr, memory.len, new_len, cAlignment(alignment));
 }
 
 fn vtRemap(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
@@ -54,7 +66,7 @@ fn vtRemap(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len:
 fn vtFree(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
     _ = ret_addr;
     const z = asZidlAllocator(ptr);
-    z.free(z.ctx, memory.ptr, memory.len, alignment.toByteUnits());
+    z.free(z.ctx, memory.ptr, memory.len, cAlignment(alignment));
 }
 
 const vtable = std.mem.Allocator.VTable{
@@ -154,6 +166,51 @@ test "toAllocator: alignment > 1 returns a genuinely aligned pointer even when t
     const vals = try alloc.alloc(u64, 4);
     defer alloc.free(vals);
     try testing.expectEqual(@as(usize, 0), @intFromPtr(vals.ptr) % @alignOf(u64));
+}
+
+// Records the alignment of each call, and fails a free whose alignment is
+// not the one its block was allocated with.
+const AlignmentRecorder = struct {
+    buf: [256]u8 align(16) = undefined,
+    used: usize = 0,
+    alloc_alignment: usize = 0,
+    free_alignment: usize = 0,
+
+    fn alloc(ctx: ?*anyopaque, len: usize, alignment: usize) callconv(.c) ?[*]u8 {
+        const self: *AlignmentRecorder = @ptrCast(@alignCast(ctx.?));
+        const start = std.mem.alignForward(usize, self.used, alignment);
+        if (start + len > self.buf.len) return null;
+        self.used = start + len;
+        self.alloc_alignment = alignment;
+        return self.buf[start..].ptr;
+    }
+
+    fn resize(_: ?*anyopaque, _: ?[*]u8, _: usize, _: usize, _: usize) callconv(.c) bool {
+        return false;
+    }
+
+    fn free(ctx: ?*anyopaque, _: ?[*]u8, _: usize, alignment: usize) callconv(.c) void {
+        const self: *AlignmentRecorder = @ptrCast(@alignCast(ctx.?));
+        self.free_alignment = alignment;
+    }
+};
+
+test "toAllocator: passes at least zidl-cdr's eight-byte alignment, the same on alloc and free" {
+    var rec: AlignmentRecorder = .{};
+    const c_alloc: ZidlAllocator = .{ .ctx = &rec, .alloc = AlignmentRecorder.alloc, .resize = AlignmentRecorder.resize, .free = AlignmentRecorder.free };
+    const alloc = toAllocator(&c_alloc);
+
+    // A string's bytes, as zidl-cdr's C side would free them.
+    const s = try alloc.alloc(u8, 4);
+    try testing.expectEqual(min_alignment, rec.alloc_alignment);
+    alloc.free(s);
+    try testing.expectEqual(min_alignment, rec.free_alignment);
+
+    // A type aligned past eight keeps its own alignment.
+    const wide = try alloc.alignedAlloc(u8, .@"16", 4);
+    try testing.expectEqual(@as(usize, 16), rec.alloc_alignment);
+    alloc.free(wide);
+    try testing.expectEqual(@as(usize, 16), rec.free_alignment);
 }
 
 test "toAllocator: OOM surfaces as error.OutOfMemory, not a crash" {

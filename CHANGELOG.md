@@ -24,6 +24,13 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   since zzdds now allocates instance handles per entity rather than hashing the key. Needs
   the zzdds that does.
 
+- `zidl_bindings.toAllocator` passes a `ZidlAllocator` at least 8-byte alignment, as
+  zidl-cdr's C side always does, so generated C and Zig code can free each other's blocks
+  with an allocator that checks alignment on free.
+- Java: `--java-jni-cdr-allocator` makes the JNI bridge allocate the native values it
+  builds from Java arguments with `zidl_cdr_alloc` instead of `malloc`. The generated C
+  `<Type>_free` releases them, so pass it with a C API whose frees go through zidl-cdr's
+  allocator (`--zig-generate-c-api-cdr-allocator`).
 - C++: a class extending an entity interface declared in an imported IDL file (zzdds's
   `zzdds::DataReader : DDS::DataReader`) now implements the imported bases' operations,
   forwarding each to the base's C function through the generated upcast, as Java already
