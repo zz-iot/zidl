@@ -48,7 +48,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.17.0"
+          version: "0.17.1"
           # setup-zig caches both the Zig toolchain and the global Zig cache
           # automatically; no separate actions/cache step is needed.
 
@@ -141,15 +141,15 @@ jobs:
 
       # ── MicroZig-facing XRCE codegen ─────────────────────────────────────
       # Keep the legacy XRCE consumer check until the Pico migration has
-      # passed hardware validation. Also test default output with Zig 0.17.0.
+      # passed hardware validation. Also test default output with Zig 0.17.1.
 
-      - name: Generate default XRCE fixture for Zig 0.17.0
+      - name: Generate default XRCE fixture for Zig 0.17.1
         if: matrix.os == 'ubuntu-latest'
         run: |
           zig build run -- -b zig --profile xrce -o test/xrce-microzig/generated test/xrce-microzig/types.idl
           zig build run -- -b zig -o test/xrce-microzig/generated test/xrce-microzig/allocations.idl
 
-      - name: Test XRCE fixture on Zig 0.17.0
+      - name: Test XRCE fixture on Zig 0.17.1
         if: matrix.os == 'ubuntu-latest'
         run: zig build test
         working-directory: test/xrce-microzig
@@ -183,7 +183,7 @@ jobs:
       - name: Install generator compiler
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.17.0"
+          version: "0.17.1"
       - name: Generate version-matched authoring fixtures
         shell: bash
         run: |
@@ -224,7 +224,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.17.0"
+          version: "0.17.1"
 
       - name: Install Valgrind
         run: |
@@ -294,7 +294,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: "0.17.0"
+          version: "0.17.1"
 
       # Ubuntu 24.04 has no kcov package. Build unmodified upstream kcov,
       # linked to the distribution's stock libdw; no elfutils patch is needed.
