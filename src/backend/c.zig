@@ -3009,9 +3009,8 @@ const CdrGenerator = struct {
 
         // Unlike write/dispose/unregister_w_timestamp above (which thread
         // `timestamp` through to zzdds_write_raw_w_timestamp), zzdds's own
-        // instance registration (zzdds_register_instance_raw) is a pure,
-        // stateless key-hash-to-handle computation with no source-timestamp
-        // involvement at all -- `timestamp` is accepted here only for
+        // instance registration (zzdds_register_instance_raw) takes no source
+        // timestamp -- `timestamp` is accepted here only for
         // spec-shape compliance (matching register_instance_w_timestamp's
         // implicit IDL) and is genuinely unused.
         try self.print("DDS_InstanceHandle_t {s}DataWriter_register_instance_w_timestamp({s}DataWriter *self, const {s} *key, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });

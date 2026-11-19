@@ -5093,11 +5093,10 @@ const Generator = struct {
         // register_instance
         try self.write("\n");
         try self.ind();
-        // registerInstanceRaw / lookupInstanceWriter are pure hash→handle functions;
-        // the DataWriter handle is not needed (C ABI accepts it for spec completeness but ignores it).
-        try self.print("    pub fn register_instance(_: @This(), instance_data: {s}) _zzdds.DDS.InstanceHandle_t {{\n", .{type_name});
+        // The DataWriter allocates its instance handles, so they are per writer.
+        try self.print("    pub fn register_instance(self: @This(), instance_data: {s}) _zzdds.DDS.InstanceHandle_t {{\n", .{type_name});
         try self.ind();
-        try self.print("        return _zzdds.registerInstanceRaw({s}.computeKeyHash(&instance_data));\n", .{type_name});
+        try self.print("        return _zzdds.registerInstanceRaw(self._dw, {s}.computeKeyHash(&instance_data));\n", .{type_name});
         try self.ind();
         try self.write("    }\n");
 
@@ -5126,9 +5125,9 @@ const Generator = struct {
         // lookup_instance
         try self.write("\n");
         try self.ind();
-        try self.print("    pub fn lookup_instance(_: @This(), instance_data: {s}) _zzdds.DDS.InstanceHandle_t {{\n", .{type_name});
+        try self.print("    pub fn lookup_instance(self: @This(), instance_data: {s}) _zzdds.DDS.InstanceHandle_t {{\n", .{type_name});
         try self.ind();
-        try self.print("        return _zzdds.lookupInstanceWriter({s}.computeKeyHash(&instance_data));\n", .{type_name});
+        try self.print("        return _zzdds.lookupInstanceWriter(self._dw, {s}.computeKeyHash(&instance_data));\n", .{type_name});
         try self.ind();
         try self.write("    }\n");
 
@@ -5235,9 +5234,7 @@ const Generator = struct {
         try self.ind();
         try self.print("    pub fn lookup_instance(self: @This(), instance_data: {s}) ?_zzdds.DDS.InstanceHandle_t {{\n", .{type_name});
         try self.ind();
-        try self.print("        const _ih = _zzdds.registerInstanceRaw({s}.computeKeyHash(&instance_data));\n", .{type_name});
-        try self.ind();
-        try self.write("        return _zzdds.lookupInstanceReader(self._dr, _ih);\n");
+        try self.print("        return _zzdds.lookupInstanceReader(self._dr, {s}.computeKeyHash(&instance_data));\n", .{type_name});
         try self.ind();
         try self.write("    }\n");
 
