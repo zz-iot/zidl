@@ -4,7 +4,7 @@
 const std = @import("std");
 const owned = @import("owned.zig");
 fn dupeCString(a: std.mem.Allocator, text: []const u8) ![:0]u8 {
-    return if (@hasDecl(std.mem.Allocator, "dupeSentinel")) a.dupeSentinel(u8, text, 0) else a.dupeZ(u8, text);
+    return a.dupeSentinel(u8, text, 0);
 }
 // Select a declared tag by its numeric metadata, preserving native-name mangling
 // without using enum conversion builtins that older compilers cannot parse.

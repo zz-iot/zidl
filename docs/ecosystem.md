@@ -58,8 +58,8 @@ Subset for bare-metal microcontrollers (DDS-XRCE v1.0, formal/20-02-01):
 XRCE profile constraints are validated before backends run (`validateXrce` in
 `src/backend/interface.zig`). Violation is a compile-time error, not a runtime check.
 
-The `--zig-version 0.15.1` flag emits Zig output compatible with MicroZig clients:
-bounded strings and sequences use fixed-capacity `zidl_cdr.BoundedArray` storage.
+Zig output for MicroZig clients uses fixed-capacity `zidl_cdr.BoundedArray` storage for
+bounded strings and sequences.
 A fully freestanding/no-heap runtime path remains planned work — see [`roadmap.md`](roadmap.md).
 
 ---

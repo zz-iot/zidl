@@ -1,7 +1,7 @@
 .{
     .name = .zidl_bindings,
     .version = "0.3.36-zig.0.17.0-dev",
-    .minimum_zig_version = "0.15.1",
+    .minimum_zig_version = "0.17.1",
     .fingerprint = 0x8962174811871111,
     .dependencies = .{
         .zidl_cdr = .{ .path = "../zidl-cdr" },

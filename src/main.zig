@@ -47,7 +47,6 @@
 //!   --zig-generate-toml-config     Emit applyToml(alloc, table: anytype) !void per struct (Zig backend)
 //!   --zig-generate-authoring       Emit strict presence-aware decoding (Zig backend)
 //!   --zig-pl-cdr                   Generate PL_CDR functions for @mutable types (Zig backend)
-//!   --zig-version <0.17.0|0.16.0|0.15.1>  Output compatibility target (Zig backend)
 //!
 //!   -h, --help                     Show this help
 //!   -v, --version                  Show version
@@ -78,7 +77,6 @@ const Opts = struct {
     type_prefix: []const u8 = "",
     export_macro: []const u8 = "",
     profile: zidl.backend.Profile = .full,
-    zig_version: zidl.backend.ZigVersion = .@"0.17.0",
     java_package: []const u8 = "",
     default_extensibility: zidl.ir.Extensibility = .final,
     jni_library: []const u8 = "zidl_dds_jni",
@@ -249,18 +247,6 @@ pub fn main(init: std.process.Init) !void {
                 try stderr.flush();
                 std.process.exit(1);
             }
-        } else if (std.mem.eql(u8, arg, "--zig-version")) {
-            i += 1;
-            if (i >= args.len) {
-                try stderr.print("error: --zig-version requires an argument\n", .{});
-                try stderr.flush();
-                std.process.exit(1);
-            }
-            opts.zig_version = zidl.backend.ZigVersion.parse(args[i]) orelse {
-                try stderr.print("error: unknown Zig version '{s}'; supported: 0.17.0, 0.16.0, 0.15.1\n", .{args[i]});
-                try stderr.flush();
-                std.process.exit(1);
-            };
         } else if (std.mem.eql(u8, arg, "--handle-retire-hook")) {
             i += 1;
             if (i >= args.len) {
@@ -700,7 +686,7 @@ fn processFile(
         try zidl.backend.validateXrce(&ir_spec, stderr);
     }
 
-    if (opts.zig_typesupport_library and (!std.mem.eql(u8, opts.backend, "zig") or opts.profile != .full or opts.split_files or opts.no_typesupport or opts.no_typeobject_support or opts.pl_cdr or opts.zig_version != .@"0.17.0" or opts.type_prefix.len != 0 or opts.zig_idiomatic_enums or opts.default_extensibility != .final))
+    if (opts.zig_typesupport_library and (!std.mem.eql(u8, opts.backend, "zig") or opts.profile != .full or opts.split_files or opts.no_typesupport or opts.no_typeobject_support or opts.pl_cdr or opts.type_prefix.len != 0 or opts.zig_idiomatic_enums or opts.default_extensibility != .final))
         return error.TypesupportLibraryIncompatibleOptions;
 
     // ── Phase 5: Code generation ─────────────────────────────────────────────
@@ -740,7 +726,6 @@ fn processFile(
         .zig_generate_authoring = opts.zig_generate_authoring,
         .generate_zzdds_wrappers = opts.generate_zzdds_wrappers,
         .java_import_packages = opts.java_import_packages.items,
-        .zig_version = opts.zig_version,
         .cpp_generate_impl = opts.cpp_generate_impl,
         .cpp_pmr_containers = opts.cpp_pmr_containers,
         .cpp_impl_overrides = opts.cpp_impl_overrides.items,
@@ -873,7 +858,6 @@ fn printUsage(w: *Io.Writer) !void {
         \\  --zig-generate-toml-config     Emit applyToml(alloc, table: anytype) !void per struct (Zig backend)
         \\  --zig-generate-authoring       Emit strict presence-aware decodeToml using zidl_bindings.authoring
         \\  --zig-pl-cdr                   Generate PL_CDR functions for @mutable types (Zig backend)
-        \\  --zig-version <0.17.0|0.16.0|0.15.1>  Output compatibility target (Zig backend)
         \\
         \\  -h, --help                     Show this help
         \\  -v, --version                  Show version

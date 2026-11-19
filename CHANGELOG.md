@@ -18,6 +18,9 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Remove the Zig backend's legacy `--zig-version` output modes (0.16.0 and 0.15.1) and their
+  CI consumer checks. Generated Zig targets Zig 0.17 only; `zidl-cdr` and `zidl-bindings`
+  require Zig 0.17.1.
 - Build zidl and its native packages with Zig 0.17.1 (`minimum_zig_version`), so release
   tags end in `-zig.0.17.1`.
 - Zig: a generated DataWriter's `register_instance` and `lookup_instance` pass the writer to

@@ -287,12 +287,12 @@ the non-Zig backends ("Zig-specific for now").
 ### Embedded / MicroZig / XRCE
 
 `--profile xrce` exists and validates XRCE constraints (only `@final`, bounded strings/
-sequences, no maps/optional/wstring, no TypeObject output). The Zig backend accepts
-`--zig-version 0.15.1` and emits bounded code on fixed-capacity `zidl_cdr.BoundedArray`. This
+sequences, no maps/optional/wstring, no TypeObject output). The Zig backend emits bounded
+code on fixed-capacity `zidl_cdr.BoundedArray`. This
 is the first MicroZig-enabling slice, not a complete freestanding output mode. Remaining:
 
 1. Wire the committed `test/xrce-microzig/` compile fixture into `zig build integration-test`
-   (blocked on confirming the Zig 0.15.1 toolchain path is available in CI).
+   (CI runs it as separate steps today).
 2. Split generated Zig runtime assumptions into a full-runtime path and a constrained
    XRCE-client path.
 3. Define the no-heap writer/reader surface for MicroZig clients — bounded-field storage is

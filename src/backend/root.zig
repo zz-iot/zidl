@@ -22,7 +22,6 @@ pub const lifecycle_audit = @import("lifecycle_audit.zig");
 pub const Backend = interface.Backend;
 pub const Options = interface.Options;
 pub const Profile = interface.Profile;
-pub const ZigVersion = interface.ZigVersion;
 pub const validateXrce = interface.validateXrce;
 pub const CBackend = c.CBackend;
 pub const CppBackend = cpp.CppBackend;

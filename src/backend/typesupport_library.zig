@@ -8,7 +8,7 @@ const to = @import("zig_typeobject.zig");
 pub fn validateOptions(opts: @import("interface.zig").Options) !void {
     if (!opts.zig_typesupport_library) return;
     if (opts.profile != .full or opts.split_files or opts.no_typesupport or
-        opts.no_typeobject_support or opts.pl_cdr or opts.zig_version != .@"0.17.0" or
+        opts.no_typeobject_support or opts.pl_cdr or
         opts.type_prefix.len != 0 or opts.zig_idiomatic_enums or opts.default_extensibility != .final)
         return error.TypesupportLibraryIncompatibleOptions;
 }
@@ -302,8 +302,6 @@ test "wire library rejects incompatible backend options before output selection"
         .{ .input_stem = "test", .no_typesupport = true },
         .{ .input_stem = "test", .no_typeobject_support = true },
         .{ .input_stem = "test", .pl_cdr = true },
-        .{ .input_stem = "test", .zig_version = .@"0.16.0" },
-        .{ .input_stem = "test", .zig_version = .@"0.15.1" },
         .{ .input_stem = "test", .type_prefix = "Prefix" },
         .{ .input_stem = "test", .zig_idiomatic_enums = true },
         .{ .input_stem = "test", .default_extensibility = .appendable },

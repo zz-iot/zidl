@@ -32,27 +32,6 @@ pub const Profile = enum {
     xrce,
 };
 
-pub const ZigVersion = enum {
-    @"0.15.1",
-    @"0.16.0",
-    @"0.17.0",
-
-    pub fn parse(s: []const u8) ?ZigVersion {
-        if (std.mem.eql(u8, s, "0.15.1")) return .@"0.15.1";
-        if (std.mem.eql(u8, s, "0.16.0")) return .@"0.16.0";
-        if (std.mem.eql(u8, s, "0.17.0")) return .@"0.17.0";
-        return null;
-    }
-
-    pub fn label(self: ZigVersion) []const u8 {
-        return switch (self) {
-            .@"0.15.1" => "0.15.1",
-            .@"0.16.0" => "0.16.0",
-            .@"0.17.0" => "0.17.0",
-        };
-    }
-};
-
 // ── Options ───────────────────────────────────────────────────────────────────
 
 /// Options passed to every backend's `generate` call.
@@ -152,9 +131,6 @@ pub const Options = struct {
     /// own package, which isn't recorded anywhere the importing invocation
     /// can see.
     java_import_packages: []const []const u8 = &.{},
-    /// Zig backend only: generated source compatibility target. zidl itself may
-    /// run on a newer Zig toolchain while emitting code for MicroZig-era Zig.
-    zig_version: ZigVersion = .@"0.17.0",
     /// Zig backend only: alongside the vtable struct output, emit
     /// `pub export fn callconv(.c)` wrappers implementing the free C functions
     /// declared by the C backend's `--generate-interfaces` output.
