@@ -32,6 +32,10 @@
  *   - `free(ctx, ptr, len, alignment)` releases a pointer previously returned
  *     by `alloc` (with its current size after any successful `resize`
  *     calls). Must accept `ptr == NULL` as a no-op.
+ *   - zidl passes one block the same `alignment` on every call: 8 from
+ *     zidl-cdr's C side, the type's alignment but at least 8 from the Zig
+ *     adapter (`zidl_bindings.toAllocator`). So a block the generated C code
+ *     allocates the generated Zig code may free, and the other way round.
  *   - The struct itself (not just `ctx`) must outlive every object created
  *     through it — the same lifetime discipline already used for
  *     `zzdds_register_type_support`'s callback pointer. Nothing that
