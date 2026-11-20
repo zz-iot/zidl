@@ -75,16 +75,20 @@ pub fn registerInstanceRaw(dw: DDS.DataWriter, key_hash: [16]u8) DDS.InstanceHan
     return 0;
 }
 
-pub fn getKeyValueRawWriter(dw: DDS.DataWriter, handle: DDS.InstanceHandle_t) ?[]const u8 {
+pub const GetKeyValueError = error{ AlreadyDeleted, NotEnabled, BadParameter, OutOfMemory };
+
+pub fn getKeyValueWriter(dw: DDS.DataWriter, handle: DDS.InstanceHandle_t, allocator: std.mem.Allocator) GetKeyValueError![]u8 {
     _ = dw;
     _ = handle;
-    return null;
+    _ = allocator;
+    return error.BadParameter;
 }
 
-pub fn getKeyValueRawReader(dr: DDS.DataReader, handle: DDS.InstanceHandle_t) ?[]const u8 {
+pub fn getKeyValueReader(dr: DDS.DataReader, handle: DDS.InstanceHandle_t, allocator: std.mem.Allocator) GetKeyValueError![]u8 {
     _ = dr;
     _ = handle;
-    return null;
+    _ = allocator;
+    return error.BadParameter;
 }
 
 pub fn lookupInstanceWriter(dw: DDS.DataWriter, key_hash: [16]u8) DDS.InstanceHandle_t {

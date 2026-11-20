@@ -18,6 +18,22 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- `--generate-zzdds-wrappers`: `get_key_value` passes on zzdds's DDS return codes
+  (BAD_PARAMETER for a handle with no alive write or sample, NOT_ENABLED, ALREADY_DELETED;
+  DDS 1.4 §2.2.2.4.2.9, §2.2.2.5.3.29). C and C++ return `DDS_ReturnCode_t`, take
+  `(key_holder, handle)` in the IDL's order rather than `(handle, key_out)`, read a sample
+  larger than `ZZDDS_KEY_VALUE_BUF_SIZE` again into a buffer from zidl-cdr's allocator
+  (they failed for one before), and return RETCODE_ERROR for a payload that does not
+  decode. Java's is now `int get_key_value(Foo key_holder, long handle)`, which fills
+  `key_holder`'s key fields through a new `copyKeyFieldsFrom` on each topic type (only with
+  `--generate-zzdds-wrappers`), in place of `Foo get_key_value(long handle)`, which returned
+  null on any failure; a null `key_holder` is BAD_PARAMETER. Zig's calls
+  `getKeyValueWriter`/`getKeyValueReader`, which copy the stored sample while they hold the
+  entity, and returns their `error.AlreadyDeleted`, `NotEnabled` or `BadParameter`. Every
+  backend now fills only `key_holder`'s key fields, as DDS specifies: C, C++ and Zig decoded
+  straight into it, zeroing its other fields and leaking any they owned; they now decode
+  into a temporary and swap the key members, a base type's included, into `key_holder`.
+  Needs the zzdds with those (zzdds #187).
 - Remove the Zig backend's legacy `--zig-version` output modes (0.16.0 and 0.15.1) and their
   CI consumer checks. Generated Zig targets Zig 0.17 only; `zidl-cdr` and `zidl-bindings`
   require Zig 0.17.1.

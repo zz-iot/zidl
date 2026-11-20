@@ -5034,6 +5034,54 @@ const Generator = struct {
     ///   - `_dds.writeRaw(dw, kind, key_hash: [16]u8, payload: []const u8) !void`
     ///   - `_dds.takeRaw(dr) ?RawSample` — `.data`, `.instance_state`,
     ///     `.instance_handle`, `.deinit() void`
+    /// The rest of a generated `get_key_value`, after `_raw` (an owned copy
+    /// of the stored sample): decode its @key members into a temporary,
+    /// swap them into `key_holder` and free the temporary, which then holds
+    /// `key_holder`'s old key values. DDS 1.4 §2.2.2.4.2.9 fills only the key
+    /// fields; the others are left as they were, and a failed decode leaks
+    /// nothing.
+    fn emitGetKeyValueDecode(self: *Generator, s: *const ir.Struct, type_name: []const u8, needs_deinit: bool) !void {
+        try self.ind();
+        try self.write("        defer self._alloc.free(_raw);\n");
+        try self.ind();
+        try self.write("        var _r = try zidl_cdr.CdrReader.init(_raw);\n");
+        try self.ind();
+        try self.print("        var _tmp: {s} = .{{}};\n", .{type_name});
+        if (needs_deinit) {
+            try self.ind();
+            try self.write("        defer _tmp.deinit(self._alloc);\n");
+        }
+        try self.ind();
+        try self.print("        try {s}.deserializeSelected(&_r, {s}.KEY_FIELD_MASK, &_tmp, self._alloc);\n", .{ type_name, type_name });
+        if (try self.emitSwapKeyMembers(s, "") == 0) {
+            // A keyless type has no key fields to fill.
+            try self.ind();
+            try self.write("        _ = key_holder;\n");
+        }
+        try self.ind();
+        try self.write("    }\n");
+    }
+
+    /// Returns how many key members it swapped.
+    fn emitSwapKeyMembers(self: *Generator, s: *const ir.Struct, prefix: []const u8) !usize {
+        var n: usize = 0;
+        if (s.base) |base| switch (base) {
+            .struct_ => |b| {
+                const p = try std.fmt.allocPrint(self.alloc, "{s}_base.", .{prefix});
+                defer self.alloc.free(p);
+                n += try self.emitSwapKeyMembers(b, p);
+            },
+            else => {},
+        };
+        for (s.members) |m| {
+            if (!m.annotations.is_key) continue;
+            try self.ind();
+            try self.print("        std.mem.swap(@TypeOf(_tmp.{s}{s}), &key_holder.{s}{s}, &_tmp.{s}{s});\n", .{ prefix, m.name, prefix, m.name, prefix, m.name });
+            n += 1;
+        }
+        return n;
+    }
+
     fn emitStructTypedWrapper(self: *Generator, s: *const ir.Struct) !void {
         const pfx = self.opts.type_prefix;
         const type_name = try std.fmt.allocPrint(self.alloc, "{s}{s}", .{ pfx, s.name });
@@ -5090,22 +5138,11 @@ const Generator = struct {
         try self.ind();
         try self.print("    pub fn get_key_value(self: @This(), key_holder: *{s}, handle: _zzdds.DDS.InstanceHandle_t) !void {{\n", .{type_name});
         try self.ind();
-        try self.write("        const _raw = _zzdds.getKeyValueRawWriter(self._dw, handle) orelse return error.BadParameter;\n");
-        try self.ind();
-        try self.write("        var _r = try zidl_cdr.CdrReader.init(_raw);\n");
-        // The stored blob is the whole last-alive sample keyed by instance
-        // handle (src/dcps/writer.zig `key_registry`). `deserializeSelected`
-        // skips every non-@key member instead of decoding it; the non-key
-        // fields of `key_holder` stay zeroed -- per DDS 1.4 §2.2.2.4.2.17
-        // their value after `get_key_value` is unspecified.
-        if (needs_deinit) {
-            try self.ind();
-            try self.print("        errdefer {s}.deinitSelected(key_holder, {s}.KEY_FIELD_MASK, self._alloc);\n", .{ type_name, type_name });
-        }
-        try self.ind();
-        try self.print("        try {s}.deserializeSelected(&_r, {s}.KEY_FIELD_MASK, key_holder, self._alloc);\n", .{ type_name, type_name });
-        try self.ind();
-        try self.write("    }\n");
+        // zzdds copies the instance's stored first alive sample while it
+        // holds the writer, and returns error.AlreadyDeleted, NotEnabled or
+        // BadParameter, named for their DDS return codes.
+        try self.write("        const _raw = try _zzdds.getKeyValueWriter(self._dw, handle, self._alloc);\n");
+        try self.emitGetKeyValueDecode(s, type_name, needs_deinit);
 
         // lookup_instance
         try self.write("\n");
@@ -5199,20 +5236,9 @@ const Generator = struct {
         try self.ind();
         try self.print("    pub fn get_key_value(self: @This(), key_holder: *{s}, handle: _zzdds.DDS.InstanceHandle_t) !void {{\n", .{type_name});
         try self.ind();
-        try self.write("        const _raw = _zzdds.getKeyValueRawReader(self._dr, handle) orelse return error.BadParameter;\n");
-        try self.ind();
-        try self.write("        var _r = try zidl_cdr.CdrReader.init(_raw);\n");
-        // See the DataWriter `get_key_value` above: the reader also stores the
-        // whole first-alive sample (src/dcps/reader.zig `key_cdr`);
-        // `deserializeSelected` skips the non-@key members.
-        if (needs_deinit) {
-            try self.ind();
-            try self.print("        errdefer {s}.deinitSelected(key_holder, {s}.KEY_FIELD_MASK, self._alloc);\n", .{ type_name, type_name });
-        }
-        try self.ind();
-        try self.print("        try {s}.deserializeSelected(&_r, {s}.KEY_FIELD_MASK, key_holder, self._alloc);\n", .{ type_name, type_name });
-        try self.ind();
-        try self.write("    }\n");
+        // As the DataWriter's `get_key_value` above (§2.2.2.5.3.29).
+        try self.write("        const _raw = try _zzdds.getKeyValueReader(self._dr, handle, self._alloc);\n");
+        try self.emitGetKeyValueDecode(s, type_name, needs_deinit);
 
         // lookup_instance
         try self.write("\n");
@@ -10853,14 +10879,17 @@ test "zig_backend: get_key_value / selective parse for a non-leading key" {
     // key-only helpers still emitted (the disposed-sample take path needs them)
     try testing.expect(has(s, "pub fn deserializeKeyInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {"));
     // get_key_value on both sides drives deserializeSelected with the key mask
-    const gkv_w = std.mem.indexOf(u8, s, "getKeyValueRawWriter(self._dw, handle)").?;
+    const gkv_w = std.mem.indexOf(u8, s, "const _raw = try _zzdds.getKeyValueWriter(self._dw, handle, self._alloc);").?;
     const gkv_w_end = std.mem.indexOfPos(u8, s, gkv_w, "\n    }\n").?;
-    try testing.expect(has(s[gkv_w..gkv_w_end], "Msg.deserializeSelected(&_r, Msg.KEY_FIELD_MASK, key_holder, self._alloc)"));
+    try testing.expect(has(s[gkv_w..gkv_w_end], "Msg.deserializeSelected(&_r, Msg.KEY_FIELD_MASK, &_tmp, self._alloc)"));
     try testing.expect(!has(s[gkv_w..gkv_w_end], "deserializeKeyInto"));
     try testing.expect(!has(s[gkv_w..gkv_w_end], "deserializeInto"));
-    const gkv_r = std.mem.indexOf(u8, s, "getKeyValueRawReader(self._dr, handle)").?;
+    const gkv_r = std.mem.indexOf(u8, s, "const _raw = try _zzdds.getKeyValueReader(self._dr, handle, self._alloc);").?;
     const gkv_r_end = std.mem.indexOfPos(u8, s, gkv_r, "\n    }\n").?;
-    try testing.expect(has(s[gkv_r..gkv_r_end], "Msg.deserializeSelected(&_r, Msg.KEY_FIELD_MASK, key_holder, self._alloc)"));
+    try testing.expect(has(s[gkv_r..gkv_r_end], "Msg.deserializeSelected(&_r, Msg.KEY_FIELD_MASK, &_tmp, self._alloc)"));
+    // Only the key members reach key_holder; the decoded temporary is freed.
+    try testing.expect(has(s[gkv_r..gkv_r_end], "std.mem.swap(@TypeOf(_tmp."));
+    try testing.expect(has(s[gkv_r..gkv_r_end], "defer _tmp.deinit(self._alloc);"));
 }
 
 // ── getFieldFromCdr tests ──────────────────────────────────────────────────

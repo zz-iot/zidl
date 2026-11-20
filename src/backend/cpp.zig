@@ -51,8 +51,9 @@ const canonical = @import("canonical_key.zig");
 const encapKindC = cdr_skip.encapKindC;
 const interface = @import("interface.zig");
 
-// Stack buffer size for get_key_value; zzdds returns an error if the serialized
-// key exceeds this.  Exposed in generated C++ as ZZDDS_KEY_VALUE_BUF_SIZE.
+// Stack buffer size for get_key_value's first read; a larger stored sample is
+// read again into an allocated buffer. Exposed in generated C++ as
+// ZZDDS_KEY_VALUE_BUF_SIZE.
 const key_value_buf_size: u32 = 4096;
 
 // ── Public backend struct ─────────────────────────────────────────────────────
@@ -532,7 +533,7 @@ const Generator = struct {
         try self.print("    int dispose_w_timestamp(const {s}& key, DDS_Time_t timestamp);\n", .{cpp_qname});
         try self.print("    int unregister_instance(const {s}& key);\n", .{cpp_qname});
         try self.print("    int unregister_instance_w_timestamp(const {s}& key, DDS_Time_t timestamp);\n", .{cpp_qname});
-        try self.print("    int get_key_value(DDS_InstanceHandle_t handle, {s}& key_out);\n", .{cpp_qname});
+        try self.print("    DDS_ReturnCode_t get_key_value({s}& key_holder, DDS_InstanceHandle_t handle);\n", .{cpp_qname});
         try self.print("    DDS_InstanceHandle_t lookup_instance(const {s}& key);\n", .{cpp_qname});
         try self.print("    int write_w_handle(const {s}& value, DDS_InstanceHandle_t handle);\n", .{cpp_qname});
         try self.print("    int dispose_w_handle(const {s}& key, DDS_InstanceHandle_t handle);\n", .{cpp_qname});
@@ -576,7 +577,7 @@ const Generator = struct {
         try self.write("    DDS_ReturnCode_t read(Sample& out, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n");
         try self.write("    DDS_ReturnCode_t take_next_instance(Sample& out, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n");
         try self.write("    DDS_ReturnCode_t read_next_instance(Sample& out, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out);\n");
-        try self.print("    int get_key_value(DDS_InstanceHandle_t handle, {s}& key_out);\n", .{cpp_qname});
+        try self.print("    DDS_ReturnCode_t get_key_value({s}& key_holder, DDS_InstanceHandle_t handle);\n", .{cpp_qname});
         try self.print("    DDS_InstanceHandle_t lookup_instance(const {s}& key);\n", .{cpp_qname});
         try self.print("    int take_n({s} *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{cpp_qname});
         try self.print("    int read_n({s} *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is);\n", .{cpp_qname});
@@ -2250,7 +2251,7 @@ const CdrGenerator = struct {
     /// Selective-parse family for a Topic struct -- see c.zig's
     /// `emitSelectiveFnsC` and zig.zig's `emitSelectiveFns`. Unlike C, there
     /// is **no** `_deinit_selected`: `::Foo`'s members (`std::string`,
-    /// `std::vector`, …) release themselves via RAII when `key_out` goes out
+    /// `std::vector`, …) release themselves via RAII when `key_holder` goes out
     /// of scope, even after a mid-parse error. Fallback to `_deserialize` for
     /// a struct with a base type or > 64 members.
     fn emitSelectiveFnsCpp(
@@ -2377,6 +2378,54 @@ const CdrGenerator = struct {
         if (!first) try self.writeI("}\n");
         try self.writeI("return _matched;\n");
         try self.write("}\n\n");
+    }
+
+    /// The @key members of `s` and its base types, swapped between
+    /// `key_holder` and `_tmp`; `_tmp`'s destructor then frees
+    /// `key_holder`'s old key values.
+    fn emitSwapKeyMembers(self: *CdrGenerator, s: *const ir.Struct) !void {
+        if (s.base) |base| switch (base) {
+            .struct_ => |b| try self.emitSwapKeyMembers(b),
+            else => {},
+        };
+        for (s.members) |m| {
+            if (!m.annotations.is_key) continue;
+            try self.printI("        swap(key_holder.{s}, _tmp.{s});\n", .{ m.name, m.name });
+        }
+    }
+
+    /// The body of a generated C++ `get_key_value`, as c.zig's
+    /// `emitGetKeyValueBody`: zzdds keeps the whole first
+    /// alive sample of an instance, and this decodes its @key members into
+    /// `key_holder`. The stack buffer suits most types; a larger sample comes
+    /// back as PRECONDITION_NOT_MET with its size, and is read again into a
+    /// buffer from zidl-cdr's allocator. A payload that does not decode is
+    /// RETCODE_ERROR, so the result is always a DDS return code.
+    fn emitGetKeyValueBody(self: *CdrGenerator, s: *const ir.Struct, c_name: []const u8, cpp_qname: []const u8, get_fn: []const u8, entity: []const u8) !void {
+        try self.writeI("uint8_t _stack[ZZDDS_KEY_VALUE_BUF_SIZE];\n");
+        try self.writeI("uint8_t *_buf = _stack;\n");
+        try self.writeI("size_t _cap = sizeof(_stack);\n");
+        try self.writeI("size_t _len = 0;\n");
+        try self.printI("DDS_ReturnCode_t _rc = {s}({s}, handle, _buf, _cap, &_len);\n", .{ get_fn, entity });
+        try self.writeI("while (_rc == DDS_RETCODE_PRECONDITION_NOT_MET) {\n");
+        try self.writeI("    if (_buf != _stack) zidl_cdr_free(_buf, _cap);\n");
+        try self.writeI("    _cap = _len;\n");
+        try self.writeI("    _buf = (uint8_t *)zidl_cdr_alloc(_cap);\n");
+        try self.writeI("    if (!_buf) return DDS_RETCODE_OUT_OF_RESOURCES;\n");
+        try self.printI("    _rc = {s}({s}, handle, _buf, _cap, &_len);\n", .{ get_fn, entity });
+        try self.writeI("}\n");
+        try self.writeI("if (_rc == DDS_RETCODE_OK) {\n");
+        try self.printI("    {s} _tmp{{}};\n", .{cpp_qname});
+        try self.writeI("    ZidlCdrReader _r;\n");
+        try self.printI("    if (zidl_cdr_reader_init(&_r, _buf, _len) != 0 || {s}_deserialize_selected(&_r, {s}_KEY_FIELD_MASK, &_tmp) != 0) {{\n", .{ c_name, c_name });
+        try self.writeI("        _rc = DDS_RETCODE_ERROR;\n");
+        try self.writeI("    } else {\n");
+        try self.writeI("        using std::swap;\n");
+        try self.emitSwapKeyMembers(s);
+        try self.writeI("    }\n");
+        try self.writeI("}\n");
+        try self.writeI("if (_buf != _stack) zidl_cdr_free(_buf, _cap);\n");
+        try self.writeI("return _rc;\n");
     }
 
     fn emitStructZzddsWrappers(self: *CdrGenerator, s: *const ir.Struct, c_name: []const u8, cpp_qname: []const u8) !void {
@@ -2527,19 +2576,10 @@ const CdrGenerator = struct {
         try self.print("int {s}DataWriter::unregister_instance_w_timestamp(const {s}& key, DDS_Time_t timestamp) {{\n", .{ class_name, cpp_qname });
         try self.printI("return {s}_write_kind_w_timestamp(writer_, xcdr_version_, DDS_WriteKind_UNREGISTER_WRITE_KIND, key, true, DDS_HANDLE_NIL, timestamp);\n", .{class_name});
         try self.write("}\n\n");
-        try self.print("int {s}DataWriter::get_key_value(DDS_InstanceHandle_t handle, {s}& key_out) {{\n", .{ class_name, cpp_qname });
-        try self.writeI("uint8_t _buf[ZZDDS_KEY_VALUE_BUF_SIZE];\n");
-        try self.writeI("size_t _len = 0;\n");
-        try self.writeI("int _rc = zzdds_get_key_value_writer(writer_, handle, _buf, sizeof(_buf), &_len);\n");
-        try self.writeI("if (_rc) return _rc;\n");
-        try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("_rc = zidl_cdr_reader_init(&_r, _buf, _len);\n");
-        try self.writeI("if (_rc) return _rc;\n");
-        // The stored blob is the whole last-alive sample keyed by instance
-        // handle; _deserialize_selected decodes just the @key members and skips
-        // the rest. Non-key fields of key_out stay default-constructed --
-        // unspecified per DDS 1.4 §2.2.2.4.2.17.
-        try self.printI("return {s}_deserialize_selected(&_r, {s}_KEY_FIELD_MASK, &key_out);\n", .{ c_name, c_name });
+        // DDS 1.4 §2.2.2.4.2.9: fills only the key fields of key_holder.
+        // See c.zig's emitGetKeyValueBody.
+        try self.print("DDS_ReturnCode_t {s}DataWriter::get_key_value({s}& key_holder, DDS_InstanceHandle_t handle) {{\n", .{ class_name, cpp_qname });
+        try self.emitGetKeyValueBody(s, c_name, cpp_qname, "zzdds_get_key_value_writer", "writer_");
         try self.write("}\n\n");
         try self.print("DDS_InstanceHandle_t {s}DataWriter::lookup_instance(const {s}& key) {{\n", .{ class_name, cpp_qname });
         try self.writeI("uint8_t _hash[16];\n");
@@ -2648,16 +2688,9 @@ const CdrGenerator = struct {
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
-        try self.print("int {s}DataReader::get_key_value(DDS_InstanceHandle_t handle, {s}& key_out) {{\n", .{ class_name, cpp_qname });
-        try self.writeI("uint8_t _buf[ZZDDS_KEY_VALUE_BUF_SIZE];\n");
-        try self.writeI("size_t _len = 0;\n");
-        try self.writeI("int _rc = zzdds_get_key_value_reader(reader_, handle, _buf, sizeof(_buf), &_len);\n");
-        try self.writeI("if (_rc) return _rc;\n");
-        try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("_rc = zidl_cdr_reader_init(&_r, _buf, _len);\n");
-        try self.writeI("if (_rc) return _rc;\n");
-        // See DataWriter get_key_value: the stored payload is a full sample.
-        try self.printI("return {s}_deserialize_selected(&_r, {s}_KEY_FIELD_MASK, &key_out);\n", .{ c_name, c_name });
+        // §2.2.2.5.3.29, as the DataWriter's.
+        try self.print("DDS_ReturnCode_t {s}DataReader::get_key_value({s}& key_holder, DDS_InstanceHandle_t handle) {{\n", .{ class_name, cpp_qname });
+        try self.emitGetKeyValueBody(s, c_name, cpp_qname, "zzdds_get_key_value_reader", "reader_");
         try self.write("}\n\n");
 
         try self.print("DDS_InstanceHandle_t {s}DataReader::lookup_instance(const {s}& key) {{\n", .{ class_name, cpp_qname });
@@ -8118,6 +8151,28 @@ test "cpp_backend: zzdds wrappers still emitted for a keyless top-level struct" 
     try testing.expect(has(s, "zzdds_c.h"));
     try testing.expect(has(s, "NoKeyDataWriter"));
     try testing.expect(has(s, "NoKeyDataReader"));
+}
+
+test "cpp_backend: get_key_value returns DDS return codes and reads a large sample again" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Topic { @key long id; sequence<octet> data; };",
+        "topic",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "DDS_ReturnCode_t TopicDataWriter::get_key_value(::Topic& key_holder, DDS_InstanceHandle_t handle) {"));
+    try testing.expect(has(s, "DDS_ReturnCode_t TopicDataReader::get_key_value(::Topic& key_holder, DDS_InstanceHandle_t handle) {"));
+    try testing.expect(has(s, "DDS_ReturnCode_t _rc = zzdds_get_key_value_writer(writer_, handle, _buf, _cap, &_len);"));
+    try testing.expect(has(s, "DDS_ReturnCode_t _rc = zzdds_get_key_value_reader(reader_, handle, _buf, _cap, &_len);"));
+    try testing.expect(has(s, "while (_rc == DDS_RETCODE_PRECONDITION_NOT_MET) {"));
+    try testing.expect(has(s, "if (_buf != _stack) zidl_cdr_free(_buf, _cap);"));
+    try testing.expect(has(s, "_rc = DDS_RETCODE_ERROR;"));
+    // Decoded into a temporary: only the key members reach key_holder.
+    try testing.expect(has(s, "::Topic _tmp{};"));
+    try testing.expect(has(s, "Topic_deserialize_selected(&_r, Topic_KEY_FIELD_MASK, &_tmp)"));
+    try testing.expect(has(s, "swap(key_holder.id, _tmp.id);"));
+    try testing.expect(!has(s, "swap(key_holder.data, _tmp.data);"));
 }
 
 test "cpp_backend: zzdds wrapper declarations for keyed topic" {
