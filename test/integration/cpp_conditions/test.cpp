@@ -1,6 +1,9 @@
 // Compile and run the generated condition bridge against a synthetic C ABI.
 #include "topic.hpp"
+#include "keyed.hpp"
 #include "dcps_impl.hpp"
+#include <memory_resource>
+#include <new>
 #include <cassert>
 #include <type_traits>
 #include <unordered_set>
@@ -190,7 +193,56 @@ static void optional_selection() {
     assert(reader.data == bytes && reader.data_len == sizeof bytes && reader.pos <= sizeof bytes);
 }
 
+// get_key_value fills only the key members, keeping the holder's own memory
+// resource for them, from register_instance's key-only CDR and from the key
+// projection's output for a complete sample.
+static void key_value_keeps_the_holders_resource() {
+    assert(KeyedNoteTypeSupport::register_type(nullptr) == 0);
+    assert(stub_projection() != nullptr);
+
+    KeyedNote value{};
+    value.name = "a key long enough to need the heap, not the small buffer";
+    value.code[0] = 3;
+    value.code[1] = 4;
+    value.note = "the writer's note";
+    KeyedNoteDataWriter writer(DDS_DataWriter{}, ZIDL_XCDR2);
+    assert(writer.register_instance(value) == 1);
+
+    std::pmr::monotonic_buffer_resource pool;
+    KeyedNote holder{};
+    holder.name.~basic_string();
+    new (&holder.name) std::pmr::string("the holder's old key, also long enough for the heap", &pool);
+    holder.note = "kept";
+    assert(writer.get_key_value(holder, 1) == DDS_RETCODE_OK);
+    assert(holder.name == value.name);
+    assert(holder.name.get_allocator().resource() == &pool);
+    assert(holder.code[0] == 3 && holder.code[1] == 4);
+    assert(holder.note == "kept");
+
+    // A complete sample, projected to its key, decodes the same way.
+    ZidlCdrWriter w;
+    assert(zidl_cdr_writer_init(&w, ZIDL_XCDR2) == 0);
+    assert(zidl_cdr_write_encap_kind(&w, ZIDL_EXT_APPENDABLE) == 0);
+    value.name = "another key, again long enough to need the heap";
+    assert(KeyedNote_serialize(&w, &value) == 0);
+    uint8_t key[256];
+    size_t key_len = 0;
+    assert(stub_projection()(nullptr, w.buf, w.len, key, sizeof key, &key_len) == DDS_RETCODE_OK);
+    zidl_cdr_writer_deinit(&w);
+    stub_key().bytes.assign(key, key + key_len);
+    KeyedNoteDataReader reader(DDS_DataReader{});
+    assert(reader.get_key_value(holder, 1) == DDS_RETCODE_OK);
+    assert(holder.name == value.name);
+    assert(holder.name.get_allocator().resource() == &pool);
+    assert(holder.note == "kept");
+
+    // A sample too short to decode is ERROR, not an exception.
+    stub_key().bytes.assign(key, key + 6);
+    assert(reader.get_key_value(holder, 1) == DDS_RETCODE_ERROR);
+}
+
 int main() {
+    key_value_keeps_the_holders_resource();
     optional_selection();
     selected_frame_bounds();
     DDS_DataReader_s reader_handle;

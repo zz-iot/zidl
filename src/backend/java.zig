@@ -2364,6 +2364,62 @@ const Generator = struct {
             try self.emitCopyKeyFields(s);
             try self.ind();
             try self.write("}\n");
+
+            // projectKeyFromCdr: zzdds's key projection, which its Java
+            // runtime registers with the type, so an instance keeps its
+            // key-only CDR rather than its first sample. Null if it cannot.
+            const x2: []const u8 = switch (s.annotations.extensibility) {
+                .final => "0x07",
+                .appendable => "0x09",
+                .mutable => "0x0b",
+            };
+            try self.write("\n");
+            try self.ind();
+            try self.write("public static byte[] projectKeyFromCdr(byte[] _sample) {\n");
+            try self.ind();
+            try self.write("    try {\n");
+            try self.ind();
+            try self.write("        io.zidl.cdr.Cdr.requireApi(2);\n");
+            try self.ind();
+            try self.write("        int _xcdrVersion = io.zidl.cdr.Cdr.detectXcdr(_sample);\n");
+            try self.ind();
+            try self.write("        java.nio.ByteBuffer _in = java.nio.ByteBuffer.wrap(_sample).order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
+            try self.ind();
+            try self.write("        _in.position(4);\n");
+            try self.ind();
+            try self.print("        {s} _key = deserializeSelected(_in, 4, _xcdrVersion, KEY_FIELD_MASK);\n", .{jn});
+            try self.ind();
+            try self.write("        for (int _cap = 64; ; _cap *= 2) {\n");
+            try self.ind();
+            try self.write("            java.nio.ByteBuffer _out = java.nio.ByteBuffer.allocate(_cap).order(java.nio.ByteOrder.LITTLE_ENDIAN);\n");
+            try self.ind();
+            try self.write("            try {\n");
+            try self.ind();
+            try self.print("                _out.put((byte)0x00); _out.put((byte)(_xcdrVersion == 1 ? 0x01 : {s})); _out.put((byte)0x00); _out.put((byte)0x00);\n", .{x2});
+            try self.ind();
+            try self.write("                _key.serializeKey(_out, 4, _xcdrVersion);\n");
+            try self.ind();
+            try self.write("                byte[] _bytes = new byte[_out.position()];\n");
+            try self.ind();
+            try self.write("                _out.rewind(); _out.get(_bytes);\n");
+            try self.ind();
+            try self.write("                return _bytes;\n");
+            try self.ind();
+            try self.write("            } catch (java.nio.BufferOverflowException _e) {\n");
+            try self.ind();
+            try self.write("                // Larger: try again.\n");
+            try self.ind();
+            try self.write("            }\n");
+            try self.ind();
+            try self.write("        }\n");
+            try self.ind();
+            try self.write("    } catch (RuntimeException _e) {\n");
+            try self.ind();
+            try self.write("        return null;\n");
+            try self.ind();
+            try self.write("    }\n");
+            try self.ind();
+            try self.write("}\n");
         }
 
         // fieldIndex
@@ -3921,11 +3977,11 @@ fn emitZzddsDataWriterFile(
         \\        return writer.write_raw(toByteList(key.computeKeyHash()), (int) handle, toByteList(toPayload(key, true)), {[wk]s}.UNREGISTER_WRITE_KIND, new {[tt]s}(sec, nanosec));
         \\    }}
         \\
-        \\    /** Computes the deterministic instance handle for {{@code key}} --
-        \\     * zzdds's own instance registration has no side effects beyond this
-        \\     * computation. */
+        \\    /** register_instance: the handle of {{@code key}}'s instance on this
+        \\     * writer, registering it if it is not, or 0 (HANDLE_NIL). Its key-only
+        \\     * CDR becomes the instance's key for get_key_value. */
         \\    public long register_instance({[t]s} key) {{
-        \\        return io.zzdds.runtime.ZzddsRuntime.registerInstanceRaw(writer, key.computeKeyHash());
+        \\        return io.zzdds.runtime.ZzddsRuntime.registerInstanceRaw(writer, key.computeKeyHash(), toPayload(key, true));
         \\    }}
         \\
         \\    /** {{@code timestamp}} is accepted for spec-shape compliance (matching
@@ -3945,20 +4001,22 @@ fn emitZzddsDataWriterFile(
         \\    /** get_key_value (DDS 1.4 section 2.2.2.4.2.9): sets {{@code key_holder}}'s
         \\     * key fields to those of the instance {{@code handle}} names, leaving its
         \\     * other fields as they were. Returns OK; BAD_PARAMETER for a handle
-        \\     * with no alive write; NOT_ENABLED until the writer is enabled;
-        \\     * ALREADY_DELETED once it is deleted; or ERROR for a stored sample
-        \\     * that does not decode. zzdds keeps the instance's whole first alive
-        \\     * write, so this decodes its key members and copies them over. */
+        \\     * whose instance has no key; NOT_ENABLED until the writer is enabled;
+        \\     * ALREADY_DELETED once it is deleted; or ERROR for a stored key that
+        \\     * does not decode. zzdds keeps the instance's key-only CDR, or for a
+        \\     * type without a key projection its first sample, so this decodes
+        \\     * the key members and copies them over. */
         \\    public int get_key_value({[t]s} key_holder, long handle) {{
         \\        if (key_holder == null) return (int) {[bp]s}.value;
         \\        byte[][] _payload = new byte[1][];
-        \\        int _rc = io.zzdds.runtime.ZzddsRuntime.getKeyValueWriter(writer, handle, _payload);
+        \\        boolean[] _keyOnly = new boolean[1];
+        \\        int _rc = io.zzdds.runtime.ZzddsRuntime.getKeyValueWriter(writer, handle, _payload, _keyOnly);
         \\        if (_rc != 0) return _rc;
         \\        try {{
         \\            java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(_payload[0]).order(java.nio.ByteOrder.LITTLE_ENDIAN);
         \\            int _xcdrVersion = xcdrVersionOf(_payload[0]);
         \\            _buf.position(4);
-        \\            key_holder.copyKeyFieldsFrom({[t]s}.deserializeSelected(_buf, 4, _xcdrVersion, {[t]s}.KEY_FIELD_MASK));
+        \\            key_holder.copyKeyFieldsFrom(_keyOnly[0] ? {[t]s}.deserializeKey(_buf, 4, _xcdrVersion) : {[t]s}.deserializeSelected(_buf, 4, _xcdrVersion, {[t]s}.KEY_FIELD_MASK));
         \\        }} catch (RuntimeException _e) {{
         \\            return (int) {[er]s}.value;
         \\        }}
@@ -4245,20 +4303,20 @@ fn emitZzddsDataReaderFile(
         \\    /** get_key_value (DDS 1.4 section 2.2.2.5.3.29): sets {{@code key_holder}}'s
         \\     * key fields to those of the instance {{@code handle}} names, leaving its
         \\     * other fields as they were. Returns OK; BAD_PARAMETER for a handle
-        \\     * with no alive sample; NOT_ENABLED until the reader is enabled;
-        \\     * ALREADY_DELETED once it is deleted; or ERROR for a stored sample
-        \\     * that does not decode. zzdds keeps the instance's whole first alive
-        \\     * sample, so this decodes its key members and copies them over. */
+        \\     * whose instance has no key; NOT_ENABLED until the reader is enabled;
+        \\     * ALREADY_DELETED once it is deleted; or ERROR for a stored key that
+        \\     * does not decode. As the DataWriter's. */
         \\    public int get_key_value({[t]s} key_holder, long handle) {{
         \\        if (key_holder == null) return (int) {[bp]s}.value;
         \\        byte[][] _payload = new byte[1][];
-        \\        int _rc = io.zzdds.runtime.ZzddsRuntime.getKeyValueReader(reader, handle, _payload);
+        \\        boolean[] _keyOnly = new boolean[1];
+        \\        int _rc = io.zzdds.runtime.ZzddsRuntime.getKeyValueReader(reader, handle, _payload, _keyOnly);
         \\        if (_rc != 0) return _rc;
         \\        try {{
         \\            java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(_payload[0]).order(java.nio.ByteOrder.LITTLE_ENDIAN);
         \\            int _xcdrVersion = xcdrVersionOf(_payload[0]);
         \\            _buf.position(4);
-        \\            key_holder.copyKeyFieldsFrom({[t]s}.deserializeSelected(_buf, 4, _xcdrVersion, {[t]s}.KEY_FIELD_MASK));
+        \\            key_holder.copyKeyFieldsFrom(_keyOnly[0] ? {[t]s}.deserializeKey(_buf, 4, _xcdrVersion) : {[t]s}.deserializeSelected(_buf, 4, _xcdrVersion, {[t]s}.KEY_FIELD_MASK));
         \\        }} catch (RuntimeException _e) {{
         \\            return (int) {[er]s}.value;
         \\        }}
@@ -9312,6 +9370,17 @@ test "java: copyKeyFieldsFrom sets the key members, a base type's included" {
     try testGenOpts(alloc, idl, "keys", .{ .input_stem = "keys", .generate_zzdds_wrappers = true }, "public void copyKeyFieldsFrom(Base _src) {\n            set_site(_src.get_site());\n        }");
 }
 
+test "java: projectKeyFromCdr re-encodes a sample's key members key-only, only with --generate-zzdds-wrappers" {
+    const alloc = testing.allocator;
+    const idl = "@appendable struct K { long note; @key long id; };";
+    const opts: interface.Options = .{ .input_stem = "keys", .generate_zzdds_wrappers = true };
+    try testGenOpts(alloc, idl, "keys", opts, "public static byte[] projectKeyFromCdr(byte[] _sample) {");
+    try testGenOpts(alloc, idl, "keys", opts, "K _key = deserializeSelected(_in, 4, _xcdrVersion, KEY_FIELD_MASK);");
+    try testGenOpts(alloc, idl, "keys", opts, "_out.put((byte)(_xcdrVersion == 1 ? 0x01 : 0x09));");
+    try testGenOpts(alloc, idl, "keys", opts, "_key.serializeKey(_out, 4, _xcdrVersion);");
+    try testing.expectError(error.FragmentNotFound, testGen(alloc, idl, "keys", "projectKeyFromCdr"));
+}
+
 test "java: copyKeyFieldsFrom only with --generate-zzdds-wrappers" {
     const alloc = testing.allocator;
     try testing.expectError(error.FragmentNotFound, testGen(alloc, "struct K { @key long id; };", "keys", "copyKeyFieldsFrom"));
@@ -9881,7 +9950,7 @@ test "java: --generate-zzdds-wrappers DataWriter gets register_instance, _w_time
     const w = writer_content;
 
     try testing.expect(std.mem.indexOf(u8, w, "public long register_instance(Foo key) {") != null);
-    try testing.expect(std.mem.indexOf(u8, w, "ZzddsRuntime.registerInstanceRaw(writer, key.computeKeyHash())") != null);
+    try testing.expect(std.mem.indexOf(u8, w, "ZzddsRuntime.registerInstanceRaw(writer, key.computeKeyHash(), toPayload(key, true))") != null);
     try testing.expect(std.mem.indexOf(u8, w, "public long register_instance_w_timestamp(Foo key, int sec, int nanosec) {") != null);
     try testing.expect(std.mem.indexOf(u8, w, "return register_instance(key);") != null);
 
@@ -9893,8 +9962,8 @@ test "java: --generate-zzdds-wrappers DataWriter gets register_instance, _w_time
     try testing.expect(std.mem.indexOf(u8, w, "writer.write_raw(toByteList(key.computeKeyHash()), (int) handle, toByteList(toPayload(key, true)), Dcps.DDS.WriteKind.UNREGISTER_WRITE_KIND, new Dcps.DDS.Time_t(sec, nanosec))") != null);
 
     try testing.expect(std.mem.indexOf(u8, w, "public int get_key_value(Foo key_holder, long handle) {") != null);
-    try testing.expect(std.mem.indexOf(u8, w, "int _rc = io.zzdds.runtime.ZzddsRuntime.getKeyValueWriter(writer, handle, _payload);") != null);
-    try testing.expect(std.mem.indexOf(u8, w, "key_holder.copyKeyFieldsFrom(Foo.deserializeSelected(_buf, 4, _xcdrVersion, Foo.KEY_FIELD_MASK));") != null);
+    try testing.expect(std.mem.indexOf(u8, w, "int _rc = io.zzdds.runtime.ZzddsRuntime.getKeyValueWriter(writer, handle, _payload, _keyOnly);") != null);
+    try testing.expect(std.mem.indexOf(u8, w, "key_holder.copyKeyFieldsFrom(_keyOnly[0] ? Foo.deserializeKey(_buf, 4, _xcdrVersion) : Foo.deserializeSelected(_buf, 4, _xcdrVersion, Foo.KEY_FIELD_MASK));") != null);
     try testing.expect(std.mem.indexOf(u8, w, "DDS.RETCODE_ERROR.value;") != null);
     try testing.expect(std.mem.indexOf(u8, w, "Foo.deserializeSelected(_buf, 4, _xcdrVersion, Foo.KEY_FIELD_MASK)") != null);
     try testing.expect(std.mem.indexOf(u8, w, "public long lookup_instance(Foo key) {") != null);
@@ -9945,7 +10014,7 @@ test "java: --generate-zzdds-wrappers DataReader gets take_instance/read_instanc
     try testing.expect(std.mem.indexOf(u8, r, "reader.read_next_instance_raw(_payloads, _hashes, _infos, (int) prev, condition, _ANY_STATE, _ANY_STATE, _ANY_STATE, max, _loan)") != null);
 
     try testing.expect(std.mem.indexOf(u8, r, "public int get_key_value(Foo key_holder, long handle) {") != null);
-    try testing.expect(std.mem.indexOf(u8, r, "int _rc = io.zzdds.runtime.ZzddsRuntime.getKeyValueReader(reader, handle, _payload);") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "int _rc = io.zzdds.runtime.ZzddsRuntime.getKeyValueReader(reader, handle, _payload, _keyOnly);") != null);
     try testing.expect(std.mem.indexOf(u8, r, "Foo.deserializeSelected(_buf, 4, _xcdrVersion, Foo.KEY_FIELD_MASK)") != null);
     try testing.expect(std.mem.indexOf(u8, r, "public long lookup_instance(Foo key) {") != null);
     try testing.expect(std.mem.indexOf(u8, r, "ZzddsRuntime.lookupInstanceReaderRaw(reader, key.computeKeyHash())") != null);
