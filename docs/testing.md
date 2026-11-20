@@ -207,16 +207,16 @@ framing, key hashing, malformed/truncated input and allocation cleanup.
 
 ## XRCE MicroZig Fixture
 
-The XRCE profile fixture in `test/xrce-microzig/` is generated and tested on Zig 0.17.1 in CI. A temporary Zig 0.15.1 consumer check remains until the Pico migration passes hardware validation. A companion allocating fixture exercises `sequence<string>` decoding, generated cloning, and runtime `cloneOwned`, with leak checking. These fixtures are not part of `zig build test`:
+The XRCE profile fixture in `test/xrce-microzig/` is generated and tested in CI. A companion allocating fixture exercises `sequence<string>` decoding, generated cloning, and runtime `cloneOwned`, with leak checking. These fixtures are not part of `zig build test`:
 
 ```sh
-# Regenerate (requires Zig 0.17.1):
-zig build run -- -b zig --profile xrce --zig-version 0.15.1 \
+# Regenerate:
+zig build run -- -b zig --profile xrce \
   -o test/xrce-microzig/generated test/xrce-microzig/types.idl
-zig build run -- -b zig --zig-version 0.15.1 \
+zig build run -- -b zig \
   -o test/xrce-microzig/generated test/xrce-microzig/allocations.idl
 
-# Compile (requires Zig 0.15.1):
+# Compile and test:
 cd test/xrce-microzig && zig build test
 ```
 

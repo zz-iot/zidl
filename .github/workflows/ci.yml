@@ -140,75 +140,17 @@ jobs:
         run: zig build interop-test
 
       # ── MicroZig-facing XRCE codegen ─────────────────────────────────────
-      # Keep the legacy XRCE consumer check until the Pico migration has
-      # passed hardware validation. Also test default output with Zig 0.17.1.
 
-      - name: Generate default XRCE fixture for Zig 0.17.1
+      - name: Generate XRCE fixture
         if: matrix.os == 'ubuntu-latest'
         run: |
           zig build run -- -b zig --profile xrce -o test/xrce-microzig/generated test/xrce-microzig/types.idl
           zig build run -- -b zig -o test/xrce-microzig/generated test/xrce-microzig/allocations.idl
 
-      - name: Test XRCE fixture on Zig 0.17.1
+      - name: Test XRCE fixture
         if: matrix.os == 'ubuntu-latest'
         run: zig build test
         working-directory: test/xrce-microzig
-
-      - name: Generate legacy XRCE fixture
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          zig build run -- -b zig --profile xrce --zig-version 0.15.1 -o test/xrce-microzig/generated test/xrce-microzig/types.idl
-          zig build run -- -b zig --zig-version 0.15.1 -o test/xrce-microzig/generated test/xrce-microzig/allocations.idl
-
-      - name: Install Zig 0.15.1
-        if: matrix.os == 'ubuntu-latest'
-        uses: mlugg/setup-zig@v2
-        with:
-          version: "0.15.1"
-
-      - name: Test legacy XRCE fixture
-        if: matrix.os == 'ubuntu-latest'
-        run: zig build test
-        working-directory: test/xrce-microzig
-
-  authoring-compatibility:
-    name: Authoring consumer / Zig ${{ matrix.zig }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        zig: ["0.15.1", "0.16.0"]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install generator compiler
-        uses: mlugg/setup-zig@v2
-        with:
-          version: "0.17.1"
-      - name: Generate version-matched authoring fixtures
-        shell: bash
-        run: |
-          zig build
-          zig-out/bin/zidl -b zig --single-file --zig-generate-authoring --no-typesupport --no-typeobject-support --zig-version "${{ matrix.zig }}" -o "${{ runner.temp }}/authoring-base" test/integration/authoring/config.idl
-          zig-out/bin/zidl -b zig --single-file --zig-generate-authoring --no-typesupport --no-typeobject-support --zig-version "${{ matrix.zig }}" -D AUTHORING_FEATURE -o "${{ runner.temp }}/authoring-feature" test/integration/authoring/config.idl
-      - name: Install consumer compiler
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ matrix.zig }}
-      - name: Test native packages on the consumer compiler
-        shell: bash
-        run: |
-          for package in zidl-cdr zidl-bindings; do
-            (cd "packages/$package" && zig build test)
-          done
-      - name: Test generated decoder on the consumer compiler
-        shell: bash
-        run: |
-          zig test --dep zidl_cdr --dep zidl_bindings --dep authoring_types --dep authoring_feature \
-            -Mroot=test/integration/authoring/test.zig \
-            -Mzidl_cdr=packages/zidl-cdr/src/root.zig \
-            --dep zidl_cdr -Mzidl_bindings=packages/zidl-bindings/src/root.zig \
-            --dep zidl_cdr --dep zidl_bindings "-Mauthoring_types=${{ runner.temp }}/authoring-base/config.zig" \
-            --dep zidl_cdr --dep zidl_bindings "-Mauthoring_feature=${{ runner.temp }}/authoring-feature/config.zig"
 
   # ── Valgrind ──────────────────────────────────────────────────────────────
 

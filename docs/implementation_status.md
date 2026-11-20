@@ -301,7 +301,7 @@ integration tests run as part of `zig build test`.
 | C backend: `@optional` `_set_` macro shape-aware setter | No `memcpy`-based setter for fixed arrays / bounded strings — future work |
 | C backend: user-supplied allocator | Implemented (`ZidlAllocator` + `zidl_cdr_set_allocator`); process-wide only, no per-type / per-reader / per-call override |
 | C++ backend: container allocators | `--cpp-pmr-containers` (opt-in) emits `std::pmr` containers through the process-wide `zidl::setCppAllocator` resource; without it, default STL allocators. No per-container allocator template-parameter support. |
-| Zig 0.15.1 / MicroZig output | Partially implemented: `--zig-version 0.15.1` is wired and bounded strings/sequences use fixed-capacity `zidl_cdr.BoundedArray`; full freestanding/no-heap runtime path remains planned |
+| MicroZig output | Partially implemented: bounded strings/sequences use fixed-capacity `zidl_cdr.BoundedArray`; full freestanding/no-heap runtime path remains planned |
 | `--generate-interfaces` C++: complex-type adaptation | Primitive and string operation signatures are adapted; richer signatures emit `/* TODO */` stubs |
 | Const type-checking | Not implemented (e.g. `const long x = "hello"` is not caught) |
 | Union discriminant type validation | Not implemented |
