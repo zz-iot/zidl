@@ -69,22 +69,29 @@ pub fn writeRawWithTimestamp(dw: DDS.DataWriter, kind: WriteKind, key_hash: [16]
     _ = timestamp;
 }
 
-pub fn registerInstanceRaw(dw: DDS.DataWriter, key_hash: [16]u8) DDS.InstanceHandle_t {
+pub fn registerInstanceRaw(dw: DDS.DataWriter, key_hash: [16]u8, key_cdr: []const u8) DDS.InstanceHandle_t {
     _ = dw;
     _ = key_hash;
+    _ = key_cdr;
     return 0;
 }
 
-pub fn getKeyValueRawWriter(dw: DDS.DataWriter, handle: DDS.InstanceHandle_t) ?[]const u8 {
+pub const GetKeyValueError = error{ AlreadyDeleted, NotEnabled, BadParameter, OutOfMemory };
+
+pub const KeyValue = struct { payload: []u8, key_only: bool };
+
+pub fn getKeyValueWriter(dw: DDS.DataWriter, handle: DDS.InstanceHandle_t, allocator: std.mem.Allocator) GetKeyValueError!KeyValue {
     _ = dw;
     _ = handle;
-    return null;
+    _ = allocator;
+    return error.BadParameter;
 }
 
-pub fn getKeyValueRawReader(dr: DDS.DataReader, handle: DDS.InstanceHandle_t) ?[]const u8 {
+pub fn getKeyValueReader(dr: DDS.DataReader, handle: DDS.InstanceHandle_t, allocator: std.mem.Allocator) GetKeyValueError!KeyValue {
     _ = dr;
     _ = handle;
-    return null;
+    _ = allocator;
+    return error.BadParameter;
 }
 
 pub fn lookupInstanceWriter(dw: DDS.DataWriter, key_hash: [16]u8) DDS.InstanceHandle_t {

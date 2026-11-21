@@ -374,6 +374,41 @@ instances with a `zidl-hs` Hackage package.
 
 ## Design Tasks — not yet scoped
 
+### Typed DataWriter/DataReader from the DDS implied IDL — investigation
+
+DDS 1.4 defines the typed `FooDataWriter`/`FooDataReader` (and `FooTypeSupport`) as
+"implied IDL": a template, commented out in `dds_dcps.idl`, with `Data` standing for each
+topic type. No backend gets these from its IDL language mapping. `--generate-zzdds-wrappers`
+hand-writes them per backend instead, and they have drifted from the IDL in different ways
+in each:
+
+- C: `unregister` rather than `unregister_instance`; `int` rather than `DDS_ReturnCode_t`
+  returns.
+- C++: `write`, `dispose` and `unregister_instance` drop the handle (with `_w_handle`
+  variants that take it); the `_w_timestamp` variants have no handle at all; `int` returns.
+- Java: `unregister`; `Time_t` split into `int sec, int nanosec`; `take()`/`read()` return
+  a `Sample` or null with no return code, and `take(int maxSampleSize)` ignores its
+  argument.
+- Zig: `write`, `dispose` and `unregister_instance` take the handle and ignore it; the
+  reader's `lookup_instance` returns null rather than `HANDLE_NIL`.
+
+`get_key_value` had drifted furthest: Java returned the key or null, and C and C++ took
+their parameters in the opposite order to the IDL's `(inout Data key_holder, in
+InstanceHandle_t handle)`. Both are fixed.
+
+Investigate generating these from the implied IDL itself: instantiate it per topic type
+(`Data` → `Foo`, `DataSeq` → `FooSeq`), run it through each backend's normal interface
+mapping for the declarations, and write only the bodies (CDR encoding and the raw-op calls
+into the middleware) by hand. The signatures would then follow each language's IDL mapping,
+and drift like the above could not happen. Questions to answer:
+
+- How the hand-written bodies attach to mapping-generated declarations in each backend
+  (C function definitions, C++ and Java classes implementing a generated interface, Zig).
+- How the instantiated IDL handles `DataSeq` and loans, which the raw ops already cover.
+- Whether this is better done as the first implementation-owned plugin (see Plugin
+  architecture below) than inside zidl core.
+- What existing generated callers (zzdds's examples, bindings and tests) have to change.
+
 ### Plugin architecture — feasibility + design
 
 zidl has a growing set of flags that exist only for "what zzdds needs from its impl
@@ -382,7 +417,11 @@ bakes a specific DDS implementation's opinions into zidl core, whose stated audi
 DDS implementation, or none." The direction: pull the implementation-specific policy layer
 (which concrete class backs an abstract interface, wrapper/listener-bridging conventions)
 out of zidl core into implementation-owned plugins (one per binding, in the consumer's
-repo).
+repo). zzdds, and zzdds's own users, should be able to use such domain-specific plugins
+without zidl's other users carrying DDS or zzdds concepts in their generated code or in
+zidl core. This matters more once zidl has another user or use case. The typed
+DataWriter/DataReader generation below is the largest piece of zzdds-specific knowledge in
+zidl today, and a natural first plugin.
 
 **Feasibility is the first question.** Zig's build/link model is compile-time and
 whole-program — there is no runtime plugin loading. Any mechanism here is more likely

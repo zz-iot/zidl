@@ -4,6 +4,8 @@
 #include "dcps.h"
 #include <cstdlib>
 #include <cstddef>
+#include <cstring>
+#include <vector>
 
 typedef int32_t DDS_ReturnCode_t;
 typedef int32_t DDS_InstanceHandle_t;
@@ -12,7 +14,10 @@ typedef void *DDS_DomainParticipant;
 struct DDS_Time_t { int32_t sec; uint32_t nanosec; };
 enum DDS_WriteKind { DDS_WriteKind_ALIVE_WRITE_KIND, DDS_WriteKind_DISPOSE_WRITE_KIND, DDS_WriteKind_UNREGISTER_WRITE_KIND };
 constexpr int DDS_RETCODE_OK = 0;
+constexpr int DDS_RETCODE_ERROR = 1;
 constexpr int DDS_RETCODE_BAD_PARAMETER = 3;
+constexpr int DDS_RETCODE_PRECONDITION_NOT_MET = 4;
+constexpr int DDS_RETCODE_OUT_OF_RESOURCES = 5;
 constexpr int DDS_RETCODE_NO_DATA = 11;
 constexpr DDS_InstanceHandle_t DDS_HANDLE_NIL = 0;
 constexpr uint32_t DDS_ANY_SAMPLE_STATE = 3;
@@ -35,10 +40,47 @@ UNUSED_SUPPORT(DDS_DataWriter_write_raw)
 UNUSED_SUPPORT(DDS_DataWriter_loan_raw)
 UNUSED_SUPPORT(DDS_DataWriter_return_loan_raw)
 UNUSED_SUPPORT(DDS_DataWriter_publish_loan_raw)
-UNUSED_SUPPORT(zzdds_register_type_support)
-UNUSED_SUPPORT(zzdds_register_instance_raw)
-UNUSED_SUPPORT(zzdds_get_key_value_writer)
-UNUSED_SUPPORT(zzdds_get_key_value_reader)
 UNUSED_SUPPORT(zzdds_lookup_instance_writer)
 UNUSED_SUPPORT(zzdds_lookup_instance_reader)
 #undef UNUSED_SUPPORT
+
+// get_key_value support: the key "zzdds" keeps is the one register_instance
+// passed, or one the test sets; the registered key projection is kept for
+// the test to call.
+struct StubKey {
+    std::vector<uint8_t> bytes;
+    int key_only = 1;
+};
+inline StubKey &stub_key() {
+    static StubKey key;
+    return key;
+}
+using stub_project_fn = DDS_ReturnCode_t (*)(void *, const uint8_t *, size_t, uint8_t *, size_t, size_t *);
+inline stub_project_fn &stub_projection() {
+    static stub_project_fn fn = nullptr;
+    return fn;
+}
+template <class... Args> inline int zzdds_register_type_support(Args...) { return 0; }
+template <class P> inline DDS_ReturnCode_t zzdds_set_key_projection(P, const char *, stub_project_fn fn, void *, void (*)(void *)) {
+    stub_projection() = fn;
+    return DDS_RETCODE_OK;
+}
+inline DDS_InstanceHandle_t zzdds_register_instance_raw(DDS_DataWriter, const uint8_t *, const uint8_t *cdr, size_t len) {
+    stub_key().bytes.assign(cdr, cdr + len);
+    stub_key().key_only = 1;
+    return 1;
+}
+inline DDS_ReturnCode_t stub_get_key_value(uint8_t *buf, size_t size, size_t *len, int *key_only) {
+    StubKey &key = stub_key();
+    *len = key.bytes.size();
+    if (key_only) *key_only = key.key_only;
+    if (key.bytes.size() > size) return DDS_RETCODE_PRECONDITION_NOT_MET;
+    if (!key.bytes.empty()) std::memcpy(buf, key.bytes.data(), key.bytes.size());
+    return DDS_RETCODE_OK;
+}
+template <class E> inline DDS_ReturnCode_t zzdds_get_key_value_writer(E, DDS_InstanceHandle_t, uint8_t *buf, size_t size, size_t *len, int *key_only) {
+    return stub_get_key_value(buf, size, len, key_only);
+}
+template <class E> inline DDS_ReturnCode_t zzdds_get_key_value_reader(E, DDS_InstanceHandle_t, uint8_t *buf, size_t size, size_t *len, int *key_only) {
+    return stub_get_key_value(buf, size, len, key_only);
+}

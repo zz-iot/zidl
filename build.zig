@@ -387,6 +387,11 @@ pub fn build(b: *std.Build) void {
         gen_topic.addArgs(&.{ "-b", "cpp", "--generate-zzdds-wrappers", "-o" });
         const topic_dir = gen_topic.addOutputDirectoryArg("cpp-conditions-topic");
         gen_topic.addFileArg(b.path("test/integration/cpp_conditions/topic.idl"));
+        // get_key_value with std::pmr containers (see keyed.idl).
+        const gen_keyed = b.addRunArtifact(exe);
+        gen_keyed.addArgs(&.{ "-b", "cpp", "--generate-zzdds-wrappers", "--cpp-pmr-containers", "-o" });
+        const keyed_dir = gen_keyed.addOutputDirectoryArg("cpp-conditions-keyed");
+        gen_keyed.addFileArg(b.path("test/integration/cpp_conditions/keyed.idl"));
         // Built twice: as usual, and without RTTI or exceptions, which the
         // generated C++ must also compile and work under.
         const variants = [_]struct { name: []const u8, flags: []const []const u8 }{
@@ -414,8 +419,13 @@ pub fn build(b: *std.Build) void {
                 .file = topic_dir.path(b, "topic_cdr.cpp"),
                 .flags = variant.flags,
             });
+            conditions_mod.addCSourceFile(.{
+                .file = keyed_dir.path(b, "keyed_cdr.cpp"),
+                .flags = variant.flags,
+            });
             linkCdr(conditions_mod, cdr_library);
             conditions_mod.addIncludePath(topic_dir);
+            conditions_mod.addIncludePath(keyed_dir);
             conditions_mod.addIncludePath(cpp_dir);
             conditions_mod.addIncludePath(c_dir);
             conditions_mod.addIncludePath(b.path("test/integration/cpp_conditions"));

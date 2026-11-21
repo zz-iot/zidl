@@ -1,0 +1,4 @@
+// get_key_value with std::pmr containers: generated with --cpp-pmr-containers,
+// so the key holder's strings can use a memory resource of their own, which
+// filling its key must keep. A raw array key covers the element-wise path.
+@appendable struct KeyedNote { @key string name; @key long code[2]; string note; };
