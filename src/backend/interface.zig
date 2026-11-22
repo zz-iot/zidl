@@ -131,6 +131,14 @@ pub const Options = struct {
     /// own package, which isn't recorded anywhere the importing invocation
     /// can see.
     java_import_packages: []const []const u8 = &.{},
+    /// Zig backend only, with `generate_interfaces`: the module whose
+    /// `zidl_provider` declaration implements the `@static` operations and
+    /// `@constructor`s of the generated interfaces (see
+    /// docs/design/c-abi-provider.md). With it, each such interface gets
+    /// Zig functions calling `@import(<name>).zidl_provider`'s
+    /// `statics(I)` and `constructors(I)`, and checks their signatures at
+    /// compile time. Empty: no Zig statics or constructors.
+    zig_provider_module: []const u8 = "",
     /// Zig backend only: alongside the vtable struct output, emit
     /// `pub export fn callconv(.c)` wrappers implementing the free C functions
     /// declared by the C backend's `--generate-interfaces` output.

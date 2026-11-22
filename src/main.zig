@@ -43,6 +43,7 @@
 //!   --java-import-package <Mod>=<pkg>  Java package of an imported module's own output, if not this file's own --java-package (Java backend, repeatable)
 //!
 //!   --zig-generate-c-api           Emit pub export fn callconv(.c) wrappers for C free-function API (Zig backend)
+//!   --zig-provider-module <name>   Module whose zidl_provider implements @static and @constructor operations in Zig (Zig backend)
 //!   --zig-idiomatic-enums          Generate lowercase snake_case enum tags (e.g. .durability_volatile) (Zig backend)
 //!   --zig-generate-toml-config     Emit applyToml(alloc, table: anytype) !void per struct (Zig backend)
 //!   --zig-generate-authoring       Emit strict presence-aware decoding (Zig backend)
@@ -94,6 +95,7 @@ const Opts = struct {
     java_import_packages: std.ArrayListUnmanaged([]const u8) = .empty,
     zig_generate_c_api: bool = false,
     zig_generate_c_api_cdr_allocator: bool = false,
+    zig_provider_module: []const u8 = "",
     zig_idiomatic_enums: bool = false,
     zig_generate_toml_config: bool = false,
     zig_generate_authoring: bool = false,
@@ -308,6 +310,14 @@ pub fn main(init: std.process.Init) !void {
             opts.pl_cdr = true;
         } else if (std.mem.eql(u8, arg, "--zig-generate-c-api")) {
             opts.zig_generate_c_api = true;
+        } else if (std.mem.eql(u8, arg, "--zig-provider-module")) {
+            i += 1;
+            if (i >= args.len) {
+                try stderr.print("error: --zig-provider-module requires an argument\n", .{});
+                try stderr.flush();
+                std.process.exit(1);
+            }
+            opts.zig_provider_module = args[i];
         } else if (std.mem.eql(u8, arg, "--zig-generate-c-api-cdr-allocator")) {
             // Opt-in: see interface.Options.zig_generate_c_api_cdr_allocator's
             // doc comment. Requires --zig-generate-c-api; ignored (harmless,
@@ -721,6 +731,7 @@ fn processFile(
         .pl_cdr = opts.pl_cdr,
         .zig_generate_c_api = opts.zig_generate_c_api,
         .zig_generate_c_api_cdr_allocator = opts.zig_generate_c_api_cdr_allocator,
+        .zig_provider_module = opts.zig_provider_module,
         .zig_idiomatic_enums = opts.zig_idiomatic_enums,
         .zig_generate_toml_config = opts.zig_generate_toml_config,
         .zig_generate_authoring = opts.zig_generate_authoring,
@@ -855,6 +866,9 @@ fn printUsage(w: *Io.Writer) !void {
         \\  --java-import-package <Mod>=<pkg>  Java package of an imported module's own output, if not this file's own --java-package (Java backend, repeatable)
         \\
         \\  --zig-generate-c-api           Emit pub export fn callconv(.c) wrappers for C free-function API (Zig backend)
+        \\  --zig-provider-module <name>   Module whose zidl_provider implements the @static operations and
+        \\                                 @constructors of generated interfaces, giving them Zig functions
+        \\                                 (Zig backend, with --generate-interfaces)
         \\  --zig-generate-toml-config     Emit applyToml(alloc, table: anytype) !void per struct (Zig backend)
         \\  --zig-generate-authoring       Emit strict presence-aware decodeToml using zidl_bindings.authoring
         \\  --zig-pl-cdr                   Generate PL_CDR functions for @mutable types (Zig backend)

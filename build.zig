@@ -443,7 +443,7 @@ pub fn build(b: *std.Build) void {
     {
         const dir = "test/integration/standalone/";
         const gen_zig = b.addRunArtifact(exe);
-        gen_zig.addArgs(&.{ "-b", "zig", "--generate-interfaces", "--zig-generate-c-api", "--no-typesupport", "--no-typeobject-support", "-o" });
+        gen_zig.addArgs(&.{ "-b", "zig", "--generate-interfaces", "--zig-generate-c-api", "--zig-provider-module", "provider", "--no-typesupport", "--no-typeobject-support", "-o" });
         const zig_dir = gen_zig.addOutputDirectoryArg("standalone-zig");
         gen_zig.addFileArg(b.path(dir ++ "standalone.idl"));
         const standalone_mod = b.createModule(.{
@@ -460,6 +460,8 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{ .{ .name = "standalone", .module = standalone_mod }, .{ .name = "zidl_bindings", .module = runtimes.bindings } },
         });
+        // The generated Zig statics and constructors call the provider.
+        standalone_mod.addImport("provider", provider_mod);
         const zig_test = b.addTest(.{ .name = "zidl-standalone-zig", .root_module = b.createModule(.{
             .root_source_file = b.path(dir ++ "zig_test.zig"),
             .target = target,

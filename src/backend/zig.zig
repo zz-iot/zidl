@@ -187,7 +187,7 @@ pub fn generateSplitFiles(
             .{opts.input_stem},
         );
         try gen.write("const std = @import(\"std\");\n");
-        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_authoring or opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(m.items) or gen.itemsNeedLifecycleRuntime(m.items)) {
+        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_authoring or opts.zig_generate_c_api or opts.zig_provider_module.len > 0 or itemsHaveCallbackInterfaceOperations(m.items) or gen.itemsNeedLifecycleRuntime(m.items)) {
             try gen.write("const zidl_cdr = @import(\"zidl_cdr\");\nconst zidl_bindings = @import(\"zidl_bindings\");\n");
         }
         if (opts.generate_zzdds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(m.items)) {
@@ -243,7 +243,7 @@ pub fn generateSplitFiles(
     if (non_module.items.len > 0) {
         if (module_names.items.len > 0) try gen.write("\n");
         try gen.write("const std = @import(\"std\");\n");
-        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_authoring or opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(non_module.items) or gen.itemsNeedLifecycleRuntime(non_module.items)) {
+        if (!opts.no_typesupport or opts.pl_cdr or opts.zig_generate_authoring or opts.zig_generate_c_api or opts.zig_provider_module.len > 0 or itemsHaveCallbackInterfaceOperations(non_module.items) or gen.itemsNeedLifecycleRuntime(non_module.items)) {
             try gen.write("const zidl_cdr = @import(\"zidl_cdr\");\nconst zidl_bindings = @import(\"zidl_bindings\");\n");
         }
         if (opts.generate_zzdds_wrappers and !opts.no_typesupport and itemsHaveTopicTypes(non_module.items)) {
@@ -353,7 +353,7 @@ const Generator = struct {
             .{self.opts.input_stem},
         );
         try self.write("const std = @import(\"std\");\n");
-        if (!self.opts.no_typesupport or self.opts.pl_cdr or self.opts.zig_generate_authoring or self.opts.zig_generate_c_api or itemsHaveCallbackInterfaceOperations(spec.items) or self.itemsNeedLifecycleRuntime(spec.items)) {
+        if (!self.opts.no_typesupport or self.opts.pl_cdr or self.opts.zig_generate_authoring or self.opts.zig_generate_c_api or self.opts.zig_provider_module.len > 0 or itemsHaveCallbackInterfaceOperations(spec.items) or self.itemsNeedLifecycleRuntime(spec.items)) {
             try self.write("const zidl_cdr = @import(\"zidl_cdr\");\nconst zidl_bindings = @import(\"zidl_bindings\");\n");
         }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveTopicTypes(spec.items)) {
@@ -2096,6 +2096,8 @@ const Generator = struct {
             try self.write("    }\n");
         }
 
+        if (self.opts.zig_provider_module.len > 0) try self.emitZigProviderFns(iface, pfx);
+
         // Nested type decls and consts inside the interface body.
         if (iface.type_decls.len > 0 or iface.consts.len > 0) {
             try self.write("\n");
@@ -2111,6 +2113,153 @@ const Generator = struct {
         if (self.opts.zig_generate_c_api) {
             try self.emitCApiExports(iface, pfx, ops.items, attrs.items);
         }
+    }
+
+    /// With --zig-provider-module: an interface's `@static` operations and
+    /// `@constructor`s as Zig functions of its struct, calling the provider
+    /// module's `zidl_provider` (see docs/design/c-abi-provider.md). Their
+    /// parameters take the idiomatic forms its methods do; a constructor
+    /// takes the allocator first. A `comptime` block checks each provider
+    /// function's signature when the interface type is first used, so a
+    /// missing or mistyped one is a compile error even if nothing calls it.
+    fn emitZigProviderFns(self: *Generator, iface: *const ir.Interface, pfx: []const u8) anyerror!void {
+        if (iface.statics.len == 0 and iface.constructors.len == 0) return;
+        for (iface.constructors) |*op| {
+            for (op.params) |p| {
+                if (typeRefIsEntitySequence(p.type_ref)) return error.UnsupportedConstructorParam;
+            }
+        }
+        // The builder keeps these names apart from the IDL's own members;
+        // the struct also declares members zidl adds.
+        for (iface.statics) |*op| {
+            if (zigInterfaceDeclaresName(iface, op.name)) return error.ZigProviderFunctionNameClash;
+        }
+        for (iface.constructors) |*op| {
+            if (zigInterfaceDeclaresName(iface, op.name)) return error.ZigProviderFunctionNameClash;
+        }
+        try self.write("\n");
+        try self.ind();
+        try self.print("    const _zidl_provider = @import(\"{s}\").zidl_provider;\n\n", .{self.opts.zig_provider_module});
+        try self.ind();
+        try self.write("    comptime {\n");
+        for (iface.statics) |*op| {
+            try self.ind();
+            try self.print("        zidl_bindings.checkProviderStatic(_zidl_provider, {s}{s}, \"{s}\", ", .{ pfx, iface.name, op.name });
+            try self.emitProviderParamTypes(op);
+            const ret = try self.cApiOptRetType(op.return_type);
+            defer self.alloc.free(ret);
+            try self.print(", {s});\n", .{ret});
+        }
+        for (iface.constructors) |*op| {
+            try self.ind();
+            try self.print("        zidl_bindings.checkProviderConstructor(_zidl_provider, {s}{s}, \"{s}\", ", .{ pfx, iface.name, op.name });
+            try self.emitProviderParamTypes(op);
+            try self.write(");\n");
+        }
+        try self.ind();
+        try self.write("    }\n");
+        for (iface.statics) |*op| try self.emitZigProviderFn(iface, pfx, op, .static);
+        for (iface.constructors) |*op| try self.emitZigProviderFn(iface, pfx, op, .ctor);
+    }
+
+    /// Whether the generated struct of `iface` declares `name` itself,
+    /// beside its IDL operations and attributes: its fields, `Vtable`,
+    /// `CAbiViews`, `deinit`, `as_{Base}` upcasts, nested types and
+    /// constants, and the provider alias.
+    fn zigInterfaceDeclaresName(iface: *const ir.Interface, name: []const u8) bool {
+        for ([_][]const u8{ "ptr", "vtable", "Vtable", "CAbiViews", "deinit", "_zidl_provider" }) |own| {
+            if (std.mem.eql(u8, name, own)) return true;
+        }
+        if (std.mem.startsWith(u8, name, "as_")) {
+            for (iface.bases) |base| {
+                if (base == .interface and std.mem.eql(u8, name["as_".len..], base.interface.name)) return true;
+            }
+        }
+        for (iface.type_decls) |td| {
+            if (std.mem.eql(u8, name, ir.typeDeclName(td))) return true;
+        }
+        for (iface.consts) |*c| {
+            if (std.mem.eql(u8, name, c.name)) return true;
+        }
+        return false;
+    }
+
+    /// A constructor's allocator parameter: `allocator`, or with trailing
+    /// underscores until no IDL parameter has its name.
+    fn ctorAllocatorName(self: *Generator, op: *const ir.Operation) ![]u8 {
+        var name = try self.alloc.dupe(u8, "allocator");
+        while (true) {
+            const taken = for (op.params) |p| {
+                if (std.mem.eql(u8, p.name, name)) break true;
+            } else false;
+            if (!taken) return name;
+            const longer = try std.fmt.allocPrint(self.alloc, "{s}_", .{name});
+            self.alloc.free(name);
+            name = longer;
+        }
+    }
+
+    /// `&.{ T1, T2 }`: the types a provider function takes for `op`'s
+    /// parameters, the forms its vtable slot would take them in.
+    fn emitProviderParamTypes(self: *Generator, op: *const ir.Operation) anyerror!void {
+        // Spaced as `zig fmt` spaces them: none inside one element's braces.
+        const pad: []const u8 = if (op.params.len > 1) " " else "";
+        try self.print("&.{{{s}", .{pad});
+        for (op.params, 0..) |p, i| {
+            const pt = try self.cApiTypeRef(p.type_ref, p.mode);
+            defer self.alloc.free(pt);
+            try self.print("{s}{s}", .{ if (i == 0) "" else ", ", pt });
+        }
+        try self.print("{s}}}", .{pad});
+    }
+
+    /// One `@static` or `@constructor` as a Zig function (see
+    /// `emitZigProviderFns`).
+    fn emitZigProviderFn(self: *Generator, iface: *const ir.Interface, pfx: []const u8, op: *const ir.Operation, mode: enum { static, ctor }) anyerror!void {
+        const ret = if (mode == .ctor)
+            try std.fmt.allocPrint(self.alloc, "!{s}{s}", .{ pfx, iface.name })
+        else
+            try self.idiomOptRetType(op.return_type);
+        defer self.alloc.free(ret);
+        const allocator = try self.ctorAllocatorName(op);
+        defer self.alloc.free(allocator);
+        try self.write("\n");
+        try self.ind();
+        switch (mode) {
+            .static => try self.print("    /// `@static`: the provider's `statics({s}{s}).{s}`.\n", .{ pfx, iface.name, op.name }),
+            .ctor => try self.print("    /// `@constructor`: the provider's `constructors({s}{s}).{s}`, allocating through `{s}`.\n", .{ pfx, iface.name, op.name, allocator }),
+        }
+        try self.ind();
+        try self.print("    pub fn {s}(", .{op.name});
+        if (mode == .ctor) try self.print("{s}: std.mem.Allocator", .{allocator});
+        for (op.params, 0..) |p, i| {
+            const pt = try self.idiomParamType(p);
+            defer self.alloc.free(pt);
+            try self.print("{s}{s}: {s}", .{ if (i == 0 and mode == .static) "" else ", ", p.name, pt });
+        }
+        try self.print(") {s} {{\n", .{ret});
+        for (op.params) |p| {
+            if (idiomNeedsLocal(p)) {
+                try self.ind();
+                try self.print("        var _lv_{s} = {s};\n", .{ p.name, p.name });
+            }
+        }
+        try self.ind();
+        try self.print("        return _zidl_provider.{s}({s}{s}).{s}(", .{ if (mode == .ctor) "constructors" else "statics", pfx, iface.name, op.name });
+        if (mode == .ctor) try self.write(allocator);
+        for (op.params, 0..) |p, i| {
+            const lv: ?[]const u8 = if (idiomNeedsLocal(p))
+                try std.fmt.allocPrint(self.alloc, "_lv_{s}", .{p.name})
+            else
+                null;
+            defer if (lv) |s| self.alloc.free(s);
+            const arg = try self.idiomCallArg(p, lv);
+            defer self.alloc.free(arg);
+            try self.print("{s}{s}", .{ if (i == 0 and mode == .static) "" else ", ", arg });
+        }
+        try self.write(");\n");
+        try self.ind();
+        try self.write("    }\n");
     }
 
     /// A `@constructor`'s two exports, inside an interface's
@@ -8643,6 +8792,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
     generate_zzdds_wrappers: bool = false,
     zig_generate_c_api: bool = false,
     zig_generate_c_api_cdr_allocator: bool = false,
+    zig_provider_module: []const u8 = "",
     zig_idiomatic_enums: bool = false,
     zig_generate_toml_config: bool = false,
     zig_generate_authoring: bool = false,
@@ -8677,6 +8827,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
         .generate_zzdds_wrappers = extra_opts.generate_zzdds_wrappers,
         .zig_generate_c_api = extra_opts.zig_generate_c_api,
         .zig_generate_c_api_cdr_allocator = extra_opts.zig_generate_c_api_cdr_allocator,
+        .zig_provider_module = extra_opts.zig_provider_module,
         .zig_idiomatic_enums = extra_opts.zig_idiomatic_enums,
         .zig_generate_toml_config = extra_opts.zig_generate_toml_config,
         .zig_generate_authoring = extra_opts.zig_generate_authoring,
@@ -12378,4 +12529,100 @@ test "zig: @static operations are exported by the module's exportCAbi, with no r
     // A static takes no vtable slot.
     try testing.expect(!has(s, "get_instance: *const fn"));
     try testing.expect(has(s, "poke: *const fn"));
+}
+
+test "zig: --zig-provider-module gives @static operations Zig functions calling the provider" {
+    var out = try testGenOpts(
+        \\module M {
+        \\    struct Cfg { long n; };
+        \\    interface Thing {
+        \\        @static Thing get_instance();
+        \\        @static long count_with(in Thing t, in Cfg c, in string label, in long n);
+        \\        @static void reset();
+        \\        long poke();
+        \\    };
+        \\};
+    , "t", .{ .generate_interfaces = true, .no_typesupport = true, .zig_provider_module = "prov" });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "const zidl_bindings = @import(\"zidl_bindings\");"));
+    try testing.expect(has(s, "const _zidl_provider = @import(\"prov\").zidl_provider;"));
+    // Each provider function's signature is checked, in its vtable-slot forms.
+    try testing.expect(has(s, "zidl_bindings.checkProviderStatic(_zidl_provider, Thing, \"get_instance\", &.{}, M.Thing);"));
+    try testing.expect(has(s, "zidl_bindings.checkProviderStatic(_zidl_provider, Thing, \"count_with\", &.{ M.Thing, *const M.Cfg, [*:0]const u8, i32 }, i32);"));
+    try testing.expect(has(s, "zidl_bindings.checkProviderStatic(_zidl_provider, Thing, \"reset\", &.{}, void);"));
+    // The Zig functions take the idiomatic forms the methods do.
+    try testing.expect(has(s, "pub fn get_instance() M.Thing {\n            return _zidl_provider.statics(Thing).get_instance();"));
+    try testing.expect(has(s, "pub fn count_with(t: M.Thing, c: M.Cfg, label: [:0]const u8, n: i32) i32 {\n            return _zidl_provider.statics(Thing).count_with(t, &c, label.ptr, n);"));
+    try testing.expect(has(s, "pub fn reset() void {"));
+    // Without the C API, nothing is exported.
+    try testing.expect(!has(s, "exportCAbi"));
+}
+
+test "zig: --zig-provider-module gives @constructors Zig functions taking an allocator" {
+    var out = try testGenOpts(
+        \\module M {
+        \\    const long OK = 0;
+        \\    @success_result(OK) typedef long Code;
+        \\    struct Cfg { long n; };
+        \\    @standalone interface Thing {
+        \\        @constructor Thing create();
+        \\        @constructor Thing create_with(in Cfg c);
+        \\        @destructor Code destroy();
+        \\    };
+        \\};
+    , "t", .{ .generate_interfaces = true, .zig_generate_c_api = true, .zig_provider_module = "prov" });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "zidl_bindings.checkProviderConstructor(_zidl_provider, Thing, \"create\", &.{});"));
+    try testing.expect(has(s, "zidl_bindings.checkProviderConstructor(_zidl_provider, Thing, \"create_with\", &.{*const M.Cfg});"));
+    try testing.expect(has(s, "pub fn create(allocator: std.mem.Allocator) !Thing {\n            return _zidl_provider.constructors(Thing).create(allocator);"));
+    try testing.expect(has(s, "pub fn create_with(allocator: std.mem.Allocator, c: M.Cfg) !Thing {\n            return _zidl_provider.constructors(Thing).create_with(allocator, &c);"));
+    // The C exports still take the provider exportCAbi is given.
+    try testing.expect(has(s, "_Provider.constructors(Thing).create(_alloc)"));
+}
+
+test "zig: without --zig-provider-module, statics and constructors have no Zig functions" {
+    var out = try testGenOpts(
+        \\module M {
+        \\    @standalone interface Thing {
+        \\        @constructor Thing create();
+        \\        @destructor void destroy();
+        \\        @static Thing get_instance();
+        \\    };
+        \\};
+    , "t", .{ .generate_interfaces = true, .zig_generate_c_api = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(!has(s, "_zidl_provider"));
+    try testing.expect(!has(s, "pub fn create("));
+    try testing.expect(!has(s, "pub fn get_instance("));
+}
+
+test "zig: --zig-provider-module names the allocator so no constructor parameter shadows it" {
+    var out = try testGenOpts(
+        \\module M {
+        \\    @standalone interface Thing {
+        \\        @constructor Thing create(in long allocator, in long allocator_);
+        \\        @destructor void destroy();
+        \\    };
+        \\};
+    , "t", .{ .generate_interfaces = true, .zig_provider_module = "prov" });
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "pub fn create(allocator__: std.mem.Allocator, allocator: i32, allocator_: i32) !Thing {\n            return _zidl_provider.constructors(Thing).create(allocator__, allocator, allocator_);"));
+}
+
+test "zig: --zig-provider-module rejects a static or constructor named like a member zidl adds" {
+    for ([_][]const u8{
+        "module M { interface Thing { @static void deinit(); }; };",
+        "module M { interface Thing { @static void Vtable(); }; };",
+        "module M { interface Base { long id(); }; interface Thing : Base { @static void as_Base(); }; };",
+        "module M { interface Thing { const long LIMIT = 1; @static void LIMIT(); }; };",
+        "module M { @standalone interface Thing { @constructor Thing deinit(); @destructor void destroy(); }; };",
+    }) |source| {
+        try testing.expectError(error.ZigProviderFunctionNameClash, testGenOpts(source, "t", .{ .generate_interfaces = true, .zig_provider_module = "prov" }));
+    }
+    // Without the flag, nothing is generated for them, so nothing clashes.
+    var out = try testGenOpts("module M { interface Thing { @static void deinit(); }; };", "t", .{ .generate_interfaces = true });
+    out.deinit(testing.allocator);
 }

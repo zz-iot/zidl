@@ -1,7 +1,7 @@
 # Static operations
 
-Status: implemented for the C, Zig (`--zig-generate-c-api`), C++ (`--cpp-generate-impl`)
-and Java backends. Related: [`standalone-construction.md`](standalone-construction.md)
+Status: implemented for the C, Zig (`--zig-generate-c-api` exports, and Zig functions with
+`--zig-provider-module`), C++ (`--cpp-generate-impl`) and Java backends. Related: [`standalone-construction.md`](standalone-construction.md)
 (operations with no receiver that create an owned object),
 [`c-abi-provider.md`](c-abi-provider.md) (what the provider supplies),
 [`handle-lifetime.md`](handle-lifetime.md) (retiring a freed handle's wrappers).
@@ -67,6 +67,12 @@ const Provider = struct {
 };
 ```
 
+**Zig.** With `--zig-provider-module`, a function of the interface's struct calling the
+provider's static, its signature checked at compile time (see
+[`c-abi-provider.md`](c-abi-provider.md#zig-statics-and-constructors)):
+`DDS.DomainParticipantFactory.get_instance()`. Without it, Zig code calls the provider
+directly.
+
 **C++.** Static members of the abstract class, defined by `--cpp-generate-impl`. An
 interface result is boxed through `_getOrCreate` (or the `--cpp-impl-override` class's)
 and not adopted. C++ finds a base's static members through a derived class too.
@@ -78,7 +84,9 @@ has none of its base's.
 ## Tests
 
 `test/integration/standalone/`'s `Registry` is a singleton behind `get_instance`,
-`delete_instance` and `is_trigger_set`. Its Zig, C++ and Java tests check that every
+`delete_instance` and `is_trigger_set`. Its Zig tests call them through both the C
+functions and the generated Zig functions, and check both reach the same singleton. Its
+Zig, C++ and Java tests check that every
 `get_instance` returns the same wrapper, that dropping it releases nothing, that
 `delete_instance` refuses while the instance is pinned and frees it otherwise, that the
 next `get_instance` creates a new one, and that interface arguments, NULL included, reach
