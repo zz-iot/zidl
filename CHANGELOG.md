@@ -18,6 +18,14 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Zig: `--zig-provider-module <name>` gives each interface's `@static` operations and
+  `@constructor`s Zig functions on its struct, such as
+  `DDS.DomainParticipantFactory.get_instance()` and `try DDS.WaitSet.create(allocator)`,
+  calling `@import(name).zidl_provider`, the provider `exportCAbi` takes. Before, only the
+  C exports reached them. Each provider function's signature is checked at compile time
+  when the interface is first used (`zidl_bindings.checkProviderStatic`,
+  `checkProviderConstructor`), so a missing or mistyped one is a compile error naming it.
+  Opt-in; output without the flag is unchanged.
 - `--generate-zzdds-wrappers`: `get_key_value` passes on zzdds's DDS return codes
   (BAD_PARAMETER for a handle with no alive write or sample, NOT_ENABLED, ALREADY_DELETED;
   DDS 1.4 §2.2.2.4.2.9, §2.2.2.5.3.29). C and C++ return `DDS_ReturnCode_t`, take

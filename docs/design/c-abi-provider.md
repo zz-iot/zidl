@@ -71,6 +71,45 @@ comptime {
 }
 ```
 
+## Zig statics and constructors
+
+The C functions are not the only callers. Zig code using the generated interfaces needs
+`@static` operations and `@constructor`s too, and has no `exportCAbi` call to receive the
+provider from. With `--zig-provider-module <name>`, the generated module imports module
+`<name>` and calls its `pub const zidl_provider`, the same type the provider passes to
+`exportCAbi`:
+
+```zig
+// The provider module's root:
+pub const zidl_provider = Provider;
+```
+
+```zig
+// Generated, inside `pub const Registry = extern struct { ... }`:
+const _zidl_provider = @import("provider").zidl_provider;
+
+comptime {
+    zidl_bindings.checkProviderStatic(_zidl_provider, Registry, "is_trigger_set", &.{S.Condition}, bool);
+}
+
+pub fn is_trigger_set(cond: S.Condition) bool {
+    return _zidl_provider.statics(Registry).is_trigger_set(cond);
+}
+```
+
+Parameters take the idiomatic forms the interface's methods take, a struct by value and a
+string as a slice, and are passed on in the vtable-slot forms the provider declares. A
+constructor takes a `std.mem.Allocator` first and returns the provider's error union. The
+`comptime` block runs when the interface type is first used and checks that every static
+and constructor exists with exactly the expected signature, so a provider gets the same
+compile-time check of these functions that a vtable literal gets of its slots, whether or
+not anything calls them. Without the flag, none of this is generated.
+
+The generated module and the provider import each other, which Zig allows. A file can
+belong to only one module, though, so a build with several modules rooted at the
+provider's file (a library and a test, say) needs a generated module for each, each
+importing its own provider.
+
 ## Why a call from the provider
 
 The C functions are generated Zig compiled into the provider, but the generated module

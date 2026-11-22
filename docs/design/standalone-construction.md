@@ -1,7 +1,7 @@
 # Standalone construction
 
-Status: implemented for the C, Zig (`--zig-generate-c-api`), C++ (`--cpp-generate-impl`)
-and Java backends. Supersedes the roadmap's `@factory_less_bootstrap(ctor=…)` decision.
+Status: implemented for the C, Zig (`--zig-generate-c-api` exports, and Zig functions with
+`--zig-provider-module`), C++ (`--cpp-generate-impl`) and Java backends. Supersedes the roadmap's `@factory_less_bootstrap(ctor=…)` decision.
 Related: [`handle-lifetime.md`](handle-lifetime.md) (retiring a freed handle's wrappers),
 [`binding-c-abi-identity.md`](binding-c-abi-identity.md) (one handle per object).
 
@@ -100,6 +100,12 @@ becomes NULL. The provider's own types never appear in generated code, and the c
 checks each constructor's signature where it is used. The destructor and finalizer are
 ordinary vtable slots.
 
+With `--zig-provider-module`, Zig code gets each constructor as a function of the
+interface's struct, taking the allocator first and the parameters in the idiomatic forms
+the methods take: `try S.Engine.create_with(allocator, cfg, 2)`. It calls the same
+provider function, and the provider's signature is checked at compile time (see
+[`c-abi-provider.md`](c-abi-provider.md#zig-statics-and-constructors)).
+
 ### C++ (`--cpp-generate-impl`)
 
 The abstract class declares static factories, one with and one without an allocator:
@@ -161,7 +167,7 @@ and the JNI bridge drops the handle from the identity cache.
 `test/integration/standalone/` has a Zig provider built on `exportCAbi`,
 driven three ways:
 
-- **Zig** through the C signatures (`zig_test.zig`).
+- **Zig** through the C signatures and the generated Zig constructors (`zig_test.zig`).
 - **C++** through the generated binding (`test.cpp`), built with and without the retire
   hook.
 - **Java** through the generated binding (`StandaloneTest.java`), with and without the

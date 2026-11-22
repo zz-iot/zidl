@@ -423,6 +423,21 @@ pub const MyInterface = extern struct {
 Multiple inheritance is handled by flattening — all base interface operations
 and attributes are collected (base first) and included in the derived vtable.
 
+`@static` operations and `@constructor`s have no receiver, so no vtable slot. With
+`--zig-provider-module <name>`, each becomes a function of the interface's struct that
+calls the provider module's `zidl_provider`, the same provider the C exports use (see
+[`design/c-abi-provider.md`](design/c-abi-provider.md)). A constructor takes the allocator
+first:
+
+```zig
+const f = DDS.DomainParticipantFactory.get_instance();
+const ws = try DDS.WaitSet.create(allocator);
+```
+
+The interface's `comptime` block checks each provider function's signature when the
+interface is first used, so a missing or mistyped one is a compile error naming it, even
+if nothing calls it.
+
 ### Callback interface (`@callback`)
 
 An interface annotated with `@callback` is user-implemented (the middleware calls

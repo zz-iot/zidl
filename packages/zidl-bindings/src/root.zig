@@ -4,6 +4,7 @@ pub const allocator = @import("allocator.zig");
 pub const entity_box = @import("entity_box.zig");
 pub const owned = @import("owned.zig");
 pub const authoring = @import("authoring.zig");
+pub const provider = @import("provider.zig");
 pub const EntityBox = entity_box.EntityBox;
 pub const boxEntity = entity_box.boxEntity;
 pub const unboxEntity = entity_box.unboxEntity;
@@ -23,6 +24,8 @@ pub const toAllocator = allocator.toAllocator;
 pub const SeqElem = owned.SeqElem;
 pub const deinitOwned = owned.deinitOwned;
 pub const cloneOwned = owned.cloneOwned;
+pub const checkProviderStatic = provider.checkStatic;
+pub const checkProviderConstructor = provider.checkConstructor;
 
 test {
     std.testing.refAllDecls(@This());

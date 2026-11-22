@@ -1,5 +1,6 @@
 //! Drives the C functions exportCAbi exports for
-//! standalone.idl, through their C signatures.
+//! standalone.idl, through their C signatures, and the Zig statics and
+//! constructors generated with `--zig-provider-module`.
 
 const std = @import("std");
 const zb = @import("zidl_bindings");
@@ -194,4 +195,53 @@ test "a static's arguments cross the C ABI, NULL as the provider's nil" {
     try testing.expectEqual(S.RETCODE_OK, S_Guard_set_trigger_value(g, true));
     try testing.expect(S_Registry_is_trigger_set(S_Guard_as_S_Condition(g)));
     try testing.expectEqual(S.RETCODE_OK, S_Guard_destroy(g));
+}
+
+// ── The Zig statics and constructors ───────────────────────────────────────
+
+test "a Zig constructor calls the provider's, allocating through the given allocator" {
+    provider.test_stats_reset();
+    const e = try S.Engine.create(testing.allocator);
+    try testing.expectEqual(@as(i32, 1), e.get_workers());
+    try testing.expectEqual(S.RETCODE_OK, e.destroy());
+
+    const pinned = try S.Engine.create_with(testing.allocator, .{ .workers = 3, .name = "pool" }, 1);
+    try testing.expectEqual(@as(i32, 3), pinned.get_workers());
+    try testing.expectEqual(S.RETCODE_PRECONDITION_NOT_MET, pinned.destroy());
+    try testing.expectEqual(S.RETCODE_OK, pinned.unpin());
+    try testing.expectEqual(S.RETCODE_OK, pinned.destroy());
+
+    try testing.expectError(error.InvalidConfig, S.Engine.create_with(testing.allocator, .{}, 0));
+
+    const g = try S.Guard.create(testing.allocator);
+    try testing.expectEqual(S.RETCODE_OK, g.destroy());
+    try expectStats(0, 3, 0);
+}
+
+test "a Zig static reaches the same singleton as the C function" {
+    provider.test_stats_reset();
+    try testing.expectEqual(S.RETCODE_OK, S.Registry.delete_instance());
+    const r = S.Registry.get_instance();
+    try testing.expectEqual(r.ptr, S.Registry.get_instance().ptr);
+    try testing.expectEqual(r.vtable.get_c_abi_handle(r.ptr), S_Registry_get_instance().?);
+    try expectStats(1, 0, 0);
+    const generation = r.get_generation();
+    try testing.expectEqual(S.RETCODE_OK, r.pin(true));
+    try testing.expectEqual(S.RETCODE_PRECONDITION_NOT_MET, S.Registry.delete_instance());
+    try testing.expectEqual(S.RETCODE_OK, r.pin(false));
+    try testing.expectEqual(S.RETCODE_OK, S.Registry.delete_instance());
+    try expectStats(0, 1, 0);
+    const next = S.Registry.get_instance();
+    try testing.expectEqual(generation + 1, next.get_generation());
+    try testing.expectEqual(S.RETCODE_OK, S.Registry.delete_instance());
+    try expectStats(0, 2, 0);
+}
+
+test "a Zig static's interface argument reaches the provider" {
+    provider.test_stats_reset();
+    const g = try S.Guard.create(testing.allocator);
+    try testing.expect(!S.Registry.is_trigger_set(g.as_Condition()));
+    try testing.expectEqual(S.RETCODE_OK, g.set_trigger_value(true));
+    try testing.expect(S.Registry.is_trigger_set(g.as_Condition()));
+    try testing.expectEqual(S.RETCODE_OK, g.destroy());
 }

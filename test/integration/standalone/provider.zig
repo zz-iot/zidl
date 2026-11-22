@@ -11,6 +11,10 @@ comptime {
     S.exportCAbi(Provider);
 }
 
+/// What the generated C API, and the generated Zig statics and
+/// constructors (`--zig-provider-module provider`), need from this provider.
+pub const zidl_provider = Provider;
+
 /// What the generated C API needs from this provider.
 const Provider = struct {
     pub fn nil(comptime I: type) I {
