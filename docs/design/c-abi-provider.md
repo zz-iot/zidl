@@ -105,6 +105,12 @@ and constructor exists with exactly the expected signature, so a provider gets t
 compile-time check of these functions that a vtable literal gets of its slots, whether or
 not anything calls them. Without the flag, none of this is generated.
 
+The functions share the struct with members zidl adds, so a static or constructor named
+`ptr`, `vtable`, `Vtable`, `CAbiViews`, `deinit`, `_zidl_provider`, an `as_<Base>` upcast,
+or one of the interface's nested types or constants is an error
+(`ZigProviderFunctionNameClash`). A constructor's allocator parameter is `allocator`,
+with an underscore added for each IDL parameter already named that.
+
 The generated module and the provider import each other, which Zig allows. A file can
 belong to only one module, though, so a build with several modules rooted at the
 provider's file (a library and a test, say) needs a generated module for each, each
