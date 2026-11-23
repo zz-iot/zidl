@@ -314,6 +314,21 @@ int main() {
     assert(nil.take_next_instance_w_condition(query, 42, values, sample_infos, 8) == -1);
     assert(nil.read_next_instance_w_condition(query, 42, values, sample_infos, 8) == -1);
     assert(calls == 28);
+
+    // A sample without valid data may carry its key hash alone, with no
+    // serialized key (DDSI-RTPS 2.5 9.6.4.3): it decodes nothing.
+    typed_result = DDS_RETCODE_OK;
+    sample_payload._length = 0;
+    sample_info.valid_data = false;
+    values[0].id = 77;
+    expected_handle = DDS_HANDLE_NIL;
+    expected_op = 11;
+    assert(typed.take_w_condition(query, values, sample_infos, 8) == 1);
+    assert(values[0].id == 0 && !sample_infos[0].valid_data); // a batch element's default value
+    assert(calls == 29 && loans == 13);
+    sample_payload._length = 8;
+    sample_info.valid_data = true;
+    typed_result = DDS_RETCODE_BAD_PARAMETER;
     assert(DDS::DataReaderImpl::_getOrCreate(&reader_handle) == reader);
 
     // Passing a condition must not replace the shared family-cache entry.
@@ -346,7 +361,7 @@ int main() {
     // C ABI's error.
     auto foreign = std::make_shared<DDS::ReadCondition>();
     exercise_typed(foreign, nullptr);
-    assert(calls == 32 && loans == 12);
+    assert(calls == 33 && loans == 13);
 
     // A root-typed lookup boxes the member a handle really is. A destroyed
     // ReadCondition's still-live wrapper is not returned for the

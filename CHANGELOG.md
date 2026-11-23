@@ -18,6 +18,13 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- `--generate-zzdds-wrappers`: a typed read or take decodes nothing for a sample without
+  valid data and without a serialized key, which a dispose or unregister may carry as its
+  key hash alone (DDSI-RTPS 2.5 §9.6.4.3), and no longer fails on it: Zig with
+  `InvalidEncapsulation`, C and C++ with the CDR reader's error, Java with an exception.
+  A single-sample read leaves the value as it was; a batch read gives the element its
+  default value (zeroed in C), as does Java's. The sample's `instance_handle` names its
+  instance.
 - Zig: `--zig-provider-module <name>` gives each interface's `@static` operations and
   `@constructor`s Zig functions on its struct, such as
   `DDS.DomainParticipantFactory.get_instance()` and `try DDS.WaitSet.create(allocator)`,

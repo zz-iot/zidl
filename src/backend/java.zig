@@ -4092,10 +4092,13 @@ fn emitZzddsDataReaderFile(
         \\    }}
         \\
         \\    private static Sample fromPayload(byte[] payload, {[si]s} info) {{
+        \\        boolean _valid = info.get_valid_data();
+        \\        // Without valid data, only a key hash may come, with no serialized key
+        \\        // (DDSI-RTPS 2.5 9.6.4.3): such a sample decodes nothing.
+        \\        if (!_valid && payload.length == 0) return new Sample(new {[t]s}(), info);
         \\        java.nio.ByteBuffer _buf = java.nio.ByteBuffer.wrap(payload).order(java.nio.ByteOrder.LITTLE_ENDIAN);
         \\        int _xcdrVersion = xcdrVersionOf(payload);
         \\        _buf.position(4);
-        \\        boolean _valid = info.get_valid_data();
         \\        {[t]s} _data = _valid ? {[t]s}.deserializeFrom(_buf, 4, _xcdrVersion) : {[t]s}.deserializeKey(_buf, 4, _xcdrVersion);
         \\        return new Sample(_data, info);
         \\    }}
@@ -9922,6 +9925,10 @@ test "java: --generate-zzdds-wrappers DataReader gets take_next_instance/read_ne
     try testing.expect(std.mem.indexOf(u8, r, "public Sample[] read_n(int max, int sampleStates, int viewStates, int instanceStates) {") != null);
     try testing.expect(std.mem.indexOf(u8, r, "reader.read_raw(_payloads, _hashes, _infos, _HANDLE_NIL, null, sampleStates, viewStates, instanceStates, max, _loan)") != null);
     try testing.expect(std.mem.indexOf(u8, r, "private static Sample[] fromPayloads(java.util.List<java.util.List<Byte>> payloads, java.util.List<Dcps.DDS.SampleInfo> infos) {") != null);
+    // A sample without valid data and without a serialized key (its key hash
+    // alone) decodes nothing, before the payload's encapsulation is read.
+    const no_key = std.mem.indexOf(u8, r, "if (!_valid && payload.length == 0) return new Sample(new Foo(), info);") orelse return error.TestExpectedGuard;
+    try testing.expect(no_key < std.mem.indexOf(u8, r, "int _xcdrVersion = xcdrVersionOf(payload);").?);
 }
 
 test "java: --generate-zzdds-wrappers DataWriter gets register_instance, _w_timestamp family, and get_key_value/lookup_instance" {
