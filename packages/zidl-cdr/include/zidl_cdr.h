@@ -448,6 +448,34 @@ bool zidl_cdr_mutable_has_more(const ZidlCdrReader *r, size_t end_pos);
  */
 int  zidl_cdr_skip_emheader_payload(ZidlCdrReader *r, const ZidlEmHeader *emh);
 
+/** Bulk primitive array bodies. No length or framing is emitted or consumed.
+ * Uses the cursor's XCDR alignment and byte order. Arrays must not overlap
+ * CDR storage. A zero count is a no-op and permits NULL; counting writers
+ * do not read values and also permit NULL. On failure, cursors and output
+ * values are unchanged.
+ */
+#define ZIDL_CDR_HAS_PRIMITIVE_ARRAYS 1
+int zidl_cdr_write_u8_array(ZidlCdrWriter *w, const uint8_t *values, size_t count);
+int zidl_cdr_read_u8_array(ZidlCdrReader *r, uint8_t *values, size_t count);
+int zidl_cdr_write_i8_array(ZidlCdrWriter *w, const int8_t *values, size_t count);
+int zidl_cdr_read_i8_array(ZidlCdrReader *r, int8_t *values, size_t count);
+int zidl_cdr_write_u16_array(ZidlCdrWriter *w, const uint16_t *values, size_t count);
+int zidl_cdr_read_u16_array(ZidlCdrReader *r, uint16_t *values, size_t count);
+int zidl_cdr_write_i16_array(ZidlCdrWriter *w, const int16_t *values, size_t count);
+int zidl_cdr_read_i16_array(ZidlCdrReader *r, int16_t *values, size_t count);
+int zidl_cdr_write_u32_array(ZidlCdrWriter *w, const uint32_t *values, size_t count);
+int zidl_cdr_read_u32_array(ZidlCdrReader *r, uint32_t *values, size_t count);
+int zidl_cdr_write_i32_array(ZidlCdrWriter *w, const int32_t *values, size_t count);
+int zidl_cdr_read_i32_array(ZidlCdrReader *r, int32_t *values, size_t count);
+int zidl_cdr_write_u64_array(ZidlCdrWriter *w, const uint64_t *values, size_t count);
+int zidl_cdr_read_u64_array(ZidlCdrReader *r, uint64_t *values, size_t count);
+int zidl_cdr_write_i64_array(ZidlCdrWriter *w, const int64_t *values, size_t count);
+int zidl_cdr_read_i64_array(ZidlCdrReader *r, int64_t *values, size_t count);
+int zidl_cdr_write_f32_array(ZidlCdrWriter *w, const float *values, size_t count);
+int zidl_cdr_read_f32_array(ZidlCdrReader *r, float *values, size_t count);
+int zidl_cdr_write_f64_array(ZidlCdrWriter *w, const double *values, size_t count);
+int zidl_cdr_read_f64_array(ZidlCdrReader *r, double *values, size_t count);
+
 /* Utility */
 size_t zidl_cdr_remaining(const ZidlCdrReader *r);
 int    zidl_cdr_skip      (ZidlCdrReader *r, size_t n);
