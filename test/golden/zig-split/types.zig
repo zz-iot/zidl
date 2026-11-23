@@ -139,17 +139,17 @@ pub const Sample = struct {
             if (@hasDecl(@TypeOf(writer.*), "writePrimitiveArray")) {
                 try writer.writePrimitiveArray(i32, (value.nums._buffer orelse return error.InvalidSequence)[0..value.nums._length]);
             } else {
-                    for ((value.nums._buffer orelse return error.InvalidSequence)[0..value.nums._length]) |_bulk_element| {
+                for ((value.nums._buffer orelse return error.InvalidSequence)[0..value.nums._length]) |_bulk_element| {
                     try writer.writeI32(_bulk_element);
-                    }
+                }
             }
         }
         if (@hasDecl(@TypeOf(writer.*), "writePrimitiveArray")) {
             try writer.writePrimitiveArray(i32, value.arr[0..]);
         } else {
-                for (value.arr[0..]) |_bulk_element| {
+            for (value.arr[0..]) |_bulk_element| {
                 try writer.writeI32(_bulk_element);
-                }
+            }
         }
         try writer.writeU32(@backingInt(value.clr));
         try Point.serialize(writer, value.nested);

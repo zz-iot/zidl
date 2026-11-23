@@ -7667,12 +7667,12 @@ const Generator = struct {
         try self.ind();
         try self.print("{s}}} else {{\n", .{extra});
         try self.ind();
-        try self.print("{s}    for ({s}) |_bulk_element| {{\n", .{ inner, slice });
+        try self.print("{s}for ({s}) |_bulk_element| {{\n", .{ inner, slice });
         const loop = try std.fmt.allocPrint(self.alloc, "{s}        ", .{extra});
         defer self.alloc.free(loop);
         try self.emitWriteForTypeRef(elem, "_bulk_element", loop);
         try self.ind();
-        try self.print("{s}    }}\n", .{inner});
+        try self.print("{s}}}\n", .{inner});
         try self.ind();
         try self.print("{s}}}\n", .{extra});
     }
