@@ -3183,8 +3183,11 @@ const CdrGenerator = struct {
         try self.writeI("if (cdr_len_out) *cdr_len_out = _c_payloads._buffer[0]._length;\n");
         try self.writeI("*info = _c_infos._buffer[0];\n");
         try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length);\n");
-        try self.printI("if (!_rc) _rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        // Without valid data, only a key hash may come, with no serialized key
+        // (DDSI-RTPS 2.5 §9.6.4.3): such a sample decodes nothing.
+        try self.writeI("const bool _decode = info->valid_data || _c_payloads._buffer[0]._length != 0;\n");
+        try self.writeI("int _rc = _decode ? zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length) : 0;\n");
+        try self.printI("if (!_rc && _decode) _rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
         try self.writeI("DDS_DataReader_return_loan_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
@@ -3200,8 +3203,11 @@ const CdrGenerator = struct {
         try self.writeI("if (cdr_len_out) *cdr_len_out = _c_payloads._buffer[0]._length;\n");
         try self.writeI("*info = _c_infos._buffer[0];\n");
         try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length);\n");
-        try self.printI("if (!_rc) _rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        // Without valid data, only a key hash may come, with no serialized key
+        // (DDSI-RTPS 2.5 §9.6.4.3): such a sample decodes nothing.
+        try self.writeI("const bool _decode = info->valid_data || _c_payloads._buffer[0]._length != 0;\n");
+        try self.writeI("int _rc = _decode ? zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length) : 0;\n");
+        try self.printI("if (!_rc && _decode) _rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
         try self.writeI("DDS_DataReader_return_loan_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
@@ -3217,8 +3223,11 @@ const CdrGenerator = struct {
         try self.writeI("if (cdr_len_out) *cdr_len_out = _c_payloads._buffer[0]._length;\n");
         try self.writeI("*info = _c_infos._buffer[0];\n");
         try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length);\n");
-        try self.printI("if (!_rc) _rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        // Without valid data, only a key hash may come, with no serialized key
+        // (DDSI-RTPS 2.5 §9.6.4.3): such a sample decodes nothing.
+        try self.writeI("const bool _decode = info->valid_data || _c_payloads._buffer[0]._length != 0;\n");
+        try self.writeI("int _rc = _decode ? zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length) : 0;\n");
+        try self.printI("if (!_rc && _decode) _rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
         try self.writeI("DDS_DataReader_return_loan_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
@@ -3234,8 +3243,11 @@ const CdrGenerator = struct {
         try self.writeI("if (cdr_len_out) *cdr_len_out = _c_payloads._buffer[0]._length;\n");
         try self.writeI("*info = _c_infos._buffer[0];\n");
         try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length);\n");
-        try self.printI("if (!_rc) _rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        // Without valid data, only a key hash may come, with no serialized key
+        // (DDSI-RTPS 2.5 §9.6.4.3): such a sample decodes nothing.
+        try self.writeI("const bool _decode = info->valid_data || _c_payloads._buffer[0]._length != 0;\n");
+        try self.writeI("int _rc = _decode ? zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length) : 0;\n");
+        try self.printI("if (!_rc && _decode) _rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
         try self.writeI("DDS_DataReader_return_loan_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
@@ -3264,7 +3276,10 @@ const CdrGenerator = struct {
         self.indent_depth += 1;
         try self.writeI("infos[_i] = _infos->_buffer[_i];\n");
         try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _payloads->_buffer[_i]._buffer, _payloads->_buffer[_i]._length);\n");
+        // Without valid data, only a key hash may come, with no serialized key
+        // (DDSI-RTPS 2.5 §9.6.4.3): such a sample decodes nothing.
+        try self.writeI("const bool _decode = infos[_i].valid_data || _payloads->_buffer[_i]._length != 0;\n");
+        try self.writeI("int _rc = _decode ? zidl_cdr_reader_init(&_r, _payloads->_buffer[_i]._buffer, _payloads->_buffer[_i]._length) : 0;\n");
         if (structHasSequenceFields(s)) {
             // Zero values[_i] before attempting to decode into it, so that
             // IF decoding fails partway through, every field it never
@@ -3278,8 +3293,13 @@ const CdrGenerator = struct {
             // failed decode free a garbage pointer instead of cleanly
             // reporting the error -- corruption/crash, not just a leak.
             try self.writeI("memset(&values[_i], 0, sizeof(values[_i]));\n");
+        } else {
+            // An element with nothing to decode is zeroed, its default
+            // value, so a batch never returns the caller's uninitialized
+            // storage as a sample (with sequence fields, it was above).
+            try self.writeI("if (!_decode) memset(&values[_i], 0, sizeof(values[_i]));\n");
         }
-        try self.writeI("if (!_rc) _rc = infos[_i].valid_data ?\n");
+        try self.writeI("if (!_rc && _decode) _rc = infos[_i].valid_data ?\n");
         self.indent_depth += 1;
         try self.printI("{s}_deserialize(&_r, &values[_i]) :\n", .{c_name});
         try self.printI("{s}_deserialize_key(&_r, &values[_i]);\n", .{c_name});
@@ -3424,8 +3444,11 @@ const CdrGenerator = struct {
         try self.writeI("if (loan_payloads->_length == 0) return DDS_RETCODE_NO_DATA;\n");
         try self.writeI("*info = loan_infos->_buffer[0];\n");
         try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, loan_payloads->_buffer[0]._buffer, loan_payloads->_buffer[0]._length);\n");
-        try self.printI("if (!_rc) _rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
+        // Without valid data, only a key hash may come, with no serialized key
+        // (DDSI-RTPS 2.5 §9.6.4.3): such a sample decodes nothing.
+        try self.writeI("const bool _decode = info->valid_data || loan_payloads->_buffer[0]._length != 0;\n");
+        try self.writeI("int _rc = _decode ? zidl_cdr_reader_init(&_r, loan_payloads->_buffer[0]._buffer, loan_payloads->_buffer[0]._length) : 0;\n");
+        try self.printI("if (!_rc && _decode) _rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
         try self.writeI("if (_rc) { DDS_OctetSeq _c_no_hashes = {0}; DDS_DataReader_return_loan_raw(self->reader, loan_payloads, &_c_no_hashes, loan_infos); }\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
@@ -6501,9 +6524,12 @@ test "c_backend cdr: _n_impl has no cleanup loop or memset when struct has no se
     try testing.expect(!has(s, "Msg_free(&values[_j])"));
     try testing.expect(has(s, "if (_rc) { DDS_DataReader_return_loan_raw(self->reader, _payloads, _hashes, _infos); return _rc; }"));
     // No _free() is ever called on values[_i] for a struct with no
-    // sequence/string fields, so there's nothing for the memset to protect
-    // -- must not be emitted.
-    try testing.expect(!has(s, "memset(&values[_i]"));
+    // sequence/string fields, so there's nothing for an unconditional
+    // memset to protect -- must not be emitted. Only an element with
+    // nothing to decode is zeroed, its default value.
+    const zeroing = std.mem.count(u8, s, "if (!_decode) memset(&values[_i], 0, sizeof(values[_i]));");
+    try testing.expect(zeroing > 0);
+    try testing.expectEqual(zeroing, std.mem.count(u8, s, "memset(&values[_i]"));
 }
 
 test "c_backend cdr: zzdds_c omitted when no qualifying topic struct" {

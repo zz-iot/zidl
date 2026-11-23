@@ -5508,6 +5508,12 @@ const Generator = struct {
         try self.write("        defer _raw.deinit();\n");
         try self.ind();
         try self.write("        sample_info.* = _raw.info;\n");
+        // A sample without valid data may carry its key hash alone, with no
+        // serialized key, as RTPS allows (DDSI-RTPS 2.5 §9.6.4.3): it
+        // decodes nothing, and `sample_info.instance_handle` names its
+        // instance.
+        try self.ind();
+        try self.write("        if (!_raw.info.valid_data and _raw.data.len == 0) return true;\n");
         try self.ind();
         try self.write("        var _r = try zidl_cdr.CdrReader.init(_raw.data);\n");
         try self.ind();
@@ -5654,21 +5660,28 @@ const Generator = struct {
         try self.ind();
         try self.write("        for (_tmp.items) |_s| {\n");
         try self.ind();
-        try self.write("            var _r = try zidl_cdr.CdrReader.init(_s.data);\n");
-        try self.ind();
         try self.print("            var _v: {s} = .{{}};\n", .{type_name});
+        // A sample without valid data and without a serialized key (its key
+        // hash alone, as RTPS allows) decodes nothing: see
+        // emitReaderSingleMethod.
         try self.ind();
-        try self.write("            if (_s.info.valid_data) {\n");
+        try self.write("            if (_s.info.valid_data or _s.data.len != 0) {\n");
         try self.ind();
-        try self.print("                try {s}.deserializeInto(&_v, &_r, self._alloc);\n", .{type_name});
+        try self.write("                var _r = try zidl_cdr.CdrReader.init(_s.data);\n");
         try self.ind();
-        try self.write("            } else {\n");
+        try self.write("                if (_s.info.valid_data) {\n");
+        try self.ind();
+        try self.print("                    try {s}.deserializeInto(&_v, &_r, self._alloc);\n", .{type_name});
+        try self.ind();
+        try self.write("                } else {\n");
         if (needs_deinit) {
             try self.ind();
-            try self.write("                errdefer _v.deinit(self._alloc);\n");
+            try self.write("                    errdefer _v.deinit(self._alloc);\n");
         }
         try self.ind();
-        try self.print("                try {s}.deserializeKeyInto(&_v, &_r, self._alloc);\n", .{type_name});
+        try self.print("                    try {s}.deserializeKeyInto(&_v, &_r, self._alloc);\n", .{type_name});
+        try self.ind();
+        try self.write("                }\n");
         try self.ind();
         try self.write("            }\n");
         try self.ind();

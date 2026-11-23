@@ -62,6 +62,31 @@ test "wrapper contract: Reading write/take round-trip against the fake middlewar
     try testing.expect(!got);
 }
 
+test "wrapper contract: a sample without valid data and without a serialized key decodes nothing" {
+    // A dispose or unregister may carry its key hash alone (DDSI-RTPS 2.5
+    // 9.6.4.3), so the reader has no payload to decode.
+    const key_hash_only: mw.OwnedRawSample = .{ .data = &.{}, .info = .{ .valid_data = false } };
+    const dr = fixture.ReadingDataReader.init(.{}, testing.allocator);
+
+    mw.next_raw = key_hash_only;
+    var data: fixture.Reading = .{ .sensor_id = 9 };
+    defer data.deinit(testing.allocator);
+    var sample_info: mw.DDS.SampleInfo = undefined;
+    try testing.expect(try dr.take_next_sample(&data, &sample_info));
+    try testing.expect(!sample_info.valid_data);
+    try testing.expectEqual(@as(u32, 9), data.sensor_id);
+
+    mw.next_batch = &.{key_hash_only};
+    var taken: std.ArrayListUnmanaged(fixture.ReadingDataReader.SampledValue) = .empty;
+    defer {
+        for (taken.items) |*s| s.value.deinit(testing.allocator);
+        taken.deinit(testing.allocator);
+    }
+    _ = try dr.take(&taken, -1, 0, 0, 0);
+    try testing.expectEqual(@as(usize, 1), taken.items.len);
+    try testing.expect(!taken.items[0].info.valid_data);
+}
+
 test "deserializeSelected: extracts a non-leading @key, skips large non-key members" {
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(testing.allocator);

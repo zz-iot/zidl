@@ -2714,8 +2714,11 @@ const CdrGenerator = struct {
         try self.writeI("if (cdr_len_out) *cdr_len_out = _c_payloads._buffer[0]._length;\n");
         try self.writeI("out.info = _c_infos._buffer[0];\n");
         try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length);\n");
-        try self.printI("if (!_rc) _rc = out.info.valid_data ? {s}_deserialize(&_r, &out.value) : {s}_deserialize_key(&_r, &out.value);\n", .{ c_name, c_name });
+        // Without valid data, only a key hash may come, with no serialized key
+        // (DDSI-RTPS 2.5 §9.6.4.3): such a sample decodes nothing.
+        try self.writeI("const bool _decode = out.info.valid_data || _c_payloads._buffer[0]._length != 0;\n");
+        try self.writeI("int _rc = _decode ? zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length) : 0;\n");
+        try self.printI("if (!_rc && _decode) _rc = out.info.valid_data ? {s}_deserialize(&_r, &out.value) : {s}_deserialize_key(&_r, &out.value);\n", .{ c_name, c_name });
         try self.writeI("DDS_DataReader_return_loan_raw(reader_, &_c_payloads, &_c_hashes, &_c_infos);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
@@ -2731,8 +2734,11 @@ const CdrGenerator = struct {
         try self.writeI("if (cdr_len_out) *cdr_len_out = _c_payloads._buffer[0]._length;\n");
         try self.writeI("out.info = _c_infos._buffer[0];\n");
         try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length);\n");
-        try self.printI("if (!_rc) _rc = out.info.valid_data ? {s}_deserialize(&_r, &out.value) : {s}_deserialize_key(&_r, &out.value);\n", .{ c_name, c_name });
+        // Without valid data, only a key hash may come, with no serialized key
+        // (DDSI-RTPS 2.5 §9.6.4.3): such a sample decodes nothing.
+        try self.writeI("const bool _decode = out.info.valid_data || _c_payloads._buffer[0]._length != 0;\n");
+        try self.writeI("int _rc = _decode ? zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length) : 0;\n");
+        try self.printI("if (!_rc && _decode) _rc = out.info.valid_data ? {s}_deserialize(&_r, &out.value) : {s}_deserialize_key(&_r, &out.value);\n", .{ c_name, c_name });
         try self.writeI("DDS_DataReader_return_loan_raw(reader_, &_c_payloads, &_c_hashes, &_c_infos);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
@@ -2748,8 +2754,11 @@ const CdrGenerator = struct {
         try self.writeI("if (cdr_len_out) *cdr_len_out = _c_payloads._buffer[0]._length;\n");
         try self.writeI("out.info = _c_infos._buffer[0];\n");
         try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length);\n");
-        try self.printI("if (!_rc) _rc = out.info.valid_data ? {s}_deserialize(&_r, &out.value) : {s}_deserialize_key(&_r, &out.value);\n", .{ c_name, c_name });
+        // Without valid data, only a key hash may come, with no serialized key
+        // (DDSI-RTPS 2.5 §9.6.4.3): such a sample decodes nothing.
+        try self.writeI("const bool _decode = out.info.valid_data || _c_payloads._buffer[0]._length != 0;\n");
+        try self.writeI("int _rc = _decode ? zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length) : 0;\n");
+        try self.printI("if (!_rc && _decode) _rc = out.info.valid_data ? {s}_deserialize(&_r, &out.value) : {s}_deserialize_key(&_r, &out.value);\n", .{ c_name, c_name });
         try self.writeI("DDS_DataReader_return_loan_raw(reader_, &_c_payloads, &_c_hashes, &_c_infos);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
@@ -2765,8 +2774,11 @@ const CdrGenerator = struct {
         try self.writeI("if (cdr_len_out) *cdr_len_out = _c_payloads._buffer[0]._length;\n");
         try self.writeI("out.info = _c_infos._buffer[0];\n");
         try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length);\n");
-        try self.printI("if (!_rc) _rc = out.info.valid_data ? {s}_deserialize(&_r, &out.value) : {s}_deserialize_key(&_r, &out.value);\n", .{ c_name, c_name });
+        // Without valid data, only a key hash may come, with no serialized key
+        // (DDSI-RTPS 2.5 §9.6.4.3): such a sample decodes nothing.
+        try self.writeI("const bool _decode = out.info.valid_data || _c_payloads._buffer[0]._length != 0;\n");
+        try self.writeI("int _rc = _decode ? zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length) : 0;\n");
+        try self.printI("if (!_rc && _decode) _rc = out.info.valid_data ? {s}_deserialize(&_r, &out.value) : {s}_deserialize_key(&_r, &out.value);\n", .{ c_name, c_name });
         try self.writeI("DDS_DataReader_return_loan_raw(reader_, &_c_payloads, &_c_hashes, &_c_infos);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
@@ -2800,8 +2812,14 @@ const CdrGenerator = struct {
         self.indent_depth += 1;
         try self.writeI("infos[_i] = _infos->_buffer[_i];\n");
         try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _payloads->_buffer[_i]._buffer, _payloads->_buffer[_i]._length);\n");
-        try self.writeI("if (!_rc) _rc = infos[_i].valid_data ?\n");
+        // Without valid data, only a key hash may come, with no serialized key
+        // (DDSI-RTPS 2.5 §9.6.4.3): such a sample decodes nothing.
+        try self.writeI("const bool _decode = infos[_i].valid_data || _payloads->_buffer[_i]._length != 0;\n");
+        try self.writeI("int _rc = _decode ? zidl_cdr_reader_init(&_r, _payloads->_buffer[_i]._buffer, _payloads->_buffer[_i]._length) : 0;\n");
+        // An element with nothing to decode gets its default value, as in
+        // the C backend's batch decode.
+        try self.writeI("if (!_decode) values[_i] = {};\n");
+        try self.writeI("if (!_rc && _decode) _rc = infos[_i].valid_data ?\n");
         self.indent_depth += 1;
         try self.printI("{s}_deserialize(&_r, &values[_i]) :\n", .{c_name});
         try self.printI("{s}_deserialize_key(&_r, &values[_i]);\n", .{c_name});
@@ -2936,8 +2954,11 @@ const CdrGenerator = struct {
         try self.writeI("if (_loan_payloads._length == 0) return DDS_RETCODE_NO_DATA;\n");
         try self.writeI("_sample.info = _loan_infos._buffer[0];\n");
         try self.writeI("ZidlCdrReader _r;\n");
-        try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _loan_payloads._buffer[0]._buffer, _loan_payloads._buffer[0]._length);\n");
-        try self.printI("if (!_rc) _rc = _sample.info.valid_data ? {s}_deserialize(&_r, &_sample.value) : {s}_deserialize_key(&_r, &_sample.value);\n", .{ c_name, c_name });
+        // Without valid data, only a key hash may come, with no serialized key
+        // (DDSI-RTPS 2.5 §9.6.4.3): such a sample decodes nothing.
+        try self.writeI("const bool _decode = _sample.info.valid_data || _loan_payloads._buffer[0]._length != 0;\n");
+        try self.writeI("int _rc = _decode ? zidl_cdr_reader_init(&_r, _loan_payloads._buffer[0]._buffer, _loan_payloads._buffer[0]._length) : 0;\n");
+        try self.printI("if (!_rc && _decode) _rc = _sample.info.valid_data ? {s}_deserialize(&_r, &_sample.value) : {s}_deserialize_key(&_r, &_sample.value);\n", .{ c_name, c_name });
         try self.writeI("if (_rc) { DDS_OctetSeq _c_no_hashes = {0}; DDS_DataReader_return_loan_raw(reader_, &_loan_payloads, &_c_no_hashes, &_loan_infos); return _rc; }\n");
         try self.writeI("out = Loan(this, _loan_payloads, _loan_infos, _sample);\n");
         try self.writeI("return DDS_RETCODE_OK;\n");

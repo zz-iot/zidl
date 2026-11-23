@@ -106,9 +106,13 @@ pub fn lookupInstanceReader(dr: DDS.DataReader, key_hash: [16]u8) ?DDS.InstanceH
     return null;
 }
 
+/// What the next `takeRaw` returns, set by a test; null otherwise.
+pub var next_raw: ?OwnedRawSample = null;
+
 pub fn takeRaw(dr: DDS.DataReader) ?OwnedRawSample {
     _ = dr;
-    return null;
+    defer next_raw = null;
+    return next_raw;
 }
 
 pub fn readNextSampleRaw(dr: DDS.DataReader) ?OwnedRawSample {
@@ -128,6 +132,9 @@ pub fn readNextInstanceRaw(dr: DDS.DataReader, prev: DDS.InstanceHandle_t) ?Owne
     return null;
 }
 
+/// What the next `takeFilteredRaw` takes, set by a test; none otherwise.
+pub var next_batch: []const OwnedRawSample = &.{};
+
 pub fn takeFilteredRaw(
     dr: DDS.DataReader,
     out: *std.ArrayListUnmanaged(OwnedRawSample),
@@ -139,13 +146,13 @@ pub fn takeFilteredRaw(
     alloc: std.mem.Allocator,
 ) !void {
     _ = dr;
-    _ = out;
     _ = max;
     _ = ss;
     _ = vs;
     _ = is;
     _ = handle;
-    _ = alloc;
+    defer next_batch = &.{};
+    try out.appendSlice(alloc, next_batch);
 }
 
 pub fn readFilteredRaw(
