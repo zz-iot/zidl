@@ -40,6 +40,17 @@ pub fn baseWireSize(b: ast.BaseTypeSpec) ?usize {
     };
 }
 
+/// CDR bodies whose mapped elements can use contiguous native storage.
+pub fn bulkBase(tr: ir.TypeRef) ?ast.BaseTypeSpec {
+    return switch (resolveAlias(tr)) {
+        .base => |b| switch (b) {
+            .boolean, .octet, .char, .uint8, .int8, .short, .int16, .unsigned_short, .uint16, .long, .int32, .unsigned_long, .uint32, .long_long, .int64, .unsigned_long_long, .uint64, .float, .double => b,
+            else => null,
+        },
+        else => null,
+    };
+}
+
 /// Wire size of a type that skips as a flat run of fixed-size elements
 /// (base primitive, or an enum/bitmask by its storage width), else null.
 pub fn typeRefPrimWireSize(tr: ir.TypeRef) ?usize {

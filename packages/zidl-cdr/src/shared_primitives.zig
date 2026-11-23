@@ -543,139 +543,52 @@ export fn zidl_md5(data: ?[*]const u8, len: usize, out: *[16]u8) void {
 
 extern fn zidl_cdr_shared_reserve_array(w: *Writer, pad: usize, len: usize, out: *?[*]u8) c_int;
 
-fn arrayAlignment(width: usize, version: c_int) usize {
-    return @min(width, if (version == 2) @as(usize, 4) else 8);
+const primitives = rt.cdr_primitives;
+
+fn reserveArray(w: *Writer, count: usize, width: usize, dest: *?[*]u8) c_int {
+    const size = std.math.mul(usize, count, width) catch return -1;
+    const pad = primitives.arrayPadding(width, w.pos, if (w.xcdr_version == 2) 4 else 8);
+    return zidl_cdr_shared_reserve_array(w, pad, size, dest);
 }
 
-// CDR storage need not be naturally aligned (in particular for XCDR2 u64).
-fn copyArray(comptime T: type, dest: []u8, source: []const u8, swap: bool) void {
-    if (@sizeOf(T) == 1 or !swap) {
-        @memcpy(dest, source);
-        return;
+export fn zidl_cdr_write_primitives(w: *Writer, values: ?*const anyopaque, count: usize, width: usize) c_int {
+    if (!primitives.isArrayWidth(width)) return -3;
+    if (count == 0) return 0;
+    if (values == null and (w.buf != null or w.grow_fn != null)) return -3;
+    var dest: ?[*]u8 = null;
+    const rc = reserveArray(w, count, width, &dest);
+    if (rc != 0) return rc;
+    if (dest) |ptr| {
+        const source: [*]const u8 = @ptrCast(values.?);
+        const size = count * width;
+        primitives.copyArray(ptr[0..size], source[0..size], width, if (w.byte_order == 1) .big else .little);
     }
-    const U = @Int(.unsigned, @bitSizeOf(T));
-    const src: [*]align(1) const U = @ptrCast(source.ptr);
-    const dst: [*]align(1) U = @ptrCast(dest.ptr);
-    for (src[0 .. source.len / @sizeOf(T)], dst[0 .. dest.len / @sizeOf(T)]) |value, *out| {
-        out.* = @byteSwap(value);
-    }
+    return 0;
 }
 
-fn ArrayCodec(comptime T: type) type {
-    return struct {
-        fn write(w: *Writer, values: ?[*]const T, count: usize) callconv(.c) c_int {
-            if (count == 0) return 0;
-            const size = std.math.mul(usize, count, @sizeOf(T)) catch return -1;
-            const counting = w.buf == null and w.grow_fn == null;
-            if (values == null and !counting) return -3;
-            const alignment = arrayAlignment(@sizeOf(T), w.xcdr_version);
-            const pad = (alignment - w.pos % alignment) % alignment;
-            var dest: ?[*]u8 = null;
-            const status = zidl_cdr_shared_reserve_array(w, pad, size, &dest);
-            if (status != 0) return status;
-            if (dest) |ptr| {
-                const wire: std.builtin.Endian = if (w.byte_order == 1) .big else .little;
-                copyArray(T, ptr[0..size], std.mem.sliceAsBytes(values.?[0..count]), wire != @import("builtin").cpu.arch.endian());
-            }
-            return 0;
-        }
-
-        fn read(r: *Reader, values: ?[*]T, count: usize) callconv(.c) c_int {
-            if (count == 0) return 0;
-            const dest = values orelse return -3;
-            const size = std.math.mul(usize, count, @sizeOf(T)) catch return -2;
-            const data = input(r) catch return -2;
-            var pos = r.pos;
-            if (@sizeOf(T) > 1) {
-                rt.cdr_cursor.alignPosition(&pos, data.len, 4, arrayAlignment(@sizeOf(T), r.xcdr_version)) catch return -2;
-            }
-            const source = rt.cdr_cursor.readSlice(data, &pos, size) catch return -2;
-            const wire: std.builtin.Endian = if (r.byte_order == 0) .little else .big;
-            copyArray(T, std.mem.sliceAsBytes(dest[0..count]), source, wire != @import("builtin").cpu.arch.endian());
-            r.pos = pos;
-            return 0;
-        }
-    };
+export fn zidl_cdr_read_primitives(r: *Reader, values: ?*anyopaque, count: usize, width: usize) c_int {
+    if (!primitives.isArrayWidth(width)) return -3;
+    if (count == 0) return 0;
+    const dest: [*]u8 = @ptrCast(values orelse return -3);
+    const data = input(r) catch return -2;
+    primitives.readArray(data, &r.pos, 4, if (r.xcdr_version == 2) 4 else 8, if (r.byte_order == 0) .little else .big, width, count, dest) catch return -2;
+    return 0;
 }
 
-// Keep these as top-level export declarations for consumers that generate
-// Windows DLL export lists from this source.
-export fn zidl_cdr_write_u8_array(w: *Writer, values: ?[*]const u8, count: usize) c_int {
-    return ArrayCodec(u8).write(w, values, count);
+export fn zidl_cdr_write_bool_array(w: *Writer, values: ?[*]const bool, count: usize) c_int {
+    if (count == 0) return 0;
+    if (values == null and (w.buf != null or w.grow_fn != null)) return -3;
+    var dest: ?[*]u8 = null;
+    const rc = reserveArray(w, count, 1, &dest);
+    if (rc != 0) return rc;
+    if (dest) |ptr| primitives.writeBools(ptr[0..count], values.?[0..count]);
+    return 0;
 }
 
-export fn zidl_cdr_read_u8_array(r: *Reader, values: ?[*]u8, count: usize) c_int {
-    return ArrayCodec(u8).read(r, values, count);
-}
-
-export fn zidl_cdr_write_i8_array(w: *Writer, values: ?[*]const i8, count: usize) c_int {
-    return ArrayCodec(i8).write(w, values, count);
-}
-
-export fn zidl_cdr_read_i8_array(r: *Reader, values: ?[*]i8, count: usize) c_int {
-    return ArrayCodec(i8).read(r, values, count);
-}
-
-export fn zidl_cdr_write_u16_array(w: *Writer, values: ?[*]const u16, count: usize) c_int {
-    return ArrayCodec(u16).write(w, values, count);
-}
-
-export fn zidl_cdr_read_u16_array(r: *Reader, values: ?[*]u16, count: usize) c_int {
-    return ArrayCodec(u16).read(r, values, count);
-}
-
-export fn zidl_cdr_write_i16_array(w: *Writer, values: ?[*]const i16, count: usize) c_int {
-    return ArrayCodec(i16).write(w, values, count);
-}
-
-export fn zidl_cdr_read_i16_array(r: *Reader, values: ?[*]i16, count: usize) c_int {
-    return ArrayCodec(i16).read(r, values, count);
-}
-
-export fn zidl_cdr_write_u32_array(w: *Writer, values: ?[*]const u32, count: usize) c_int {
-    return ArrayCodec(u32).write(w, values, count);
-}
-
-export fn zidl_cdr_read_u32_array(r: *Reader, values: ?[*]u32, count: usize) c_int {
-    return ArrayCodec(u32).read(r, values, count);
-}
-
-export fn zidl_cdr_write_i32_array(w: *Writer, values: ?[*]const i32, count: usize) c_int {
-    return ArrayCodec(i32).write(w, values, count);
-}
-
-export fn zidl_cdr_read_i32_array(r: *Reader, values: ?[*]i32, count: usize) c_int {
-    return ArrayCodec(i32).read(r, values, count);
-}
-
-export fn zidl_cdr_write_u64_array(w: *Writer, values: ?[*]const u64, count: usize) c_int {
-    return ArrayCodec(u64).write(w, values, count);
-}
-
-export fn zidl_cdr_read_u64_array(r: *Reader, values: ?[*]u64, count: usize) c_int {
-    return ArrayCodec(u64).read(r, values, count);
-}
-
-export fn zidl_cdr_write_i64_array(w: *Writer, values: ?[*]const i64, count: usize) c_int {
-    return ArrayCodec(i64).write(w, values, count);
-}
-
-export fn zidl_cdr_read_i64_array(r: *Reader, values: ?[*]i64, count: usize) c_int {
-    return ArrayCodec(i64).read(r, values, count);
-}
-
-export fn zidl_cdr_write_f32_array(w: *Writer, values: ?[*]const f32, count: usize) c_int {
-    return ArrayCodec(f32).write(w, values, count);
-}
-
-export fn zidl_cdr_read_f32_array(r: *Reader, values: ?[*]f32, count: usize) c_int {
-    return ArrayCodec(f32).read(r, values, count);
-}
-
-export fn zidl_cdr_write_f64_array(w: *Writer, values: ?[*]const f64, count: usize) c_int {
-    return ArrayCodec(f64).write(w, values, count);
-}
-
-export fn zidl_cdr_read_f64_array(r: *Reader, values: ?[*]f64, count: usize) c_int {
-    return ArrayCodec(f64).read(r, values, count);
+export fn zidl_cdr_read_bool_array(r: *Reader, values: ?[*]bool, count: usize) c_int {
+    if (count == 0) return 0;
+    const dest = values orelse return -3;
+    const data = input(r) catch return -2;
+    primitives.readBools(data, &r.pos, dest[0..count]) catch |err| return readStatus(err);
+    return 0;
 }

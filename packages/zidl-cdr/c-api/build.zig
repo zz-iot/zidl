@@ -126,7 +126,7 @@ pub fn build(b: *std.Build) void {
         .file = codec_dep.path("test/shared_primitives.c"),
         .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
     });
-    const shared_tests = b.addTest(.{ .root_module = shared_test_mod });
+    const shared_tests = b.addTest(.{ .name = "cdr-shared-primitives", .root_module = shared_test_mod });
     if (coverage or sanitize_thread) shared_tests.use_llvm = true;
     const run_shared = b.addRunArtifact(shared_tests);
     b.step("test-shared-primitives", "Check shared Zig/C wire operations, modes and ABI").dependOn(&run_shared.step);
@@ -134,6 +134,9 @@ pub fn build(b: *std.Build) void {
 
     if (coverage or sanitize_thread) test_exe.use_llvm = true;
     const emit_tests_step = b.step("emit-tests", "Build test binaries for kcov coverage analysis");
+    emit_tests_step.dependOn(&b.addInstallArtifact(shared_tests, .{
+        .dest_dir = .{ .override = .{ .custom = "tests" } },
+    }).step);
     emit_tests_step.dependOn(&b.addInstallArtifact(test_exe, .{
         .dest_dir = .{ .override = .{ .custom = "tests" } },
     }).step);

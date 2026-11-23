@@ -18,6 +18,10 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Add bulk CDR primitive and checked boolean array bodies to the native
+  codec and C API, and use them for contiguous primitive collections in
+  generated C, C++, and Zig codecs.
+
 - `--generate-zzdds-wrappers`: a typed read or take decodes nothing for a sample without
   valid data and without a serialized key, which a dispose or unregister may carry as its
   key hash alone (DDSI-RTPS 2.5 §9.6.4.3), and no longer fails on it: Zig with

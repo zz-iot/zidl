@@ -1,6 +1,7 @@
 /* Independent C compiler view of the public ABI and a real foreign caller. */
 #include "zidl_cdr.h"
 #include <stddef.h>
+#include <string.h>
 
 void shared_primitives_layout(size_t out[17]) {
     out[0] = sizeof(ZidlCdrWriter);
@@ -182,12 +183,9 @@ int shared_framing_read_sample(ZidlCdrReader *r) {
     return zidl_cdr_seek_to(r, end);
 }
 
-#ifdef ZIDL_CDR_SHARED_CONSUMER
-#include <string.h>
 
-/* Link this with a normal C compiler against the staged archive. */
-static int bulk_primitive_arrays(void) {
-    for (int version = ZIDL_XCDR1; version <= ZIDL_XCDR2; ++version) {
+int bulk_primitive_arrays(void) {
+    for (int version = ZIDL_XCDR1; version <= ZIDL_PL_CDR; ++version) {
         for (int endian = ZIDL_CDR_LE; endian <= ZIDL_CDR_BE; ++endian) {
 #define CHECK_ARRAY(name, type, a, b, c) do { \
     const type values[] = { a, b, c }; \
@@ -236,9 +234,50 @@ static int bulk_primitive_arrays(void) {
 #undef CHECK_ARRAY
         }
     }
+    {
+        ZidlCdrWriter w;
+        ZidlCdrReader r, limited;
+        uint32_t values[2048], decoded[2048];
+        for (size_t i = 0; i < 2048; ++i) values[i] = (uint32_t)(i * 17);
+        if (zidl_cdr_writer_init(&w, ZIDL_XCDR1)) return 33;
+        int status = 0;
+        if (zidl_cdr_write_encap(&w) ||
+            zidl_cdr_write_u32_array(&w, NULL, 1) != ZIDL_CDR_INVALID ||
+            zidl_cdr_write_u32_array(&w, values, SIZE_MAX) != ZIDL_CDR_OVERFLOW ||
+            zidl_cdr_write_primitives(&w, values, 0, 3) != ZIDL_CDR_INVALID || w.len != 4 ||
+            zidl_cdr_write_u32_array(&w, values, 2048) ||
+            zidl_cdr_reader_init(&r, w.buf, w.len) ||
+            zidl_cdr_read_u32_array(&r, NULL, 1) != ZIDL_CDR_INVALID ||
+            zidl_cdr_read_u32_array(&r, decoded, SIZE_MAX) != ZIDL_CDR_TRUNCATED || r.pos != 4 ||
+            zidl_cdr_reader_limit(&r, w.len - 1, &limited) ||
+            zidl_cdr_read_u32_array(&limited, decoded, 2048) != ZIDL_CDR_TRUNCATED ||
+            limited.pos != 4 || zidl_cdr_read_u32_array(&r, decoded, 2048) ||
+            memcmp(values, decoded, sizeof values)) status = 34;
+        zidl_cdr_writer_deinit(&w);
+        if (status) return status;
+    }
+    {
+        const bool values[] = { true, false, true };
+        bool decoded[] = { false, true, false };
+        uint8_t bytes[7];
+        ZidlCdrWriter w;
+        ZidlCdrReader r;
+        zidl_cdr_writer_init_fixed(&w, bytes, sizeof bytes, ZIDL_XCDR1);
+        if (zidl_cdr_write_encap(&w) || zidl_cdr_write_bool_array(&w, values, 3) ||
+            bytes[4] != 1 || bytes[5] != 0 || bytes[6] != 1) return 35;
+        bytes[6] = 2;
+        if (zidl_cdr_reader_init(&r, bytes, w.len) ||
+            zidl_cdr_read_bool_array(&r, decoded, 3) != ZIDL_CDR_INVALID ||
+            r.pos != 4 || decoded[0] || !decoded[1] || decoded[2]) return 36;
+        bytes[6] = 1;
+        if (zidl_cdr_read_bool_array(&r, decoded, 3) || r.pos != 7 ||
+            !decoded[0] || decoded[1] || !decoded[2]) return 37;
+    }
     return 0;
 }
 
+#ifdef ZIDL_CDR_SHARED_CONSUMER
+/* Link this with a normal C compiler against the staged archive. */
 int main(void) {
     const int bulk_status = bulk_primitive_arrays();
     if (bulk_status) return bulk_status;
