@@ -850,6 +850,15 @@ pub const CdrReader = struct {
         try cursor.skipPrimitives(&self.pos, self.data.len, 4, count, elem_wire_size, if (self.xcdr_version == .xcdr1) 8 else 4);
     }
 
+    /// Reads a primitive sequence's length, checked before its elements are
+    /// allocated: within `bound` (null: unbounded), and with room for its
+    /// elements of `elem_wire_size` bytes (1/2/4/8) in the input left. Reads
+    /// only the length; on failure the reader is unchanged
+    /// (`primitives.readSequenceCount`).
+    pub fn readSequenceCount(self: *CdrReader, elem_wire_size: usize, bound: ?u32) !u32 {
+        return primitives.readSequenceCount(self.data, &self.pos, 4, if (self.xcdr_version == .xcdr1) 8 else 4, self.byte_order, elem_wire_size, bound);
+    }
+
     /// Read a contiguous primitive array body; failure leaves output unchanged.
     pub fn readPrimitiveArray(self: *CdrReader, comptime T: type, values: []T) !void {
         if (values.len == 0) return;
@@ -2293,5 +2302,70 @@ test "primitive array bodies agree with scalar writes and validate bools atomica
         try std.testing.expectError(error.InvalidBool, r.readPrimitiveArray(bool, &bools));
         try std.testing.expectEqual(before, r.pos);
         try std.testing.expectEqualSlices(bool, &.{ false, true }, &bools);
+    }
+}
+
+test "readSequenceCount checks a sequence's bound and body before reading only its length" {
+    const alloc = std.testing.allocator;
+    var bytes: std.ArrayListUnmanaged(u8) = .empty;
+    defer bytes.deinit(alloc);
+    const values = [_]u64{ 1, 0x0123456789abcdef, 3 };
+    inline for (.{ XcdrVersion.xcdr1, XcdrVersion.xcdr2 }) |version| {
+        bytes.clearRetainingCapacity();
+        var w = CdrWriter(version).init(&bytes, alloc);
+        try w.writeEncapHeader();
+        try w.writeU8(7); // the length and the elements are padded
+        try w.writeU32(values.len);
+        try w.writePrimitiveArray(u64, &values);
+
+        // Reads only the length; the elements follow at their alignment.
+        var r = try CdrReader.init(bytes.items);
+        _ = try r.readU8();
+        const at_length = r.pos;
+        try std.testing.expectEqual(@as(u32, values.len), try r.readSequenceCount(8, null));
+        try std.testing.expectEqual(at_length + 3 + 4, r.pos);
+        var out: [values.len]u64 = undefined;
+        try r.readPrimitiveArray(u64, &out);
+        try std.testing.expectEqualSlices(u64, &values, &out);
+        try std.testing.expectEqual(bytes.items.len, r.pos);
+
+        // A bound it is within; one it is over, unchanged.
+        r.pos = at_length;
+        try std.testing.expectEqual(@as(u32, values.len), try r.readSequenceCount(8, values.len));
+        r.pos = at_length;
+        try std.testing.expectError(error.SequenceTooLong, r.readSequenceCount(8, values.len - 1));
+        try std.testing.expectEqual(at_length, r.pos);
+
+        // Another width is refused before anything is read.
+        try std.testing.expectError(error.InvalidPrimitiveSize, r.readSequenceCount(3, null));
+        try std.testing.expectEqual(at_length, r.pos);
+
+        // Elements one byte short, or a length cut off: unchanged.
+        var short = try CdrReader.init(bytes.items[0 .. bytes.items.len - 1]);
+        _ = try short.readU8();
+        try std.testing.expectError(error.EndOfStream, short.readSequenceCount(8, null));
+        try std.testing.expectEqual(at_length, short.pos);
+        var cut = try CdrReader.init(bytes.items[0 .. at_length + 5]);
+        _ = try cut.readU8();
+        try std.testing.expectError(error.EndOfStream, cut.readSequenceCount(8, null));
+        try std.testing.expectEqual(at_length, cut.pos);
+
+        // A count whose elements cannot fit is refused, not overflowed.
+        bytes.clearRetainingCapacity();
+        w = CdrWriter(version).init(&bytes, alloc);
+        try w.writeEncapHeader();
+        try w.writeU32(0xffff_ffff);
+        r = try CdrReader.init(bytes.items);
+        try std.testing.expectError(error.EndOfStream, r.readSequenceCount(8, null));
+        try std.testing.expectEqual(@as(usize, 4), r.pos);
+
+        // An empty sequence needs no element bytes.
+        bytes.clearRetainingCapacity();
+        w = CdrWriter(version).init(&bytes, alloc);
+        try w.writeEncapHeader();
+        try w.writeU32(0);
+        r = try CdrReader.init(bytes.items);
+        try std.testing.expectEqual(@as(u32, 0), try r.readSequenceCount(8, 4));
+        try std.testing.expectEqual(bytes.items.len, r.pos);
     }
 }

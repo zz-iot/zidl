@@ -18,6 +18,12 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- The CDR C API gains `zidl_cdr_read_sequence_count`, and the native reader
+  `readSequenceCount`: they read a primitive sequence's length and check it against its
+  bound and the input left before the caller allocates its elements, leaving the reader
+  unchanged on failure, as generated code checks. Hand-written consumers such as ROS
+  typesupport then allocate and `zidl_cdr_read_primitives` the elements.
+
 - `--generate-zzdds-wrappers`: Zig generates `{Type}TypeSupport.register`, which registers
   every generated zzdds callback, the key projection included, under the type's IDL name,
   as C and C++'s `{Type}TypeSupport_register` do. Zig applications no longer assemble the

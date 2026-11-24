@@ -273,6 +273,38 @@ int bulk_primitive_arrays(void) {
         if (zidl_cdr_read_bool_array(&r, decoded, 3) || r.pos != 7 ||
             !decoded[0] || decoded[1] || !decoded[2]) return 37;
     }
+    for (int version = ZIDL_XCDR1; version <= ZIDL_XCDR2; ++version) {
+        for (int endian = ZIDL_CDR_LE; endian <= ZIDL_CDR_BE; ++endian) {
+            const double values[] = { 1.5, -2.25, 1e300 };
+            double decoded[3] = { 0 };
+            uint8_t bytes[64];
+            ZidlCdrWriter w;
+            ZidlCdrReader r, limited;
+            uint32_t count = 99;
+            zidl_cdr_writer_init_fixed(&w, bytes, sizeof bytes, version);
+            zidl_cdr_writer_set_byte_order(&w, endian);
+            /* After a u8, the length and the elements are padded. */
+            if (zidl_cdr_write_encap(&w) || zidl_cdr_write_u8(&w, 7) ||
+                zidl_cdr_write_u32(&w, 3) || zidl_cdr_write_f64_array(&w, values, 3) ||
+                zidl_cdr_reader_init(&r, bytes, w.len) || zidl_cdr_skip(&r, 1)) return 38;
+            const size_t at_length = r.pos;
+            /* Over the bound, another width or no count: INVALID, unchanged. */
+            if (zidl_cdr_read_sequence_count(&r, 8, 2, &count) != ZIDL_CDR_INVALID ||
+                zidl_cdr_read_sequence_count(&r, 3, 0, &count) != ZIDL_CDR_INVALID ||
+                zidl_cdr_read_sequence_count(&r, 8, 0, NULL) != ZIDL_CDR_INVALID ||
+                r.pos != at_length || count != 99) return 39;
+            /* Elements one byte short: TRUNCATED, unchanged. */
+            if (zidl_cdr_reader_limit(&r, w.len - 1, &limited) ||
+                zidl_cdr_read_sequence_count(&limited, 8, 0, &count) != ZIDL_CDR_TRUNCATED ||
+                limited.pos != at_length || count != 99) return 40;
+            /* Within the bound, it reads only the length, in the writer's byte
+             * order; the elements follow. */
+            if (zidl_cdr_read_sequence_count(&r, 8, 3, &count) || count != 3 ||
+                r.pos != at_length + 3 + 4 ||
+                zidl_cdr_read_primitives(&r, decoded, count, 8) || r.pos != w.len ||
+                memcmp(values, decoded, sizeof values) != 0) return 41;
+        }
+    }
     return 0;
 }
 

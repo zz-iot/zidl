@@ -541,6 +541,21 @@ int    zidl_cdr_skip      (ZidlCdrReader *r, size_t n);
 int    zidl_cdr_skip_primitives(ZidlCdrReader *r, uint32_t count, size_t elem_wire_size);
 
 /**
+ * Read a primitive sequence's length and check it before allocating its
+ * elements: against `bound` (0: unbounded), then that `*count` elements of
+ * `elem_wire_size` bytes (1/2/4/8), aligned as the cursor aligns them, fit
+ * in the input left -- so `*count * elem_wire_size` fits in `size_t` too.
+ * On success it consumes only the length, leaving the reader at the
+ * elements' padding for zidl_cdr_read_primitives (or an element loop), and
+ * sets `*count`. On failure the reader and `*count` are unchanged: INVALID
+ * for another width, a count over the bound or a NULL `count`; TRUNCATED if
+ * the length or the elements do not fit. A bad width is reported before
+ * anything is read, a count over the bound before its elements are checked.
+ */
+#define ZIDL_CDR_HAS_READ_SEQUENCE_COUNT 1
+int    zidl_cdr_read_sequence_count(ZidlCdrReader *r, size_t elem_wire_size, uint32_t bound, uint32_t *count);
+
+/**
  * Seek to an absolute position in the reader buffer.
  * Used by generated PL_CDR deserializers to advance to PlParam.end_pos
  * after processing (or skipping) a parameter value.
