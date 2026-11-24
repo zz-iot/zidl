@@ -32,6 +32,8 @@ struct zzdds_filter_value {
 };
 extern "C" DDS_ReturnCode_t DDS_DataReader_return_loan_raw(
     DDS_DataReader, DDS_OctetSeqSeq *, DDS_OctetSeq *, DDS_SampleInfoSeq *);
+extern "C" DDS_ReturnCode_t DDS_DataReader_return_loan_raw_failed(
+    DDS_DataReader, DDS_OctetSeqSeq *, DDS_OctetSeq *, DDS_SampleInfoSeq *, const DDS_OctetSeq *);
 
 // Templates accept the generated support signatures without pretending to
 // implement writer/type-registration behavior in this reader-only fixture.

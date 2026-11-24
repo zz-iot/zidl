@@ -5433,6 +5433,7 @@ const Generator = struct {
         }
         try self.ind();
         try self.write("    };\n");
+        try self.emitReaderDecodeHelper(type_name, needs_deinit);
         try self.write("\n");
 
         // take_next_sample
@@ -5499,27 +5500,46 @@ const Generator = struct {
             (if (non_destructive) "_zzdds.readNextSampleRaw" else "_zzdds.takeRaw");
         const prev_param = if (with_instance) ", prev: _zzdds.DDS.InstanceHandle_t" else "";
         const raw_arg = if (with_instance) "(self._dr, prev)" else "(self._dr)";
+        _ = needs_deinit;
         try self.write("\n");
         try self.ind();
         try self.print("    pub fn {s}(self: @This(), data_value: *{s}, sample_info: *_zzdds.DDS.SampleInfo{s}) !bool {{\n", .{ method_name, type_name, prev_param });
         try self.ind();
-        try self.print("        const _raw = {s}{s} orelse return false;\n", .{ raw_fn, raw_arg });
+        // A sample that does not decode is marked failed, so its loan's end
+        // gives it to the reader's policy (zzdds's two-step take): dropped,
+        // or kept undecodable.
+        try self.print("        var _raw = {s}{s} orelse return false;\n", .{ raw_fn, raw_arg });
         try self.ind();
         try self.write("        defer _raw.deinit();\n");
         try self.ind();
+        try self.write("        errdefer _raw.failed = true;\n");
+        try self.ind();
         try self.write("        sample_info.* = _raw.info;\n");
-        // A sample without valid data may carry its key hash alone, with no
-        // serialized key, as RTPS allows (DDSI-RTPS 2.5 §9.6.4.3): it
-        // decodes nothing, and `sample_info.instance_handle` names its
-        // instance.
         try self.ind();
-        try self.write("        if (!_raw.info.valid_data and _raw.data.len == 0) return true;\n");
+        try self.write("        try self._decode(data_value, _raw.data, _raw.info);\n");
         try self.ind();
-        try self.write("        var _r = try zidl_cdr.CdrReader.init(_raw.data);\n");
+        try self.write("        return true;\n");
         try self.ind();
-        try self.write("        if (_raw.info.valid_data) {\n");
+        try self.write("    }\n");
+    }
+
+    /// Emit the DataReader's `_decode`, which every take and read uses:
+    /// decodes `data` into `value`, or its key alone for a sample without
+    /// valid data. A sample without valid data may carry its key hash alone,
+    /// with no serialized key, as RTPS allows (DDSI-RTPS 2.5 §9.6.4.3): it
+    /// decodes nothing, and its info's `instance_handle` names its instance.
+    fn emitReaderDecodeHelper(self: *Generator, type_name: []const u8, needs_deinit: bool) !void {
+        try self.write("\n");
         try self.ind();
-        try self.print("            try {s}.deserializeInto(data_value, &_r, self._alloc);\n", .{type_name});
+        try self.print("    fn _decode(self: @This(), value: *{s}, data: []const u8, info: _zzdds.DDS.SampleInfo) !void {{\n", .{type_name});
+        try self.ind();
+        try self.write("        if (!info.valid_data and data.len == 0) return;\n");
+        try self.ind();
+        try self.write("        var _r = try zidl_cdr.CdrReader.init(data);\n");
+        try self.ind();
+        try self.write("        if (info.valid_data) {\n");
+        try self.ind();
+        try self.print("            try {s}.deserializeInto(value, &_r, self._alloc);\n", .{type_name});
         try self.ind();
         try self.write("        } else {\n");
         if (needs_deinit) {
@@ -5530,15 +5550,13 @@ const Generator = struct {
             try self.ind();
             try self.print("            try {s}.deserializeKeyInto(&_kv, &_r, self._alloc);\n", .{type_name});
             try self.ind();
-            try self.write("            data_value.* = _kv;\n");
+            try self.write("            value.* = _kv;\n");
         } else {
             try self.ind();
-            try self.print("            try {s}.deserializeKeyInto(data_value, &_r, self._alloc);\n", .{type_name});
+            try self.print("            try {s}.deserializeKeyInto(value, &_r, self._alloc);\n", .{type_name});
         }
         try self.ind();
         try self.write("        }\n");
-        try self.ind();
-        try self.write("        return true;\n");
         try self.ind();
         try self.write("    }\n");
     }
@@ -5564,7 +5582,7 @@ const Generator = struct {
         try self.ind();
         try self.write("        defer {\n");
         try self.ind();
-        try self.write("            for (_tmp.items) |_s| _s.deinit();\n");
+        try self.write("            for (_tmp.items) |*_s| _s.deinit();\n");
         try self.ind();
         try self.write("            _tmp.deinit(self._alloc);\n");
         try self.ind();
@@ -5595,7 +5613,7 @@ const Generator = struct {
         try self.ind();
         try self.write("        defer {\n");
         try self.ind();
-        try self.write("            for (_tmp.items) |_s| _s.deinit();\n");
+        try self.write("            for (_tmp.items) |*_s| _s.deinit();\n");
         try self.ind();
         try self.write("            _tmp.deinit(self._alloc);\n");
         try self.ind();
@@ -5624,7 +5642,7 @@ const Generator = struct {
         try self.ind();
         try self.write("        defer {\n");
         try self.ind();
-        try self.write("            for (_tmp.items) |_s| _s.deinit();\n");
+        try self.write("            for (_tmp.items) |*_s| _s.deinit();\n");
         try self.ind();
         try self.write("            _tmp.deinit(self._alloc);\n");
         try self.ind();
@@ -5639,6 +5657,11 @@ const Generator = struct {
     /// `out`. The three emitReader*Method functions above only differ in
     /// which raw op populates `_tmp` and that op's own parameter list.
     fn emitReaderDecodeTmpTail(self: *Generator, type_name: []const u8, needs_deinit: bool) !void {
+        _ = needs_deinit;
+        // The samples that decode are appended, in order; one that does not
+        // is marked failed, so its loan's end gives it to the reader's
+        // policy (zzdds's two-step take). The first failure is returned only
+        // when none decoded.
         try self.ind();
         try self.write("        if (_tmp.items.len == 0) return false;\n");
         try self.ind();
@@ -5646,48 +5669,27 @@ const Generator = struct {
         try self.ind();
         try self.write("        const _base = out.items.len;\n");
         try self.ind();
-        if (needs_deinit) {
-            try self.write("        errdefer {\n");
-            try self.ind();
-            try self.write("            for (out.items[_base..]) |*_sv| _sv.value.deinit(self._alloc);\n");
-            try self.ind();
-            try self.write("            out.items.len = _base;\n");
-            try self.ind();
-            try self.write("        }\n");
-        } else {
-            try self.write("        errdefer out.items.len = _base;\n");
-        }
+        try self.write("        var _first: ?anyerror = null;\n");
         try self.ind();
-        try self.write("        for (_tmp.items) |_s| {\n");
+        try self.write("        for (_tmp.items) |*_s| {\n");
         try self.ind();
         try self.print("            var _v: {s} = .{{}};\n", .{type_name});
-        // A sample without valid data and without a serialized key (its key
-        // hash alone, as RTPS allows) decodes nothing: see
-        // emitReaderSingleMethod.
         try self.ind();
-        try self.write("            if (_s.info.valid_data or _s.data.len != 0) {\n");
+        try self.write("            self._decode(&_v, _s.data, _s.info) catch |_e| {\n");
         try self.ind();
-        try self.write("                var _r = try zidl_cdr.CdrReader.init(_s.data);\n");
+        try self.write("                _s.failed = true;\n");
         try self.ind();
-        try self.write("                if (_s.info.valid_data) {\n");
+        try self.write("                if (_first == null) _first = _e;\n");
         try self.ind();
-        try self.print("                    try {s}.deserializeInto(&_v, &_r, self._alloc);\n", .{type_name});
+        try self.write("                continue;\n");
         try self.ind();
-        try self.write("                } else {\n");
-        if (needs_deinit) {
-            try self.ind();
-            try self.write("                    errdefer _v.deinit(self._alloc);\n");
-        }
-        try self.ind();
-        try self.print("                    try {s}.deserializeKeyInto(&_v, &_r, self._alloc);\n", .{type_name});
-        try self.ind();
-        try self.write("                }\n");
-        try self.ind();
-        try self.write("            }\n");
+        try self.write("            };\n");
         try self.ind();
         try self.write("            out.appendAssumeCapacity(.{ .value = _v, .info = _s.info });\n");
         try self.ind();
         try self.write("        }\n");
+        try self.ind();
+        try self.write("        if (out.items.len == _base) if (_first) |_e| return _e;\n");
         try self.ind();
         try self.write("        return true;\n");
         try self.ind();
@@ -11115,7 +11117,10 @@ test "zig_backend: typed DataWriter/DataReader for keyed @appendable struct" {
     try testing.expect(has(s, "info: _zzdds.DDS.SampleInfo,"));
     try testing.expect(has(s, "pub fn take_next_sample(self: @This(), data_value: *ShapeType, sample_info: *_zzdds.DDS.SampleInfo) !bool {"));
     try testing.expect(has(s, "_zzdds.takeRaw(self._dr)"));
-    try testing.expect(has(s, "ShapeType.deserializeInto(data_value, &_r, self._alloc)"));
+    try testing.expect(has(s, "ShapeType.deserializeInto(value, &_r, self._alloc)"));
+    // A sample that does not decode is ended failed (zzdds's two-step take).
+    try testing.expect(has(s, "errdefer _raw.failed = true;"));
+    try testing.expect(has(s, "try self._decode(data_value, _raw.data, _raw.info);"));
     // no SampledValue.deinit — ShapeType has no unbounded sequences
     try testing.expect(!has(s, "pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {"));
 }
@@ -11143,8 +11148,11 @@ test "zig_backend: typed DataReader gets take_w_condition/read_w_condition and t
     try testing.expect(has(s, "_zzdds.readNextInstanceWithReadConditionRaw(self._dr, cond, prev, &_tmp, max, self._alloc);"));
 
     // Shared decode tail must still fire for the new methods too (proves the
-    // emitReaderDecodeTmpTail extraction didn't drop anything).
-    try testing.expect(has(s, "ShapeType.deserializeInto(&_v, &_r, self._alloc)"));
+    // emitReaderDecodeTmpTail extraction didn't drop anything): a sample that
+    // does not decode is marked failed and the rest kept.
+    try testing.expect(has(s, "self._decode(&_v, _s.data, _s.info) catch |_e| {"));
+    try testing.expect(has(s, "_s.failed = true;"));
+    try testing.expect(has(s, "if (out.items.len == _base) if (_first) |_e| return _e;"));
 }
 
 test "zig_backend: typed DataWriter uses writeEncapHeader for @final struct" {

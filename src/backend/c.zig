@@ -2930,6 +2930,24 @@ const CdrGenerator = struct {
     /// comes back as PRECONDITION_NOT_MET with its size, and is read again
     /// into a buffer from zidl-cdr's allocator. A payload that does not
     /// decode is RETCODE_ERROR, so the result is always a DDS return code.
+    /// Releases a single-sample typed read's or take's loan. A sample that
+    /// failed to decode (`_rc` nonzero) is named to
+    /// DDS_DataReader_return_loan_raw_failed, whose reader drops or keeps it
+    /// (zzdds's two-step take); otherwise DDS_DataReader_return_loan_raw.
+    fn emitReturnLoanOne(self: *CdrGenerator, payloads: []const u8, hashes: []const u8, infos: []const u8) !void {
+        try self.writeI("if (_rc) {\n");
+        self.indent_depth += 1;
+        try self.writeI("uint8_t _flag = 1;\n");
+        try self.writeI("DDS_OctetSeq _failed = { 1, 1, &_flag, false };\n");
+        try self.printI("DDS_DataReader_return_loan_raw_failed(self->reader, {s}, {s}, {s}, &_failed);\n", .{ payloads, hashes, infos });
+        self.indent_depth -= 1;
+        try self.writeI("} else {\n");
+        self.indent_depth += 1;
+        try self.printI("DDS_DataReader_return_loan_raw(self->reader, {s}, {s}, {s});\n", .{ payloads, hashes, infos });
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+    }
+
     fn emitGetKeyValueBody(self: *CdrGenerator, s: *const ir.Struct, c_name: []const u8, get_fn: []const u8, entity: []const u8) !void {
         try self.writeI("uint8_t _stack[ZZDDS_KEY_VALUE_BUF_SIZE];\n");
         try self.writeI("uint8_t *_buf = _stack;\n");
@@ -3174,7 +3192,7 @@ const CdrGenerator = struct {
 
         try self.print("DDS_ReturnCode_t {s}DataReader_take({s}DataReader *self, {s} *out, DDS_SampleInfo *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
         try self.writeI("(void)buf; (void)buf_size;\n");
-        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 1, 0, NULL, false };\n");
+        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 0, 0, NULL, false };\n");
         try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
         try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
         try self.writeI("DDS_ReturnCode_t _n = DDS_DataReader_take_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, DDS_HANDLE_NIL, NULL, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, 1);\n");
@@ -3188,13 +3206,13 @@ const CdrGenerator = struct {
         try self.writeI("const bool _decode = info->valid_data || _c_payloads._buffer[0]._length != 0;\n");
         try self.writeI("int _rc = _decode ? zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length) : 0;\n");
         try self.printI("if (!_rc && _decode) _rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
-        try self.writeI("DDS_DataReader_return_loan_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos);\n");
+        try self.emitReturnLoanOne("&_c_payloads", "&_c_hashes", "&_c_infos");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
         try self.print("DDS_ReturnCode_t {s}DataReader_read({s}DataReader *self, {s} *out, DDS_SampleInfo *info, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
         try self.writeI("(void)buf; (void)buf_size;\n");
-        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 1, 0, NULL, false };\n");
+        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 0, 0, NULL, false };\n");
         try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
         try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
         try self.writeI("DDS_ReturnCode_t _n = DDS_DataReader_read_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, DDS_HANDLE_NIL, NULL, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, 1);\n");
@@ -3208,13 +3226,13 @@ const CdrGenerator = struct {
         try self.writeI("const bool _decode = info->valid_data || _c_payloads._buffer[0]._length != 0;\n");
         try self.writeI("int _rc = _decode ? zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length) : 0;\n");
         try self.printI("if (!_rc && _decode) _rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
-        try self.writeI("DDS_DataReader_return_loan_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos);\n");
+        try self.emitReturnLoanOne("&_c_payloads", "&_c_hashes", "&_c_infos");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
         try self.print("DDS_ReturnCode_t {s}DataReader_take_next_instance({s}DataReader *self, {s} *out, DDS_SampleInfo *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
         try self.writeI("(void)buf; (void)buf_size;\n");
-        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 1, 0, NULL, false };\n");
+        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 0, 0, NULL, false };\n");
         try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
         try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
         try self.writeI("DDS_ReturnCode_t _n = DDS_DataReader_take_next_instance_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, prev, NULL, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, 1);\n");
@@ -3228,13 +3246,13 @@ const CdrGenerator = struct {
         try self.writeI("const bool _decode = info->valid_data || _c_payloads._buffer[0]._length != 0;\n");
         try self.writeI("int _rc = _decode ? zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length) : 0;\n");
         try self.printI("if (!_rc && _decode) _rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
-        try self.writeI("DDS_DataReader_return_loan_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos);\n");
+        try self.emitReturnLoanOne("&_c_payloads", "&_c_hashes", "&_c_infos");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
         try self.print("DDS_ReturnCode_t {s}DataReader_read_next_instance({s}DataReader *self, {s} *out, DDS_SampleInfo *info, DDS_InstanceHandle_t prev, uint8_t *buf, size_t buf_size, size_t *cdr_len_out) {{\n", .{ c_name, c_name, c_name });
         try self.writeI("(void)buf; (void)buf_size;\n");
-        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 1, 0, NULL, false };\n");
+        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 0, 0, NULL, false };\n");
         try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
         try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
         try self.writeI("DDS_ReturnCode_t _n = DDS_DataReader_read_next_instance_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos, prev, NULL, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, 1);\n");
@@ -3248,7 +3266,7 @@ const CdrGenerator = struct {
         try self.writeI("const bool _decode = info->valid_data || _c_payloads._buffer[0]._length != 0;\n");
         try self.writeI("int _rc = _decode ? zidl_cdr_reader_init(&_r, _c_payloads._buffer[0]._buffer, _c_payloads._buffer[0]._length) : 0;\n");
         try self.printI("if (!_rc && _decode) _rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
-        try self.writeI("DDS_DataReader_return_loan_raw(self->reader, &_c_payloads, &_c_hashes, &_c_infos);\n");
+        try self.emitReturnLoanOne("&_c_payloads", "&_c_hashes", "&_c_infos");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
@@ -3263,87 +3281,79 @@ const CdrGenerator = struct {
         try self.writeI("return zzdds_lookup_instance_reader(self->reader, _hash);\n");
         try self.write("}\n\n");
 
-        // Decodes a copy-mode take_raw/read_raw-family batch result
+        // Decodes a loan-mode take_raw/read_raw-family batch result
         // (_payloads/_infos, already populated by the caller's own raw-op
-        // call) into values/infos, releasing the batch via
-        // DDS_DataReader_return_loan_raw either way -- the shared tail of
-        // every batch reader op below (take_n/read_n, take_instance/
-        // read_instance, take_w_condition/read_w_condition,
+        // call) into values/infos, then releases the batch -- the shared
+        // tail of every batch reader op below (take_n/read_n,
+        // take_instance/read_instance, take_w_condition/read_w_condition,
         // take_next_instance_w_condition/read_next_instance_w_condition),
         // which otherwise only differ in which raw op produces the batch.
+        // The samples that decode are returned, in order; those that do not
+        // are named to DDS_DataReader_return_loan_raw_failed, whose reader
+        // drops or keeps them (zzdds's two-step take). -1 when none decoded.
         try self.print("static int {s}DataReader_decode_batch({s}DataReader *self, DDS_OctetSeqSeq *_payloads, DDS_OctetSeq *_hashes, DDS_SampleInfoSeq *_infos, {s} *values, DDS_SampleInfo *infos) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("for (uint32_t _i = 0; _i < _payloads->_length; _i++) {\n");
+        try self.writeI("const uint32_t _len = _payloads->_length;\n");
+        try self.writeI("uint8_t *_failed = NULL;\n");
+        try self.writeI("int _n = 0;\n");
+        try self.writeI("for (uint32_t _i = 0; _i < _len; _i++) {\n");
         self.indent_depth += 1;
-        try self.writeI("infos[_i] = _infos->_buffer[_i];\n");
+        try self.writeI("const DDS_SampleInfo *_info = &_infos->_buffer[_i];\n");
         try self.writeI("ZidlCdrReader _r;\n");
         // Without valid data, only a key hash may come, with no serialized key
         // (DDSI-RTPS 2.5 §9.6.4.3): such a sample decodes nothing.
-        try self.writeI("const bool _decode = infos[_i].valid_data || _payloads->_buffer[_i]._length != 0;\n");
-        try self.writeI("int _rc = _decode ? zidl_cdr_reader_init(&_r, _payloads->_buffer[_i]._buffer, _payloads->_buffer[_i]._length) : 0;\n");
+        try self.writeI("const bool _decode = _info->valid_data || _payloads->_buffer[_i]._length != 0;\n");
         if (structHasSequenceFields(s)) {
-            // Zero values[_i] before attempting to decode into it, so that
-            // IF decoding fails partway through, every field it never
-            // reached is a well-defined NULL/empty state rather than
-            // whatever the caller's storage happened to contain -- the
-            // cleanup below calls _free() on this same (possibly partial)
-            // element, and _free() is only null/zero-safe per field, not
-            // safe against indeterminate/garbage pointers. Caught in review
-            // (Greptile): the caller is not guaranteed to have zero-
-            // initialized `values` itself, so relying on that would let a
-            // failed decode free a garbage pointer instead of cleanly
-            // reporting the error -- corruption/crash, not just a leak.
-            try self.writeI("memset(&values[_i], 0, sizeof(values[_i]));\n");
+            // Zeroed before decoding into it, so a decode that fails partway
+            // leaves every field it never reached NULL/empty, which _free()
+            // below handles: the caller's storage may be uninitialized.
+            try self.writeI("memset(&values[_n], 0, sizeof(values[_n]));\n");
         } else {
             // An element with nothing to decode is zeroed, its default
             // value, so a batch never returns the caller's uninitialized
             // storage as a sample (with sequence fields, it was above).
-            try self.writeI("if (!_decode) memset(&values[_i], 0, sizeof(values[_i]));\n");
+            try self.writeI("if (!_decode) memset(&values[_n], 0, sizeof(values[_n]));\n");
         }
-        try self.writeI("if (!_rc && _decode) _rc = infos[_i].valid_data ?\n");
+        try self.writeI("int _rc = _decode ? zidl_cdr_reader_init(&_r, _payloads->_buffer[_i]._buffer, _payloads->_buffer[_i]._length) : 0;\n");
+        try self.writeI("if (!_rc && _decode) _rc = _info->valid_data ?\n");
         self.indent_depth += 1;
-        try self.printI("{s}_deserialize(&_r, &values[_i]) :\n", .{c_name});
-        try self.printI("{s}_deserialize_key(&_r, &values[_i]);\n", .{c_name});
+        try self.printI("{s}_deserialize(&_r, &values[_n]) :\n", .{c_name});
+        try self.printI("{s}_deserialize_key(&_r, &values[_n]);\n", .{c_name});
         self.indent_depth -= 1;
+        try self.writeI("if (_rc) {\n");
+        self.indent_depth += 1;
         if (structHasSequenceFields(s)) {
             // Not gated on --c-no-free -- see emitGetFieldFromCdr's has_free
-            // comment: the prototype is always declared, the function always
-            // exists (locally or externally), so this cleanup call is always
-            // safe and always needed to avoid leaking every already-decoded
-            // element on this error path. `_j <= _i` (not `_j < _i`): the
-            // *current*, partially-decoded element must be freed too, not
-            // just the ones before it -- deserialize/deserialize_key can
-            // allocate several fields before a later one fails, leaving
-            // values[_i] holding real, now-orphaned allocations if skipped.
-            // Safe to call _free on values[_i] (partial or not) because it
-            // was zeroed immediately above, so every field _free() might
-            // touch is either a real allocation or a well-defined NULL/empty
-            // state -- never indeterminate caller-supplied memory.
-            try self.writeI("if (_rc) {\n");
-            self.indent_depth += 1;
-            try self.printI("for (uint32_t _j = 0; _j <= _i; _j++) {s}_free(&values[_j]);\n", .{c_name});
-            try self.writeI("DDS_DataReader_return_loan_raw(self->reader, _payloads, _hashes, _infos);\n");
-            try self.writeI("return _rc;\n");
-            self.indent_depth -= 1;
-            try self.writeI("}\n");
-        } else {
-            // --c-no-free (if set) suppressed {c_name}_free -- can't call it
-            // here either, so this CDR-error cleanup path leaks the samples
-            // already decoded into `values[0.._i)` rather than calling a
-            // function that no longer exists. Not zzdds's own combination
-            // (its dcps.idl/zzdds.idl generation never passes
-            // --generate-zzdds-wrappers), but kept correct rather than
-            // silently broken for anyone else who does combine them.
-            try self.writeI("if (_rc) { DDS_DataReader_return_loan_raw(self->reader, _payloads, _hashes, _infos); return _rc; }\n");
+            // comment: the function always exists. Frees what the failed
+            // decode allocated before it failed.
+            try self.printI("{s}_free(&values[_n]);\n", .{c_name});
         }
+        // Out of memory for the flags, the failures go unnamed: the reader
+        // then treats them as decoded and releases them.
+        try self.writeI("if (!_failed) { _failed = (uint8_t *)zidl_cdr_alloc(_len); if (_failed) memset(_failed, 0, _len); }\n");
+        try self.writeI("if (_failed) _failed[_i] = 1;\n");
+        try self.writeI("continue;\n");
         self.indent_depth -= 1;
         try self.writeI("}\n");
-        try self.writeI("int _n = (int)_payloads->_length;\n");
+        try self.writeI("infos[_n] = *_info;\n");
+        try self.writeI("_n++;\n");
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.writeI("if (_failed) {\n");
+        self.indent_depth += 1;
+        try self.writeI("DDS_OctetSeq _f = { _len, _len, _failed, false };\n");
+        try self.writeI("DDS_DataReader_return_loan_raw_failed(self->reader, _payloads, _hashes, _infos, &_f);\n");
+        try self.writeI("zidl_cdr_free(_failed, _len);\n");
+        self.indent_depth -= 1;
+        try self.writeI("} else {\n");
+        self.indent_depth += 1;
         try self.writeI("DDS_DataReader_return_loan_raw(self->reader, _payloads, _hashes, _infos);\n");
-        try self.writeI("return _n;\n");
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.writeI("return (_n == 0 && _len != 0) ? -1 : _n;\n");
         try self.write("}\n\n");
 
         try self.print("static int {s}DataReader_n_impl({s}DataReader *self, {s} *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is, int destructive) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 1, 0, NULL, false };\n");
+        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 0, 0, NULL, false };\n");
         try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
         try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
         try self.writeI("DDS_ReturnCode_t _rc0 = destructive ?\n");
@@ -3363,7 +3373,7 @@ const CdrGenerator = struct {
         try self.write("}\n\n");
 
         try self.print("static int {s}DataReader_n_instance_impl({s}DataReader *self, DDS_InstanceHandle_t instance_handle, {s} *values, DDS_SampleInfo *infos, int max, uint32_t ss, uint32_t vs, uint32_t is, int destructive) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 1, 0, NULL, false };\n");
+        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 0, 0, NULL, false };\n");
         try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
         try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
         try self.writeI("DDS_ReturnCode_t _rc0 = destructive ?\n");
@@ -3383,7 +3393,7 @@ const CdrGenerator = struct {
         try self.write("}\n\n");
 
         try self.print("static int {s}DataReader_w_condition_impl({s}DataReader *self, DDS_ReadCondition condition, {s} *values, DDS_SampleInfo *infos, int max, int destructive) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 1, 0, NULL, false };\n");
+        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 0, 0, NULL, false };\n");
         try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
         try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
         try self.writeI("DDS_ReturnCode_t _rc0 = destructive ?\n");
@@ -3403,7 +3413,7 @@ const CdrGenerator = struct {
         try self.write("}\n\n");
 
         try self.print("static int {s}DataReader_next_instance_w_condition_impl({s}DataReader *self, DDS_ReadCondition condition, DDS_InstanceHandle_t prev, {s} *values, DDS_SampleInfo *infos, int max, int destructive) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 1, 0, NULL, false };\n");
+        try self.writeI("DDS_OctetSeqSeq _c_payloads = { 0, 0, NULL, false };\n");
         try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
         try self.writeI("DDS_SampleInfoSeq _c_infos = {0};\n");
         try self.writeI("DDS_ReturnCode_t _rc0 = destructive ?\n");
@@ -3449,7 +3459,7 @@ const CdrGenerator = struct {
         try self.writeI("const bool _decode = info->valid_data || loan_payloads->_buffer[0]._length != 0;\n");
         try self.writeI("int _rc = _decode ? zidl_cdr_reader_init(&_r, loan_payloads->_buffer[0]._buffer, loan_payloads->_buffer[0]._length) : 0;\n");
         try self.printI("if (!_rc && _decode) _rc = info->valid_data ? {s}_deserialize(&_r, out) : {s}_deserialize_key(&_r, out);\n", .{ c_name, c_name });
-        try self.writeI("if (_rc) { DDS_OctetSeq _c_no_hashes = {0}; DDS_DataReader_return_loan_raw(self->reader, loan_payloads, &_c_no_hashes, loan_infos); }\n");
+        try self.writeI("if (_rc) { DDS_OctetSeq _c_no_hashes = {0}; uint8_t _flag = 1; DDS_OctetSeq _failed = { 1, 1, &_flag, false }; DDS_DataReader_return_loan_raw_failed(self->reader, loan_payloads, &_c_no_hashes, loan_infos, &_failed); }\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
@@ -6532,7 +6542,7 @@ test "c_backend cdr: A1 — namespaced struct uses IDL-scoped type name in TypeS
     try testing.expect(!has(s, "\"ovidds_Frame\""));
 }
 
-test "c_backend cdr: _n_impl cleans up partial samples when struct has sequence fields" {
+test "c_backend cdr: a batch frees a sample that fails to decode, zeroed before it decodes" {
     var out = try testGenCdrOpts(
         "@appendable struct Msg { @key long id; sequence<octet> data; };",
         "msg",
@@ -6540,17 +6550,12 @@ test "c_backend cdr: _n_impl cleans up partial samples when struct has sequence 
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // `_j <= _i`: the current, partially-decoded element must be freed too
-    // (a real leak Greptile caught in review — see the generator's own
-    // comment for the safety argument), not just the ones before it.
-    try testing.expect(has(s, "for (uint32_t _j = 0; _j <= _i; _j++) Msg_free(&values[_j]);"));
-    try testing.expect(has(s, "DDS_DataReader_return_loan_raw(self->reader, _payloads, _hashes, _infos);"));
-    // values[_i] must be zeroed *before* the decode attempt -- otherwise
-    // _free() above could touch indeterminate caller-supplied memory for
-    // whatever fields a partial decode never reached (a second real bug
-    // Greptile caught, on top of the leak: freeing the current element
-    // isn't safe unless it's known-zeroed first).
-    try testing.expect(has(s, "memset(&values[_i], 0, sizeof(values[_i]));"));
+    // Zeroed before the decode, so _free() never touches indeterminate
+    // caller-supplied memory for the fields a partial decode never reached.
+    try testing.expect(has(s, "memset(&values[_n], 0, sizeof(values[_n]));"));
+    try testing.expect(has(s, "Msg_free(&values[_n]);"));
+    // The decoded ones before it stay: they are returned.
+    try testing.expect(!has(s, "Msg_free(&values[_j])"));
 }
 
 test "c_backend cdr: _n_impl has no cleanup loop or memset when struct has no sequence fields" {
@@ -6561,15 +6566,14 @@ test "c_backend cdr: _n_impl has no cleanup loop or memset when struct has no se
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(!has(s, "Msg_free(&values[_j])"));
-    try testing.expect(has(s, "if (_rc) { DDS_DataReader_return_loan_raw(self->reader, _payloads, _hashes, _infos); return _rc; }"));
-    // No _free() is ever called on values[_i] for a struct with no
-    // sequence/string fields, so there's nothing for an unconditional
-    // memset to protect -- must not be emitted. Only an element with
-    // nothing to decode is zeroed, its default value.
-    const zeroing = std.mem.count(u8, s, "if (!_decode) memset(&values[_i], 0, sizeof(values[_i]));");
+    try testing.expect(!has(s, "Msg_free("));
+    // No _free() is ever called for a struct with no sequence/string
+    // fields, so there's nothing for an unconditional memset to protect --
+    // must not be emitted. Only an element with nothing to decode is
+    // zeroed, its default value.
+    const zeroing = std.mem.count(u8, s, "if (!_decode) memset(&values[_n], 0, sizeof(values[_n]));");
     try testing.expect(zeroing > 0);
-    try testing.expectEqual(zeroing, std.mem.count(u8, s, "memset(&values[_i]"));
+    try testing.expectEqual(zeroing, std.mem.count(u8, s, "memset(&values[_n]"));
 }
 
 test "c_backend cdr: zzdds_c omitted when no qualifying topic struct" {
@@ -6663,9 +6667,30 @@ test "c_backend cdr: _decode_batch cleans up partial samples when struct has seq
     );
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "for (uint32_t _j = 0; _j <= _i; _j++) Msg_free(&values[_j]);"));
     try testing.expect(has(s, "static int MsgDataReader_decode_batch(MsgDataReader *self, DDS_OctetSeqSeq *_payloads, DDS_OctetSeq *_hashes, DDS_SampleInfoSeq *_infos, Msg *values, DDS_SampleInfo *infos) {"));
-    try testing.expect(has(s, "memset(&values[_i], 0, sizeof(values[_i]));"));
+    try testing.expect(has(s, "memset(&values[_n], 0, sizeof(values[_n]));"));
+}
+
+test "c_backend cdr: typed reads and takes loan their samples and name those that fail to decode" {
+    var out = try testGenCdrOpts(
+        "@appendable struct Msg { @key long id; long value; };",
+        "msg",
+        .{ .generate_zzdds_wrappers = true },
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    // Loan mode (a zero maximum), never copy mode.
+    try testing.expect(!has(s, "DDS_OctetSeqSeq _c_payloads = { 1, 0, NULL, false };"));
+    try testing.expectEqual(@as(usize, 8), std.mem.count(u8, s, "DDS_OctetSeqSeq _c_payloads = { 0, 0, NULL, false };"));
+    // A single sample: named when its decode fails.
+    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, s, "DDS_DataReader_return_loan_raw_failed(self->reader, &_c_payloads, &_c_hashes, &_c_infos, &_failed);"));
+    // A batch: the decoded ones are returned in order, the rest named.
+    try testing.expect(has(s, "infos[_n] = *_info;"));
+    try testing.expect(has(s, "if (_failed) _failed[_i] = 1;"));
+    try testing.expect(has(s, "DDS_DataReader_return_loan_raw_failed(self->reader, _payloads, _hashes, _infos, &_f);"));
+    try testing.expect(has(s, "return (_n == 0 && _len != 0) ? -1 : _n;"));
+    // take_loaned too.
+    try testing.expect(has(s, "DDS_DataReader_return_loan_raw_failed(self->reader, loan_payloads, &_c_no_hashes, loan_infos, &_failed);"));
 }
 
 test "c_backend cdr: source file banner and includes" {

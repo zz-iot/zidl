@@ -1702,12 +1702,17 @@ const Generator = struct {
             std.mem.eql(u8, op_name, "read_raw") or
             std.mem.eql(u8, op_name, "take_next_instance_raw") or
             std.mem.eql(u8, op_name, "read_next_instance_raw") or
-            std.mem.eql(u8, op_name, "return_loan_raw");
+            std.mem.eql(u8, op_name, "return_loan_raw") or
+            std.mem.eql(u8, op_name, "return_loan_raw_failed");
     }
 
     fn emitReadLoanBufferInterfaceOp(self: *Generator, op: *const ir.Operation) !void {
         if (std.mem.eql(u8, op.name, "return_loan_raw")) {
             try self.write("int return_loan_raw(java.nio.ByteBuffer[] loanHandles);\n");
+            return;
+        }
+        if (std.mem.eql(u8, op.name, "return_loan_raw_failed")) {
+            try self.write("int return_loan_raw_failed(java.nio.ByteBuffer[] loanHandles, byte[] failed);\n");
             return;
         }
         try self.print("int {s}(", .{op.name});
@@ -4103,12 +4108,49 @@ fn emitZzddsDataReaderFile(
         \\        return new Sample(_data, info);
         \\    }}
         \\
-        \\    private static Sample[] fromPayloads(java.util.List<java.util.List<Byte>> payloads, java.util.List<{[si]s}> infos) {{
-        \\        Sample[] _out = new Sample[payloads.size()];
-        \\        for (int _i = 0; _i < payloads.size(); _i++) {{
-        \\            _out[_i] = fromPayload(fromByteList(payloads.get(_i)), infos.get(_i));
+        \\    /** Decodes a loan's one sample, then releases the loan, whatever is
+        \\     * thrown. A sample that does not decode is named to
+        \\     * return_loan_raw_failed, whose reader drops or keeps it (zzdds's
+        \\     * two-step take), and its exception rethrown. */
+        \\    private Sample decodeOne(java.util.List<java.util.List<Byte>> payloads, java.util.List<{[si]s}> infos, java.nio.ByteBuffer[] loan) {{
+        \\        byte[] _failed = null;
+        \\        try {{
+        \\            return fromPayload(fromByteList(payloads.get(0)), infos.get(0));
+        \\        }} catch (RuntimeException _e) {{
+        \\            _failed = new byte[] {{ 1 }};
+        \\            throw _e;
+        \\        }} finally {{
+        \\            if (_failed != null) reader.return_loan_raw_failed(loan, _failed);
+        \\            else reader.return_loan_raw(loan);
         \\        }}
-        \\        return _out;
+        \\    }}
+        \\
+        \\    /** Decodes a loan's samples, then releases the loan, whatever is
+        \\     * thrown: those that decode are returned, in order, and those that do
+        \\     * not are named to return_loan_raw_failed, whose reader drops or keeps
+        \\     * them (zzdds's two-step take). Throws the first failure only when
+        \\     * none decoded. */
+        \\    private Sample[] decodeBatch(java.util.List<java.util.List<Byte>> payloads, java.util.List<{[si]s}> infos, java.nio.ByteBuffer[] loan) {{
+        \\        java.util.List<Sample> _out = null;
+        \\        byte[] _failed = null;
+        \\        RuntimeException _first = null;
+        \\        try {{
+        \\            _out = new java.util.ArrayList<>();
+        \\            for (int _i = 0; _i < payloads.size(); _i++) {{
+        \\                try {{
+        \\                    _out.add(fromPayload(fromByteList(payloads.get(_i)), infos.get(_i)));
+        \\                }} catch (RuntimeException _e) {{
+        \\                    if (_failed == null) _failed = new byte[payloads.size()];
+        \\                    _failed[_i] = 1;
+        \\                    if (_first == null) _first = _e;
+        \\                }}
+        \\            }}
+        \\        }} finally {{
+        \\            if (_failed != null) reader.return_loan_raw_failed(loan, _failed);
+        \\            else reader.return_loan_raw(loan);
+        \\        }}
+        \\        if (_out.isEmpty() && _first != null) throw _first;
+        \\        return _out.toArray(new Sample[0]);
         \\    }}
         \\
         \\    /** {{@code maxSampleSize}} is accepted for source compatibility and is
@@ -4120,11 +4162,7 @@ fn emitZzddsDataReaderFile(
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.take_raw(_payloads, _hashes, _infos, _HANDLE_NIL, null, _ANY_STATE, _ANY_STATE, _ANY_STATE, 1, _loan);
         \\        if (_payloads.isEmpty()) return null;
-        \\        try {{
-        \\            return fromPayload(fromByteList(_payloads.get(0)), _infos.get(0));
-        \\        }} finally {{
-        \\            reader.return_loan_raw(_loan);
-        \\        }}
+        \\        return decodeOne(_payloads, _infos, _loan);
         \\    }}
         \\
         \\    public Sample read(int maxSampleSize) {{
@@ -4134,11 +4172,7 @@ fn emitZzddsDataReaderFile(
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.read_raw(_payloads, _hashes, _infos, _HANDLE_NIL, null, _ANY_STATE, _ANY_STATE, _ANY_STATE, 1, _loan);
         \\        if (_payloads.isEmpty()) return null;
-        \\        try {{
-        \\            return fromPayload(fromByteList(_payloads.get(0)), _infos.get(0));
-        \\        }} finally {{
-        \\            reader.return_loan_raw(_loan);
-        \\        }}
+        \\        return decodeOne(_payloads, _infos, _loan);
         \\    }}
         \\
         \\    public Sample take() {{ return take(65536); }}
@@ -4156,11 +4190,7 @@ fn emitZzddsDataReaderFile(
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.take_next_instance_raw(_payloads, _hashes, _infos, (int) prevHandle, null, _ANY_STATE, _ANY_STATE, _ANY_STATE, 1, _loan);
         \\        if (_payloads.isEmpty()) return null;
-        \\        try {{
-        \\            return fromPayload(fromByteList(_payloads.get(0)), _infos.get(0));
-        \\        }} finally {{
-        \\            reader.return_loan_raw(_loan);
-        \\        }}
+        \\        return decodeOne(_payloads, _infos, _loan);
         \\    }}
         \\
         \\    public Sample read_next_instance(long prevHandle, int maxSampleSize) {{
@@ -4170,11 +4200,7 @@ fn emitZzddsDataReaderFile(
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.read_next_instance_raw(_payloads, _hashes, _infos, (int) prevHandle, null, _ANY_STATE, _ANY_STATE, _ANY_STATE, 1, _loan);
         \\        if (_payloads.isEmpty()) return null;
-        \\        try {{
-        \\            return fromPayload(fromByteList(_payloads.get(0)), _infos.get(0));
-        \\        }} finally {{
-        \\            reader.return_loan_raw(_loan);
-        \\        }}
+        \\        return decodeOne(_payloads, _infos, _loan);
         \\    }}
         \\
         \\    public Sample take_next_instance(long prevHandle) {{ return take_next_instance(prevHandle, 65536); }}
@@ -4191,11 +4217,7 @@ fn emitZzddsDataReaderFile(
         \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.take_raw(_payloads, _hashes, _infos, _HANDLE_NIL, null, sampleStates, viewStates, instanceStates, max, _loan);
-        \\        try {{
-        \\            return fromPayloads(_payloads, _infos);
-        \\        }} finally {{
-        \\            reader.return_loan_raw(_loan);
-        \\        }}
+        \\        return decodeBatch(_payloads, _infos, _loan);
         \\    }}
         \\
         \\    public Sample[] read_n(int max, int sampleStates, int viewStates, int instanceStates) {{
@@ -4204,11 +4226,7 @@ fn emitZzddsDataReaderFile(
         \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.read_raw(_payloads, _hashes, _infos, _HANDLE_NIL, null, sampleStates, viewStates, instanceStates, max, _loan);
-        \\        try {{
-        \\            return fromPayloads(_payloads, _infos);
-        \\        }} finally {{
-        \\            reader.return_loan_raw(_loan);
-        \\        }}
+        \\        return decodeBatch(_payloads, _infos, _loan);
         \\    }}
         \\
         \\    /** Batch take/read restricted to one instance, same semantics as
@@ -4221,11 +4239,7 @@ fn emitZzddsDataReaderFile(
         \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.take_raw(_payloads, _hashes, _infos, (int) instanceHandle, null, sampleStates, viewStates, instanceStates, max, _loan);
-        \\        try {{
-        \\            return fromPayloads(_payloads, _infos);
-        \\        }} finally {{
-        \\            reader.return_loan_raw(_loan);
-        \\        }}
+        \\        return decodeBatch(_payloads, _infos, _loan);
         \\    }}
         \\
         \\    public Sample[] read_instance(long instanceHandle, int max, int sampleStates, int viewStates, int instanceStates) {{
@@ -4234,11 +4248,7 @@ fn emitZzddsDataReaderFile(
         \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.read_raw(_payloads, _hashes, _infos, (int) instanceHandle, null, sampleStates, viewStates, instanceStates, max, _loan);
-        \\        try {{
-        \\            return fromPayloads(_payloads, _infos);
-        \\        }} finally {{
-        \\            reader.return_loan_raw(_loan);
-        \\        }}
+        \\        return decodeBatch(_payloads, _infos, _loan);
         \\    }}
         \\
         \\    /** Batch take/read restricted to a {{@code ReadCondition}} (or a
@@ -4253,11 +4263,7 @@ fn emitZzddsDataReaderFile(
         \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.take_raw(_payloads, _hashes, _infos, _HANDLE_NIL, condition, _ANY_STATE, _ANY_STATE, _ANY_STATE, max, _loan);
-        \\        try {{
-        \\            return fromPayloads(_payloads, _infos);
-        \\        }} finally {{
-        \\            reader.return_loan_raw(_loan);
-        \\        }}
+        \\        return decodeBatch(_payloads, _infos, _loan);
         \\    }}
         \\
         \\    public Sample[] read_w_condition({[rc]s} condition, int max) {{
@@ -4266,11 +4272,7 @@ fn emitZzddsDataReaderFile(
         \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.read_raw(_payloads, _hashes, _infos, _HANDLE_NIL, condition, _ANY_STATE, _ANY_STATE, _ANY_STATE, max, _loan);
-        \\        try {{
-        \\            return fromPayloads(_payloads, _infos);
-        \\        }} finally {{
-        \\            reader.return_loan_raw(_loan);
-        \\        }}
+        \\        return decodeBatch(_payloads, _infos, _loan);
         \\    }}
         \\
         \\    /** Batch take/read restricted to {{@code condition}} AND scoped to the
@@ -4283,11 +4285,7 @@ fn emitZzddsDataReaderFile(
         \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.take_next_instance_raw(_payloads, _hashes, _infos, (int) prev, condition, _ANY_STATE, _ANY_STATE, _ANY_STATE, max, _loan);
-        \\        try {{
-        \\            return fromPayloads(_payloads, _infos);
-        \\        }} finally {{
-        \\            reader.return_loan_raw(_loan);
-        \\        }}
+        \\        return decodeBatch(_payloads, _infos, _loan);
         \\    }}
         \\
         \\    public Sample[] read_next_instance_w_condition({[rc]s} condition, long prev, int max) {{
@@ -4296,11 +4294,7 @@ fn emitZzddsDataReaderFile(
         \\        java.util.List<{[si]s}> _infos = new java.util.ArrayList<>();
         \\        java.nio.ByteBuffer[] _loan = new java.nio.ByteBuffer[3];
         \\        reader.read_next_instance_raw(_payloads, _hashes, _infos, (int) prev, condition, _ANY_STATE, _ANY_STATE, _ANY_STATE, max, _loan);
-        \\        try {{
-        \\            return fromPayloads(_payloads, _infos);
-        \\        }} finally {{
-        \\            reader.return_loan_raw(_loan);
-        \\        }}
+        \\        return decodeBatch(_payloads, _infos, _loan);
         \\    }}
         \\
         \\    /** get_key_value (DDS 1.4 section 2.2.2.5.3.29): sets {{@code key_holder}}'s
@@ -5254,6 +5248,13 @@ const ImplFileGenerator = struct {
             );
             return;
         }
+        if (std.mem.eql(u8, op.name, "return_loan_raw_failed")) {
+            try self.print(
+                "    public int {s}(java.nio.ByteBuffer[] loanHandles, byte[] failed) {{\n        {s}{s}return n_{s}(ptr_, loanHandles, failed);\n    }}\n",
+                .{ op.name, guard, nl, op.name },
+            );
+            return;
+        }
         try self.print("    public int {s}(", .{op.name});
         for (op.params) |p| {
             const pt = try self.typeRefToJava(p.type_ref);
@@ -5268,6 +5269,10 @@ const ImplFileGenerator = struct {
     fn emitReadLoanBufferNativeDecl(self: *ImplFileGenerator, op: *const ir.Operation) !void {
         if (std.mem.eql(u8, op.name, "return_loan_raw")) {
             try self.print("    private native int n_{s}(long ptr, java.nio.ByteBuffer[] loanHandles);\n", .{op.name});
+            return;
+        }
+        if (std.mem.eql(u8, op.name, "return_loan_raw_failed")) {
+            try self.print("    private native int n_{s}(long ptr, java.nio.ByteBuffer[] loanHandles, byte[] failed);\n", .{op.name});
             return;
         }
         try self.print("    private native int n_{s}(long ptr, ", .{op.name});
@@ -7268,10 +7273,33 @@ const JniBridgeGenerator = struct {
         const cc = call_target.c_name;
         const se = call_target.self_expr;
 
-        if (std.mem.eql(u8, op.name, "return_loan_raw")) {
+        const is_failed = std.mem.eql(u8, op.name, "return_loan_raw_failed");
+        if (is_failed or std.mem.eql(u8, op.name, "return_loan_raw")) {
+            const call = if (is_failed) try std.fmt.allocPrint(
+                self.alloc,
+                "    DDS_OctetSeq _c_failed; memset(&_c_failed, 0, sizeof(_c_failed));\n" ++
+                    "    jbyte *_fb = NULL;\n" ++
+                    "    if (failed != NULL) {{\n" ++
+                    "        _fb = (*env)->GetByteArrayElements(env, failed, NULL);\n" ++
+                    // Out of memory for the flags, the failures go unnamed, as
+                    // in C: the loan still goes back, every sample as decoded.
+                    "        if (_fb == NULL) return (jint){[c]s}_return_loan_raw({[se]s}, &_c_cdr_payloads, &_c_key_hashes, &_c_sample_infos);\n" ++
+                    "        _c_failed._buffer = (uint8_t *)_fb;\n" ++
+                    "        _c_failed._length = _c_failed._maximum = (uint32_t)(*env)->GetArrayLength(env, failed);\n" ++
+                    "    }}\n" ++
+                    "    jint _rc = (jint){[c]s}_return_loan_raw_failed({[se]s}, &_c_cdr_payloads, &_c_key_hashes, &_c_sample_infos, &_c_failed);\n" ++
+                    "    if (_fb != NULL) (*env)->ReleaseByteArrayElements(env, failed, _fb, JNI_ABORT);\n" ++
+                    "    return _rc;\n",
+                .{ .c = cc, .se = se },
+            ) else try std.fmt.allocPrint(
+                self.alloc,
+                "    return (jint){[c]s}_return_loan_raw({[se]s}, &_c_cdr_payloads, &_c_key_hashes, &_c_sample_infos);\n",
+                .{ .c = cc, .se = se },
+            );
+            defer self.alloc.free(call);
             try self.print(
                 "JNIEXPORT jint JNICALL {[fname]s}(\n" ++
-                    "    JNIEnv *env, jobject self, jlong ptr, jobjectArray loanHandles)\n" ++
+                    "    JNIEnv *env, jobject self, jlong ptr, jobjectArray loanHandles{[fparam]s})\n" ++
                     "{{\n" ++
                     "    (void)self;\n" ++
                     "    DDS_OctetSeqSeq _c_cdr_payloads; memset(&_c_cdr_payloads, 0, sizeof(_c_cdr_payloads));\n" ++
@@ -7297,9 +7325,13 @@ const JniBridgeGenerator = struct {
                     "            if (_ib != NULL && _ic >= 0) {{ _c_sample_infos._buffer = (DDS_SampleInfo *)_ib; _c_sample_infos._maximum = (uint32_t)(_ic / sizeof(DDS_SampleInfo)); _c_sample_infos._length = _c_sample_infos._maximum; }}\n" ++
                     "        }}\n" ++
                     "    }}\n" ++
-                    "    return (jint){[c]s}_return_loan_raw({[se]s}, &_c_cdr_payloads, &_c_key_hashes, &_c_sample_infos);\n" ++
+                    "{[call]s}" ++
                     "}}\n\n",
-                .{ .fname = jni_fn, .c = cc, .se = se },
+                .{
+                    .fname = jni_fn,
+                    .fparam = if (is_failed) ", jbyteArray failed" else "",
+                    .call = call,
+                },
             );
             return;
         }
@@ -9924,7 +9956,10 @@ test "java: --generate-zzdds-wrappers DataReader gets take_next_instance/read_ne
     try testing.expect(std.mem.indexOf(u8, r, "reader.take_raw(_payloads, _hashes, _infos, _HANDLE_NIL, null, sampleStates, viewStates, instanceStates, max, _loan)") != null);
     try testing.expect(std.mem.indexOf(u8, r, "public Sample[] read_n(int max, int sampleStates, int viewStates, int instanceStates) {") != null);
     try testing.expect(std.mem.indexOf(u8, r, "reader.read_raw(_payloads, _hashes, _infos, _HANDLE_NIL, null, sampleStates, viewStates, instanceStates, max, _loan)") != null);
-    try testing.expect(std.mem.indexOf(u8, r, "private static Sample[] fromPayloads(java.util.List<java.util.List<Byte>> payloads, java.util.List<Dcps.DDS.SampleInfo> infos) {") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "private Sample[] decodeBatch(java.util.List<java.util.List<Byte>> payloads, java.util.List<Dcps.DDS.SampleInfo> infos, java.nio.ByteBuffer[] loan) {") != null);
+    // Released in a finally, whatever is thrown, naming any that failed.
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, r, "} finally {\n            if (_failed != null) reader.return_loan_raw_failed(loan, _failed);"));
+    try testing.expect(std.mem.indexOf(u8, r, "_failed = new byte[] { 1 };") != null);
     // A sample without valid data and without a serialized key (its key hash
     // alone) decodes nothing, before the payload's encapsulation is read.
     const no_key = std.mem.indexOf(u8, r, "if (!_valid && payload.length == 0) return new Sample(new Foo(), info);") orelse return error.TestExpectedGuard;
@@ -11779,6 +11814,7 @@ const raw_loan_fixture =
     \\    interface DataReader {
     \\        long take_raw(inout OctetSeqSeq cdr_payloads, inout OctetSeq key_hashes, inout SampleInfoSeq sample_infos, in long instance_handle, in ReadCondition a_condition, in unsigned long sample_states, in unsigned long view_states, in unsigned long instance_states, in long max_samples);
     \\        long return_loan_raw(inout OctetSeqSeq cdr_payloads, inout OctetSeq key_hashes, inout SampleInfoSeq sample_infos);
+    \\        long return_loan_raw_failed(inout OctetSeqSeq cdr_payloads, inout OctetSeq key_hashes, inout SampleInfoSeq sample_infos, in OctetSeq failed);
     \\    };
     \\};
     \\module Foo {
@@ -11901,6 +11937,26 @@ test "java: raw-loan read ops carry native loan identity through the impl and JN
         u8,
         jni,
         "return (jint)DDS_DataReader_return_loan_raw((void *)(intptr_t)ptr, &_c_cdr_payloads, &_c_key_hashes, &_c_sample_infos);",
+    ) != null);
+    // return_loan_raw_failed: the same three structs, plus the failure flags.
+    try testing.expect(std.mem.indexOf(u8, impl,
+        \\public int return_loan_raw_failed(java.nio.ByteBuffer[] loanHandles, byte[] failed) {
+        \\        return n_return_loan_raw_failed(ptr_, loanHandles, failed);
+    ) != null);
+    try testing.expect(std.mem.indexOf(u8, jni,
+        \\JNIEXPORT jint JNICALL Java_DataReaderImpl_n_1return_1loan_1raw_1failed(
+        \\    JNIEnv *env, jobject self, jlong ptr, jobjectArray loanHandles, jbyteArray failed)
+    ) != null);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        jni,
+        "jint _rc = (jint)DDS_DataReader_return_loan_raw_failed((void *)(intptr_t)ptr, &_c_cdr_payloads, &_c_key_hashes, &_c_sample_infos, &_c_failed);",
+    ) != null);
+    // Out of memory for the flags, the loan still goes back.
+    try testing.expect(std.mem.indexOf(
+        u8,
+        jni,
+        "if (_fb == NULL) return (jint)DDS_DataReader_return_loan_raw((void *)(intptr_t)ptr, &_c_cdr_payloads, &_c_key_hashes, &_c_sample_infos);",
     ) != null);
 
     // JNI: Foo::DataReader's take_raw uses the ordinary generic marshaling

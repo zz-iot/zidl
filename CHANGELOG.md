@@ -18,10 +18,19 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- `--generate-zzdds-wrappers`: typed reads and takes keep a sample that does not decode
+  rather than lose it, for zzdds's two-step take. They take in loan mode and decode from
+  the reader's own buffers, then name the samples that failed to the reader
+  (`return_loan_raw_failed`; in Zig, an `OwnedRawSample` ended with `failed` set), which
+  drops them with a warning by default or, opted in, keeps them for the application. A
+  single-sample read or take returns the decode error as before. A batch returns the
+  samples that decoded, in order, where before one failure failed the batch and lost it;
+  it fails only when none decoded. The C++ and Java DDS interfaces pass
+  `return_loan_raw_failed`'s loan by identity, as they do `return_loan_raw`'s. Needs a
+  zzdds with `return_loan_raw_failed`.
 - Add bulk CDR primitive and checked boolean array bodies to the native
   codec and C API, and use them for contiguous primitive collections in
   generated C, C++, and Zig codecs.
-
 - `--generate-zzdds-wrappers`: a typed read or take decodes nothing for a sample without
   valid data and without a serialized key, which a dispose or unregister may carry as its
   key hash alone (DDSI-RTPS 2.5 §9.6.4.3), and no longer fails on it: Zig with
