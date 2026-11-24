@@ -527,6 +527,59 @@ static inline int zidl_cdr_read_f64_array(ZidlCdrReader *r, double *values, size
     return zidl_cdr_read_primitives(r, values, count, sizeof(*values));
 }
 
+/** Zero-copy views of bulk primitive bodies (docs/design/bulk-cdr-zero-copy.md).
+ * A view points at the elements' wire bytes in the reader's buffer, in the
+ * stream's byte order, and is valid while that buffer is. CDR aligns elements
+ * relative to the payload, not to memory, so a view promises no memory
+ * alignment: use the elements in place through ZIDL_CDR_VIEW_AS, which checks,
+ * and otherwise copy them with zidl_cdr_view_copy. Octets always qualify.
+ *
+ * Typed access in place also needs storage the language lets you read as the
+ * element type: the reader's buffer must be allocated storage with no declared
+ * type (malloc, mmap, shared memory, a loaned sample), not, say, a declared
+ * `uint8_t bytes[N]`, and in C++ the element type must be implicit-lifetime.
+ * For any other buffer, use zidl_cdr_view_copy or memcpy from `data`. Octets
+ * may be read in place from any buffer.
+ */
+#define ZIDL_CDR_HAS_PRIMITIVE_VIEWS 1
+typedef struct ZidlCdrPrimitivesView {
+    const uint8_t *data;  /**< first element's wire bytes; NULL iff count == 0 */
+    size_t count;
+    size_t elem_size;     /**< 1, 2, 4 or 8 */
+    bool   swapped;       /**< wire byte order differs from the host's */
+} ZidlCdrPrimitivesView;
+
+/** Consumes `count` elements of `elem_size` bytes as zidl_cdr_read_primitives
+ * does (alignment, bounds and errors; reader and view unchanged on failure),
+ * but sets `*out` to point at them instead of copying them. A NULL `out` is
+ * INVALID. */
+int zidl_cdr_read_primitives_view(ZidlCdrReader *r, size_t count, size_t elem_size, ZidlCdrPrimitivesView *out);
+
+/** Copies a view's elements into `dest` (count * elem_size bytes, not
+ * overlapping the view) as host values, swapping them if needed. It does not
+ * touch the reader. INVALID for another elem_size or a NULL view, data or
+ * dest; a count of 0 copies nothing. */
+int zidl_cdr_view_copy(const ZidlCdrPrimitivesView *v, void *dest);
+
+/** The view's elements as host values in place: its `data` when they are
+ * `elem_size` bytes, unswapped and aligned to `align` in memory; otherwise
+ * NULL, also for an empty view, and the caller copies them. */
+static inline const void *zidl_cdr_view_native(const ZidlCdrPrimitivesView *v, size_t elem_size, size_t align) {
+    if (!v || !v->data || v->swapped || v->elem_size != elem_size) return NULL;
+    if (align > 1 && ((uintptr_t)v->data % align) != 0) return NULL;
+    return v->data;
+}
+#if defined(__cplusplus)
+#define ZIDL_CDR_VIEW_AS(v, T) \
+    (static_cast<const T *>(zidl_cdr_view_native((v), sizeof(T), alignof(T))))
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#define ZIDL_CDR_VIEW_AS(v, T) \
+    ((const T *)zidl_cdr_view_native((v), sizeof(T), _Alignof(T)))
+#else /* C99: a primitive's alignment never exceeds its size */
+#define ZIDL_CDR_VIEW_AS(v, T) \
+    ((const T *)zidl_cdr_view_native((v), sizeof(T), sizeof(T)))
+#endif
+
 /* Utility */
 size_t zidl_cdr_remaining(const ZidlCdrReader *r);
 int    zidl_cdr_skip      (ZidlCdrReader *r, size_t n);

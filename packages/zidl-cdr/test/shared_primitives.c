@@ -305,6 +305,89 @@ int bulk_primitive_arrays(void) {
                 memcmp(values, decoded, sizeof values) != 0) return 41;
         }
     }
+    {
+        const uint16_t probe = 1;
+        const bool host_le = *(const uint8_t *)&probe == 1;
+        for (int version = ZIDL_XCDR1; version <= ZIDL_XCDR2; ++version) {
+            for (int endian = ZIDL_CDR_LE; endian <= ZIDL_CDR_BE; ++endian) {
+                const double values[] = { 1.5, -2.25, 1e300 };
+                const uint8_t octets[] = { 9, 8, 7, 6, 5 };
+                double copied[3] = { 0 };
+                uint8_t bytes[96];
+                ZidlCdrWriter w;
+                ZidlCdrReader r, limited;
+                ZidlCdrPrimitivesView v = { bytes, 77, 77, true }, o;
+                zidl_cdr_writer_init_fixed(&w, bytes, sizeof bytes, version);
+                zidl_cdr_writer_set_byte_order(&w, endian);
+                if (zidl_cdr_write_encap(&w) || zidl_cdr_write_u8(&w, 7) ||
+                    zidl_cdr_write_f64_array(&w, values, 3) ||
+                    zidl_cdr_write_u8_array(&w, octets, 5) ||
+                    zidl_cdr_reader_init(&r, bytes, w.len) || zidl_cdr_skip(&r, 1)) return 42;
+                const size_t at = r.pos;
+                /* Another width, no view, or doubles cut short: the reader
+                 * and the view are unchanged. */
+                if (zidl_cdr_read_primitives_view(&r, 3, 3, &v) != ZIDL_CDR_INVALID ||
+                    zidl_cdr_read_primitives_view(&r, 3, 8, NULL) != ZIDL_CDR_INVALID ||
+                    zidl_cdr_reader_limit(&r, w.len - 6, &limited) ||
+                    zidl_cdr_read_primitives_view(&limited, 3, 8, &v) != ZIDL_CDR_TRUNCATED ||
+                    r.pos != at || limited.pos != at || v.data != bytes ||
+                    v.count != 77 || v.elem_size != 77 || !v.swapped) return 43;
+                /* The doubles, in the stream's byte order. */
+                if (zidl_cdr_read_primitives_view(&r, 3, 8, &v) || v.count != 3 ||
+                    v.elem_size != 8 || !v.data ||
+                    v.swapped != (host_le != (endian == ZIDL_CDR_LE))) return 44;
+                /* In place only unswapped and aligned in memory; a type of
+                 * another size never. The copy always gives the values.
+                 * `bytes` is declared storage, so the pointer is compared with
+                 * memcmp, which reads bytes, never dereferenced as doubles. */
+                const double *native = ZIDL_CDR_VIEW_AS(&v, double);
+                const bool usable = !v.swapped && ((uintptr_t)v.data % _Alignof(double)) == 0;
+                if ((native != NULL) != usable ||
+                    (native && (const void *)native != (const void *)v.data) ||
+                    (native && memcmp(native, values, sizeof values) != 0) ||
+                    ZIDL_CDR_VIEW_AS(&v, float) != NULL ||
+                    zidl_cdr_view_copy(&v, copied) ||
+                    memcmp(copied, values, sizeof values) != 0) return 45;
+                /* Octets are never swapped and always usable in place. */
+                if (zidl_cdr_read_primitives_view(&r, 5, 1, &o) || o.swapped ||
+                    ZIDL_CDR_VIEW_AS(&o, uint8_t) == NULL ||
+                    memcmp(o.data, octets, sizeof octets) != 0 || r.pos != w.len) return 46;
+                /* An empty view consumes and copies nothing; a view of
+                 * another width is refused. */
+                if (zidl_cdr_read_primitives_view(&r, 0, 8, &v) || v.data || v.count ||
+                    zidl_cdr_view_copy(&v, NULL) || r.pos != w.len) return 47;
+                v.count = 1;
+                v.elem_size = 3;
+                v.data = bytes;
+                if (zidl_cdr_view_copy(&v, copied) != ZIDL_CDR_INVALID ||
+                    zidl_cdr_view_copy(NULL, copied) != ZIDL_CDR_INVALID) return 48;
+            }
+        }
+    }
+    {
+        /* ZIDL_CDR_VIEW_AS on views built over a buffer of known alignment:
+         * a pointer exactly when the elements are the type's size, unswapped
+         * and aligned for it. Pointers are only compared, never read through. */
+        _Alignas(8) static const uint8_t storage[32];
+        ZidlCdrPrimitivesView v = { storage, 2, 8, false };
+        if ((const void *)ZIDL_CDR_VIEW_AS(&v, double) != (const void *)storage ||
+            (const void *)ZIDL_CDR_VIEW_AS(&v, uint64_t) != (const void *)storage ||
+            ZIDL_CDR_VIEW_AS(&v, float) != NULL) return 49;
+        v.swapped = true;
+        if (ZIDL_CDR_VIEW_AS(&v, double) != NULL) return 50;
+        v.swapped = false;
+        v.data = storage + 4;
+        if (_Alignof(double) == 8 && ZIDL_CDR_VIEW_AS(&v, double) != NULL) return 51;
+        v.elem_size = 2;
+        v.data = storage + 1;
+        if (ZIDL_CDR_VIEW_AS(&v, uint16_t) != NULL) return 52;
+        v.data = storage + 2;
+        if ((const void *)ZIDL_CDR_VIEW_AS(&v, uint16_t) != (const void *)(storage + 2)) return 53;
+        v.elem_size = 1;
+        v.data = storage + 3;
+        v.swapped = false;
+        if ((const void *)ZIDL_CDR_VIEW_AS(&v, uint8_t) != (const void *)(storage + 3)) return 54;
+    }
     return 0;
 }
 

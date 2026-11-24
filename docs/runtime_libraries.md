@@ -236,6 +236,17 @@ canonical 0 and 1 and reject any other wire value before committing a read.
 Before allocating a sequence's elements, `zidl_cdr_read_sequence_count` reads
 its length and checks it against the sequence's bound and the input left,
 leaving the reader unchanged if either fails.
+
+`zidl_cdr_read_primitives_view` consumes the elements as
+`zidl_cdr_read_primitives` does but points at them in the reader's buffer,
+in the stream's byte order, instead of copying them; the view is valid while
+that buffer is. CDR aligns elements relative to the payload rather than to
+memory, so `ZIDL_CDR_VIEW_AS(&view, T)` returns a `const T *` only when the
+elements are unswapped and aligned for `T` (always, for octets), and
+`zidl_cdr_view_copy` is the fallback. Reading in place as `T` also needs a
+buffer of allocated storage (malloc, mmap, a loaned sample) rather than one
+declared as another type; otherwise copy. See
+[`design/bulk-cdr-zero-copy.md`](design/bulk-cdr-zero-copy.md).
 See the public header for error codes, counting mode, and cursor guarantees.
 
 ### Version / Byte-Order Constants
