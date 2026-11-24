@@ -4131,10 +4131,11 @@ fn emitZzddsDataReaderFile(
         \\     * them (zzdds's two-step take). Throws the first failure only when
         \\     * none decoded. */
         \\    private Sample[] decodeBatch(java.util.List<java.util.List<Byte>> payloads, java.util.List<{[si]s}> infos, java.nio.ByteBuffer[] loan) {{
-        \\        java.util.List<Sample> _out = new java.util.ArrayList<>();
+        \\        java.util.List<Sample> _out = null;
         \\        byte[] _failed = null;
         \\        RuntimeException _first = null;
         \\        try {{
+        \\            _out = new java.util.ArrayList<>();
         \\            for (int _i = 0; _i < payloads.size(); _i++) {{
         \\                try {{
         \\                    _out.add(fromPayload(fromByteList(payloads.get(_i)), infos.get(_i)));
