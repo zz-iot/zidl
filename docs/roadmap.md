@@ -113,13 +113,11 @@ series and require a separate consumer-driven investigation. See
   and byte order. Then add typed bulk binary128 operations and matching
   generator support. Verify scalar/bulk wire parity and interoperability
   without assuming that C or C++ `long double` is binary128.
-- **Zero-copy bulk CDR views and reservations** — a read view returning a
-  pointer into the input for octet bodies (later, other widths, with a swap
-  flag), and a write reservation that lets a producer fill wire storage
-  directly (images, point clouds, loaned buffers). Define buffer lifetime,
-  pointer invalidation on writer growth, and how a writer commits the bytes
-  the caller filled before exposing either. From the #92 review; proposed
-  design in [`design/bulk-cdr-zero-copy.md`](design/bulk-cdr-zero-copy.md).
+- **Zero-copy bulk CDR follow-ups** — read views and write reservations of
+  primitive bodies are built ([`design/bulk-cdr-zero-copy.md`](design/bulk-cdr-zero-copy.md)).
+  Left, each needing its own design: `bool` views that check their bytes in
+  place, and generated-code integration, where a loaned sample exposes its
+  primitive sequence members as views (a binding-mapping change, not a CDR one).
 
 ### C++ backend
 

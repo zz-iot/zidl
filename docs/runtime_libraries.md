@@ -247,6 +247,14 @@ elements are unswapped and aligned for `T` (always, for octets), and
 buffer of allocated storage (malloc, mmap, a loaned sample) rather than one
 declared as another type; otherwise copy. See
 [`design/bulk-cdr-zero-copy.md`](design/bulk-cdr-zero-copy.md).
+
+`zidl_cdr_reserve_primitives` is the write side: it pads and advances the
+writer as `zidl_cdr_write_primitives` would but leaves the elements for the
+caller to fill in place, found again by offset through
+`zidl_cdr_reservation_data` after the writer grows. Fill every element with
+host values (they are not zeroed), then call `zidl_cdr_commit_primitives`,
+which puts them in the writer's byte order once. A counting writer counts
+them, so a write loan can be sized first and then filled directly.
 See the public header for error codes, counting mode, and cursor guarantees.
 
 ### Version / Byte-Order Constants

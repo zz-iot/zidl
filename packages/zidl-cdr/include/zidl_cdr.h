@@ -580,6 +580,58 @@ static inline const void *zidl_cdr_view_native(const ZidlCdrPrimitivesView *v, s
     ((const T *)zidl_cdr_view_native((v), sizeof(T), sizeof(T)))
 #endif
 
+/** Zero-copy reservations of bulk primitive bodies
+ * (docs/design/bulk-cdr-zero-copy.md). A reservation pads and advances the
+ * writer as zidl_cdr_write_primitives would, but leaves the elements for the
+ * caller to fill in place. It records an offset, not a pointer, so it
+ * survives a dynamic writer's growth:
+ *
+ *   ZidlCdrReservation res;
+ *   if ((rc = zidl_cdr_reserve_primitives(w, n, 4, &res))) return rc;
+ *   float *f = zidl_cdr_reservation_data(w, &res);   (NULL when counting)
+ *   if (f) { ...fill all n with host values, memcpy if unaligned... }
+ *   zidl_cdr_commit_primitives(w, &res);
+ *
+ * The elements are not initialized, not even zeroed: fill every one, or
+ * leftover memory goes onto the wire. Like a view's, the data promises no
+ * memory alignment, and typed stores need allocated storage (see the views
+ * above): a fixed writer over a declared array is filled with memcpy. Commit
+ * once filled, always, even where it does nothing.
+ */
+#define ZIDL_CDR_HAS_PRIMITIVE_RESERVATIONS 1
+typedef struct ZidlCdrReservation {
+    size_t offset;     /**< first element's offset in the writer's buffer */
+    size_t count;
+    size_t elem_size;  /**< 1, 2, 4 or 8 */
+    bool   swap;       /**< writer byte order differs from the host's: commit swaps */
+    bool   committed;  /**< set by zidl_cdr_commit_primitives */
+} ZidlCdrReservation;
+
+/** Reserves `count` elements of `elem_size` bytes, padding zeroed, with
+ * zidl_cdr_write_primitives' errors: INVALID for another width or a NULL
+ * `out`, OVERFLOW when a fixed writer has no room or the size overflows.
+ * All-or-nothing: on failure the writer and `*out` are unchanged. A counting
+ * writer counts the elements; a count of 0 reserves nothing. */
+int zidl_cdr_reserve_primitives(ZidlCdrWriter *w, size_t count, size_t elem_size, ZidlCdrReservation *out);
+
+/** Where to fill `res`: NULL for a counting writer, a count of 0, or a
+ * reservation not within what `w` has written. Valid until `w`'s next
+ * write, reserve or deinit, which may move a dynamic writer's buffer; a
+ * fixed writer's never moves. */
+static inline void *zidl_cdr_reservation_data(const ZidlCdrWriter *w, const ZidlCdrReservation *res) {
+    if (!w || !res || !w->buf || res->count == 0 || res->elem_size == 0) return NULL;
+    if (res->offset > w->len || res->count > (w->len - res->offset) / res->elem_size) return NULL;
+    return w->buf + res->offset;
+}
+
+/** Puts `res`'s filled elements in the writer's byte order, in place, and
+ * marks it committed. Required before the buffer is used. A no-op without
+ * `swap`, for a counting writer or a count of 0, and for a reservation
+ * already committed, so a repeated call cannot swap the bytes back. INVALID
+ * for a NULL writer or reservation, another width, or a reservation not
+ * within what the writer has written. */
+int zidl_cdr_commit_primitives(ZidlCdrWriter *w, ZidlCdrReservation *res);
+
 /* Utility */
 size_t zidl_cdr_remaining(const ZidlCdrReader *r);
 int    zidl_cdr_skip      (ZidlCdrReader *r, size_t n);

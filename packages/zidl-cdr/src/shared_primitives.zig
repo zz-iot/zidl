@@ -626,6 +626,49 @@ export fn zidl_cdr_view_copy(v: ?*const PrimitivesView, dest: ?*anyopaque) c_int
     return 0;
 }
 
+/// `ZidlCdrReservation`.
+pub const Reservation = extern struct {
+    offset: usize,
+    count: usize,
+    elem_size: usize,
+    swap: bool,
+    committed: bool,
+};
+
+export fn zidl_cdr_reserve_primitives(w: *Writer, count: usize, width: usize, out: ?*Reservation) c_int {
+    const dest = out orelse return -3;
+    if (!primitives.isArrayWidth(width)) return -3;
+    const swap = primitives.swaps(if (w.byte_order == 1) .big else .little, width);
+    if (count == 0) {
+        dest.* = .{ .offset = w.len, .count = 0, .elem_size = width, .swap = swap, .committed = false };
+        return 0;
+    }
+    const size = std.math.mul(usize, count, width) catch return -1;
+    const pad = primitives.arrayPadding(width, w.pos, if (w.xcdr_version == 2) 4 else 8);
+    const start = w.len;
+    var data: ?[*]u8 = null;
+    const rc = zidl_cdr_shared_reserve_array(w, pad, size, &data);
+    if (rc != 0) return rc;
+    dest.* = .{ .offset = start + pad, .count = count, .elem_size = width, .swap = swap, .committed = false };
+    return 0;
+}
+
+export fn zidl_cdr_commit_primitives(w: ?*Writer, res: ?*Reservation) c_int {
+    const writer = w orelse return -3;
+    const r = res orelse return -3;
+    if (r.committed) return 0;
+    if (!primitives.isArrayWidth(r.elem_size)) return -3;
+    if (r.count != 0) if (writer.buf) |buf| {
+        // A reservation must lie within what the writer has written.
+        const size = std.math.mul(usize, r.count, r.elem_size) catch return -3;
+        const end = std.math.add(usize, r.offset, size) catch return -3;
+        if (end > writer.len) return -3;
+        if (r.swap) primitives.swapInPlace(buf[r.offset..end], r.elem_size);
+    };
+    r.committed = true;
+    return 0;
+}
+
 export fn zidl_cdr_write_bool_array(w: *Writer, values: ?[*]const bool, count: usize) c_int {
     if (count == 0) return 0;
     if (values == null and (w.buf != null or w.grow_fn != null)) return -3;
