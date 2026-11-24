@@ -7281,7 +7281,9 @@ const JniBridgeGenerator = struct {
                     "    jbyte *_fb = NULL;\n" ++
                     "    if (failed != NULL) {{\n" ++
                     "        _fb = (*env)->GetByteArrayElements(env, failed, NULL);\n" ++
-                    "        if (_fb == NULL) return DDS_RETCODE_OUT_OF_RESOURCES;\n" ++
+                    // Out of memory for the flags, the failures go unnamed, as
+                    // in C: the loan still goes back, every sample as decoded.
+                    "        if (_fb == NULL) return (jint){[c]s}_return_loan_raw({[se]s}, &_c_cdr_payloads, &_c_key_hashes, &_c_sample_infos);\n" ++
                     "        _c_failed._buffer = (uint8_t *)_fb;\n" ++
                     "        _c_failed._length = _c_failed._maximum = (uint32_t)(*env)->GetArrayLength(env, failed);\n" ++
                     "    }}\n" ++
@@ -11949,6 +11951,12 @@ test "java: raw-loan read ops carry native loan identity through the impl and JN
         u8,
         jni,
         "jint _rc = (jint)DDS_DataReader_return_loan_raw_failed((void *)(intptr_t)ptr, &_c_cdr_payloads, &_c_key_hashes, &_c_sample_infos, &_c_failed);",
+    ) != null);
+    // Out of memory for the flags, the loan still goes back.
+    try testing.expect(std.mem.indexOf(
+        u8,
+        jni,
+        "if (_fb == NULL) return (jint)DDS_DataReader_return_loan_raw((void *)(intptr_t)ptr, &_c_cdr_payloads, &_c_key_hashes, &_c_sample_infos);",
     ) != null);
 
     // JNI: Foo::DataReader's take_raw uses the ordinary generic marshaling
