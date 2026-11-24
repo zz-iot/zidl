@@ -43,11 +43,17 @@ pub const WriteKind = enum { alive, dispose, unregister };
 pub const OwnedRawSample = struct {
     data: []const u8,
     info: DDS.SampleInfo,
+    /// Set by a typed reader whose decode of it failed: its end gives it to
+    /// the reader's policy (zzdds's two-step take).
+    failed: bool = false,
 
-    pub fn deinit(self: @This()) void {
-        _ = self;
+    pub fn deinit(self: *const @This()) void {
+        if (self.failed) failed_samples += 1;
     }
 };
+
+/// How many samples typed readers ended as failed.
+pub var failed_samples: usize = 0;
 
 pub fn writerUsesXcdr2(writer: DDS.DataWriter) bool {
     _ = writer;

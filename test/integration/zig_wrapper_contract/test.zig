@@ -87,6 +87,35 @@ test "wrapper contract: a sample without valid data and without a serialized key
     try testing.expect(!taken.items[0].info.valid_data);
 }
 
+test "wrapper contract: a sample that does not decode is ended failed, and a batch keeps the ones that do" {
+    const dr = fixture.ReadingDataReader.init(.{}, testing.allocator);
+    // Too short for its encapsulation header.
+    const malformed: mw.OwnedRawSample = .{ .data = &.{0x00}, .info = .{ .valid_data = true } };
+    const key_hash_only: mw.OwnedRawSample = .{ .data = &.{}, .info = .{ .valid_data = false } };
+    mw.failed_samples = 0;
+
+    mw.next_raw = malformed;
+    var data: fixture.Reading = .{};
+    defer data.deinit(testing.allocator);
+    var sample_info: mw.DDS.SampleInfo = undefined;
+    try testing.expect(std.meta.isError(dr.take_next_sample(&data, &sample_info)));
+    try testing.expectEqual(@as(usize, 1), mw.failed_samples);
+
+    var taken: std.ArrayListUnmanaged(fixture.ReadingDataReader.SampledValue) = .empty;
+    defer {
+        for (taken.items) |*s| s.value.deinit(testing.allocator);
+        taken.deinit(testing.allocator);
+    }
+    mw.next_batch = &.{ malformed, key_hash_only };
+    try testing.expect(try dr.take(&taken, -1, 0, 0, 0));
+    try testing.expectEqual(@as(usize, 1), taken.items.len);
+    try testing.expectEqual(@as(usize, 2), mw.failed_samples);
+    // None decoded: the failure is returned.
+    mw.next_batch = &.{malformed};
+    try testing.expect(std.meta.isError(dr.take(&taken, -1, 0, 0, 0)));
+    try testing.expectEqual(@as(usize, 1), taken.items.len);
+}
+
 test "deserializeSelected: extracts a non-leading @key, skips large non-key members" {
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(testing.allocator);

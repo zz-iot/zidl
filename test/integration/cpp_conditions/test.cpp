@@ -130,7 +130,7 @@ int32_t DDS_DataReader_##name(DDS_DataReader reader, DDS_OctetSeqSeq *payloads, 
     if (typed_mode) { \
         assert(expected_op == result && handle == expected_handle); \
         assert(ss == DDS_ANY_SAMPLE_STATE && vs == DDS_ANY_VIEW_STATE && is == DDS_ANY_INSTANCE_STATE && max == 8); \
-        assert(payloads->_maximum == 1 && payloads->_length == 0); \
+        assert(payloads->_maximum == 0 && payloads->_length == 0); \
         if (typed_result == DDS_RETCODE_OK) { \
             payloads->_length = 1; payloads->_buffer = &sample_payload; \
             infos->_length = 1; infos->_buffer = &sample_info; \
@@ -150,6 +150,10 @@ DDS_ReturnCode_t DDS_DataReader_return_loan_raw(DDS_DataReader reader, DDS_Octet
     assert(reader && typed_mode);
     ++loans;
     return DDS_RETCODE_OK;
+}
+// Typed reads and takes here decode what they are given: none fails.
+DDS_ReturnCode_t DDS_DataReader_return_loan_raw_failed(DDS_DataReader, DDS_OctetSeqSeq*, DDS_OctetSeq*, DDS_SampleInfoSeq*, const DDS_OctetSeq*) {
+    std::abort();
 }
 }
 
