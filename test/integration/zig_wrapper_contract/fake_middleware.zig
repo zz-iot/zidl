@@ -19,6 +19,7 @@ const std = @import("std");
 pub const DDS = struct {
     pub const DataWriter = struct { _tag: u8 = 0 };
     pub const DataReader = struct { _tag: u8 = 0 };
+    pub const DomainParticipant = struct { _tag: u8 = 0 };
     pub const InstanceHandle_t = u64;
     pub const Time_t = struct { sec: i32 = 0, nanosec: u32 = 0 };
     pub const ReadCondition = struct { _tag: u8 = 0 };
@@ -36,7 +37,41 @@ pub const dcps = struct {
             string: []const u8,
         };
     };
+
+    pub const KeyProjection = struct {
+        ctx: *anyopaque,
+        project: *const fn (ctx: *anyopaque, sample: []const u8, allocator: std.mem.Allocator) ?[]u8,
+    };
+
+    pub const TypeSupport = struct {
+        ctx: *anyopaque,
+        compute_key_hash: *const fn (ctx: *anyopaque, payload: []const u8) [16]u8,
+        compute_key_hash_key_only: ?*const fn (ctx: *anyopaque, payload: []const u8) [16]u8 = null,
+        has_key: bool = false,
+        get_field: ?*const fn (ctx: *anyopaque, payload: []const u8, field: []const u8, scratch: []u8) ?filter.FilterValue = null,
+        deinit: ?*const fn (ctx: *anyopaque) void = null,
+        key_projection: ?KeyProjection = null,
+    };
 };
+
+/// The last registration `registerTypeSupport` accepted, and its name.
+pub var registered: ?dcps.TypeSupport = null;
+pub var registered_name: [64]u8 = undefined;
+pub var registered_name_len: usize = 0;
+/// Makes `registerTypeSupport` refuse, consuming the support as it does.
+pub var refuse_registration = false;
+
+pub fn registerTypeSupport(participant: DDS.DomainParticipant, type_name: []const u8, ts: dcps.TypeSupport) bool {
+    _ = participant;
+    if (refuse_registration or type_name.len > registered_name.len) {
+        if (ts.deinit) |release| release(ts.ctx);
+        return false;
+    }
+    @memcpy(registered_name[0..type_name.len], type_name);
+    registered_name_len = type_name.len;
+    registered = ts;
+    return true;
+}
 
 pub const WriteKind = enum { alive, dispose, unregister };
 

@@ -268,3 +268,56 @@ test "a keyless topic retains its empty key while nested values can project" {
     try fixture.KeylessBridge.serializeKeyValue(&writer, value);
     try testing.expectEqualSlices(u8, &.{ 42, 0, 0, 0 }, bytes[0..writer.len]);
 }
+
+test "TypeSupport.register registers every generated callback under the IDL name and owns its context" {
+    const allocator = testing.allocator;
+    mw.registered = null;
+    try testing.expect(fixture.LabeledTypeSupport.register(.{}, null, allocator));
+    const ts = mw.registered.?;
+    defer if (ts.deinit) |release| release(ts.ctx);
+    try testing.expectEqualStrings("Labeled", mw.registered_name[0..mw.registered_name_len]);
+    try testing.expect(ts.has_key);
+    try testing.expect(ts.compute_key_hash_key_only != null);
+    try testing.expect(ts.get_field != null);
+
+    const value: fixture.Labeled = .{ .name = "probe-7", .reading = 21 };
+    var bytes = std.ArrayListUnmanaged(u8).empty;
+    defer bytes.deinit(allocator);
+    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&bytes, allocator);
+    try writer.writeEncapHeaderDelimited();
+    try fixture.Labeled.serialize(&writer, value);
+
+    // The key hash decodes the string key with the registration's allocator.
+    const want = fixture.Labeled.computeKeyHash(&value);
+    try testing.expectEqualSlices(u8, &want, &ts.compute_key_hash(ts.ctx, bytes.items));
+
+    const projection = ts.key_projection.?;
+    const key = projection.project(projection.ctx, bytes.items, allocator).?;
+    defer allocator.free(key);
+    const expected_key = try value.keyCdr(true, allocator);
+    defer allocator.free(expected_key);
+    try testing.expectEqualSlices(u8, expected_key, key);
+    try testing.expectEqualSlices(u8, &want, &ts.compute_key_hash_key_only.?(ts.ctx, key));
+
+    var scratch: [16]u8 = undefined;
+    try testing.expectEqual(@as(i64, 21), ts.get_field.?(ts.ctx, bytes.items, "reading", &scratch).?.int);
+}
+
+test "TypeSupport.register takes an explicit name and releases its context when refused" {
+    mw.registered = null;
+    mw.refuse_registration = true;
+    defer mw.refuse_registration = false;
+    // The testing allocator fails the test if the refused registration's
+    // context copy is not released.
+    try testing.expect(!fixture.LabeledTypeSupport.register(.{}, "custom::Labeled", testing.allocator));
+    try testing.expect(mw.registered == null);
+
+    mw.refuse_registration = false;
+    try testing.expect(fixture.ReadingTypeSupport.register(.{}, "custom::Reading", testing.allocator));
+    const ts = mw.registered.?;
+    defer ts.deinit.?(ts.ctx);
+    try testing.expectEqualStrings("custom::Reading", mw.registered_name[0..mw.registered_name_len]);
+
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expect(!fixture.ReadingTypeSupport.register(.{}, null, failing.allocator()));
+}

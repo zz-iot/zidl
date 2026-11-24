@@ -5285,6 +5285,72 @@ const Generator = struct {
 
     // ── Typed DataWriter / DataReader wrappers ────────────────────────────────
 
+    /// Emit `FooTypeSupport.register`, the Zig equivalent of the C and C++
+    /// backends' `{Type}TypeSupport_register`: it registers every generated
+    /// zzdds callback for `s` (key hash, key-only key hash, field getter,
+    /// key projection, `has_key`) under the type's IDL name, so that a Zig
+    /// application cannot leave one out by assembling the TypeSupport by
+    /// hand. The registration owns a copy of the caller's allocator as its
+    /// `ctx` (which `computeKeyHashFromCdr` decodes variable-length keys
+    /// with) and frees it in `deinit`. The projection's own `ctx` is unused
+    /// by `projectKeyFromCdr`, so it outlives the participant as zzdds
+    /// requires.
+    fn emitStructTypeSupport(self: *Generator, s: *const ir.Struct, type_name: []const u8) !void {
+        try self.ind();
+        try self.print("/// {s}'s zzdds type support: every generated callback, registered as\n", .{type_name});
+        try self.ind();
+        try self.print("/// C's `{s}TypeSupport_register` registers them.\n", .{type_name});
+        try self.ind();
+        try self.print("pub const {s}TypeSupport = struct {{\n", .{type_name});
+        try self.ind();
+        try self.print("    /// Registers the type under `type_name`, or its IDL name \"{s}\" when null.\n", .{s.qualified_name});
+        try self.ind();
+        try self.write("    /// `allocator` decodes variable-length key members; the registration keeps\n");
+        try self.ind();
+        try self.write("    /// a copy of it and releases the copy with itself. False when that copy\n");
+        try self.ind();
+        try self.write("    /// cannot be allocated or the participant refuses the registration.\n");
+        try self.ind();
+        try self.write("    pub fn register(participant: _zzdds.DDS.DomainParticipant, type_name: ?[]const u8, allocator: std.mem.Allocator) bool {\n");
+        try self.ind();
+        try self.write("        const ctx = allocator.create(std.mem.Allocator) catch return false;\n");
+        try self.ind();
+        try self.write("        ctx.* = allocator;\n");
+        try self.ind();
+        try self.print("        return _zzdds.registerTypeSupport(participant, type_name orelse \"{s}\", .{{\n", .{s.qualified_name});
+        try self.ind();
+        try self.write("            .ctx = ctx,\n");
+        try self.ind();
+        try self.print("            .compute_key_hash = {s}.computeKeyHashFromCdr,\n", .{type_name});
+        try self.ind();
+        try self.print("            .compute_key_hash_key_only = {s}.computeKeyHashFromCdrKeyOnly,\n", .{type_name});
+        try self.ind();
+        try self.print("            .has_key = {s}.has_key,\n", .{type_name});
+        try self.ind();
+        try self.print("            .get_field = {s}.getFieldFromCdr,\n", .{type_name});
+        try self.ind();
+        try self.write("            .deinit = release,\n");
+        try self.ind();
+        try self.write("            // A generated projection uses no context, so none need outlive the participant.\n");
+        try self.ind();
+        try self.print("            .key_projection = .{{ .ctx = undefined, .project = {s}.projectKeyFromCdr }},\n", .{type_name});
+        try self.ind();
+        try self.write("        });\n");
+        try self.ind();
+        try self.write("    }\n");
+        try self.write("\n");
+        try self.ind();
+        try self.write("    fn release(ctx: *anyopaque) void {\n");
+        try self.ind();
+        try self.write("        const allocator: *std.mem.Allocator = @ptrCast(@alignCast(ctx));\n");
+        try self.ind();
+        try self.write("        allocator.*.destroy(allocator);\n");
+        try self.ind();
+        try self.write("    }\n");
+        try self.ind();
+        try self.write("};\n\n");
+    }
+
     /// Emit `FooDataWriter` and `FooDataReader` structs for `s` when it is a
     /// usable Topic type (see isZzddsTopicStruct — not @mutable, not nested;
     /// keyed or keyless, both are spec-legitimate Topic types per DDS 1.4
@@ -5302,12 +5368,17 @@ const Generator = struct {
     ///   - `_dds.writeRaw(dw, kind, key_hash: [16]u8, payload: []const u8) !void`
     ///   - `_dds.takeRaw(dr) ?RawSample` — `.data`, `.instance_state`,
     ///     `.instance_handle`, `.deinit() void`
+    ///   - `_dds.DDS.DomainParticipant`, `_dds.dcps.TypeSupport` and
+    ///     `_dds.registerTypeSupport(participant, type_name, ts) bool`, which
+    ///     consumes `ts` (calls its `deinit`) on failure as on success
     fn emitStructTypedWrapper(self: *Generator, s: *const ir.Struct) !void {
         const pfx = self.opts.type_prefix;
         const type_name = try std.fmt.allocPrint(self.alloc, "{s}{s}", .{ pfx, s.name });
         defer self.alloc.free(type_name);
         const ext = s.annotations.extensibility;
         const needs_deinit = structNeedsSeqDeinit(s);
+
+        try self.emitStructTypeSupport(s, type_name);
 
         // ── DataWriter ────────────────────────────────────────────────────────
         try self.ind();
@@ -11312,6 +11383,27 @@ test "zig_backend: getFieldFromCdr converts bool/enum/float members correctly" {
     try testing.expect(has(s, "if (std.mem.eql(u8, field, \"active\")) return .{ .int = @intFromBool(_v.active) };"));
     try testing.expect(has(s, "if (std.mem.eql(u8, field, \"color\")) return .{ .int = @intCast(@backingInt(_v.color)) };"));
     try testing.expect(has(s, "if (std.mem.eql(u8, field, \"ratio\")) return .{ .float = @floatCast(_v.ratio) };"));
+}
+
+test "zig_backend: TypeSupport.register registers every generated callback under the IDL name" {
+    var out = try testGenOpts(
+        \\module sensors { @appendable struct Reading { @key long id; long value; }; };
+    , "reading", .{ .generate_zzdds_wrappers = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "pub const ReadingTypeSupport = struct {"));
+    try testing.expect(has(s, "pub fn register(participant: _zzdds.DDS.DomainParticipant, type_name: ?[]const u8, allocator: std.mem.Allocator) bool {"));
+    try testing.expect(has(s, "return _zzdds.registerTypeSupport(participant, type_name orelse \"sensors::Reading\", .{"));
+    try testing.expect(has(s, ".compute_key_hash = Reading.computeKeyHashFromCdr,"));
+    try testing.expect(has(s, ".compute_key_hash_key_only = Reading.computeKeyHashFromCdrKeyOnly,"));
+    try testing.expect(has(s, ".has_key = Reading.has_key,"));
+    try testing.expect(has(s, ".get_field = Reading.getFieldFromCdr,"));
+    try testing.expect(has(s, ".deinit = release,"));
+    try testing.expect(has(s, ".key_projection = .{ .ctx = undefined, .project = Reading.projectKeyFromCdr },"));
+
+    var plain = try testGenOpts("struct Reading { @key long id; };", "reading", .{});
+    defer plain.deinit(testing.allocator);
+    try testing.expect(!has(plain.items, "ReadingTypeSupport"));
 }
 
 test "zig_backend: getFieldFromCdr follows a typedef to an enum member" {
