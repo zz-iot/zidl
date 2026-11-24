@@ -107,3 +107,21 @@ pub fn readBools(data: []const u8, pos: *usize, values: []bool) error{ EndOfStre
     for (values, source) |*value, byte| value.* = byte != 0;
     pos.* = next;
 }
+
+/// Reads a primitive sequence's length and checks it before its elements are
+/// allocated: within `bound` (null: unbounded), and that its elements of
+/// `width` bytes (1, 2, 4 or 8), aligned as the cursor aligns them, fit in
+/// `data`, so `count * width` fits in `usize` too. On success `pos` is past
+/// the length only, before the elements' padding; on failure it is unchanged.
+/// An unsupported width fails before anything is read, a count over the
+/// bound before its body is checked.
+pub fn readSequenceCount(data: []const u8, pos: *usize, origin: usize, alignment_cap: usize, order: ByteOrder, width: usize, bound: ?u32) error{ EndOfStream, InvalidPrimitiveSize, SequenceTooLong }!u32 {
+    if (!isArrayWidth(width)) return error.InvalidPrimitiveSize;
+    var next = pos.*;
+    const count = try readUnsigned(u32, data, &next, origin, alignment_cap, order);
+    if (bound) |b| if (count > b) return error.SequenceTooLong;
+    var body = next;
+    try cursor.skipPrimitives(&body, data.len, origin, count, width, alignment_cap);
+    pos.* = next;
+    return count;
+}

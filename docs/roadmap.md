@@ -113,12 +113,6 @@ series and require a separate consumer-driven investigation. See
   and byte order. Then add typed bulk binary128 operations and matching
   generator support. Verify scalar/bulk wire parity and interoperability
   without assuming that C or C++ `long double` is binary128.
-- **Bounded sequence-count helper for the CDR C API** — a public
-  `zidl_cdr_read_sequence_count(r, elem_wire_size, bound, &count)` that reads a
-  sequence's length and checks it against its bound and the remaining input
-  before the caller allocates, so hand-written consumers (ROS typesupport) don't
-  each reimplement the check generated code makes. Specify what it consumes on
-  success and that it leaves the cursor unchanged on failure. From the #92 review.
 - **Zero-copy bulk CDR views and reservations** — a read view returning a
   pointer into the input for octet bodies (later, other widths, with a swap
   flag), and a write reservation that lets a producer fill wire storage

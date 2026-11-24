@@ -233,7 +233,9 @@ functions accept contiguous native primitive representations of width 1, 2,
 4, or 8 and use the cursor's byte order and XCDR alignment. They do not
 encode a length or collection framing. The checked bool functions encode
 canonical 0 and 1 and reject any other wire value before committing a read.
-Check a sequence's declared bound and available input before allocating.
+Before allocating a sequence's elements, `zidl_cdr_read_sequence_count` reads
+its length and checks it against the sequence's bound and the input left,
+leaving the reader unchanged if either fails.
 See the public header for error codes, counting mode, and cursor guarantees.
 
 ### Version / Byte-Order Constants

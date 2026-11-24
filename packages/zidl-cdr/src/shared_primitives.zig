@@ -140,6 +140,17 @@ export fn zidl_cdr_skip_primitives(r: *Reader, count: u32, wire_size: usize) c_i
     return 0;
 }
 
+export fn zidl_cdr_read_sequence_count(r: *Reader, elem_wire_size: usize, bound: u32, count: ?*u32) c_int {
+    const out = count orelse return -3;
+    const data = input(r) catch return -2;
+    const n = rt.cdr_primitives.readSequenceCount(data, &r.pos, 4, if (r.xcdr_version == 2) 4 else 8, if (r.byte_order == 0) .little else .big, elem_wire_size, if (bound == 0) null else bound) catch |err| return switch (err) {
+        error.EndOfStream => -2,
+        error.InvalidPrimitiveSize, error.SequenceTooLong => -3,
+    };
+    out.* = n;
+    return 0;
+}
+
 export fn zidl_cdr_seek_to(r: *Reader, target: usize) c_int {
     rt.cdr_cursor.seek(&r.pos, r.data_len, target) catch |err| return readStatus(err);
     return 0;
