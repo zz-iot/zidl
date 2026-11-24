@@ -134,6 +134,7 @@ pub const MyStruct = struct {
 
     // Typed zzdds wrappers for keyed, non-mutable topic structs
     // (requires --generate-zzdds-wrappers flag and a `dds` adapter module):
+    // pub const MyStructTypeSupport = struct { ... };
     // pub const MyStructDataWriter = struct { ... };
     // pub const MyStructDataReader = struct { ... };
 
@@ -156,7 +157,17 @@ pub fn takeRaw(dr: DDS.DataReader) ?TakenSample;
 ```
 
 `TakenSample` must expose `.data`, `.instance_state`, `.instance_handle`, and
-`.deinit()`. In zzdds, this adapter should wrap the hand-written DCPS runtime
+`.deinit()`.
+
+`MyStructTypeSupport.register(participant, type_name, allocator) bool` is the
+Zig counterpart of C's `MyStructTypeSupport_register`: it registers every
+generated callback (`computeKeyHashFromCdr`, `computeKeyHashFromCdrKeyOnly`,
+`getFieldFromCdr`, `projectKeyFromCdr` and `has_key`) under `type_name`, or the
+type's IDL name when it is null. The registration keeps a copy of `allocator`,
+which decodes variable-length keys, and releases it with itself. For it, the
+adapter also provides `DDS.DomainParticipant`, `dcps.TypeSupport` and
+`registerTypeSupport(participant, type_name, ts) bool`, which releases `ts`
+on failure as on success. In zzdds, this adapter should wrap the hand-written DCPS runtime
 (`DataWriterImpl.writeRaw` / `DataReaderImpl.takeRaw`) rather than the C ABI
 exports from `--zig-generate-c-api`.
 

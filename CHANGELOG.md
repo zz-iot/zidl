@@ -18,6 +18,11 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- `--generate-zzdds-wrappers`: Zig generates `{Type}TypeSupport.register`, which registers
+  every generated zzdds callback, the key projection included, under the type's IDL name,
+  as C and C++'s `{Type}TypeSupport_register` do. Zig applications no longer assemble the
+  TypeSupport by hand, where leaving out the key projection or field getter went unnoticed.
+
 - `--generate-zzdds-wrappers`: typed reads and takes keep a sample that does not decode
   rather than lose it, for zzdds's two-step take. They take in loan mode and decode from
   the reader's own buffers, then name the samples that failed to the reader

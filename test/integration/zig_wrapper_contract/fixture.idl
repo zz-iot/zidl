@@ -48,3 +48,11 @@ struct KeyInner { long ignored; @key long id; };
 struct KeyOuter { @key KeyInner inner; @key long tail; };
 
 struct KeylessBridge { KeyInner inner; };
+
+// A variable-length key: its generated TypeSupport's key hash decodes it
+// with the allocator the registration keeps.
+@appendable
+struct Labeled {
+    @key string name;
+    long reading;
+};
