@@ -586,6 +586,46 @@ export fn zidl_cdr_read_primitives(r: *Reader, values: ?*anyopaque, count: usize
     return 0;
 }
 
+/// `ZidlCdrPrimitivesView`.
+pub const PrimitivesView = extern struct {
+    data: ?[*]const u8,
+    count: usize,
+    elem_size: usize,
+    swapped: bool,
+};
+
+export fn zidl_cdr_read_primitives_view(r: *Reader, count: usize, width: usize, out: ?*PrimitivesView) c_int {
+    const dest = out orelse return -3;
+    if (!primitives.isArrayWidth(width)) return -3;
+    const data = input(r) catch return -2;
+    const wire: primitives.ByteOrder = if (r.byte_order == 0) .little else .big;
+    const view = primitives.viewArray(data, &r.pos, 4, if (r.xcdr_version == 2) 4 else 8, wire, width, count) catch |err| return switch (err) {
+        error.EndOfStream => -2,
+        error.InvalidPrimitiveSize => -3,
+    };
+    dest.* = .{
+        .data = if (count == 0) null else view.bytes.ptr,
+        .count = count,
+        .elem_size = width,
+        .swapped = view.swapped(),
+    };
+    return 0;
+}
+
+export fn zidl_cdr_view_copy(v: ?*const PrimitivesView, dest: ?*anyopaque) c_int {
+    const view = v orelse return -3;
+    if (!primitives.isArrayWidth(view.elem_size)) return -3;
+    if (view.count == 0) return 0;
+    const source = view.data orelse return -3;
+    const out: [*]u8 = @ptrCast(dest orelse return -3);
+    const size = std.math.mul(usize, view.count, view.elem_size) catch return -3;
+    // A swapped view's wire order is the host's opposite.
+    const host: primitives.ByteOrder = if (@import("builtin").cpu.arch.endian() == .little) .little else .big;
+    const wire: primitives.ByteOrder = if (view.swapped) (if (host == .little) .big else .little) else host;
+    primitives.copyArray(out[0..size], source[0..size], view.elem_size, wire);
+    return 0;
+}
+
 export fn zidl_cdr_write_bool_array(w: *Writer, values: ?[*]const bool, count: usize) c_int {
     if (count == 0) return 0;
     if (values == null and (w.buf != null or w.grow_fn != null)) return -3;

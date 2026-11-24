@@ -88,12 +88,66 @@ pub fn copyArray(dest: []u8, source: []const u8, width: usize, order: ByteOrder)
 
 pub fn readArray(data: []const u8, pos: *usize, origin: usize, cap: usize, order: ByteOrder, width: usize, count: usize, dest: [*]u8) error{EndOfStream}!void {
     if (count == 0) return;
+    const source = try takeArray(data, pos, origin, cap, width, count);
+    copyArray(dest[0..source.len], source, width, order);
+}
+
+/// Consumes `count` elements of `width` bytes at their alignment and returns
+/// their wire bytes; on failure `pos` is unchanged. `count` is not 0.
+fn takeArray(data: []const u8, pos: *usize, origin: usize, cap: usize, width: usize, count: usize) error{EndOfStream}![]const u8 {
     const size = @import("std").math.mul(usize, count, width) catch return error.EndOfStream;
     var next = pos.*;
     if (width > 1) try cursor.alignPosition(&next, data.len, origin, @min(width, cap));
     const source = try cursor.readSlice(data, &next, size);
-    copyArray(dest[0..size], source, width, order);
     pos.* = next;
+    return source;
+}
+
+const host_order: ByteOrder = if (@import("builtin").cpu.arch.endian() == .little) .little else .big;
+
+/// Primitives of one width, in place in the input and in its byte order
+/// (docs/design/bulk-cdr-zero-copy.md). Valid while the input is.
+pub const PrimitivesView = struct {
+    /// The elements' wire bytes: `count * width` of them.
+    bytes: []const u8 = &.{},
+    /// 1, 2, 4 or 8.
+    width: usize,
+    /// The input's byte order.
+    order: ByteOrder,
+
+    pub fn count(self: PrimitivesView) usize {
+        return self.bytes.len / self.width;
+    }
+
+    /// Whether the wire byte order differs from the host's. Never for one
+    /// byte elements.
+    pub fn swapped(self: PrimitivesView) bool {
+        return self.width > 1 and self.order != host_order;
+    }
+
+    /// The elements as `T` values in place, unless they need swapping or `T`
+    /// is not `width` bytes. Their memory alignment is not `T`'s: CDR aligns
+    /// them relative to the payload, not to memory.
+    pub fn asNative(self: PrimitivesView, comptime T: type) ?[]align(1) const T {
+        if (self.swapped() or @sizeOf(T) != self.width) return null;
+        const elements: [*]align(1) const T = @ptrCast(self.bytes.ptr);
+        return elements[0..self.count()];
+    }
+
+    /// Copies the elements into `dest`, `bytes.len` bytes long, as host
+    /// values, swapping them if needed.
+    pub fn copyTo(self: PrimitivesView, dest: []u8) void {
+        copyArray(dest[0..self.bytes.len], self.bytes, self.width, self.order);
+    }
+};
+
+/// Consumes `count` elements of `width` bytes (1, 2, 4 or 8) as `readArray`
+/// does, but returns a view of them in `data` rather than copying them. On
+/// failure `pos` is unchanged; an empty view consumes nothing.
+pub fn viewArray(data: []const u8, pos: *usize, origin: usize, cap: usize, order: ByteOrder, width: usize, count: usize) error{ EndOfStream, InvalidPrimitiveSize }!PrimitivesView {
+    if (!isArrayWidth(width)) return error.InvalidPrimitiveSize;
+    if (count == 0) return .{ .width = width, .order = order };
+    return .{ .bytes = try takeArray(data, pos, origin, cap, width, count), .width = width, .order = order };
 }
 
 pub fn writeBools(dest: []u8, values: []const bool) void {

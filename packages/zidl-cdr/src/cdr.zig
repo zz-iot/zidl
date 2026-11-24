@@ -868,6 +868,14 @@ pub const CdrReader = struct {
         try primitives.readArray(self.data, &self.pos, 4, if (self.xcdr_version == .xcdr1) 8 else 4, self.byte_order, primitives.nativeArrayWidth(T), values.len, std.mem.sliceAsBytes(values).ptr);
     }
 
+    /// Consumes `count` primitives of `width` bytes (1/2/4/8) as
+    /// `readPrimitiveArray` would, but returns a view of them in the input
+    /// rather than copying them; valid while the input is. Failure leaves
+    /// the reader unchanged.
+    pub fn viewPrimitives(self: *CdrReader, width: usize, count: usize) !primitives.PrimitivesView {
+        return primitives.viewArray(self.data, &self.pos, 4, if (self.xcdr_version == .xcdr1) 8 else 4, self.byte_order, width, count);
+    }
+
     // ── Primitive reads ───────────────────────────────────────────────────
 
     pub fn readU8(self: *CdrReader) !u8 {
@@ -2368,4 +2376,51 @@ test "readSequenceCount checks a sequence's bound and body before reading only i
         try std.testing.expectEqual(@as(u32, 0), try r.readSequenceCount(8, 4));
         try std.testing.expectEqual(bytes.items.len, r.pos);
     }
+}
+
+test "viewPrimitives views elements in place, in the stream's byte order" {
+    const host_le = @import("builtin").cpu.arch.endian() == .little;
+    const values = [_]u32{ 0x01020304, 0xa0b0c0d0, 7 };
+    var as_bytes: [12]u8 = undefined;
+
+    // Little endian, as the native writer writes.
+    const alloc = std.testing.allocator;
+    var le: std.ArrayListUnmanaged(u8) = .empty;
+    defer le.deinit(alloc);
+    var w = CdrWriter(.xcdr1).init(&le, alloc);
+    try w.writeEncapHeader();
+    try w.writeU8(7);
+    try w.writePrimitiveArray(u32, &values);
+    try w.writePrimitiveArray(u8, &.{ 9, 8 });
+    var r = try CdrReader.init(le.items);
+    _ = try r.readU8();
+    const at = r.pos;
+    // Failures leave the reader unchanged; an empty view consumes nothing.
+    try std.testing.expectError(error.EndOfStream, r.viewPrimitives(4, 4));
+    try std.testing.expectError(error.InvalidPrimitiveSize, r.viewPrimitives(3, 3));
+    try std.testing.expectEqual(@as(usize, 0), (try r.viewPrimitives(4, 0)).count());
+    try std.testing.expectEqual(at, r.pos);
+    const view = try r.viewPrimitives(4, values.len);
+    try std.testing.expectEqual(@as(usize, 3), view.count());
+    try std.testing.expectEqual(!host_le, view.swapped());
+    // Not aligned to u32 in memory: compared element by element.
+    if (view.asNative(u32)) |native| for (values, native) |want, got| try std.testing.expectEqual(want, got);
+    try std.testing.expect(view.asNative(u16) == null);
+    view.copyTo(&as_bytes);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&values), &as_bytes);
+    const octets = try r.viewPrimitives(1, 2);
+    try std.testing.expect(!octets.swapped());
+    try std.testing.expectEqualSlices(u8, &.{ 9, 8 }, octets.asNative(u8).?);
+    try std.testing.expectEqual(le.items.len, r.pos);
+
+    // Big endian (CDR_BE): the same values, swapped on a little-endian host.
+    const be = [_]u8{ 0x00, 0x00, 0x00, 0x00, 7, 0, 0, 0, 0x01, 0x02, 0x03, 0x04, 0xa0, 0xb0, 0xc0, 0xd0, 0, 0, 0, 7 };
+    r = try CdrReader.init(&be);
+    _ = try r.readU8();
+    const swapped = try r.viewPrimitives(4, values.len);
+    try std.testing.expectEqual(host_le, swapped.swapped());
+    try std.testing.expectEqual(host_le, swapped.asNative(u32) == null);
+    swapped.copyTo(&as_bytes);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&values), &as_bytes);
+    try std.testing.expectEqual(be.len, r.pos);
 }

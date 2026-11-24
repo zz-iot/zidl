@@ -18,6 +18,12 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Zero-copy read views of bulk primitive bodies: `zidl_cdr_read_primitives_view`
+  (natively `CdrReader.viewPrimitives`) points at the elements in the reader's buffer
+  instead of copying them, with `ZIDL_CDR_VIEW_AS` for checked in-place use and
+  `zidl_cdr_view_copy` as the fallback when the elements are byte-swapped or not aligned
+  in memory. Phase 1 of `docs/design/bulk-cdr-zero-copy.md`.
+
 - The CDR C API gains `zidl_cdr_read_sequence_count`, and the native reader
   `readSequenceCount`: they read a primitive sequence's length and check it against its
   bound and the input left before the caller allocates its elements, leaving the reader
