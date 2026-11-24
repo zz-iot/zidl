@@ -118,7 +118,8 @@ series and require a separate consumer-driven investigation. See
   flag), and a write reservation that lets a producer fill wire storage
   directly (images, point clouds, loaned buffers). Define buffer lifetime,
   pointer invalidation on writer growth, and how a writer commits the bytes
-  the caller filled before exposing either. From the #92 review.
+  the caller filled before exposing either. From the #92 review; proposed
+  design in [`design/bulk-cdr-zero-copy.md`](design/bulk-cdr-zero-copy.md).
 
 ### C++ backend
 
