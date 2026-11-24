@@ -363,3 +363,8 @@ const FixedAPI = struct {
 test "shared C ABI fixed decimal contract" {
     try @import("fixed_contract.zig").check(FixedAPI);
 }
+
+extern fn bulk_primitive_arrays() c_int;
+test "C bulk primitives match scalar CDR across representations and error cases" {
+    try testing.expectEqual(@as(c_int, 0), bulk_primitive_arrays());
+}

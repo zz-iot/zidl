@@ -135,13 +135,21 @@ pub const Sample = struct {
         try writer.writeString(value.str);
         try writer.writeString(value.bstr.slice());
         try writer.writeU32(value.nums._length);
-        if (value.nums._buffer) |_sb| {
-            for (_sb[0..value.nums._length]) |_se| {
-                try writer.writeI32(_se);
+        if (value.nums._length != 0) {
+            if (@hasDecl(@TypeOf(writer.*), "writePrimitiveArray")) {
+                try writer.writePrimitiveArray(i32, (value.nums._buffer orelse return error.InvalidSequence)[0..value.nums._length]);
+            } else {
+                for ((value.nums._buffer orelse return error.InvalidSequence)[0..value.nums._length]) |_bulk_element| {
+                    try writer.writeI32(_bulk_element);
+                }
             }
         }
-        for (value.arr) |_d0| {
-            try writer.writeI32(_d0);
+        if (@hasDecl(@TypeOf(writer.*), "writePrimitiveArray")) {
+            try writer.writePrimitiveArray(i32, value.arr[0..]);
+        } else {
+            for (value.arr[0..]) |_bulk_element| {
+                try writer.writeI32(_bulk_element);
+            }
         }
         try writer.writeU32(@backingInt(value.clr));
         try Point.serialize(writer, value.nested);
@@ -168,21 +176,16 @@ pub const Sample = struct {
         }
         {
             const _n = try reader.readU32();
-            out.nums._length = 0;
-            out.nums._maximum = _n;
+            var _bulk_probe = reader.*;
+            try _bulk_probe.skipPrimitives(_n, 4);
             if (_n > 0) {
                 const _buf = try allocator.alloc(i32, _n);
-                out.nums._buffer = _buf.ptr;
-                out.nums._release = true;
-                for (_buf) |*_se| {
-                    _se.* = try reader.readI32();
-                    out.nums._length += 1;
-                }
-            }
+                errdefer allocator.free(_buf);
+                try reader.readPrimitiveArray(i32, _buf);
+                out.nums = .{ ._length = _n, ._maximum = _n, ._buffer = _buf.ptr, ._release = true };
+            } else out.nums = .{};
         }
-        for (0..3) |_i0| {
-            out.arr[_i0] = try reader.readI32();
-        }
+        try reader.readPrimitiveArray(i32, out.arr[0..]);
         out.clr = @fromBackingInt(@intCast(try reader.readU32()));
         try Point.deserializeInto(&out.nested, reader, allocator);
     }

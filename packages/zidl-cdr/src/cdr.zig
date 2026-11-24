@@ -217,6 +217,25 @@ pub fn CdrWriter(comptime xcdr_version: XcdrVersion) type {
 
         // ── Primitive writes ──────────────────────────────────────────────
 
+        /// Write a contiguous primitive array body without its length or framing.
+        pub fn writePrimitiveArray(self: *Self, comptime T: type, values: []const T) !void {
+            if (values.len == 0) return;
+            const width = primitives.nativeArrayWidth(T);
+            const pad = primitives.arrayPadding(width, self.pos, if (xcdr_version == .xcdr1) 8 else 4);
+            const size = try std.math.mul(usize, values.len, width);
+            const total = try std.math.add(usize, pad, size);
+            const next = try std.math.add(usize, self.pos, total);
+            _ = try std.math.add(usize, self.buf.items.len, total);
+            const dest = try self.buf.addManyAsSlice(self.alloc, total);
+            @memset(dest[0..pad], 0);
+            if (T == bool) {
+                primitives.writeBools(dest[pad..], values);
+            } else {
+                primitives.copyArray(dest[pad..], std.mem.sliceAsBytes(values), width, .little);
+            }
+            self.pos = next;
+        }
+
         pub fn writeU8(self: *Self, v: u8) !void {
             try primitives.writeUnsigned(self, u8, v, self.pos, if (xcdr_version == .xcdr1) 8 else 4, .little);
         }
@@ -650,6 +669,9 @@ pub const PlCdrWriter = struct {
     pub fn writeBytes(self: *PlCdrWriter, data: []const u8) !void {
         try self.inner.writeBytes(data);
     }
+    pub fn writePrimitiveArray(self: *PlCdrWriter, comptime T: type, values: []const T) !void {
+        try self.inner.writePrimitiveArray(T, values);
+    }
     pub fn writeU8(self: *PlCdrWriter, v: u8) !void {
         try self.inner.writeU8(v);
     }
@@ -826,6 +848,15 @@ pub const CdrReader = struct {
     /// 1/2/4/8. The caller has already consumed any length prefix.
     pub fn skipPrimitives(self: *CdrReader, count: usize, elem_wire_size: usize) !void {
         try cursor.skipPrimitives(&self.pos, self.data.len, 4, count, elem_wire_size, if (self.xcdr_version == .xcdr1) 8 else 4);
+    }
+
+    /// Read a contiguous primitive array body; failure leaves output unchanged.
+    pub fn readPrimitiveArray(self: *CdrReader, comptime T: type, values: []T) !void {
+        if (values.len == 0) return;
+        if (T == bool) {
+            return primitives.readBools(self.data, &self.pos, values);
+        }
+        try primitives.readArray(self.data, &self.pos, 4, if (self.xcdr_version == .xcdr1) 8 else 4, self.byte_order, primitives.nativeArrayWidth(T), values.len, std.mem.sliceAsBytes(values).ptr);
     }
 
     // ── Primitive reads ───────────────────────────────────────────────────
@@ -2227,4 +2258,40 @@ test "mandatory XCDR2 framing rejects XCDR1 before touching the cursor" {
     var reader = try CdrReader.init(bytes.items);
     try std.testing.expectError(error.UnsupportedEncoding, reader.readMutableDheader());
     try std.testing.expectEqual(@as(usize, 4), reader.pos);
+}
+
+test "primitive array bodies agree with scalar writes and validate bools atomically" {
+    const alloc = std.testing.allocator;
+    var bulk: std.ArrayListUnmanaged(u8) = .empty;
+    defer bulk.deinit(alloc);
+    var scalar: std.ArrayListUnmanaged(u8) = .empty;
+    defer scalar.deinit(alloc);
+    inline for (.{ XcdrVersion.xcdr1, XcdrVersion.xcdr2 }) |version| {
+        bulk.clearRetainingCapacity();
+        scalar.clearRetainingCapacity();
+        var w = CdrWriter(version).init(&bulk, alloc);
+        var expected = CdrWriter(version).init(&scalar, alloc);
+        const values = [_]u64{ 0x0123456789abcdef, 42 };
+        try w.writeEncapHeader();
+        try expected.writeEncapHeader();
+        try w.writeU8(1);
+        try expected.writeU8(1);
+        try w.writePrimitiveArray(u64, &values);
+        for (values) |v| try expected.writeU64(v);
+        try w.writePrimitiveArray(bool, &.{ true, false });
+        try expected.writeBool(true);
+        try expected.writeBool(false);
+        try std.testing.expectEqualSlices(u8, scalar.items, bulk.items);
+        var r = try CdrReader.init(bulk.items);
+        _ = try r.readU8();
+        var out: [2]u64 = undefined;
+        try r.readPrimitiveArray(u64, &out);
+        try std.testing.expectEqualSlices(u64, &values, &out);
+        const before = r.pos;
+        var bools = [_]bool{ false, true };
+        bulk.items[bulk.items.len - 1] = 2;
+        try std.testing.expectError(error.InvalidBool, r.readPrimitiveArray(bool, &bools));
+        try std.testing.expectEqual(before, r.pos);
+        try std.testing.expectEqualSlices(bool, &.{ false, true }, &bools);
+    }
 }

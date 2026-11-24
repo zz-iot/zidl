@@ -225,6 +225,17 @@ ZIDL_CDR_TRUNCATED = -2   // read past end of data
 ZIDL_CDR_INVALID   = -3   // bad encap ID, invalid bool byte
 ```
 
+### Bulk primitive bodies
+
+The typed `zidl_cdr_{write,read}_*_array` helpers wrap
+`zidl_cdr_{write,read}_primitives` for integers and floats. The generic
+functions accept contiguous native primitive representations of width 1, 2,
+4, or 8 and use the cursor's byte order and XCDR alignment. They do not
+encode a length or collection framing. The checked bool functions encode
+canonical 0 and 1 and reject any other wire value before committing a read.
+Check a sequence's declared bound and available input before allocating.
+See the public header for error codes, counting mode, and cursor guarantees.
+
 ### Version / Byte-Order Constants
 
 ```c

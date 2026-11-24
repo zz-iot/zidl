@@ -540,3 +540,55 @@ export fn zidl_md5(data: ?[*]const u8, len: usize, out: *[16]u8) void {
     const bytes = if (len == 0) &.{} else data.?[0..len];
     std.crypto.hash.Md5.hash(bytes, out, .{});
 }
+
+extern fn zidl_cdr_shared_reserve_array(w: *Writer, pad: usize, len: usize, out: *?[*]u8) c_int;
+
+const primitives = rt.cdr_primitives;
+
+fn reserveArray(w: *Writer, count: usize, width: usize, dest: *?[*]u8) c_int {
+    const size = std.math.mul(usize, count, width) catch return -1;
+    const pad = primitives.arrayPadding(width, w.pos, if (w.xcdr_version == 2) 4 else 8);
+    return zidl_cdr_shared_reserve_array(w, pad, size, dest);
+}
+
+export fn zidl_cdr_write_primitives(w: *Writer, values: ?*const anyopaque, count: usize, width: usize) c_int {
+    if (!primitives.isArrayWidth(width)) return -3;
+    if (count == 0) return 0;
+    if (values == null and (w.buf != null or w.grow_fn != null)) return -3;
+    var dest: ?[*]u8 = null;
+    const rc = reserveArray(w, count, width, &dest);
+    if (rc != 0) return rc;
+    if (dest) |ptr| {
+        const source: [*]const u8 = @ptrCast(values.?);
+        const size = count * width;
+        primitives.copyArray(ptr[0..size], source[0..size], width, if (w.byte_order == 1) .big else .little);
+    }
+    return 0;
+}
+
+export fn zidl_cdr_read_primitives(r: *Reader, values: ?*anyopaque, count: usize, width: usize) c_int {
+    if (!primitives.isArrayWidth(width)) return -3;
+    if (count == 0) return 0;
+    const dest: [*]u8 = @ptrCast(values orelse return -3);
+    const data = input(r) catch return -2;
+    primitives.readArray(data, &r.pos, 4, if (r.xcdr_version == 2) 4 else 8, if (r.byte_order == 0) .little else .big, width, count, dest) catch return -2;
+    return 0;
+}
+
+export fn zidl_cdr_write_bool_array(w: *Writer, values: ?[*]const bool, count: usize) c_int {
+    if (count == 0) return 0;
+    if (values == null and (w.buf != null or w.grow_fn != null)) return -3;
+    var dest: ?[*]u8 = null;
+    const rc = reserveArray(w, count, 1, &dest);
+    if (rc != 0) return rc;
+    if (dest) |ptr| primitives.writeBools(ptr[0..count], values.?[0..count]);
+    return 0;
+}
+
+export fn zidl_cdr_read_bool_array(r: *Reader, values: ?[*]bool, count: usize) c_int {
+    if (count == 0) return 0;
+    const dest = values orelse return -3;
+    const data = input(r) catch return -2;
+    primitives.readBools(data, &r.pos, dest[0..count]) catch |err| return readStatus(err);
+    return 0;
+}

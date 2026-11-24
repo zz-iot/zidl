@@ -6976,6 +6976,28 @@ const Generator = struct {
                         try self.print("{s}try writer.writeU32(4 + @as(u32, @intCast({s})) * {d});\n", .{ extra, length, width });
                     }
                 }
+                if (!self.canonical_key and cdr_skip.bulkBase(seq.element.*) != null) {
+                    if (seq.bound != null) {
+                        try self.ind();
+                        try self.print("{s}try writer.writeU32(@intCast({s}.slice().len));\n", .{ extra, access });
+                        const slice = try std.fmt.allocPrint(self.alloc, "{s}.slice()", .{access});
+                        defer self.alloc.free(slice);
+                        try self.emitBulkWrite(seq.element.*, slice, extra);
+                    } else {
+                        try self.ind();
+                        try self.print("{s}try writer.writeU32({s}._length);\n", .{ extra, access });
+                        try self.ind();
+                        try self.print("{s}if ({s}._length != 0) {{\n", .{ extra, access });
+                        const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
+                        defer self.alloc.free(inner);
+                        const slice = try std.fmt.allocPrint(self.alloc, "({s}._buffer orelse return error.InvalidSequence)[0..{s}._length]", .{ access, access });
+                        defer self.alloc.free(slice);
+                        try self.emitBulkWrite(seq.element.*, slice, inner);
+                        try self.ind();
+                        try self.print("{s}}}\n", .{extra});
+                    }
+                    return;
+                }
                 // Ordinary XCDR2 collections reserve their DHEADER here.
                 // Canonical headers use the known-size path above or the
                 // shared counting/streaming collection-body helper.
@@ -7185,6 +7207,38 @@ const Generator = struct {
                 }
                 try self.ind();
                 try self.print("{s}const {s} = try reader.readU32();\n", .{ ii, n });
+                if (cdr_skip.bulkBase(seq.element.*)) |base| {
+                    const ty = try self.typeRefToZig(seq.element.*);
+                    defer self.alloc.free(ty);
+                    if (seq.bound) |bound| {
+                        try self.ind();
+                        try self.print("{s}if ({s} > {d}) return error.SequenceTooLong;\n", .{ ii, n, bound });
+                        try self.ind();
+                        try self.print("{s}try reader.readPrimitiveArray({s}, {s}.buf[0..{s}]);\n", .{ ii, ty, out_expr, n });
+                        try self.ind();
+                        try self.print("{s}{s}.len = {s};\n", .{ ii, out_expr, n });
+                    } else {
+                        try self.ind();
+                        try self.print("{s}var _bulk_probe = reader.*;\n", .{ii});
+                        try self.ind();
+                        try self.print("{s}try _bulk_probe.skipPrimitives({s}, {d});\n", .{ ii, n, cdr_skip.baseWireSize(base).? });
+                        try self.ind();
+                        try self.print("{s}if ({s} > 0) {{\n", .{ ii, n });
+                        try self.ind();
+                        try self.print("{s}    const {s} = try allocator.alloc({s}, {s});\n", .{ ii, buf, ty, n });
+                        try self.ind();
+                        try self.print("{s}    errdefer allocator.free({s});\n", .{ ii, buf });
+                        try self.ind();
+                        try self.print("{s}    try reader.readPrimitiveArray({s}, {s});\n", .{ ii, ty, buf });
+                        try self.ind();
+                        try self.print("{s}    {s} = .{{ ._length = {s}, ._maximum = {s}, ._buffer = {s}.ptr, ._release = true }};\n", .{ ii, out_expr, n, n, buf });
+                        try self.ind();
+                        try self.print("{s}}} else {s} = .{{}};\n", .{ ii, out_expr });
+                    }
+                    try self.ind();
+                    try self.print("{s}}}\n", .{extra});
+                    return;
+                }
                 self.coll_depth += 1;
                 defer self.coll_depth -= 1;
                 if (seq.bound) |bound| {
@@ -7601,6 +7655,28 @@ const Generator = struct {
         try self.closeCollectionDheader(cdh, extra);
     }
 
+    fn emitBulkWrite(self: *Generator, elem: ir.TypeRef, slice: []const u8, extra: []const u8) anyerror!void {
+        const ty = try self.typeRefToZig(elem);
+        defer self.alloc.free(ty);
+        const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
+        defer self.alloc.free(inner);
+        try self.ind();
+        try self.print("{s}if (@hasDecl(@TypeOf(writer.*), \"writePrimitiveArray\")) {{\n", .{extra});
+        try self.ind();
+        try self.print("{s}try writer.writePrimitiveArray({s}, {s});\n", .{ inner, ty, slice });
+        try self.ind();
+        try self.print("{s}}} else {{\n", .{extra});
+        try self.ind();
+        try self.print("{s}for ({s}) |_bulk_element| {{\n", .{ inner, slice });
+        const loop = try std.fmt.allocPrint(self.alloc, "{s}        ", .{extra});
+        defer self.alloc.free(loop);
+        try self.emitWriteForTypeRef(elem, "_bulk_element", loop);
+        try self.ind();
+        try self.print("{s}}}\n", .{inner});
+        try self.ind();
+        try self.print("{s}}}\n", .{extra});
+    }
+
     fn emitWriteArrayDims(self: *Generator, elem_tr: ir.TypeRef, access: []const u8, dims: []const u64, extra: []const u8, depth: usize) anyerror!void {
         if (dims.len == 0) {
             if (arrayTypedefOf(elem_tr)) |t| return self.emitWriteArrayDims(t.type_ref, access, t.dimensions, extra, depth);
@@ -7608,6 +7684,11 @@ const Generator = struct {
             defer self.coll_depth -= 1;
             try self.emitWriteForTypeRef(elem_tr, access, extra);
             return;
+        }
+        if (!self.canonical_key and dims.len == 1 and cdr_skip.bulkBase(elem_tr) != null) {
+            const slice = try std.fmt.allocPrint(self.alloc, "{s}[0..]", .{access});
+            defer self.alloc.free(slice);
+            return self.emitBulkWrite(elem_tr, slice, extra);
         }
         const var_name = try self.arrayVar("_d", depth);
         defer self.alloc.free(var_name);
@@ -7655,6 +7736,12 @@ const Generator = struct {
             defer self.coll_depth -= 1;
             try self.emitReadForTypeRef(elem_tr, base_access, extra);
             return;
+        }
+        if (dims.len == 1 and cdr_skip.bulkBase(elem_tr) != null) {
+            const ty = try self.typeRefToZig(elem_tr);
+            defer self.alloc.free(ty);
+            try self.ind();
+            return self.print("{s}try reader.readPrimitiveArray({s}, {s}[0..]);\n", .{ extra, ty, base_access });
         }
         const idx = try self.arrayVar("_i", depth);
         defer self.alloc.free(idx);
@@ -9497,15 +9584,16 @@ test "zig_backend: serialize string and sequence" {
     // Unbounded string → writeString, readString(allocator)
     try testing.expect(has(s, "try writer.writeString(value.label);"));
     try testing.expect(has(s, "label = try reader.readString(allocator);"));
-    // Sequence → length prefix + if/for loop over buffer
+    // Sequence length and bulk body, with a scalar writer fallback.
     try testing.expect(has(s, "try writer.writeU32(value.values._length);"));
-    try testing.expect(has(s, "if (value.values._buffer) |_sb|"));
-    try testing.expect(has(s, "for (_sb[0..value.values._length]) |_se|"));
-    try testing.expect(has(s, "try writer.writeI32(_se);"));
-    // Read side: alloc buffer + loop
+    try testing.expect(has(s, "if (value.values._length != 0)"));
+    try testing.expect(has(s, "try writer.writePrimitiveArray(i32, (value.values._buffer orelse return error.InvalidSequence)[0..value.values._length]);"));
+    try testing.expect(has(s, "try writer.writeI32(_bulk_element);"));
+    // Preflight the wire body before allocation.
     try testing.expect(has(s, "const _n = try reader.readU32();"));
     try testing.expect(has(s, "const _buf = try allocator.alloc(i32, _n);"));
-    try testing.expect(has(s, "_se.* = try reader.readI32();"));
+    try testing.expect(has(s, "try reader.readPrimitiveArray(i32, _buf);"));
+    try testing.expect(has(s, "try _bulk_probe.skipPrimitives(_n, 4);"));
     // Needs allocator → no "_ = allocator"
     try testing.expect(!has(s, "_ = allocator;"));
 }
@@ -9515,9 +9603,9 @@ test "zig_backend: bounded sequence deserialize is heap-free" {
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "try writer.writeU32(@intCast(value.values.slice().len));"));
-    try testing.expect(has(s, "for (value.values.slice()) |_se|"));
+    try testing.expect(has(s, "try writer.writePrimitiveArray(i32, value.values.slice());"));
     try testing.expect(has(s, "if (_n > 4) return error.SequenceTooLong;"));
-    try testing.expect(has(s, "out.values.clearRetainingCapacity();"));
+    try testing.expect(has(s, "try reader.readPrimitiveArray(i32, out.values.buf[0.._n]);"));
     try testing.expect(!has(s, "out.values.ensureTotalCapacity(allocator, _n);"));
     try testing.expect(!has(s, "value.values.items"));
 }
@@ -9534,14 +9622,13 @@ test "zig_backend: serialize array field" {
     var out = try testGen("struct Mat { long m[2][4]; };", "mat");
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // Write: nested for loops
+    // Bulk each row and preserve the scalar writer fallback.
     try testing.expect(has(s, "for (value.m) |_d0|"));
-    try testing.expect(has(s, "for (_d0) |_d1|"));
-    try testing.expect(has(s, "try writer.writeI32(_d1);"));
-    // Read: index-based loops with hardcoded bounds
+    try testing.expect(has(s, "try writer.writePrimitiveArray(i32, _d0[0..]);"));
+    try testing.expect(has(s, "try writer.writeI32(_bulk_element);"));
+    // Read one bulk body per row.
     try testing.expect(has(s, "for (0..2) |_i0|"));
-    try testing.expect(has(s, "for (0..4) |_i1|"));
-    try testing.expect(has(s, "out.m[_i0][_i1] = try reader.readI32();"));
+    try testing.expect(has(s, "try reader.readPrimitiveArray(i32, out.m[_i0][0..]);"));
 }
 
 test "zig_backend: serialize nested struct" {

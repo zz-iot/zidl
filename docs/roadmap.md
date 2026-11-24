@@ -108,6 +108,12 @@ series and require a separate consumer-driven investigation. See
 - **`zidl_allocator_pmr.hpp`** — a no-throw, placement-new-based allocator bridge (bypassing
   `std::pmr`) is a deliberately deferred option; not built.
 
+- **Portable binary128 CDR** — define a host-independent IEEE binary128
+  representation and scalar encode/decode with the required CDR alignment
+  and byte order. Then add typed bulk binary128 operations and matching
+  generator support. Verify scalar/bulk wire parity and interoperability
+  without assuming that C or C++ `long double` is binary128.
+
 ### C++ backend
 
 - **`--generate-c-api` complex-type adapter (`ConcreteImplGenerator`)** — the largest single

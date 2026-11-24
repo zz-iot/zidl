@@ -3813,6 +3813,10 @@ const CdrGenerator = struct {
                         try self.writeI("if (_rc) return _rc;\n");
                     }
                 }
+                if (!self.canonical_key and cppBulkSequenceBase(seq.element.*) != null) {
+                    try self.printI("if ({s}.size() > UINT32_MAX) return ZIDL_CDR_OVERFLOW;\n", .{access});
+                    if (seq.bound) |n| try self.printI("if ({s}.size() > {d}u) return ZIDL_CDR_INVALID;\n", .{ access, n });
+                }
                 // XCDR2 prefixes a collection of non-primitive elements with a
                 // DHEADER (no-op for XCDR1 writers).
                 const dh = try self.openCollectionDheader(!cdr_skip.isPrimitiveElement(seq.element.*) and (!self.canonical_key or canonical.fixedCollectionElementWidth(seq.element.*) == null));
@@ -3820,16 +3824,20 @@ const CdrGenerator = struct {
                 defer self.alloc.free(si);
                 try self.printI("_rc = zidl_cdr_write_u32(_w, (uint32_t){s}.size());\n", .{access});
                 try self.writeI("if (_rc) return _rc;\n");
-                try self.printI("{{ uint32_t {s}; for ({s} = 0; {s} < (uint32_t){s}.size(); {s}++) {{\n", .{ si, si, si, access, si });
-                self.indent_depth += 1;
-                const elem_access = try std.fmt.allocPrint(self.alloc, "{s}[{s}]", .{ access, si });
-                defer self.alloc.free(elem_access);
-                self.coll_depth += 1;
-                try self.emitWriteForTypeRef(seq.element.*, field_name, elem_access);
-                self.coll_depth -= 1;
-                self.indent_depth -= 1;
-                try self.writeI("}\n");
-                try self.writeI("}\n");
+                if (if (self.canonical_key) null else cppBulkSequenceBase(seq.element.*)) |base| {
+                    try self.printI("_rc = zidl_cdr_write_primitives(_w, {s}.data(), {s}.size(), {d}u); if (_rc) return _rc;\n", .{ access, access, cdr_skip.baseWireSize(base).? });
+                } else {
+                    try self.printI("{{ uint32_t {s}; for ({s} = 0; {s} < (uint32_t){s}.size(); {s}++) {{\n", .{ si, si, si, access, si });
+                    self.indent_depth += 1;
+                    const elem_access = try std.fmt.allocPrint(self.alloc, "{s}[{s}]", .{ access, si });
+                    defer self.alloc.free(elem_access);
+                    self.coll_depth += 1;
+                    try self.emitWriteForTypeRef(seq.element.*, field_name, elem_access);
+                    self.coll_depth -= 1;
+                    self.indent_depth -= 1;
+                    try self.writeI("}\n");
+                    try self.writeI("}\n");
+                }
                 try self.closeCollectionDheader(dh);
             },
             .named => |td| try self.emitWriteNamed(td, field_name, access),
@@ -3963,6 +3971,16 @@ const CdrGenerator = struct {
             self.coll_depth += 1;
             defer self.coll_depth -= 1;
             return self.emitWriteForTypeRef(elem_tr, "_elem", access);
+        }
+        if (dims.len == 1) {
+            if (cdr_skip.bulkBase(elem_tr)) |base| {
+                if (base == .boolean) {
+                    try self.printI("_rc = zidl_cdr_write_bool_array(_w, &({s})[0], {d}u); if (_rc) return _rc;\n", .{ access, dims[0] });
+                } else {
+                    try self.printI("_rc = zidl_cdr_write_primitives(_w, &({s})[0], {d}u, {d}u); if (_rc) return _rc;\n", .{ access, dims[0], cdr_skip.baseWireSize(base).? });
+                }
+                return;
+            }
         }
         const var_name = try cdr_skip.arrayVar(self.alloc, "_ai", self.coll_depth, dim_idx);
         defer self.alloc.free(var_name);
@@ -4128,26 +4146,30 @@ const CdrGenerator = struct {
                 try self.printI("_rc = zidl_cdr_read_u32(_r, &{s});\n", .{sl});
                 try self.writeI("if (_rc) return _rc;\n");
                 try self.printI("{s}.resize({s});\n", .{ lval, sl });
-                try self.printI("{{ uint32_t {s}; for ({s} = 0; {s} < {s}; {s}++) {{\n", .{ si, si, si, sl, si });
-                self.indent_depth += 1;
-                const elem_lval = try std.fmt.allocPrint(self.alloc, "{s}[{s}]", .{ lval, si });
-                defer self.alloc.free(elem_lval);
-                const is_bool = switch (cdr_skip.resolveAlias(seq.element.*)) {
-                    .base => |b| b == .boolean,
-                    else => false,
-                };
-                if (is_bool) {
-                    // std::vector<bool> elements are proxies, not addressable bools.
-                    try self.writeI("{ bool _bv; _rc = zidl_cdr_read_bool(_r, &_bv); if (_rc) return _rc; ");
-                    try self.print("{s} = _bv; }}\n", .{elem_lval});
+                if (cppBulkSequenceBase(seq.element.*)) |base| {
+                    try self.printI("_rc = zidl_cdr_read_primitives(_r, {s}.data(), {s}, {d}u); if (_rc) return _rc;\n", .{ lval, sl, cdr_skip.baseWireSize(base).? });
                 } else {
-                    self.coll_depth += 1;
-                    try self.emitReadForTypeRef(seq.element.*, field_name, elem_lval);
-                    self.coll_depth -= 1;
+                    try self.printI("{{ uint32_t {s}; for ({s} = 0; {s} < {s}; {s}++) {{\n", .{ si, si, si, sl, si });
+                    self.indent_depth += 1;
+                    const elem_lval = try std.fmt.allocPrint(self.alloc, "{s}[{s}]", .{ lval, si });
+                    defer self.alloc.free(elem_lval);
+                    const is_bool = switch (cdr_skip.resolveAlias(seq.element.*)) {
+                        .base => |b| b == .boolean,
+                        else => false,
+                    };
+                    if (is_bool) {
+                        // std::vector<bool> elements are proxies, not addressable bools.
+                        try self.writeI("{ bool _bv; _rc = zidl_cdr_read_bool(_r, &_bv); if (_rc) return _rc; ");
+                        try self.print("{s} = _bv; }}\n", .{elem_lval});
+                    } else {
+                        self.coll_depth += 1;
+                        try self.emitReadForTypeRef(seq.element.*, field_name, elem_lval);
+                        self.coll_depth -= 1;
+                    }
+                    self.indent_depth -= 1;
+                    try self.writeI("}\n");
+                    try self.writeI("}\n");
                 }
-                self.indent_depth -= 1;
-                try self.writeI("}\n");
-                try self.writeI("}\n");
                 self.indent_depth -= 1;
                 try self.writeI("}\n");
                 try cdr_skip.closeReadWindow(self, window);
@@ -4289,6 +4311,16 @@ const CdrGenerator = struct {
             self.coll_depth += 1;
             defer self.coll_depth -= 1;
             return self.emitReadForTypeRef(elem_tr, field_name, lval);
+        }
+        if (dims.len == 1) {
+            if (cdr_skip.bulkBase(elem_tr)) |base| {
+                if (base == .boolean) {
+                    try self.printI("_rc = zidl_cdr_read_bool_array(_r, &({s})[0], {d}u); if (_rc) return _rc;\n", .{ lval, dims[0] });
+                } else {
+                    try self.printI("_rc = zidl_cdr_read_primitives(_r, &({s})[0], {d}u, {d}u); if (_rc) return _rc;\n", .{ lval, dims[0], cdr_skip.baseWireSize(base).? });
+                }
+                return;
+            }
         }
         const var_name = try cdr_skip.arrayVar(self.alloc, "_ai", self.coll_depth, dim_idx);
         defer self.alloc.free(var_name);
@@ -8040,6 +8072,12 @@ const semantic_mod = @import("../semantic/root.zig");
 
 /// Parse `source`, analyse, build IR, generate C++ header into a returned buffer.
 /// Caller must call `.deinit(testing.allocator)` on the returned ArrayList.
+fn cppBulkSequenceBase(tr: ir.TypeRef) ?ast.BaseTypeSpec {
+    const base = cdr_skip.bulkBase(tr) orelse return null;
+    // std::vector<bool> does not provide addressable bool storage.
+    return if (base == .boolean) null else base;
+}
+
 fn testGen(source: []const u8, stem: []const u8) !std.ArrayList(u8) {
     return testGenOpts(source, stem, .{});
 }
@@ -8431,10 +8469,10 @@ test "cpp_backend: union array CDR serialize/deserialize" {
     , "var");
     defer out.deinit(testing.allocator);
     const s = out.items;
-    // serialize: write array via loop
+    // Serialize the addressable union array as a single primitive body.
     try testing.expect(has(s, "int Var_serialize(ZidlCdrWriter *_w, const ::Var *_v)"));
-    try testing.expect(has(s, "_v->arr()[_ai0]"));
-    // deserialize: temp array decl + read loop + setter call
+    try testing.expect(has(s, "zidl_cdr_write_primitives(_w, &(_v->arr())[0], 3u, 4u)"));
+    // Deserialize through a temporary array and call the setter.
     try testing.expect(has(s, "int Var_deserialize(ZidlCdrReader *_r, ::Var *_v)"));
     try testing.expect(has(s, "int32_t _tmp_arr[3]{}"));
     try testing.expect(has(s, "_v->arr(_tmp_arr)"));
@@ -9051,7 +9089,7 @@ test "cpp_backend: cdr std::vector deserialize uses resize" {
     defer out.deinit(testing.allocator);
     const s = out.items;
     try testing.expect(has(s, "_v->items.resize(_sl)"));
-    try testing.expect(has(s, "zidl_cdr_read_i32(_r, &_v->items[_si])"));
+    try testing.expect(has(s, "zidl_cdr_read_primitives(_r, _v->items.data(), _sl, 4u)"));
 }
 
 test "cpp_backend: cdr enum class uses static_cast" {
@@ -9076,13 +9114,12 @@ test "cpp_backend: cdr nested struct calls serialize/deserialize by name" {
     try testing.expect(has(s, "Inner_deserialize(_r, &_v->inner)"));
 }
 
-test "cpp_backend: cdr array member generates loop" {
+test "cpp_backend: cdr array member uses bulk bodies" {
     var out = try testGenCdr("struct Mat { long data[3]; };", "mat");
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "for (_ai0 = 0; _ai0 < 3u; _ai0++)"));
-    try testing.expect(has(s, "zidl_cdr_write_i32(_w, _v->data[_ai0])"));
-    try testing.expect(has(s, "zidl_cdr_read_i32(_r, &_v->data[_ai0])"));
+    try testing.expect(has(s, "zidl_cdr_write_primitives(_w, &(_v->data)[0], 3u, 4u)"));
+    try testing.expect(has(s, "zidl_cdr_read_primitives(_r, &(_v->data)[0], 3u, 4u)"));
 }
 
 test "cpp_backend: cdr all primitives serialize" {
@@ -11345,8 +11382,8 @@ test "cpp_backend cdr: collection DHEADERs, depth-named loops and vector<bool>" 
     try testing.expect(has(s, "uint32_t _si1;"));
     // std::vector<bool> elements are proxies: read through a temporary.
     try testing.expect(has(s, "{ bool _bv; _rc = zidl_cdr_read_bool(_r, &_bv);"));
-    // Triple[2] flattens to int32 x 6: no DHEADER, depth-qualified loop vars.
-    try testing.expect(has(s, "_ai1"));
+    // Triple[2] emits one bulk body per row.
+    try testing.expect(has(s, "zidl_cdr_write_primitives(_w, &(_v->ta[_ai0])[0], 3u, 4u)"));
 }
 
 test "cpp_backend: cross-file base parameter adapter also accepts the imported file's own subtypes" {

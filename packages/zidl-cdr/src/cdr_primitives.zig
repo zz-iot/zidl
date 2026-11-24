@@ -42,3 +42,68 @@ pub fn readBool(data: []const u8, pos: *usize) error{ EndOfStream, InvalidBool }
     if (value > 1) return error.InvalidBool;
     return value == 1;
 }
+
+pub fn isArrayWidth(width: usize) bool {
+    return switch (width) {
+        1, 2, 4, 8 => true,
+        else => false,
+    };
+}
+
+pub fn nativeArrayWidth(comptime T: type) usize {
+    return switch (T) {
+        bool, u8, i8 => 1,
+        u16, i16 => 2,
+        u32, i32, f32 => 4,
+        u64, i64, f64 => 8,
+        else => @compileError("primitive CDR arrays require bool, an 8/16/32/64-bit integer, f32, or f64"),
+    };
+}
+
+pub fn arrayPadding(width: usize, pos: usize, cap: usize) usize {
+    const boundary = @min(width, cap);
+    return (boundary - pos % boundary) % boundary;
+}
+
+fn swapArray(comptime T: type, dest: []u8, source: []const u8) void {
+    const src: [*]align(1) const T = @ptrCast(source.ptr);
+    const dst: [*]align(1) T = @ptrCast(dest.ptr);
+    for (src[0 .. source.len / @sizeOf(T)], dst[0 .. dest.len / @sizeOf(T)]) |value, *out| {
+        out.* = @byteSwap(value);
+    }
+}
+
+pub fn copyArray(dest: []u8, source: []const u8, width: usize, order: ByteOrder) void {
+    if (width == 1 or (order == .little) == (@import("builtin").cpu.arch.endian() == .little)) {
+        @memcpy(dest, source);
+        return;
+    }
+    switch (width) {
+        2 => swapArray(u16, dest, source),
+        4 => swapArray(u32, dest, source),
+        8 => swapArray(u64, dest, source),
+        else => unreachable,
+    }
+}
+
+pub fn readArray(data: []const u8, pos: *usize, origin: usize, cap: usize, order: ByteOrder, width: usize, count: usize, dest: [*]u8) error{EndOfStream}!void {
+    if (count == 0) return;
+    const size = @import("std").math.mul(usize, count, width) catch return error.EndOfStream;
+    var next = pos.*;
+    if (width > 1) try cursor.alignPosition(&next, data.len, origin, @min(width, cap));
+    const source = try cursor.readSlice(data, &next, size);
+    copyArray(dest[0..size], source, width, order);
+    pos.* = next;
+}
+
+pub fn writeBools(dest: []u8, values: []const bool) void {
+    for (dest, values) |*out, value| out.* = @intFromBool(value);
+}
+
+pub fn readBools(data: []const u8, pos: *usize, values: []bool) error{ EndOfStream, InvalidBool }!void {
+    var next = pos.*;
+    const source = try cursor.readSlice(data, &next, values.len);
+    for (source) |byte| if (byte > 1) return error.InvalidBool;
+    for (values, source) |*value, byte| value.* = byte != 0;
+    pos.* = next;
+}

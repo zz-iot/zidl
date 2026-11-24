@@ -191,18 +191,11 @@ int Sample_serialize(ZidlCdrWriter *_w, const ::Sample *_v) {
     if (_rc) return _rc;
     _rc = zidl_cdr_write_string(_w, _v->bstr.c_str(), (uint32_t)_v->bstr.size());
     if (_rc) return _rc;
+    if (_v->nums.size() > UINT32_MAX) return ZIDL_CDR_OVERFLOW;
     _rc = zidl_cdr_write_u32(_w, (uint32_t)_v->nums.size());
     if (_rc) return _rc;
-    { uint32_t _si; for (_si = 0; _si < (uint32_t)_v->nums.size(); _si++) {
-        _rc = zidl_cdr_write_i32(_w, _v->nums[_si]);
-        if (_rc) return _rc;
-    }
-    }
-    { uint32_t _ai0; for (_ai0 = 0; _ai0 < 3u; _ai0++) {
-        _rc = zidl_cdr_write_i32(_w, _v->arr[_ai0]);
-        if (_rc) return _rc;
-    }
-    }
+    _rc = zidl_cdr_write_primitives(_w, _v->nums.data(), _v->nums.size(), 4u); if (_rc) return _rc;
+    _rc = zidl_cdr_write_primitives(_w, &(_v->arr)[0], 3u, 4u); if (_rc) return _rc;
     _rc = zidl_cdr_write_u32(_w, static_cast<uint32_t>(_v->clr));
     if (_rc) return _rc;
     _rc = Point_serialize(_w, &_v->nested);
@@ -284,17 +277,9 @@ static int Sample_deserialize_bounded_impl(ZidlCdrReader *_r, ::Sample *_v) {
         _rc = zidl_cdr_read_u32(_r, &_sl);
         if (_rc) return _rc;
         _v->nums.resize(_sl);
-        { uint32_t _si; for (_si = 0; _si < _sl; _si++) {
-            _rc = zidl_cdr_read_i32(_r, &_v->nums[_si]);
-            if (_rc) return _rc;
-        }
-        }
+        _rc = zidl_cdr_read_primitives(_r, _v->nums.data(), _sl, 4u); if (_rc) return _rc;
     }
-    { uint32_t _ai0; for (_ai0 = 0; _ai0 < 3u; _ai0++) {
-        _rc = zidl_cdr_read_i32(_r, &_v->arr[_ai0]);
-        if (_rc) return _rc;
-    }
-    }
+    _rc = zidl_cdr_read_primitives(_r, &(_v->arr)[0], 3u, 4u); if (_rc) return _rc;
     { uint32_t _ev; _rc = zidl_cdr_read_u32(_r, &_ev); if (_rc) return _rc; _v->clr = static_cast<::Color>(_ev); }
     _rc = Point_deserialize(_r, &_v->nested);
     if (_rc) return _rc;

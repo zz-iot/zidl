@@ -1,6 +1,7 @@
 /* Independent C compiler view of the public ABI and a real foreign caller. */
 #include "zidl_cdr.h"
 #include <stddef.h>
+#include <string.h>
 
 void shared_primitives_layout(size_t out[17]) {
     out[0] = sizeof(ZidlCdrWriter);
@@ -182,11 +183,104 @@ int shared_framing_read_sample(ZidlCdrReader *r) {
     return zidl_cdr_seek_to(r, end);
 }
 
-#ifdef ZIDL_CDR_SHARED_CONSUMER
-#include <string.h>
 
+int bulk_primitive_arrays(void) {
+    for (int version = ZIDL_XCDR1; version <= ZIDL_PL_CDR; ++version) {
+        for (int endian = ZIDL_CDR_LE; endian <= ZIDL_CDR_BE; ++endian) {
+#define CHECK_ARRAY(name, type, a, b, c) do { \
+    const type values[] = { a, b, c }; \
+    type decoded[3] = { 0 }; \
+    uint8_t scalar_buf[64], bulk_buf[64]; \
+    ZidlCdrWriter scalar, bulk, counting; \
+    ZidlCdrReader reader; \
+    zidl_cdr_writer_init_fixed(&scalar, scalar_buf, sizeof scalar_buf, version); \
+    zidl_cdr_writer_init_fixed(&bulk, bulk_buf, sizeof bulk_buf, version); \
+    zidl_cdr_writer_init_counting(&counting, version); \
+    zidl_cdr_writer_set_byte_order(&scalar, endian); \
+    zidl_cdr_writer_set_byte_order(&bulk, endian); \
+    if (zidl_cdr_write_encap(&scalar) || zidl_cdr_write_encap(&bulk) || \
+        zidl_cdr_write_encap(&counting) || zidl_cdr_write_u8(&scalar, 42) || \
+        zidl_cdr_write_u8(&bulk, 42) || zidl_cdr_write_u8(&counting, 42)) return 26; \
+    for (size_t i = 0; i < 3; ++i) \
+        if (zidl_cdr_write_##name(&scalar, values[i])) return 27; \
+    if (zidl_cdr_write_##name##_array(&bulk, NULL, 0) || \
+        zidl_cdr_write_##name##_array(&bulk, values, 3) || \
+        zidl_cdr_write_##name##_array(&counting, NULL, 3)) return 28; \
+    if (bulk.len != scalar.len || counting.len != scalar.len || \
+        memcmp(bulk_buf, scalar_buf, bulk.len) != 0) return 29; \
+    if (zidl_cdr_reader_init(&reader, bulk_buf, bulk.len - 1) || \
+        zidl_cdr_skip(&reader, 1) || \
+        zidl_cdr_read_##name##_array(&reader, decoded, 3) != ZIDL_CDR_TRUNCATED || \
+        reader.pos != 5 || decoded[0] != 0) return 30; \
+    if (zidl_cdr_reader_init(&reader, bulk_buf, bulk.len) || \
+        zidl_cdr_skip(&reader, 1) || zidl_cdr_read_##name##_array(&reader, NULL, 0) || \
+        zidl_cdr_read_##name##_array(&reader, decoded, 3) || \
+        reader.pos != bulk.len || memcmp(values, decoded, sizeof values) != 0) return 31; \
+    zidl_cdr_writer_init_fixed(&bulk, bulk_buf, scalar.len - 1, version); \
+    if (zidl_cdr_write_encap(&bulk) || zidl_cdr_write_u8(&bulk, 42) || \
+        zidl_cdr_write_##name##_array(&bulk, values, 3) != ZIDL_CDR_OVERFLOW || \
+        bulk.len != 5 || bulk.pos != 1) return 32; \
+} while (0)
+            CHECK_ARRAY(u8, uint8_t, 0xab, 0, 0xfe);
+            CHECK_ARRAY(i8, int8_t, -2, 3, INT8_MIN);
+            CHECK_ARRAY(u16, uint16_t, 0xabcd, 0, UINT16_MAX);
+            CHECK_ARRAY(i16, int16_t, -2, 0x1234, INT16_MIN);
+            CHECK_ARRAY(u32, uint32_t, 0x12345678, 0, UINT32_MAX);
+            CHECK_ARRAY(i32, int32_t, -4, 0x12345678, INT32_MIN);
+            CHECK_ARRAY(u64, uint64_t, UINT64_C(0x123456789abcdef0), 0, UINT64_MAX);
+            CHECK_ARRAY(i64, int64_t, -8, INT64_C(0x123456789abcdef0), INT64_MIN);
+            CHECK_ARRAY(f32, float, 1.25f, -0.0f, -5.5f);
+            CHECK_ARRAY(f64, double, 1.25, -0.0, -5.5);
+#undef CHECK_ARRAY
+        }
+    }
+    {
+        ZidlCdrWriter w;
+        ZidlCdrReader r, limited;
+        uint32_t values[2048], decoded[2048];
+        for (size_t i = 0; i < 2048; ++i) values[i] = (uint32_t)(i * 17);
+        if (zidl_cdr_writer_init(&w, ZIDL_XCDR1)) return 33;
+        int status = 0;
+        if (zidl_cdr_write_encap(&w) ||
+            zidl_cdr_write_u32_array(&w, NULL, 1) != ZIDL_CDR_INVALID ||
+            zidl_cdr_write_u32_array(&w, values, SIZE_MAX) != ZIDL_CDR_OVERFLOW ||
+            zidl_cdr_write_primitives(&w, values, 0, 3) != ZIDL_CDR_INVALID || w.len != 4 ||
+            zidl_cdr_write_u32_array(&w, values, 2048) ||
+            zidl_cdr_reader_init(&r, w.buf, w.len) ||
+            zidl_cdr_read_u32_array(&r, NULL, 1) != ZIDL_CDR_INVALID ||
+            zidl_cdr_read_u32_array(&r, decoded, SIZE_MAX) != ZIDL_CDR_TRUNCATED || r.pos != 4 ||
+            zidl_cdr_reader_limit(&r, w.len - 1, &limited) ||
+            zidl_cdr_read_u32_array(&limited, decoded, 2048) != ZIDL_CDR_TRUNCATED ||
+            limited.pos != 4 || zidl_cdr_read_u32_array(&r, decoded, 2048) ||
+            memcmp(values, decoded, sizeof values)) status = 34;
+        zidl_cdr_writer_deinit(&w);
+        if (status) return status;
+    }
+    {
+        const bool values[] = { true, false, true };
+        bool decoded[] = { false, true, false };
+        uint8_t bytes[7];
+        ZidlCdrWriter w;
+        ZidlCdrReader r;
+        zidl_cdr_writer_init_fixed(&w, bytes, sizeof bytes, ZIDL_XCDR1);
+        if (zidl_cdr_write_encap(&w) || zidl_cdr_write_bool_array(&w, values, 3) ||
+            bytes[4] != 1 || bytes[5] != 0 || bytes[6] != 1) return 35;
+        bytes[6] = 2;
+        if (zidl_cdr_reader_init(&r, bytes, w.len) ||
+            zidl_cdr_read_bool_array(&r, decoded, 3) != ZIDL_CDR_INVALID ||
+            r.pos != 4 || decoded[0] || !decoded[1] || decoded[2]) return 36;
+        bytes[6] = 1;
+        if (zidl_cdr_read_bool_array(&r, decoded, 3) || r.pos != 7 ||
+            !decoded[0] || decoded[1] || !decoded[2]) return 37;
+    }
+    return 0;
+}
+
+#ifdef ZIDL_CDR_SHARED_CONSUMER
 /* Link this with a normal C compiler against the staged archive. */
 int main(void) {
+    const int bulk_status = bulk_primitive_arrays();
+    if (bulk_status) return bulk_status;
     extern int fixed_external_contract(void);
     { int rc = fixed_external_contract(); if (rc) return 100 + rc; }
 

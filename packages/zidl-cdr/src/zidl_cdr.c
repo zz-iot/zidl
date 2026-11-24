@@ -96,6 +96,22 @@ int zidl_cdr_shared_write_bytes(ZidlCdrWriter *w, const uint8_t *bytes, size_t n
     return writer_write_bytes(w, bytes, n);
 }
 
+/* Reserve a complete aligned body before the codec touches its contents. */
+int zidl_cdr_shared_reserve_array(ZidlCdrWriter *w, size_t pad, size_t n,
+                                  uint8_t **out) {
+    if (n > SIZE_MAX - pad) return ZIDL_CDR_OVERFLOW;
+    int rc = writer_ensure(w, pad + n);
+    if (rc) return rc;
+    *out = NULL;
+    if (w->buf) {
+        memset(w->buf + w->len, 0, pad);
+        *out = w->buf + w->len + pad;
+    }
+    w->len += pad + n;
+    w->pos += pad + n;
+    return ZIDL_CDR_OK;
+}
+
 /* ── Allocator ───────────────────────────────────────────────────────────── */
 
 /* Preserve the C ABI allocator's fixed eight-byte alignment. */
