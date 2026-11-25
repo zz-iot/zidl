@@ -18,6 +18,12 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Zero-copy write reservations of bulk primitive bodies: `zidl_cdr_reserve_primitives`
+  (natively `CdrWriter.reservePrimitives`) pads and advances the writer but leaves the
+  elements for the caller to fill in place, found by offset across a dynamic writer's
+  growth through `zidl_cdr_reservation_data`; `zidl_cdr_commit_primitives` then puts
+  them in the writer's byte order, once. Phase 2 of `docs/design/bulk-cdr-zero-copy.md`.
+
 - Zero-copy read views of bulk primitive bodies: `zidl_cdr_read_primitives_view`
   (natively `CdrReader.viewPrimitives`) points at the elements in the reader's buffer
   instead of copying them, with `ZIDL_CDR_VIEW_AS` for checked in-place use and

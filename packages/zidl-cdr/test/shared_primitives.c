@@ -388,6 +388,84 @@ int bulk_primitive_arrays(void) {
         v.swapped = false;
         if ((const void *)ZIDL_CDR_VIEW_AS(&v, uint8_t) != (const void *)(storage + 3)) return 54;
     }
+    {
+        const uint16_t probe = 1;
+        const bool host_le = *(const uint8_t *)&probe == 1;
+        static uint32_t more[1024];
+        for (size_t i = 0; i < 1024; ++i) more[i] = (uint32_t)(i * 7);
+        for (int version = ZIDL_XCDR1; version <= ZIDL_XCDR2; ++version) {
+            for (int endian = ZIDL_CDR_LE; endian <= ZIDL_CDR_BE; ++endian) {
+                const double values[] = { 1.5, -2.25, 1e300 };
+                ZidlCdrWriter bulk, scalar;
+                ZidlCdrReservation res, empty;
+                uint8_t *data;
+                int status = 0;
+                if (zidl_cdr_writer_init(&bulk, version)) return 55;
+                if (zidl_cdr_writer_init(&scalar, version)) {
+                    zidl_cdr_writer_deinit(&bulk);
+                    return 55;
+                }
+                zidl_cdr_writer_set_byte_order(&bulk, endian);
+                zidl_cdr_writer_set_byte_order(&scalar, endian);
+                if (zidl_cdr_write_encap(&bulk) || zidl_cdr_write_encap(&scalar) ||
+                    zidl_cdr_write_u8(&bulk, 7) || zidl_cdr_write_u8(&scalar, 7)) status = 56;
+                /* Another width or no reservation: INVALID. An empty one
+                 * reserves nothing, has no data and commits. */
+                else if (zidl_cdr_reserve_primitives(&bulk, 1, 3, &res) != ZIDL_CDR_INVALID ||
+                         zidl_cdr_reserve_primitives(&bulk, 1, 8, NULL) != ZIDL_CDR_INVALID ||
+                         zidl_cdr_reserve_primitives(&bulk, 0, 8, &empty) || empty.count ||
+                         zidl_cdr_reservation_data(&bulk, &empty) != NULL ||
+                         zidl_cdr_commit_primitives(&bulk, &empty) || !empty.committed ||
+                         bulk.len != scalar.len) status = 57;
+                /* Reserved, then the writer grows past its first buffer; the
+                 * elements are found by offset, filled late with host values
+                 * and committed into the writer's byte order. */
+                else if (zidl_cdr_reserve_primitives(&bulk, 3, 8, &res) || res.count != 3 ||
+                         res.elem_size != 8 || res.committed ||
+                         res.swap != (host_le != (endian == ZIDL_CDR_LE)) ||
+                         zidl_cdr_write_f64_array(&scalar, values, 3) ||
+                         zidl_cdr_write_u32_array(&bulk, more, 1024) ||
+                         zidl_cdr_write_u32_array(&scalar, more, 1024) ||
+                         (data = (uint8_t *)zidl_cdr_reservation_data(&bulk, &res)) == NULL) status = 58;
+                else {
+                    memcpy(data, values, sizeof values);
+                    /* Once: a repeated commit cannot swap the bytes back. */
+                    if (zidl_cdr_commit_primitives(&bulk, &res) || !res.committed ||
+                        zidl_cdr_commit_primitives(&bulk, &res) ||
+                        bulk.len != scalar.len || memcmp(bulk.buf, scalar.buf, bulk.len) != 0) status = 59;
+                }
+                /* A reservation past what the writer has written is refused. */
+                if (!status) {
+                    ZidlCdrReservation forged = { bulk.len - 4, 1, 8, true, false };
+                    if (zidl_cdr_reservation_data(&bulk, &forged) != NULL ||
+                        zidl_cdr_commit_primitives(&bulk, &forged) != ZIDL_CDR_INVALID ||
+                        forged.committed || zidl_cdr_commit_primitives(NULL, &res) != ZIDL_CDR_INVALID ||
+                        zidl_cdr_commit_primitives(&bulk, NULL) != ZIDL_CDR_INVALID) status = 60;
+                }
+                zidl_cdr_writer_deinit(&bulk);
+                zidl_cdr_writer_deinit(&scalar);
+                if (status) return status;
+            }
+        }
+        {
+            /* A fixed writer without room: OVERFLOW, writer and reservation
+             * unchanged. A counting writer counts the elements, with no data. */
+            uint8_t bytes[16];
+            ZidlCdrWriter w, counting;
+            ZidlCdrReservation res = { 77, 77, 77, true, true };
+            zidl_cdr_writer_init_fixed(&w, bytes, sizeof bytes, ZIDL_XCDR1);
+            zidl_cdr_writer_init_counting(&counting, ZIDL_XCDR1);
+            if (zidl_cdr_write_encap(&w) || zidl_cdr_write_u8(&w, 7) ||
+                zidl_cdr_reserve_primitives(&w, 2, 8, &res) != ZIDL_CDR_OVERFLOW ||
+                w.len != 5 || w.pos != 1 || res.offset != 77 || res.count != 77 ||
+                res.elem_size != 77 || !res.swap || !res.committed) return 61;
+            if (zidl_cdr_write_encap(&counting) || zidl_cdr_write_u8(&counting, 7) ||
+                zidl_cdr_reserve_primitives(&counting, 2, 8, &res) || res.count != 2 ||
+                zidl_cdr_reservation_data(&counting, &res) != NULL ||
+                zidl_cdr_commit_primitives(&counting, &res) || !res.committed ||
+                counting.len != 4 + 8 + 16) return 62;
+        }
+    }
     return 0;
 }
 

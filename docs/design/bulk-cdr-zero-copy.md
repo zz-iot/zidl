@@ -1,6 +1,6 @@
 # Zero-copy bulk CDR: read views and write reservations
 
-Status: accepted; phase 1 (read views) in progress. Follows the bulk primitive array operations
+Status: accepted; phases 1 (read views, #98) and 2 (write reservations) built. Follows the bulk primitive array operations
 (#92) and `zidl_cdr_read_sequence_count` (#96).
 
 ## Problem
@@ -79,8 +79,9 @@ const void *zidl_cdr_view_native(const ZidlCdrPrimitivesView *v,
 #endif
 
 /* The fallback: copies the elements into `dest` as host values, swapping
- * if needed. It does not touch the reader. */
-void zidl_cdr_view_copy(const ZidlCdrPrimitivesView *v, void *dest);
+ * if needed. It does not touch the reader. INVALID for a view of another
+ * width or NULL pointers, rather than a crash. */
+int zidl_cdr_view_copy(const ZidlCdrPrimitivesView *v, void *dest);
 ```
 
 A consumer reads the count, takes a view, and uses the elements in place when
@@ -131,9 +132,10 @@ typedef struct ZidlCdrReservation {
 int zidl_cdr_reserve_primitives(ZidlCdrWriter *w, size_t count,
                                 size_t elem_size, ZidlCdrReservation *out);
 
-/* Where to fill the elements: NULL for a counting writer or a count of 0.
- * Valid until the writer's next write, reserve or deinit, which may move a
- * dynamic writer's buffer; a fixed writer's never moves. */
+/* Where to fill the elements: NULL for a counting writer, a count of 0, or
+ * a reservation not within what the writer has written. Valid until the
+ * writer's next write, reserve or deinit, which may move a dynamic writer's
+ * buffer; a fixed writer's never moves. Static inline. */
 void *zidl_cdr_reservation_data(const ZidlCdrWriter *w,
                                 const ZidlCdrReservation *res);
 
@@ -141,8 +143,10 @@ void *zidl_cdr_reservation_data(const ZidlCdrWriter *w,
  * the writer's byte order, in place, and marks the reservation committed.
  * Required before the buffer is used. A no-op without `swap`, for a
  * counting writer or a count of 0, and for a reservation already committed,
- * so a repeated call cannot swap the bytes back. */
-void zidl_cdr_commit_primitives(ZidlCdrWriter *w, ZidlCdrReservation *res);
+ * so a repeated call cannot swap the bytes back. INVALID for NULL
+ * pointers, another width, or a reservation not within what the writer has
+ * written. */
+int zidl_cdr_commit_primitives(ZidlCdrWriter *w, ZidlCdrReservation *res);
 ```
 
 The contract is to fill every element with host values, then commit once.

@@ -150,6 +150,51 @@ pub fn viewArray(data: []const u8, pos: *usize, origin: usize, cap: usize, order
     return .{ .bytes = try takeArray(data, pos, origin, cap, width, count), .width = width, .order = order };
 }
 
+/// Whether elements of `width` bytes in `order` differ from host values.
+pub fn swaps(order: ByteOrder, width: usize) bool {
+    return width > 1 and order != host_order;
+}
+
+/// Reverses each `width`-byte element of `bytes` in place.
+pub fn swapInPlace(bytes: []u8, width: usize) void {
+    switch (width) {
+        2 => swapArray(u16, bytes, bytes),
+        4 => swapArray(u32, bytes, bytes),
+        8 => swapArray(u64, bytes, bytes),
+        else => {},
+    }
+}
+
+/// Primitives reserved in a writer's buffer for the caller to fill in place
+/// (docs/design/bulk-cdr-zero-copy.md). Recorded by offset, so it survives
+/// the buffer's reallocation as the writer grows; its bytes are fetched
+/// again after any other write.
+pub const PrimitivesReservation = struct {
+    /// The first element's offset in the writer's buffer.
+    offset: usize,
+    count: usize = 0,
+    /// 1, 2, 4 or 8.
+    width: usize,
+    /// The writer's byte order differs from the host's: `commit` swaps.
+    swap: bool,
+    committed: bool = false,
+
+    /// The reserved elements in `buf`, the writer's bytes so far. Not
+    /// initialized: fill every one with host values, then `commit`.
+    pub fn bytes(self: PrimitivesReservation, buf: []u8) []u8 {
+        return buf[self.offset..][0 .. self.count * self.width];
+    }
+
+    /// Puts the filled elements in the writer's byte order, in place, once:
+    /// a reservation already committed is left alone, so a repeated commit
+    /// cannot swap the bytes back.
+    pub fn commit(self: *PrimitivesReservation, buf: []u8) void {
+        if (self.committed) return;
+        if (self.swap) swapInPlace(self.bytes(buf), self.width);
+        self.committed = true;
+    }
+};
+
 pub fn writeBools(dest: []u8, values: []const bool) void {
     for (dest, values) |*out, value| out.* = @intFromBool(value);
 }

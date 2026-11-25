@@ -236,6 +236,38 @@ pub fn CdrWriter(comptime xcdr_version: XcdrVersion) type {
             self.pos = next;
         }
 
+        /// Reserves `count` primitives of `width` bytes (1/2/4/8) as
+        /// `writePrimitiveArray` would write them (padding zeroed,
+        /// all-or-nothing), leaving the elements for the caller to fill in
+        /// place through `reservedBytes`, then `commitPrimitives`. Unfilled
+        /// elements are left as the buffer had them.
+        pub fn reservePrimitives(self: *Self, width: usize, count: usize) !primitives.PrimitivesReservation {
+            if (!primitives.isArrayWidth(width)) return error.InvalidPrimitiveSize;
+            const swap = primitives.swaps(.little, width);
+            if (count == 0) return .{ .offset = self.buf.items.len, .width = width, .swap = swap };
+            const pad = primitives.arrayPadding(width, self.pos, if (xcdr_version == .xcdr1) 8 else 4);
+            const size = try std.math.mul(usize, count, width);
+            const total = try std.math.add(usize, pad, size);
+            const next = try std.math.add(usize, self.pos, total);
+            const start = self.buf.items.len;
+            _ = try std.math.add(usize, start, total);
+            const dest = try self.buf.addManyAsSlice(self.alloc, total);
+            @memset(dest[0..pad], 0);
+            self.pos = next;
+            return .{ .offset = start + pad, .count = count, .width = width, .swap = swap };
+        }
+
+        /// Where to fill `res`: valid until the writer's next write, which
+        /// may reallocate its buffer.
+        pub fn reservedBytes(self: *Self, res: primitives.PrimitivesReservation) []u8 {
+            return res.bytes(self.buf.items);
+        }
+
+        /// Puts `res`'s filled elements in the writer's byte order, once.
+        pub fn commitPrimitives(self: *Self, res: *primitives.PrimitivesReservation) void {
+            res.commit(self.buf.items);
+        }
+
         pub fn writeU8(self: *Self, v: u8) !void {
             try primitives.writeUnsigned(self, u8, v, self.pos, if (xcdr_version == .xcdr1) 8 else 4, .little);
         }
@@ -671,6 +703,15 @@ pub const PlCdrWriter = struct {
     }
     pub fn writePrimitiveArray(self: *PlCdrWriter, comptime T: type, values: []const T) !void {
         try self.inner.writePrimitiveArray(T, values);
+    }
+    pub fn reservePrimitives(self: *PlCdrWriter, width: usize, count: usize) !primitives.PrimitivesReservation {
+        return self.inner.reservePrimitives(width, count);
+    }
+    pub fn reservedBytes(self: *PlCdrWriter, res: primitives.PrimitivesReservation) []u8 {
+        return self.inner.reservedBytes(res);
+    }
+    pub fn commitPrimitives(self: *PlCdrWriter, res: *primitives.PrimitivesReservation) void {
+        self.inner.commitPrimitives(res);
     }
     pub fn writeU8(self: *PlCdrWriter, v: u8) !void {
         try self.inner.writeU8(v);
@@ -2423,4 +2464,46 @@ test "viewPrimitives views elements in place, in the stream's byte order" {
     swapped.copyTo(&as_bytes);
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&values), &as_bytes);
     try std.testing.expectEqual(be.len, r.pos);
+}
+
+test "reservePrimitives leaves elements to fill in place, found by offset across growth" {
+    const alloc = std.testing.allocator;
+    var bulk: std.ArrayListUnmanaged(u8) = .empty;
+    defer bulk.deinit(alloc);
+    var scalar: std.ArrayListUnmanaged(u8) = .empty;
+    defer scalar.deinit(alloc);
+    const values = [_]u64{ 1, 0x0123456789abcdef, 3 };
+    var more: [600]u32 = undefined;
+    for (&more, 0..) |*m, i| m.* = @intCast(i * 7);
+    inline for (.{ XcdrVersion.xcdr1, XcdrVersion.xcdr2 }) |version| {
+        bulk.clearAndFree(alloc);
+        scalar.clearRetainingCapacity();
+        var w = CdrWriter(version).init(&bulk, alloc);
+        var expected = CdrWriter(version).init(&scalar, alloc);
+        try w.writeEncapHeader();
+        try expected.writeEncapHeader();
+        try w.writeU8(7);
+        try expected.writeU8(7);
+
+        // Another width is refused; an empty reservation reserves nothing.
+        try std.testing.expectError(error.InvalidPrimitiveSize, w.reservePrimitives(3, 1));
+        const len = bulk.items.len;
+        var empty = try w.reservePrimitives(8, 0);
+        try std.testing.expectEqual(@as(usize, 0), w.reservedBytes(empty).len);
+        w.commitPrimitives(&empty);
+        try std.testing.expectEqual(len, bulk.items.len);
+
+        // Reserved, then the writer grows past its first allocation: the
+        // reservation is found again by its offset and filled late.
+        var res = try w.reservePrimitives(8, values.len);
+        try expected.writePrimitiveArray(u64, &values);
+        try std.testing.expect(!res.committed);
+        try w.writePrimitiveArray(u32, &more);
+        try expected.writePrimitiveArray(u32, &more);
+        @memcpy(w.reservedBytes(res), std.mem.sliceAsBytes(&values));
+        w.commitPrimitives(&res);
+        try std.testing.expect(res.committed);
+        w.commitPrimitives(&res); // once: a repeat changes nothing
+        try std.testing.expectEqualSlices(u8, scalar.items, bulk.items);
+    }
 }
