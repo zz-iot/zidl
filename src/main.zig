@@ -262,13 +262,7 @@ pub fn main(init: std.process.Init) !void {
             }
             opts.handle_retire_hook = args[i];
         } else if (std.mem.eql(u8, arg, "--listener-failure-report")) {
-            i += 1;
-            if (i >= args.len) {
-                try stderr.print("error: --listener-failure-report requires an argument\n", .{});
-                try stderr.flush();
-                std.process.exit(1);
-            }
-            opts.listener_failure_report = args[i];
+            opts.listener_failure_report = try optionValue(args, &i, stderr);
         } else if (std.mem.eql(u8, arg, "--handle-retire-query")) {
             i += 1;
             if (i >= args.len) {
@@ -757,6 +751,27 @@ fn processFile(
         .c_no_free = opts.c_no_free,
     };
     try be.generate(&ir_spec, gen_opts);
+}
+
+/// The argument after option `args[i.*]`, advancing `i.*` past it. Exits
+/// with an error when there is none.
+fn optionValue(args: []const [:0]const u8, i: *usize, stderr: *Io.Writer) ![]const u8 {
+    const name = args[i.*];
+    i.* += 1;
+    if (i.* < args.len) return args[i.*];
+    try stderr.print("error: {s} requires an argument\n", .{name});
+    try stderr.flush();
+    std.process.exit(1);
+}
+
+test "optionValue returns the argument after an option and advances past it" {
+    const args = [_][:0]const u8{ "zidl", "--listener-failure-report", "report", "-o" };
+    var buf: [64]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    var i: usize = 1;
+    try std.testing.expectEqualStrings("report", try optionValue(&args, &i, &w));
+    try std.testing.expectEqual(@as(usize, 2), i);
+    try std.testing.expectEqual(@as(usize, 0), w.end);
 }
 
 fn fileExists(path_str: []const u8) bool {
