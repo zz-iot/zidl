@@ -300,6 +300,12 @@ jobs:
             done
             test "$count" -gt 0
           done
+          # Every code-generation step of the integration tests runs zidl under
+          # kcov into the same report, so codegen paths those tests exercise
+          # count as covered. One job at a time: kcov merges each run into the
+          # report as it finishes.
+          zig build coverage-generators -Dcoverage=true -j1 \
+            -Dkcov-generators="$(pwd)/coverage" -Dkcov-root="$(pwd)"
           # Exercise the CLI's opt-in output path and the actual loadable providers.
           collect zig-out/bin/zidl -b zig --experimental-typesupport-library \
             -o "${RUNNER_TEMP}/coverage-generated" test/integration/typesupport_library/a.idl
