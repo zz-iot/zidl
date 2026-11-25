@@ -3971,14 +3971,10 @@ const Generator = struct {
             defer self.alloc.free(t.init);
             // A string's `@default` stays, as in the struct: a mutable sample
             // that omits the member keeps it.
-            const default_literal: ?[]u8 = if (kind == .string) if (m.annotations.default_value) |dv| switch (dv) {
-                .string => |text| blk: {
-                    const esc = try escapeStringLiteral(self.alloc, text);
-                    defer self.alloc.free(esc);
-                    break :blk try std.fmt.allocPrint(self.alloc, "\"{s}\"", .{esc});
-                },
-                else => null,
-            } else null else null;
+            const default_literal: ?[]u8 = if (kind == .string) if (m.annotations.default_value) |dv|
+                try self.formatDefaultValueZig(dv, m.type_ref)
+            else
+                null else null;
             defer if (default_literal) |d| self.alloc.free(d);
             try self.ind();
             if (m.annotations.is_optional) {
@@ -13230,6 +13226,16 @@ test "zig_backend: a view keeps string defaults; an absent final optional is nul
     try testing.expect(has(view, "o: ?[]const u8 = \"o\","));
     try testing.expect(has(view, "n: i32 = 3,"));
     try testing.expect(has(view, "            out.o = null;\n"));
+}
+
+test "zig_backend: a view keeps a string default naming a constant" {
+    var out = try testGenOpts(
+        \\const string FALLBACK = "f";
+        \\struct D { @default(FALLBACK) string s; };
+    , "d", .{ .generate_views = true });
+    defer out.deinit(testing.allocator);
+    const view = out.items[std.mem.indexOf(u8, out.items, "pub const View").?..];
+    try testing.expect(has(view, "s: []const u8 = FALLBACK,"));
 }
 
 test "zig_backend: a view of a struct owning nothing frees nothing" {
