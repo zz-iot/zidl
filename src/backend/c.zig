@@ -650,6 +650,7 @@ const Generator = struct {
             } else {
                 try self.write("\n");
             }
+            if (viewsEnabledC(self.opts)) try self.emitStructView(s, c_name);
             if (self.opts.generate_zzdds_wrappers and isZzddsTopicStructC(s)) {
                 try self.emitStructZzddsWrapperProtos(c_name);
             }
@@ -724,6 +725,46 @@ const Generator = struct {
         try self.write("\n");
     }
 
+    /// `{Type}View`: the struct as decoded in place from its CDR input
+    /// (`viewKindC`), with `{Type}_deserialize_view` and `{Type}View_free`.
+    fn emitStructView(self: *Generator, s: *const ir.Struct, c_name: []const u8) !void {
+        const em = self.opts.export_macro;
+        const sp: []const u8 = if (em.len > 0) " " else "";
+        try self.print("/* {s}View: {s} decoded in place. Primitive sequences and arrays point into\n", .{ c_name, c_name });
+        try self.write(" * the CDR input, strings are zero-copy and nested structs are views, all\n");
+        try self.write(" * valid while that input is; other members are decoded as in the struct and\n");
+        try self.print(" * owned by the view until {s}View_free. */\n", .{c_name});
+        try self.print("typedef struct {s}View_s {{\n", .{c_name});
+        if (s.base) |base| {
+            const base_c = try self.prefixedCName(ir.typeDeclQualifiedName(base));
+            defer self.alloc.free(base_c);
+            try self.print("    {s}View _base;\n", .{base_c});
+        }
+        for (s.members) |m| {
+            if (m.annotations.is_optional) {
+                try self.write("    uint64_t _present;\n");
+                break;
+            }
+        }
+        for (s.members) |m| {
+            switch (viewKindC(m.type_ref, m.dimensions)) {
+                .primitives => try self.print("    ZidlCdrPrimitivesView {s};\n", .{m.name}),
+                .string => try self.print("    const char *{s};\n", .{m.name}),
+                .struct_view => {
+                    const nested = try self.prefixedCName(viewStructQname(m.type_ref));
+                    defer self.alloc.free(nested);
+                    try self.print("    {s}View {s};\n", .{ nested, m.name });
+                },
+                .owned => try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, "    "),
+            }
+        }
+        try self.print("}} {s}View;\n", .{c_name});
+        try self.write("/* Decodes a view of the sample at the reader; on failure the view is zeroed and owns nothing. */\n");
+        try self.print("{s}{s}int {s}_deserialize_view(ZidlCdrReader *_r, {s}View *_v);\n", .{ em, sp, c_name, c_name });
+        try self.write("/* Releases what a view owns and zeroes it; its input is not touched. */\n");
+        try self.print("{s}{s}void {s}View_free({s}View *v);\n\n", .{ em, sp, c_name, c_name });
+    }
+
     fn emitStructZzddsWrapperProtos(self: *Generator, c_name: []const u8) !void {
         const em = self.opts.export_macro;
         const sp: []const u8 = if (em.len > 0) " " else "";
@@ -774,6 +815,13 @@ const Generator = struct {
         // caller-owned-storage convention instead of a separate ad hoc type.
         try self.print("{s}{s}DDS_ReturnCode_t {s}DataReader_take_loaned({s}DataReader *self, {s} *out, DDS_SampleInfo *info, DDS_OctetSeqSeq *loan_payloads, DDS_SampleInfoSeq *loan_infos);\n", .{ em, sp, c_name, c_name, c_name });
         try self.print("{s}{s}void {s}DataReader_return_loan({s}DataReader *self, DDS_OctetSeqSeq *loan_payloads, DDS_SampleInfoSeq *loan_infos);\n\n", .{ em, sp, c_name, c_name });
+        if (viewsEnabledC(self.opts)) {
+            try self.write("/* Takes one sample on loan and decodes a view of it, valid until return_view.\n");
+            try self.write(" * A sample without valid data leaves the view zeroed (its key: get_key_value).\n");
+            try self.write(" * On a decode error the loan is already returned. */\n");
+            try self.print("{s}{s}DDS_ReturnCode_t {s}DataReader_take_view({s}DataReader *self, {s}View *out, DDS_SampleInfo *info, DDS_OctetSeqSeq *loan_payloads, DDS_SampleInfoSeq *loan_infos);\n", .{ em, sp, c_name, c_name, c_name });
+            try self.print("{s}{s}void {s}DataReader_return_view({s}DataReader *self, {s}View *view, DDS_OctetSeqSeq *loan_payloads, DDS_SampleInfoSeq *loan_infos);\n\n", .{ em, sp, c_name, c_name, c_name });
+        }
     }
 
     // ── Union ─────────────────────────────────────────────────────────────────
@@ -1771,6 +1819,51 @@ fn structHasSequenceFields(s: *const ir.Struct) bool {
     return false;
 }
 
+/// Whether struct view types are generated: `--generate-views` with codecs
+/// and `_free` functions, which a view's owned members rely on.
+fn viewsEnabledC(opts: interface.Options) bool {
+    return opts.generate_views and !opts.no_typesupport and !opts.c_no_free;
+}
+
+/// How a struct member appears in the struct's view type.
+const ViewKindC = enum {
+    /// A primitive sequence or array (not bool, whose bytes must be
+    /// checked): a `ZidlCdrPrimitivesView` of the input. An array of any
+    /// rank is one view of all its elements.
+    primitives,
+    /// A string, bounded or not: a zero-copy `const char *` into the input.
+    string,
+    /// A struct: its own view type.
+    struct_view,
+    /// Anything else: decoded as in the struct, and owned by the view.
+    owned,
+};
+
+fn viewKindC(tr: ir.TypeRef, dims: []const u64) ViewKindC {
+    if (dims.len > 0) {
+        if (cdr_skip.arrayTypedefOf(tr) != null) return .owned;
+        const base = cdr_skip.bulkBase(tr) orelse return .owned;
+        return if (base == .boolean) .owned else .primitives;
+    }
+    return switch (cdr_skip.resolveAlias(tr)) {
+        .sequence => |seq| blk: {
+            const base = cdr_skip.bulkBase(seq.element.*) orelse break :blk .owned;
+            break :blk if (base == .boolean) .owned else .primitives;
+        },
+        .string => .string,
+        .named => |td| if (td == .struct_) .struct_view else .owned,
+        else => .owned,
+    };
+}
+
+/// The qualified name of a `.struct_view` member's struct.
+fn viewStructQname(tr: ir.TypeRef) []const u8 {
+    return switch (cdr_skip.resolveAlias(tr)) {
+        .named => |td| ir.typeDeclQualifiedName(td),
+        else => unreachable,
+    };
+}
+
 fn typeRefHasSequence(tr: ir.TypeRef) bool {
     return switch (tr) {
         .string => |b| b == null,
@@ -2101,6 +2194,9 @@ const CdrGenerator = struct {
     reader_window_id: usize = 0,
     canonical_key: bool = false,
     wire_key: bool = false,
+    /// Decoding a view type: a base type's fields are reached through its
+    /// view (`openWireField`).
+    view_owner: bool = false,
     alloc: std.mem.Allocator,
     opts: interface.Options,
     out: *std.ArrayList(u8),
@@ -2300,12 +2396,13 @@ const CdrGenerator = struct {
         }
         const name = try self.prefixedCName(field.owner_name);
         defer self.alloc.free(name);
+        const view: []const u8 = if (self.view_owner) "View" else "";
         var path = std.ArrayList(u8).empty;
         defer path.deinit(self.alloc);
         try path.appendSlice(self.alloc, "_v->");
         for (0..field.base_depth) |i| try path.appendSlice(self.alloc, if (i == 0) "_base" else "._base");
-        try self.printI("{s}{s} *_base_value = &{s};\n", .{ if (read_only) "const " else "", name, path.items });
-        try self.printI("{s}{s} *_v = _base_value;\n", .{ if (read_only) "const " else "", name });
+        try self.printI("{s}{s}{s} *_base_value = &{s};\n", .{ if (read_only) "const " else "", name, view, path.items });
+        try self.printI("{s}{s}{s} *_v = _base_value;\n", .{ if (read_only) "const " else "", name, view });
     }
 
     fn closeWireField(self: *CdrGenerator, field: canonical.Field, scope: bool) !void {
@@ -2350,6 +2447,218 @@ const CdrGenerator = struct {
         try self.printI("else _v->_present &= ~(1ULL << {d}u);\n", .{optBitIdxForMember(field.owner.*, field.index)});
         try self.writeI("zidl_cdr_end_optional_read(_r, &_scope);\n");
         try self.writeI("return _rc;\n");
+        try self.write("}\n\n");
+    }
+
+    /// Reads member `m` into `lval` as its view type has it (`viewKindC`).
+    fn emitViewMemberRead(self: *CdrGenerator, m: ir.StructMember, lval: []const u8) !void {
+        switch (viewKindC(m.type_ref, m.dimensions)) {
+            .owned => if (m.dimensions.len > 0) {
+                try self.emitReadArray(m.type_ref, m.name, lval, m.dimensions, 0);
+            } else {
+                try self.emitReadForTypeRef(m.type_ref, m.name, lval);
+            },
+            .primitives => if (m.dimensions.len > 0) {
+                var total: u64 = 1;
+                for (m.dimensions) |d| total *= d;
+                const width = cdr_skip.baseWireSize(cdr_skip.bulkBase(m.type_ref).?).?;
+                try self.printI("_rc = zidl_cdr_read_primitives_view(_r, {d}u, {d}u, &{s});\n", .{ total, width, lval });
+                try self.emitRcCheck();
+            } else {
+                const seq = cdr_skip.resolveAlias(m.type_ref).sequence;
+                const width = cdr_skip.baseWireSize(cdr_skip.bulkBase(seq.element.*).?).?;
+                try self.writeI("{ uint32_t _vn;\n");
+                self.indent_depth += 1;
+                try self.printI("_rc = zidl_cdr_read_sequence_count(_r, {d}u, {d}u, &_vn);\n", .{ width, seq.bound orelse 0 });
+                try self.emitRcCheck();
+                try self.printI("_rc = zidl_cdr_read_primitives_view(_r, _vn, {d}u, &{s});\n", .{ width, lval });
+                try self.emitRcCheck();
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            },
+            .string => {
+                try self.writeI("{ uint32_t _vl;\n");
+                self.indent_depth += 1;
+                try self.printI("_rc = zidl_cdr_read_string_zerocopy(_r, &{s}, &_vl);\n", .{lval});
+                try self.emitRcCheck();
+                if (cdr_skip.resolveAlias(m.type_ref).string) |n| {
+                    try self.printI("if (_vl > {d}u) {{\n", .{n});
+                    self.indent_depth += 1;
+                    try self.emitReturnRc("ZIDL_CDR_INVALID");
+                    self.indent_depth -= 1;
+                    try self.writeI("}\n");
+                }
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            },
+            .struct_view => {
+                const nested = try self.prefixedCName(viewStructQname(m.type_ref));
+                defer self.alloc.free(nested);
+                try self.printI("_rc = {s}_deserialize_view(_r, &{s});\n", .{ nested, lval });
+                try self.emitRcCheck();
+            },
+        }
+    }
+
+    /// The view counterparts of `emitOptionalValueFns`' read helpers.
+    fn emitOptionalViewReadFns(self: *CdrGenerator, c_name: []const u8, field: canonical.Field) !void {
+        const m = field.member.*;
+        const id = m.annotations.memberId(@intCast(field.index));
+        const bit = optBitIdxForMember(field.owner.*, field.index);
+        const owner = try self.prefixedCName(field.owner_name);
+        defer self.alloc.free(owner);
+        const lval = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
+        defer self.alloc.free(lval);
+        try self.print("static int {s}_optional_read_view_value_{d}(ZidlCdrReader *_r, {s}View *_v) {{\n", .{ c_name, id, owner });
+        try self.writeI("int _rc = 0; (void)_rc;\n");
+        try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit});
+        try self.emitViewMemberRead(m, lval);
+        try self.writeI("return 0;\n");
+        try self.write("}\n\n");
+        try self.print("static int {s}_optional_read_view_{d}(ZidlCdrReader *_r, {s}View *_v) {{\n", .{ c_name, id, owner });
+        try self.writeI("ZidlCdrOptionalRead _scope; bool _present;\n");
+        try self.printI("int _rc = zidl_cdr_begin_optional_read(_r, {d}, &_scope, &_present);\n", .{id});
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.printI("if (_present) _rc = {s}_optional_read_view_value_{d}(_r, _v);\n", .{ c_name, id });
+        try self.writeI("zidl_cdr_end_optional_read(_r, &_scope);\n");
+        try self.writeI("return _rc;\n");
+        try self.write("}\n\n");
+    }
+
+    /// `{Type}_deserialize_view` and `{Type}View_free`: the view
+    /// counterparts of `_deserialize` (whose framing, member order and
+    /// optional and mutable handling they share) and `_free`.
+    fn emitStructViewFns(self: *CdrGenerator, s: *const ir.Struct, c_name: []const u8) !void {
+        const mutable = s.annotations.extensibility == .mutable;
+        const appendable = s.annotations.extensibility != .final;
+        const wire_fields = try canonical.wireFields(self.alloc, s, false);
+        defer self.alloc.free(wire_fields);
+        const previous = self.view_owner;
+        self.view_owner = true;
+        defer self.view_owner = previous;
+        const frame = try std.fmt.allocPrint(self.alloc, "{s}_deserialize_view_frame", .{c_name});
+        defer self.alloc.free(frame);
+        const view_type = try std.fmt.allocPrint(self.alloc, "{s}View", .{c_name});
+        defer self.alloc.free(view_type);
+
+        if (!mutable) for (wire_fields) |field| {
+            if (field.member.annotations.is_optional) try self.emitOptionalViewReadFns(c_name, field);
+        };
+
+        // The frame: _deserialize's body, reading members as the view has them.
+        try self.print("int {s}(ZidlCdrReader *_r, {s} *_v);\n", .{ frame, view_type });
+        try cdr_skip.emitReadFunction(self, frame, view_type, false, if (mutable) "1" else if (appendable) "_r->xcdr_version == ZIDL_XCDR2" else "0");
+        try self.writeI("int _rc = ZIDL_CDR_OK; (void)_rc;\n");
+        if (mutable) {
+            try self.writeI("size_t _em_end;\n");
+            try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_em_end);\n");
+            try self.writeI("if (_rc) return _rc;\n");
+            try cdr_skip.limitReader(self, "_em_end");
+            try self.writeI("for (size_t _frame_limit = _r->data_len, _member_end = _r->pos; zidl_cdr_mutable_has_more(_r, _em_end); _r->pos = _member_end, _r->data_len = _frame_limit) {\n");
+            self.indent_depth += 1;
+            try self.writeI("ZidlEmHeader _emh;\n");
+            try self.writeI("_rc = zidl_cdr_read_emheader(_r, &_emh);\n");
+            try self.writeI("if (_rc) return _rc;\n");
+            try cdr_skip.memberWindow(self);
+            try self.writeI("switch (_emh.member_id) {\n");
+            self.indent_depth += 1;
+            for (wire_fields) |field| {
+                const m = field.member.*;
+                try self.printI("case {d}: {{\n", .{memberIdAtC(m, field.index)});
+                self.indent_depth += 1;
+                try self.openWireField(field, false, false);
+                if (m.annotations.is_optional) {
+                    try self.printI("_v->_present |= (1ULL << {d}u);\n", .{optBitIdxForMember(field.owner.*, field.index)});
+                }
+                const lval = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
+                defer self.alloc.free(lval);
+                try self.emitViewMemberRead(m, lval);
+                try self.writeI("break;\n");
+                try self.closeWireField(field, false);
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            }
+            try self.writeI("default:\n");
+            self.indent_depth += 1;
+            try self.writeI("if (_emh.must_understand) return ZIDL_CDR_INVALID;\n");
+            try self.writeI("_rc = zidl_cdr_skip_emheader_payload(_r, &_emh);\n");
+            try self.writeI("if (_rc) return _rc;\n");
+            try self.writeI("break;\n");
+            self.indent_depth -= 2;
+            try self.writeI("}\n");
+            self.indent_depth -= 1;
+            try self.writeI("}\n");
+        } else {
+            if (appendable) {
+                try self.writeI("if (_r->xcdr_version == ZIDL_XCDR2) {\n");
+                self.indent_depth += 1;
+                try self.writeI("size_t _body_end;\n");
+                try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_body_end);\n");
+                try cdr_skip.readRcCheck(self);
+                try cdr_skip.limitReader(self, "_body_end");
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            }
+            for (wire_fields) |field| {
+                const m = field.member.*;
+                try self.openWireField(field, false, true);
+                if (m.annotations.is_optional) {
+                    try self.printI("_rc = {s}_optional_read_view_{d}(_r, _v);\n", .{ c_name, m.annotations.memberId(@intCast(field.index)) });
+                    try self.writeI("if (_rc) return _rc;\n");
+                } else {
+                    const lval = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
+                    defer self.alloc.free(lval);
+                    try self.emitViewMemberRead(m, lval);
+                }
+                try self.closeWireField(field, true);
+            }
+        }
+        try self.writeI("return ZIDL_CDR_OK;\n");
+        try self.write("}\n\n");
+
+        // The public entry: a failed decode leaves nothing to free.
+        try self.print("int {s}_deserialize_view(ZidlCdrReader *_r, {s} *_v) {{\n", .{ c_name, view_type });
+        try self.writeI("memset(_v, 0, sizeof *_v);\n");
+        try self.printI("int _rc = {s}(_r, _v);\n", .{frame});
+        try self.printI("if (_rc) {s}_free(_v);\n", .{view_type});
+        try self.writeI("return _rc;\n");
+        try self.write("}\n\n");
+
+        try self.emitStructViewFree(s, view_type);
+    }
+
+    /// `{Type}View_free`: frees what the view owns, its owned members and
+    /// nested views, and zeroes it. Views and zero-copy strings own nothing.
+    fn emitStructViewFree(self: *CdrGenerator, s: *const ir.Struct, view_type: []const u8) !void {
+        try self.print("void {s}_free({s} *v) {{\n", .{ view_type, view_type });
+        try self.writeI("if (!v) return;\n");
+        if (s.base) |base| {
+            const base_c = try self.prefixedCName(ir.typeDeclQualifiedName(base));
+            defer self.alloc.free(base_c);
+            try self.printI("{s}View_free(&v->_base);\n", .{base_c});
+        }
+        for (s.members) |m| {
+            const lval = try std.fmt.allocPrint(self.alloc, "v->{s}", .{m.name});
+            defer self.alloc.free(lval);
+            switch (viewKindC(m.type_ref, m.dimensions)) {
+                .primitives, .string => {},
+                // An absent optional nested view is zero, which frees as nothing.
+                .struct_view => {
+                    const nested = try self.prefixedCName(viewStructQname(m.type_ref));
+                    defer self.alloc.free(nested);
+                    try self.printI("{s}View_free(&{s});\n", .{ nested, lval });
+                },
+                .owned => {
+                    if (!typeRefHasSequence(m.type_ref)) continue;
+                    if (m.dimensions.len > 0) {
+                        try self.emitFreeArrayElementsGeneral(m.type_ref, lval, m.dimensions, 0);
+                    } else {
+                        try self.emitFreeTypeRefGeneral(m.type_ref, lval, 0);
+                    }
+                },
+            }
+        }
+        try self.writeI("memset(v, 0, sizeof *v);\n");
         try self.write("}\n\n");
     }
 
@@ -2541,6 +2850,7 @@ const CdrGenerator = struct {
 
         try self.emitStructValueFns(s, c_name, false);
         try self.emitStructValueFns(s, c_name, true);
+        if (viewsEnabledC(self.opts)) try self.emitStructViewFns(s, c_name);
         try cdr_skip.emitKeyValueSkip(self, s, c_name);
 
         if (!self.opts.c_no_free or !structHasSequenceFields(s)) try @import("sample_processing.zig").emit(self, c_name, c_name, has_key, structHasSequenceFields(s), appendable, mutable, false);
@@ -3469,6 +3779,34 @@ const CdrGenerator = struct {
         try self.writeI("DDS_OctetSeq _c_no_hashes = {0};\n");
         try self.writeI("DDS_DataReader_return_loan_raw(self->reader, loan_payloads, &_c_no_hashes, loan_infos);\n");
         try self.write("}\n\n");
+
+        if (viewsEnabledC(self.opts)) {
+            // As take_loaned, but decoding a view, which stays valid while the
+            // loan is held. Only valid data is decoded: a key-only sample's key
+            // comes from get_key_value.
+            try self.print("DDS_ReturnCode_t {s}DataReader_take_view({s}DataReader *self, {s}View *out, DDS_SampleInfo *info, DDS_OctetSeqSeq *loan_payloads, DDS_SampleInfoSeq *loan_infos) {{\n", .{ c_name, c_name, c_name });
+            try self.writeI("memset(out, 0, sizeof *out);\n");
+            try self.writeI("loan_payloads->_maximum = 0;\n");
+            try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
+            try self.writeI("DDS_ReturnCode_t _n = DDS_DataReader_take_raw(self->reader, loan_payloads, &_c_hashes, loan_infos, DDS_HANDLE_NIL, NULL, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, 1);\n");
+            try self.writeI("{ DDS_OctetSeqSeq _c_empty_payloads = {0}; DDS_SampleInfoSeq _c_empty_infos = {0}; DDS_DataReader_return_loan_raw(self->reader, &_c_empty_payloads, &_c_hashes, &_c_empty_infos); }\n");
+            try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
+            try self.writeI("if (loan_payloads->_length == 0) return DDS_RETCODE_NO_DATA;\n");
+            try self.writeI("*info = loan_infos->_buffer[0];\n");
+            try self.writeI("if (!info->valid_data) return DDS_RETCODE_OK;\n");
+            try self.writeI("ZidlCdrReader _r;\n");
+            try self.writeI("int _rc = zidl_cdr_reader_init(&_r, loan_payloads->_buffer[0]._buffer, loan_payloads->_buffer[0]._length);\n");
+            try self.printI("if (!_rc) _rc = {s}_deserialize_view(&_r, out);\n", .{c_name});
+            try self.writeI("if (_rc) { DDS_OctetSeq _c_no_hashes = {0}; uint8_t _flag = 1; DDS_OctetSeq _failed = { 1, 1, &_flag, false }; DDS_DataReader_return_loan_raw_failed(self->reader, loan_payloads, &_c_no_hashes, loan_infos, &_failed); }\n");
+            try self.writeI("return _rc;\n");
+            try self.write("}\n\n");
+
+            try self.print("void {s}DataReader_return_view({s}DataReader *self, {s}View *view, DDS_OctetSeqSeq *loan_payloads, DDS_SampleInfoSeq *loan_infos) {{\n", .{ c_name, c_name, c_name });
+            try self.printI("{s}View_free(view);\n", .{c_name});
+            try self.writeI("DDS_OctetSeq _c_no_hashes = {0};\n");
+            try self.writeI("DDS_DataReader_return_loan_raw(self->reader, loan_payloads, &_c_no_hashes, loan_infos);\n");
+            try self.write("}\n\n");
+        }
     }
 
     fn emitExceptionFns(self: *CdrGenerator, e: *const ir.Exception) !void {
@@ -5555,6 +5893,7 @@ fn testGenFullOpts(source: []const u8, stem: []const u8, extra: struct {
     no_typesupport: bool = false,
     generate_zzdds_wrappers: bool = false,
     c_no_free: bool = false,
+    generate_views: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
 
@@ -5576,6 +5915,7 @@ fn testGenFullOpts(source: []const u8, stem: []const u8, extra: struct {
 
     const opts = interface.Options{
         .input_stem = stem,
+        .generate_views = extra.generate_views,
         .type_prefix = extra.type_prefix,
         .generate_interfaces = extra.generate_interfaces,
         .pragma_once = extra.pragma_once,
@@ -6236,6 +6576,7 @@ fn testGenCdrOpts(source: []const u8, stem: []const u8, opts_extra: struct {
     type_prefix: []const u8 = "",
     generate_zzdds_wrappers: bool = false,
     c_no_free: bool = false,
+    generate_views: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
 
@@ -6257,6 +6598,7 @@ fn testGenCdrOpts(source: []const u8, stem: []const u8, opts_extra: struct {
 
     const opts = interface.Options{
         .input_stem = stem,
+        .generate_views = opts_extra.generate_views,
         .no_typesupport = opts_extra.no_typesupport,
         .type_prefix = opts_extra.type_prefix,
         .generate_zzdds_wrappers = opts_extra.generate_zzdds_wrappers,
@@ -6265,6 +6607,149 @@ fn testGenCdrOpts(source: []const u8, stem: []const u8, opts_extra: struct {
     try generateCdrSource(alloc, &ir_spec, opts, &out);
 
     return out;
+}
+
+const view_idl =
+    \\struct Inner { long id; };
+    \\@final struct Frame {
+    \\    string name;
+    \\    string<8> tag;
+    \\    sequence<octet> data;
+    \\    sequence<long, 5> bounded;
+    \\    long grid[2][3];
+    \\    sequence<boolean> flags;
+    \\    Inner nested;
+    \\};
+;
+
+test "c_backend views: --generate-views declares a view type, its decoder and its free" {
+    var h = try testGenFullOpts(view_idl, "v", .{ .generate_views = true });
+    defer h.deinit(testing.allocator);
+    const s = h.items;
+    try testing.expect(has(s, "typedef struct FrameView_s {"));
+    try testing.expect(has(s, "    const char *name;\n"));
+    try testing.expect(has(s, "    const char *tag;\n"));
+    try testing.expect(has(s, "    ZidlCdrPrimitivesView data;\n"));
+    try testing.expect(has(s, "    ZidlCdrPrimitivesView bounded;\n"));
+    try testing.expect(has(s, "    ZidlCdrPrimitivesView grid;\n"));
+    // Bool bytes must be checked, so a bool sequence stays owned.
+    try testing.expect(has(s, "    bool_seq flags;\n"));
+    try testing.expect(has(s, "    InnerView nested;\n"));
+    try testing.expect(has(s, "int Frame_deserialize_view(ZidlCdrReader *_r, FrameView *_v);"));
+    try testing.expect(has(s, "void FrameView_free(FrameView *v);"));
+
+    var plain = try testGenFullOpts(view_idl, "v", .{});
+    defer plain.deinit(testing.allocator);
+    try testing.expect(!has(plain.items, "FrameView"));
+    // A view's owned members rely on the generated _free functions.
+    var no_free = try testGenFullOpts(view_idl, "v", .{ .generate_views = true, .c_no_free = true });
+    defer no_free.deinit(testing.allocator);
+    try testing.expect(!has(no_free.items, "FrameView"));
+}
+
+test "c_backend views: the decoder reads views, zero-copy strings and nested views" {
+    var c_src = try testGenCdrOpts(view_idl, "v", .{ .generate_views = true });
+    defer c_src.deinit(testing.allocator);
+    const s = c_src.items;
+    try testing.expect(has(s, "_rc = zidl_cdr_read_string_zerocopy(_r, &_v->name, &_vl);"));
+    try testing.expect(has(s, "if (_vl > 8u) {"));
+    try testing.expect(has(s, "_rc = zidl_cdr_read_sequence_count(_r, 1u, 0u, &_vn);"));
+    try testing.expect(has(s, "_rc = zidl_cdr_read_primitives_view(_r, _vn, 1u, &_v->data);"));
+    try testing.expect(has(s, "_rc = zidl_cdr_read_sequence_count(_r, 4u, 5u, &_vn);"));
+    // A two-dimensional array is one view of all its elements.
+    try testing.expect(has(s, "_rc = zidl_cdr_read_primitives_view(_r, 6u, 4u, &_v->grid);"));
+    try testing.expect(has(s, "_rc = Inner_deserialize_view(_r, &_v->nested);"));
+    // The entry zeroes the view and frees it on failure.
+    try testing.expect(has(s, "int Frame_deserialize_view(ZidlCdrReader *_r, FrameView *_v) {\n    memset(_v, 0, sizeof *_v);\n    int _rc = Frame_deserialize_view_frame(_r, _v);\n    if (_rc) FrameView_free(_v);"));
+    // Free releases the owned bool sequence and the nested view only.
+    try testing.expect(has(s, "void FrameView_free(FrameView *v) {"));
+    try testing.expect(has(s, "InnerView_free(&v->nested);"));
+}
+
+test "c_backend views: zzdds wrappers gain take_view and return_view" {
+    var h = try testGenFullOpts(view_idl, "v", .{ .generate_views = true, .generate_zzdds_wrappers = true });
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "DDS_ReturnCode_t FrameDataReader_take_view(FrameDataReader *self, FrameView *out, DDS_SampleInfo *info, DDS_OctetSeqSeq *loan_payloads, DDS_SampleInfoSeq *loan_infos);"));
+    try testing.expect(has(h.items, "void FrameDataReader_return_view(FrameDataReader *self, FrameView *view, DDS_OctetSeqSeq *loan_payloads, DDS_SampleInfoSeq *loan_infos);"));
+    var c_src = try testGenCdrOpts(view_idl, "v", .{ .generate_views = true, .generate_zzdds_wrappers = true });
+    defer c_src.deinit(testing.allocator);
+    try testing.expect(has(c_src.items, "if (!info->valid_data) return DDS_RETCODE_OK;"));
+    try testing.expect(has(c_src.items, "if (!_rc) _rc = Frame_deserialize_view(&_r, out);"));
+    try testing.expect(has(c_src.items, "    FrameView_free(view);\n    DDS_OctetSeq _c_no_hashes = {0};"));
+    var plain = try testGenFullOpts(view_idl, "v", .{ .generate_zzdds_wrappers = true });
+    defer plain.deinit(testing.allocator);
+    try testing.expect(!has(plain.items, "take_view"));
+}
+
+/// The generated function starting at `header`, through its closing brace.
+fn generatedFn(s: []const u8, header: []const u8) []const u8 {
+    const start = std.mem.indexOf(u8, s, header) orelse return "";
+    const end = std.mem.indexOfPos(u8, s, start, "\n}\n") orelse return s[start..];
+    return s[start .. end + 3];
+}
+
+const view_framing_idl =
+    \\struct Inner { long id; };
+    \\@final struct B { string id; };
+    \\@final struct D : B { sequence<octet> px; };
+    \\@appendable struct A {
+    \\    string name;
+    \\    @optional sequence<long> extra;
+    \\    boolean flags[3];
+    \\    string names[2];
+    \\};
+    \\@mutable struct M {
+    \\    string name;
+    \\    @optional long count;
+    \\    Inner nested;
+    \\};
+;
+
+test "c_backend views: a base type's view, optionals and owned arrays are declared" {
+    var h = try testGenFullOpts(view_framing_idl, "v", .{ .generate_views = true });
+    defer h.deinit(testing.allocator);
+    const s = h.items;
+    try testing.expect(has(s, "typedef struct DView_s {\n    BView _base;\n    ZidlCdrPrimitivesView px;\n} DView;"));
+    try testing.expect(has(s, "typedef struct AView_s {\n    uint64_t _present;\n    const char *name;\n    ZidlCdrPrimitivesView extra;\n    bool flags[3];\n    char *names[2];\n} AView;"));
+}
+
+test "c_backend views: an appendable view reads its window, optionals and owned arrays" {
+    var c_src = try testGenCdrOpts(view_framing_idl, "v", .{ .generate_views = true });
+    defer c_src.deinit(testing.allocator);
+    const s = c_src.items;
+    const optional = generatedFn(s, "static int A_optional_read_view_value_1(ZidlCdrReader *_r, AView *_v) {");
+    try testing.expect(has(optional, "_v->_present |= (1ULL << 0u);"));
+    try testing.expect(has(optional, "_rc = zidl_cdr_read_primitives_view(_r, _vn, 4u, &_v->extra);"));
+    try testing.expect(has(generatedFn(s, "static int A_optional_read_view_1(ZidlCdrReader *_r, AView *_v) {"), "if (_present) _rc = A_optional_read_view_value_1(_r, _v);"));
+    const frame = generatedFn(s, "static int A_deserialize_view_frame_bounded_impl(ZidlCdrReader *_r, AView *_v) {");
+    try testing.expect(has(frame, "_rc = zidl_cdr_read_mutable_dheader(_r, &_body_end);"));
+    try testing.expect(has(frame, "_rc = A_optional_read_view_1(_r, _v);"));
+    // Owned arrays: bool bytes are checked, strings in an array are owned.
+    try testing.expect(has(frame, "_rc = zidl_cdr_read_bool_array(_r, _v->flags, 3u);"));
+    try testing.expect(has(frame, "_rc = zidl_cdr_read_string(_r, &_v->names[_ai0]);"));
+    try testing.expect(has(generatedFn(s, "void AView_free(AView *v) {"), "zidl_cdr_free_str(v->names[_fai0]);"));
+}
+
+test "c_backend views: a mutable view dispatches on member id" {
+    var c_src = try testGenCdrOpts(view_framing_idl, "v", .{ .generate_views = true });
+    defer c_src.deinit(testing.allocator);
+    const frame = generatedFn(c_src.items, "static int M_deserialize_view_frame_bounded_impl(ZidlCdrReader *_r, MView *_v) {");
+    try testing.expect(has(frame, "_rc = zidl_cdr_read_mutable_dheader(_r, &_em_end);"));
+    try testing.expect(has(frame, "switch (_emh.member_id) {"));
+    try testing.expect(has(frame, "_rc = zidl_cdr_read_string_zerocopy(_r, &_v->name, &_vl);"));
+    try testing.expect(has(frame, "_v->_present |= (1ULL << 0u);\n                _rc = zidl_cdr_read_i32(_r, &_v->count);"));
+    try testing.expect(has(frame, "_rc = Inner_deserialize_view(_r, &_v->nested);"));
+    try testing.expect(has(frame, "if (_emh.must_understand) return ZIDL_CDR_INVALID;"));
+}
+
+test "c_backend views: a derived view reads and frees its base through the base's view" {
+    var c_src = try testGenCdrOpts(view_framing_idl, "v", .{ .generate_views = true });
+    defer c_src.deinit(testing.allocator);
+    const s = c_src.items;
+    const frame = generatedFn(s, "static int D_deserialize_view_frame_bounded_impl(ZidlCdrReader *_r, DView *_v) {");
+    try testing.expect(has(frame, "BView *_base_value = &_v->_base;"));
+    try testing.expect(has(frame, "_rc = zidl_cdr_read_string_zerocopy(_r, &_v->id, &_vl);"));
+    try testing.expect(has(generatedFn(s, "void DView_free(DView *v) {"), "BView_free(&v->_base);"));
 }
 
 test "c_backend cdr: header includes zidl_cdr.h when typesupport enabled" {

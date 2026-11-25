@@ -75,6 +75,21 @@ and the C/Zig loader hosts and three shared providers in
 and both hosts with these providers, covering the ABI helper and callbacks
 alongside the generator unit tests.
 
+Integration tests that generate code run the zidl executable as a build step,
+which kcov only measures when it runs it, so CI also runs every such step
+under kcov into the same report:
+
+```sh
+zig build coverage-generators -Dcoverage=true -j1 \
+  -Dkcov-generators="$PWD/coverage" -Dkcov-root="$PWD"
+```
+
+`coverage-generators` depends on every code-generation step, and only those.
+With `-Dkcov-generators`, each runs under kcov and re-runs on every build, so
+a cached step cannot skip its coverage. `-j1` keeps one kcov run at a time,
+since each merges into the one report. Codegen paths that only integration
+tests exercise therefore count as covered.
+
 ### Integration tests
 
 ```sh

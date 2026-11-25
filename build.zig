@@ -70,6 +70,37 @@ fn javaCommand(b: *std.Build, args: []const []const u8, runtime: JavaCdrRuntime)
     return run;
 }
 
+/// Runs zidl for a code-generation step. With `-Dkcov-generators=<dir>` the
+/// run goes through kcov, reporting into `<dir>`, and always re-runs, so a
+/// cached step cannot skip its coverage. Every such run is also a dependency
+/// of `coverage-generators`.
+const Generators = struct {
+    b: *std.Build,
+    exe: *std.Build.Step.Compile,
+    kcov_dir: ?[]const u8,
+    /// The absolute source root kcov includes and strips.
+    root: []const u8,
+    step: *std.Build.Step,
+
+    fn run(self: Generators) *std.Build.Step.Run {
+        const b = self.b;
+        const r = if (self.kcov_dir) |dir| blk: {
+            const k = b.addSystemCommand(&.{
+                "kcov",
+                b.fmt("--include-path={s}/src,{s}/packages", .{ self.root, self.root }),
+                b.fmt("--strip-path={s}", .{self.root}),
+                "--exclude-line=unreachable,@panic",
+                dir,
+            });
+            k.addArtifactArg(self.exe);
+            k.has_side_effects = true;
+            break :blk k;
+        } else b.addRunArtifact(self.exe);
+        self.step.dependOn(&r.step);
+        return r;
+    }
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -130,6 +161,21 @@ pub fn build(b: *std.Build) void {
     run_cmd.step.dependOn(b.getInstallStep());
     run_cmd.addPassthruArgs();
 
+    // Code generation under kcov, for the coverage job: integration tests
+    // that generate code run the zidl executable, which kcov only measures
+    // when it runs it. Pass -Dcoverage=true too, for kcov-readable debug
+    // information, and run with -j1: kcov merges every run into one report.
+    const kcov_generators = b.option([]const u8, "kcov-generators", "Run code-generation steps' zidl under kcov, reporting into this directory");
+    const kcov_root = b.option([]const u8, "kcov-root", "Absolute source root kcov includes and strips (required with -Dkcov-generators)") orelse "";
+    if (kcov_generators != null and kcov_root.len == 0) @panic("-Dkcov-generators requires -Dkcov-root=<absolute source root>");
+    const gens: Generators = .{
+        .b = b,
+        .exe = exe,
+        .kcov_dir = kcov_generators,
+        .root = kcov_root,
+        .step = b.step("coverage-generators", "Run every code-generation step (under kcov with -Dkcov-generators)"),
+    };
+
     // ── unit tests ────────────────────────────────────────────────────────────
     const mod_tests = b.addTest(.{ .name = "zidl-mod", .root_module = mod });
     const run_mod_tests = b.addRunArtifact(mod_tests);
@@ -163,7 +209,7 @@ pub fn build(b: *std.Build) void {
                     1 => "javavalidation.",
                     else => "",
                 };
-                const gen = b.addRunArtifact(exe);
+                const gen = gens.run();
                 gen.addArgs(&.{ "-b", "java" });
                 if (split) gen.addArg("--split-files");
                 if (mode == 1) gen.addArgs(&.{ "--java-package", "javavalidation" });
@@ -217,7 +263,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const authoring_step = b.step("test-authoring", "Test generated strict presence-aware authoring records");
-    const authoring_gen = b.addRunArtifact(exe);
+    const authoring_gen = gens.run();
     authoring_gen.addArgs(&.{ "-b", "zig", "--single-file", "--zig-generate-authoring", "--no-typesupport", "--no-typeobject-support", "-o" });
     const authoring_dir = authoring_gen.addOutputDirectoryArg("authoring-config");
     authoring_gen.addFileArg(b.path("test/integration/authoring/config.idl"));
@@ -228,7 +274,7 @@ pub fn build(b: *std.Build) void {
         .sanitize_thread = sanitize_thread,
         .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings } },
     });
-    const authoring_feature_gen = b.addRunArtifact(exe);
+    const authoring_feature_gen = gens.run();
     authoring_feature_gen.addArgs(&.{ "-b", "zig", "--single-file", "--zig-generate-authoring", "--no-typesupport", "--no-typeobject-support", "-D", "AUTHORING_FEATURE", "-o" });
     const authoring_feature_dir = authoring_feature_gen.addOutputDirectoryArg("authoring-config-feature");
     authoring_feature_gen.addFileArg(b.path("test/integration/authoring/config.idl"));
@@ -334,7 +380,7 @@ pub fn build(b: *std.Build) void {
     // regression here is a real `zig build test` failure, not just a
     // stale-looking substring match.
     {
-        const gen_wrapper_fixture = b.addRunArtifact(exe);
+        const gen_wrapper_fixture = gens.run();
         gen_wrapper_fixture.addArgs(&.{ "-b", "zig", "--generate-zzdds-wrappers", "-o" });
         const wrapper_fixture_dir = gen_wrapper_fixture.addOutputDirectoryArg("zig-wrapper-contract-gen");
         gen_wrapper_fixture.addFileArg(b.path("test/integration/zig_wrapper_contract/fixture.idl"));
@@ -375,20 +421,20 @@ pub fn build(b: *std.Build) void {
     // Keep this in the default tests: signature text checks alone cannot catch
     // incompatible native_handle return types or incorrect shared_ptr upcasts.
     {
-        const gen_c = b.addRunArtifact(exe);
+        const gen_c = gens.run();
         gen_c.addArgs(&.{ "-b", "c", "--generate-interfaces", "-o" });
         const c_dir = gen_c.addOutputDirectoryArg("cpp-conditions-c");
         gen_c.addFileArg(b.path("test/integration/cpp_conditions/dcps.idl"));
-        const gen_cpp = b.addRunArtifact(exe);
+        const gen_cpp = gens.run();
         gen_cpp.addArgs(&.{ "-b", "cpp", "--generate-interfaces", "--cpp-generate-impl", "--handle-retire-hook", "test_retire", "--handle-retire-query", "test_is_retired", "--listener-failure-report", "test_listener_failed", "-o" });
         const cpp_dir = gen_cpp.addOutputDirectoryArg("cpp-conditions-cpp");
         gen_cpp.addFileArg(b.path("test/integration/cpp_conditions/dcps.idl"));
-        const gen_topic = b.addRunArtifact(exe);
+        const gen_topic = gens.run();
         gen_topic.addArgs(&.{ "-b", "cpp", "--generate-zzdds-wrappers", "-o" });
         const topic_dir = gen_topic.addOutputDirectoryArg("cpp-conditions-topic");
         gen_topic.addFileArg(b.path("test/integration/cpp_conditions/topic.idl"));
         // get_key_value with std::pmr containers (see keyed.idl).
-        const gen_keyed = b.addRunArtifact(exe);
+        const gen_keyed = gens.run();
         gen_keyed.addArgs(&.{ "-b", "cpp", "--generate-zzdds-wrappers", "--cpp-pmr-containers", "-o" });
         const keyed_dir = gen_keyed.addOutputDirectoryArg("cpp-conditions-keyed");
         gen_keyed.addFileArg(b.path("test/integration/cpp_conditions/keyed.idl"));
@@ -442,7 +488,7 @@ pub fn build(b: *std.Build) void {
     // destructor and finalizer, family identity).
     {
         const dir = "test/integration/standalone/";
-        const gen_zig = b.addRunArtifact(exe);
+        const gen_zig = gens.run();
         gen_zig.addArgs(&.{ "-b", "zig", "--generate-interfaces", "--zig-generate-c-api", "--zig-provider-module", "provider", "--no-typesupport", "--no-typeobject-support", "-o" });
         const zig_dir = gen_zig.addOutputDirectoryArg("standalone-zig");
         gen_zig.addFileArg(b.path(dir ++ "standalone.idl"));
@@ -476,7 +522,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(zig_test).step);
 
         const provider_lib = b.addLibrary(.{ .linkage = .static, .name = "standalone-provider", .root_module = provider_mod });
-        const gen_c = b.addRunArtifact(exe);
+        const gen_c = gens.run();
         gen_c.addArgs(&.{ "-b", "c", "--generate-interfaces", "--no-typesupport", "-o" });
         const c_dir = gen_c.addOutputDirectoryArg("standalone-c");
         gen_c.addFileArg(b.path(dir ++ "standalone.idl"));
@@ -495,7 +541,7 @@ pub fn build(b: *std.Build) void {
             },
         };
         for (variants) |variant| {
-            const gen_cpp = b.addRunArtifact(exe);
+            const gen_cpp = gens.run();
             gen_cpp.addArgs(&.{ "-b", "cpp", "--generate-interfaces", "--cpp-generate-impl", "--no-typesupport" });
             gen_cpp.addArgs(variant.gen_args);
             gen_cpp.addArg("-o");
@@ -527,7 +573,7 @@ pub fn build(b: *std.Build) void {
     // output, and round-trips it (retention, replay, strict must-understand,
     // deinit/clone of unknown_params).
     {
-        const gen_pl_cdr = b.addRunArtifact(exe);
+        const gen_pl_cdr = gens.run();
         gen_pl_cdr.addArgs(&.{ "-b", "zig", "--zig-pl-cdr", "--no-typeobject-support", "-o" });
         const pl_cdr_dir = gen_pl_cdr.addOutputDirectoryArg("zig-pl-cdr-gen");
         gen_pl_cdr.addFileArg(b.path("test/integration/zig_pl_cdr/fixture.idl"));
@@ -565,7 +611,7 @@ pub fn build(b: *std.Build) void {
     // (the discriminant must not be committed before the payload it now
     // points at is known to actually be there).
     {
-        const gen_union_safety = b.addRunArtifact(exe);
+        const gen_union_safety = gens.run();
         gen_union_safety.addArgs(&.{ "-b", "zig", "--no-typeobject-support", "-o" });
         const union_safety_dir = gen_union_safety.addOutputDirectoryArg("zig-union-safety-gen");
         gen_union_safety.addFileArg(b.path("test/integration/zig_union_safety/fixture.idl"));
@@ -598,7 +644,7 @@ pub fn build(b: *std.Build) void {
         union_safety_step.dependOn(&run_union_safety.step);
         // Lifecycle/default construction is also emitted without wire codecs.
         for ([_]bool{ false, true }) |split| {
-            const declarations = b.addRunArtifact(exe);
+            const declarations = gens.run();
             declarations.addArgs(&.{ "-b", "zig", "--no-typesupport", "--no-typeobject-support" });
             if (split) declarations.addArg("--split-files");
             declarations.addArg("-o");
@@ -630,7 +676,7 @@ pub fn build(b: *std.Build) void {
     {
         const seq_idl = b.path("test/integration/sequence_elements/fixture.idl");
 
-        const gen_zig = b.addRunArtifact(exe);
+        const gen_zig = gens.run();
         gen_zig.addArgs(&.{ "-b", "zig", "--no-typeobject-support", "-o" });
         const zig_dir = gen_zig.addOutputDirectoryArg("sequence-elements-zig");
         gen_zig.addFileArg(seq_idl);
@@ -657,7 +703,7 @@ pub fn build(b: *std.Build) void {
         });
         test_step.dependOn(&b.addRunArtifact(zig_tests).step);
 
-        const gen_c = b.addRunArtifact(exe);
+        const gen_c = gens.run();
         gen_c.addArgs(&.{ "-b", "c", "-o" });
         const c_dir = gen_c.addOutputDirectoryArg("sequence-elements-c");
         gen_c.addFileArg(seq_idl);
@@ -688,7 +734,7 @@ pub fn build(b: *std.Build) void {
         // `_cdr.c` per type): split headers must not re-declare types their
         // dependency headers provide, and unions / sequence typedefs need
         // their own `_cdr.c`. `fixture.h` is shimmed onto `fixture_all.h`.
-        const gen_c_split = b.addRunArtifact(exe);
+        const gen_c_split = gens.run();
         gen_c_split.addArgs(&.{ "-b", "c", "--split-files", "-o" });
         const c_split_dir = gen_c_split.addOutputDirectoryArg("sequence-elements-c-split");
         gen_c_split.addFileArg(seq_idl);
@@ -731,7 +777,7 @@ pub fn build(b: *std.Build) void {
         if (!verbose_tests) run_c_split_test.expectStdOutMatch("sequence_elements C: all checks passed");
         test_step.dependOn(&run_c_split_test.step);
 
-        const gen_cpp = b.addRunArtifact(exe);
+        const gen_cpp = gens.run();
         gen_cpp.addArgs(&.{ "-b", "cpp", "-o" });
         const cpp_dir = gen_cpp.addOutputDirectoryArg("sequence-elements-cpp");
         gen_cpp.addFileArg(seq_idl);
@@ -765,7 +811,7 @@ pub fn build(b: *std.Build) void {
         const key_step = b.step("test-canonical-keys", "Check native canonical key holders and type-aware hashes");
         test_step.dependOn(key_step);
         const dir = "test/integration/canonical_keys/";
-        const gen_zig = b.addRunArtifact(exe);
+        const gen_zig = gens.run();
         gen_zig.addArgs(&.{ "-b", "zig", "-o" });
         const zig_dir = gen_zig.addOutputDirectoryArg("canonical-keys-zig");
         gen_zig.addFileArg(b.path(dir ++ "keys.idl"));
@@ -786,7 +832,7 @@ pub fn build(b: *std.Build) void {
         key_step.dependOn(&b.addRunArtifact(tests).step);
         for ([_][]const u8{ "c", "cpp" }) |lang| {
             const cpp = std.mem.eql(u8, lang, "cpp");
-            const gen = b.addRunArtifact(exe);
+            const gen = gens.run();
             gen.addArgs(&.{ "-b", lang, "-o" });
             const generated = gen.addOutputDirectoryArg(b.fmt("canonical-keys-{s}", .{lang}));
             gen.addFileArg(b.path(dir ++ "keys.idl"));
@@ -809,7 +855,7 @@ pub fn build(b: *std.Build) void {
         const maybe_java = b.findProgram(.{ .names = &.{"java"} });
         if (maybe_javac != null and maybe_java != null) {
             for ([_]bool{ false, true }) |split| {
-                const gen = b.addRunArtifact(exe);
+                const gen = gens.run();
                 gen.addArgs(&.{ "-b", "java" });
                 if (split) gen.addArgs(&.{ "--split-files", "--java-package", "canonicalkeys" });
                 gen.addArg("-o");
@@ -841,7 +887,7 @@ pub fn build(b: *std.Build) void {
         const validation_step = b.step("test-cdr-validation", "Check generated patch errors, wide strings and sequence allocation validation");
         test_step.dependOn(validation_step);
         const fixture_dir = "test/integration/cdr_validation/";
-        const gen_zig = b.addRunArtifact(exe);
+        const gen_zig = gens.run();
         gen_zig.addArgs(&.{ "-b", "zig", "-o" });
         const zig_dir = gen_zig.addOutputDirectoryArg("cdr-validation-zig");
         gen_zig.addFileArg(b.path(fixture_dir ++ "validation.idl"));
@@ -864,7 +910,7 @@ pub fn build(b: *std.Build) void {
         validation_step.dependOn(&b.addRunArtifact(validation_tests).step);
         for ([_][]const u8{ "c", "cpp" }) |lang| {
             const cpp = std.mem.eql(u8, lang, "cpp");
-            const gen = b.addRunArtifact(exe);
+            const gen = gens.run();
             gen.addArgs(&.{ "-b", lang, "-o" });
             const dir = gen.addOutputDirectoryArg(b.fmt("cdr-validation-{s}", .{lang}));
             gen.addFileArg(b.path(fixture_dir ++ "validation.idl"));
@@ -908,7 +954,7 @@ pub fn build(b: *std.Build) void {
         const step = b.step("test-c-bounded-typedefs", "Check bounded string typedef storage and decoding");
         test_step.dependOn(step);
         const fixture = "test/integration/c_bounded_typedefs/";
-        const gen = b.addRunArtifact(exe);
+        const gen = gens.run();
         gen.addArgs(&.{ "-b", "c", "-o" });
         const dir = gen.addOutputDirectoryArg("c-bounded-typedefs");
         gen.addFileArg(b.path(fixture ++ "types.idl"));
@@ -938,7 +984,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(step);
         for (0..4) |mode| {
             const split = mode >= 2;
-            const gen = b.addRunArtifact(exe);
+            const gen = gens.run();
             gen.addArgs(&.{ "-b", "cpp" });
             if (mode % 2 == 1) gen.addArg("--cpp-pmr-containers");
             if (split) gen.addArg("--split-files");
@@ -968,7 +1014,7 @@ pub fn build(b: *std.Build) void {
             const split = mode % 3 != 0;
             const packaged = mode % 3 == 1;
             const codecs = mode < 3;
-            const gen = b.addRunArtifact(exe);
+            const gen = gens.run();
             gen.addArgs(&.{ "-b", "java" });
             if (split) gen.addArg("--split-files");
             if (packaged) gen.addArgs(&.{ "--java-package", "lifecycle" });
@@ -1000,7 +1046,7 @@ pub fn build(b: *std.Build) void {
             const cpp = mode % 3 != 0;
             const pmr = mode % 3 == 2;
             const split = mode >= 3;
-            const gen = b.addRunArtifact(exe);
+            const gen = gens.run();
             gen.addArgs(&.{ "-b", if (cpp) "cpp" else "c" });
             if (pmr) gen.addArg("--cpp-pmr-containers");
             if (split) gen.addArg("--split-files");
@@ -1024,7 +1070,7 @@ pub fn build(b: *std.Build) void {
     {
         const map_step = b.step("test-c-maps", "Check primitive C map storage, wire bytes and allocation failures");
         test_step.dependOn(map_step);
-        const gen = b.addRunArtifact(exe);
+        const gen = gens.run();
         gen.addArgs(&.{ "-b", "c", "-o" });
         const generated = gen.addOutputDirectoryArg("c-maps");
         gen.addFileArg(b.path("test/integration/c_maps/maps.idl"));
@@ -1056,10 +1102,28 @@ pub fn build(b: *std.Build) void {
     }
 
     {
+        const views_step = b.step("test-c-views", "Check generated C view types decode in place across encodings");
+        test_step.dependOn(views_step);
+        const gen = gens.run();
+        gen.addArgs(&.{ "-b", "c", "--generate-views", "-o" });
+        const generated = gen.addOutputDirectoryArg("c-views");
+        gen.addFileArg(b.path("test/integration/c_views/views.idl"));
+        const consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true });
+        const flags = &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" };
+        consumer.addCSourceFile(.{ .file = b.path("test/integration/c_views/test.c"), .flags = flags });
+        consumer.addCSourceFile(.{ .file = generated.path(b, "views_cdr.c"), .flags = flags });
+        consumer.addIncludePath(generated);
+        consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
+        linkCdr(consumer, cdr_library);
+        const app = b.addExecutable(.{ .name = "c-views", .root_module = consumer });
+        views_step.dependOn(&b.addRunArtifact(app).step);
+    }
+
+    {
         const step = b.step("test-skip-admission", "Check structural traversal and projection are distinct from admission");
         test_step.dependOn(step);
         const dir = "test/integration/skip_admission/";
-        const gen = b.addRunArtifact(exe);
+        const gen = gens.run();
         gen.addArgs(&.{ "-b", "zig", "--generate-zzdds-wrappers", "-o" });
         const out = gen.addOutputDirectoryArg("skip-admission-zig");
         gen.addFileArg(b.path(dir ++ "shapes.idl"));
@@ -1069,7 +1133,7 @@ pub fn build(b: *std.Build) void {
         step.dependOn(&b.addRunArtifact(tests).step);
         for ([_][]const u8{ "c", "cpp" }) |lang| {
             const cpp = std.mem.eql(u8, lang, "cpp");
-            const g = b.addRunArtifact(exe);
+            const g = gens.run();
             g.addArgs(&.{ "-b", lang, "-o" });
             const generated = g.addOutputDirectoryArg(b.fmt("skip-admission-{s}", .{lang}));
             g.addFileArg(b.path(dir ++ "shapes.idl"));
@@ -1086,7 +1150,7 @@ pub fn build(b: *std.Build) void {
         const javac = b.findProgram(.{ .names = &.{"javac"} });
         const java = b.findProgram(.{ .names = &.{"java"} });
         if (javac != null and java != null) {
-            const g = b.addRunArtifact(exe);
+            const g = gens.run();
             g.addArgs(&.{ "-b", "java", "-o" });
             const generated = g.addOutputDirectoryArg("skip-admission-java");
             g.addFileArg(b.path(dir ++ "shapes.idl"));
@@ -1106,7 +1170,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(step);
         for (0..3) |mode| {
             const cpp = mode != 0;
-            const gen = b.addRunArtifact(exe);
+            const gen = gens.run();
             gen.addArgs(&.{ "-b", if (cpp) "cpp" else "c" });
             if (mode == 2) gen.addArg("--cpp-pmr-containers");
             gen.addArg("-o");
@@ -1129,7 +1193,7 @@ pub fn build(b: *std.Build) void {
         const allocation_step = b.step("test-cpp-codec-allocation", "Inject C++ codec allocation failures");
         test_step.dependOn(allocation_step);
         for ([_]bool{ false, true }) |pmr| {
-            const gen = b.addRunArtifact(exe);
+            const gen = gens.run();
             gen.addArgs(&.{ "-b", "cpp", "-o" });
             const dir = gen.addOutputDirectoryArg(if (pmr) "allocation-pmr" else "allocation-stl");
             if (pmr) gen.addArg("--cpp-pmr-containers");
@@ -1172,7 +1236,7 @@ pub fn build(b: *std.Build) void {
         const projection_step = b.step("test-key-projection", "Check inherited frames and recursive key-only values");
         test_step.dependOn(projection_step);
         const dir = "test/integration/key_projection/";
-        const gen_zig = b.addRunArtifact(exe);
+        const gen_zig = gens.run();
         gen_zig.addArgs(&.{ "-b", "zig", "-o" });
         const zig_dir = gen_zig.addOutputDirectoryArg("key-projection-zig");
         gen_zig.addFileArg(b.path(dir ++ "shapes.idl"));
@@ -1190,7 +1254,7 @@ pub fn build(b: *std.Build) void {
         projection_step.dependOn(&b.addRunArtifact(tests).step);
         for ([_][]const u8{ "c", "cpp" }) |lang| {
             const cpp = std.mem.eql(u8, lang, "cpp");
-            const gen = b.addRunArtifact(exe);
+            const gen = gens.run();
             gen.addArgs(&.{ "-b", lang, "-o" });
             const generated = gen.addOutputDirectoryArg(b.fmt("key-projection-{s}", .{lang}));
             gen.addFileArg(b.path(dir ++ "shapes.idl"));
@@ -1210,7 +1274,7 @@ pub fn build(b: *std.Build) void {
         const maybe_java = b.findProgram(.{ .names = &.{"java"} });
         if (maybe_javac != null and maybe_java != null) {
             for ([_]bool{ false, true }) |split| {
-                const gen = b.addRunArtifact(exe);
+                const gen = gens.run();
                 gen.addArgs(&.{ "-b", "java" });
                 if (split) gen.addArgs(&.{ "--split-files", "--java-package", "keyprojection" });
                 gen.addArg("-o");
@@ -1239,7 +1303,7 @@ pub fn build(b: *std.Build) void {
         const projection_step = b.step("test-optional-wire", "Check optional member framing and scoped alignment");
         test_step.dependOn(projection_step);
         const dir = "test/integration/optional_wire/";
-        const gen_zig = b.addRunArtifact(exe);
+        const gen_zig = gens.run();
         gen_zig.addArgs(&.{ "-b", "zig", "--generate-zzdds-wrappers", "-o" });
         const zig_dir = gen_zig.addOutputDirectoryArg("optional-wire-zig");
         gen_zig.addFileArg(b.path(dir ++ "shapes.idl"));
@@ -1258,7 +1322,7 @@ pub fn build(b: *std.Build) void {
         projection_step.dependOn(&b.addRunArtifact(tests).step);
         for ([_][]const u8{ "c", "cpp" }) |lang| {
             const cpp = std.mem.eql(u8, lang, "cpp");
-            const gen = b.addRunArtifact(exe);
+            const gen = gens.run();
             gen.addArgs(&.{ "-b", lang, "-o" });
             const generated = gen.addOutputDirectoryArg(b.fmt("optional-wire-{s}", .{lang}));
             gen.addFileArg(b.path(dir ++ "shapes.idl"));
@@ -1278,7 +1342,7 @@ pub fn build(b: *std.Build) void {
         const maybe_java = b.findProgram(.{ .names = &.{"java"} });
         if (maybe_javac != null and maybe_java != null) {
             for ([_]bool{ false, true }) |split| {
-                const gen = b.addRunArtifact(exe);
+                const gen = gens.run();
                 gen.addArgs(&.{ "-b", "java", "--generate-zzdds-wrappers" });
                 if (split) gen.addArgs(&.{ "--split-files", "--java-package", "optionalwire" });
                 gen.addArg("-o");
@@ -1306,7 +1370,7 @@ pub fn build(b: *std.Build) void {
         const array_step = b.step("test-cpp-optional-arrays", "Compile and exercise C++ optional arrays");
         test_step.dependOn(array_step);
         for ([_]bool{ false, true }) |pmr| {
-            const gen = b.addRunArtifact(exe);
+            const gen = gens.run();
             gen.addArgs(&.{ "-b", "cpp" });
             if (pmr) gen.addArg("--cpp-pmr-containers");
             gen.addArg("-o");
@@ -1327,7 +1391,7 @@ pub fn build(b: *std.Build) void {
     {
         const admission_step = b.step("test-native-union-admission", "Check native mutable union member admission and ownership");
         test_step.dependOn(admission_step);
-        const gen = b.addRunArtifact(exe);
+        const gen = gens.run();
         gen.addArgs(&.{ "-b", "c", "-o" });
         const generated = gen.addOutputDirectoryArg("union-admission-c");
         gen.addFileArg(b.path("test/integration/native_union_admission/shapes.idl"));
@@ -1341,7 +1405,7 @@ pub fn build(b: *std.Build) void {
         const app = b.addExecutable(.{ .name = "union-admission-c", .root_module = consumer });
         admission_step.dependOn(&b.addRunArtifact(app).step);
         for ([_]bool{ false, true }) |pmr| {
-            const cpp_gen = b.addRunArtifact(exe);
+            const cpp_gen = gens.run();
             cpp_gen.addArgs(&.{ "-b", "cpp" });
             if (pmr) cpp_gen.addArg("--cpp-pmr-containers");
             cpp_gen.addArg("-o");
@@ -1365,7 +1429,7 @@ pub fn build(b: *std.Build) void {
         const javac = b.findProgram(.{ .names = &.{"javac"} });
         const java = b.findProgram(.{ .names = &.{"java"} });
         if (javac != null and java != null) for (0..3) |mode| {
-            const gen = b.addRunArtifact(exe);
+            const gen = gens.run();
             gen.addArgs(&.{ "-b", "java" });
             if (mode != 0) gen.addArg("--split-files");
             if (mode == 1) gen.addArgs(&.{ "--java-package", "admission" });
@@ -1391,7 +1455,7 @@ pub fn build(b: *std.Build) void {
         const step = b.step("test-map-admission", "Check map wire framing and admission across C++, Java and Zig");
         test_step.dependOn(step);
         const dir = "test/integration/map_admission/";
-        const gen = b.addRunArtifact(exe);
+        const gen = gens.run();
         gen.addArgs(&.{ "-b", "zig", "-o" });
         const generated = gen.addOutputDirectoryArg("map-admission-zig");
         gen.addFileArg(b.path(dir ++ "shapes.idl"));
@@ -1399,7 +1463,7 @@ pub fn build(b: *std.Build) void {
         const tests = b.addTest(.{ .name = "map-admission", .root_module = b.createModule(.{ .root_source_file = b.path(dir ++ "test.zig"), .target = target, .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "fixture", .module = fixture } } }) });
         step.dependOn(&b.addRunArtifact(tests).step);
         for ([_]bool{ false, true }) |pmr| {
-            const g = b.addRunArtifact(exe);
+            const g = gens.run();
             g.addArgs(&.{ "-b", "cpp" });
             if (pmr) g.addArg("--cpp-pmr-containers");
             g.addArg("-o");
@@ -1418,7 +1482,7 @@ pub fn build(b: *std.Build) void {
         const javac = b.findProgram(.{ .names = &.{"javac"} });
         const java = b.findProgram(.{ .names = &.{"java"} });
         if (javac != null and java != null) {
-            const g = b.addRunArtifact(exe);
+            const g = gens.run();
             g.addArgs(&.{ "-b", "java", "-o" });
             const out = g.addOutputDirectoryArg("map-admission-java");
             g.addFileArg(b.path(dir ++ "shapes.idl"));
@@ -1453,7 +1517,7 @@ pub fn build(b: *std.Build) void {
         const ka_step = b.step("test-cdr-known-answer", "Check generated codecs against independent XCDR framing/collection vectors");
         const ka_idl = b.path("test/integration/xcdr_known_answer/ka.idl");
 
-        const gen_zig = b.addRunArtifact(exe);
+        const gen_zig = gens.run();
         gen_zig.addArgs(&.{ "-b", "zig", "-o" });
         const zig_dir = gen_zig.addOutputDirectoryArg("xcdr-known-answer-zig");
         gen_zig.addFileArg(ka_idl);
@@ -1483,7 +1547,7 @@ pub fn build(b: *std.Build) void {
 
         const vectors = b.path("test/integration/xcdr_known_answer/vectors.txt");
 
-        const gen_c = b.addRunArtifact(exe);
+        const gen_c = gens.run();
         gen_c.addArgs(&.{ "-b", "c", "-o" });
         const c_dir = gen_c.addOutputDirectoryArg("xcdr-known-answer-c");
         gen_c.addFileArg(ka_idl);
@@ -1512,7 +1576,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_c.step);
         ka_step.dependOn(&run_c.step);
 
-        const gen_cpp = b.addRunArtifact(exe);
+        const gen_cpp = gens.run();
         gen_cpp.addArgs(&.{ "-b", "cpp", "-o" });
         const cpp_dir = gen_cpp.addOutputDirectoryArg("xcdr-known-answer-cpp");
         gen_cpp.addFileArg(ka_idl);
@@ -1546,7 +1610,7 @@ pub fn build(b: *std.Build) void {
         const maybe_javac = b.findProgram(.{ .names = &.{"javac"} });
         const maybe_java = b.findProgram(.{ .names = &.{"java"} });
         if (maybe_javac != null and maybe_java != null) {
-            const gen_java = b.addRunArtifact(exe);
+            const gen_java = gens.run();
             gen_java.addArgs(&.{ "-b", "java", "-o" });
             const java_dir = gen_java.addOutputDirectoryArg("xcdr-known-answer-java");
             gen_java.addFileArg(ka_idl);
@@ -1583,7 +1647,9 @@ pub fn build(b: *std.Build) void {
 
     const backends = [_][]const u8{ "zig", "c", "cpp", "java" };
 
-    // regen-goldens: regenerate test/golden/<lang>/ and test/golden/<lang>-split/ in-place
+    // regen-goldens: regenerate test/golden/<lang>/ and test/golden/<lang>-split/ in-place.
+    // Not through `gens`: these write into the source tree, which
+    // `coverage-generators` must never do (check-goldens covers the same output).
     const regen_step = b.step("regen-goldens", "Regenerate test/golden/ from types.idl");
     for (backends) |lang| {
         const out_dir = b.fmt("{s}/{s}", .{ golden_root, lang });
@@ -1605,7 +1671,7 @@ pub fn build(b: *std.Build) void {
         // Single-file mode
         const gen_dir = b.fmt("{s}/{s}", .{ check_root, lang });
         const gold_dir = b.fmt("{s}/{s}", .{ golden_root, lang });
-        const gen_run = b.addRunArtifact(exe);
+        const gen_run = gens.run();
         gen_run.addArgs(&.{ "-b", lang, "--generate-interfaces", "-o", gen_dir, golden_idl });
         const cmp = b.addRunArtifact(check_goldens_exe);
         cmp.addArg(gold_dir);
@@ -1616,7 +1682,7 @@ pub fn build(b: *std.Build) void {
         // Split-file mode
         const gen_dir_split = b.fmt("{s}/{s}-split", .{ check_root, lang });
         const gold_dir_split = b.fmt("{s}/{s}-split", .{ golden_root, lang });
-        const gen_run_split = b.addRunArtifact(exe);
+        const gen_run_split = gens.run();
         gen_run_split.addArgs(&.{ "-b", lang, "--generate-interfaces", "--split-files", "-o", gen_dir_split, golden_idl });
         const cmp_split = b.addRunArtifact(check_goldens_exe);
         cmp_split.addArg(gold_dir_split);
@@ -1741,7 +1807,7 @@ pub fn build(b: *std.Build) void {
     // test/golden/types.idl with the flag on, since the checked-in cpp
     // goldens are generated without it.
     {
-        const gen_pmr_cpp = b.addRunArtifact(exe);
+        const gen_pmr_cpp = gens.run();
         gen_pmr_cpp.addArgs(&.{ "-b", "cpp", "--cpp-pmr-containers", "-o" });
         const gen_pmr_cpp_dir = gen_pmr_cpp.addOutputDirectoryArg("integ-cpp-pmr-containers");
         gen_pmr_cpp.addFileArg(b.path("test/golden/types.idl"));
@@ -1769,20 +1835,20 @@ pub fn build(b: *std.Build) void {
     // to that view. native.c tags every view and rejects an unconverted
     // handle. The C++ half runs here; the Java half below (needs a JDK).
     const xfw_dir = "test/integration/cross_file_widening";
-    const gen_xfw_c = b.addRunArtifact(exe);
+    const gen_xfw_c = gens.run();
     gen_xfw_c.addArgs(&.{ "-b", "c", "--generate-interfaces", "-o" });
     const xfw_c_dir = gen_xfw_c.addOutputDirectoryArg("xfw-c");
     gen_xfw_c.addFileArg(b.path(xfw_dir ++ "/core.idl"));
-    const gen_xfw_c_ext = b.addRunArtifact(exe);
+    const gen_xfw_c_ext = gens.run();
     gen_xfw_c_ext.addArgs(&.{ "-b", "c", "--generate-interfaces", "-o" });
     const xfw_c_ext_dir = gen_xfw_c_ext.addOutputDirectoryArg("xfw-c-ext");
     gen_xfw_c_ext.addFileArg(b.path(xfw_dir ++ "/plugin.idl"));
     {
-        const gen_cpp_base = b.addRunArtifact(exe);
+        const gen_cpp_base = gens.run();
         gen_cpp_base.addArgs(&.{ "-b", "cpp", "--generate-interfaces", "--cpp-generate-impl", "-o" });
         const cpp_base_dir = gen_cpp_base.addOutputDirectoryArg("xfw-cpp-base");
         gen_cpp_base.addFileArg(b.path(xfw_dir ++ "/core.idl"));
-        const gen_cpp_ext = b.addRunArtifact(exe);
+        const gen_cpp_ext = gens.run();
         gen_cpp_ext.addArgs(&.{ "-b", "cpp", "--generate-interfaces", "--cpp-generate-impl", "-o" });
         const cpp_ext_dir = gen_cpp_ext.addOutputDirectoryArg("xfw-cpp-ext");
         gen_cpp_ext.addFileArg(b.path(xfw_dir ++ "/plugin.idl"));
@@ -1846,7 +1912,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "integ-java-standalone-no-retire-hook", .gen_args = &.{} },
                 }) |variant| {
                     const dir = "test/integration/standalone/";
-                    const gen_zig = b.addRunArtifact(exe);
+                    const gen_zig = gens.run();
                     gen_zig.addArgs(&.{ "-b", "zig", "--generate-interfaces", "--zig-generate-c-api", "--no-typesupport", "--no-typeobject-support", "-o" });
                     const zig_dir = gen_zig.addOutputDirectoryArg(b.fmt("{s}-zig", .{variant.name}));
                     gen_zig.addFileArg(b.path(dir ++ "standalone.idl"));
@@ -1855,11 +1921,11 @@ pub fn build(b: *std.Build) void {
                         .target = target,
                         .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings } },
                     });
-                    const gen_c = b.addRunArtifact(exe);
+                    const gen_c = gens.run();
                     gen_c.addArgs(&.{ "-b", "c", "--generate-interfaces", "--no-typesupport", "-o" });
                     const c_dir = gen_c.addOutputDirectoryArg(b.fmt("{s}-c", .{variant.name}));
                     gen_c.addFileArg(b.path(dir ++ "standalone.idl"));
-                    const gen_java = b.addRunArtifact(exe);
+                    const gen_java = gens.run();
                     gen_java.addArgs(&.{ "-b", "java", "--generate-interfaces", "--no-typesupport", "--java-jni-library", "standalone_jni", "--java-jni-onload-hook", "test_on_load" });
                     gen_java.addArgs(variant.gen_args);
                     gen_java.addArg("-o");
@@ -1895,12 +1961,12 @@ pub fn build(b: *std.Build) void {
                     integ_step.dependOn(&run.step);
                 }
 
-                const gen_entity_c = b.addRunArtifact(exe);
+                const gen_entity_c = gens.run();
                 gen_entity_c.addArgs(&.{ "-b", "c", "--generate-interfaces", "-o" });
                 const gen_entity_c_dir = gen_entity_c.addOutputDirectoryArg("integ-java-entity-c");
                 gen_entity_c.addFileArg(b.path("test/integration/java/entity.idl"));
 
-                const gen_entity_java = b.addRunArtifact(exe);
+                const gen_entity_java = gens.run();
                 gen_entity_java.addArgs(&.{
                     "-b",                     "java",
                     "--generate-interfaces",  "--java-jni-library",
@@ -1954,11 +2020,11 @@ pub fn build(b: *std.Build) void {
                 integ_step.dependOn(&run_entity_java.step);
 
                 // Java half of the cross-file widening test (see above).
-                const gen_xfw_java_base = b.addRunArtifact(exe);
+                const gen_xfw_java_base = gens.run();
                 gen_xfw_java_base.addArgs(&.{ "-b", "java", "--generate-interfaces", "--java-package", "xfw.core", "--java-jni-library", "xfw_jni", "-o" });
                 const xfw_java_base_dir = gen_xfw_java_base.addOutputDirectoryArg("xfw-java-base");
                 gen_xfw_java_base.addFileArg(b.path(xfw_dir ++ "/core.idl"));
-                const gen_xfw_java_ext = b.addRunArtifact(exe);
+                const gen_xfw_java_ext = gens.run();
                 gen_xfw_java_ext.addArgs(&.{
                     "-b",                    "java",
                     "--generate-interfaces", "--java-package",

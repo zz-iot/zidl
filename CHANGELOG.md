@@ -18,6 +18,13 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- `--generate-views` (C backend): each struct also gets a view type, decoded in place
+  from its CDR input by `{Type}_deserialize_view`. Primitive sequences and arrays become
+  `ZidlCdrPrimitivesView`s of the input, strings zero-copy `const char *`, nested structs
+  views, and other members decode as in the struct, owned until `{Type}View_free`. With
+  `--generate-zzdds-wrappers`, readers gain `take_view`/`return_view` over a loan. Part B
+  of zzdds' `docs/design/shmem-zero-copy.md`; Zig and C++ follow.
+
 - `--listener-failure-report <name>` (C++ `--cpp-generate-impl`, Java): a generated
   listener bridge calls the provider's `bool name(int reason)` on the callback's own
   thread when its listener throws (1) or its arguments cannot be built (2), then returns
@@ -25,9 +32,11 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   the call in try blocks, omitted when exceptions are disabled; Java bridges report and
   clear the pending exception instead of printing it. Without the option, C++ catches
   nothing and Java prints and clears, as before.
+
 - Java listener bridges no longer continue with an exception pending: a failed class
   lookup, constructor or method lookup skips the listener, where it used to carry on
   into further JNI calls.
+
 - Zero-copy write reservations of bulk primitive bodies: `zidl_cdr_reserve_primitives`
   (natively `CdrWriter.reservePrimitives`) pads and advances the writer but leaves the
   elements for the caller to fill in place, found by offset across a dynamic writer's
@@ -61,9 +70,11 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   it fails only when none decoded. The C++ and Java DDS interfaces pass
   `return_loan_raw_failed`'s loan by identity, as they do `return_loan_raw`'s. Needs a
   zzdds with `return_loan_raw_failed`.
+
 - Add bulk CDR primitive and checked boolean array bodies to the native
   codec and C API, and use them for contiguous primitive collections in
   generated C, C++, and Zig codecs.
+
 - `--generate-zzdds-wrappers`: a typed read or take decodes nothing for a sample without
   valid data and without a serialized key, which a dispose or unregister may carry as its
   key hash alone (DDSI-RTPS 2.5 §9.6.4.3), and no longer fails on it: Zig with
@@ -71,6 +82,7 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   A single-sample read leaves the value as it was; a batch read gives the element its
   default value (zeroed in C), as does Java's. The sample's `instance_handle` names its
   instance.
+
 - Zig: `--zig-provider-module <name>` gives each interface's `@static` operations and
   `@constructor`s Zig functions on its struct, such as
   `DDS.DomainParticipantFactory.get_instance()` and `try DDS.WaitSet.create(allocator)`,
@@ -79,6 +91,7 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   when the interface is first used (`zidl_bindings.checkProviderStatic`,
   `checkProviderConstructor`), so a missing or mistyped one is a compile error naming it.
   Opt-in; output without the flag is unchanged.
+
 - `--generate-zzdds-wrappers`: `get_key_value` passes on zzdds's DDS return codes
   (BAD_PARAMETER for a handle with no alive write or sample, NOT_ENABLED, ALREADY_DELETED;
   DDS 1.4 §2.2.2.4.2.9, §2.2.2.5.3.29). C and C++ return `DDS_ReturnCode_t`, take
@@ -105,11 +118,14 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   `keyCdr`) for `TypeSupport.key_projection`; and `get_key_value` decodes the key with the
   key-only decoder or, for a whole sample, the selective one, as zzdds says. Needs the zzdds
   with those (zzdds #187).
+
 - Remove the Zig backend's legacy `--zig-version` output modes (0.16.0 and 0.15.1) and their
   CI consumer checks. Generated Zig targets Zig 0.17 only; `zidl-cdr` and `zidl-bindings`
   require Zig 0.17.1.
+
 - Build zidl and its native packages with Zig 0.17.1 (`minimum_zig_version`), so release
   tags end in `-zig.0.17.1`.
+
 - Zig: a generated DataWriter's `register_instance` and `lookup_instance` pass the writer to
   zzdds (`registerInstanceRaw(dw, key_hash)`, `lookupInstanceWriter(dw, key_hash)`), and a
   DataReader's `lookup_instance` passes the key hash (`lookupInstanceReader(dr, key_hash)`),
@@ -119,10 +135,12 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 - `zidl_bindings.toAllocator` passes a `ZidlAllocator` at least 8-byte alignment, as
   zidl-cdr's C side always does, so generated C and Zig code can free each other's blocks
   with an allocator that checks alignment on free.
+
 - Java: `--java-jni-cdr-allocator` makes the JNI bridge allocate the native values it
   builds from Java arguments with `zidl_cdr_alloc` instead of `malloc`. The generated C
   `<Type>_free` releases them, so pass it with a C API whose frees go through zidl-cdr's
   allocator (`--zig-generate-c-api-cdr-allocator`).
+
 - C++: a class extending an entity interface declared in an imported IDL file (zzdds's
   `zzdds::DataReader : DDS::DataReader`) now implements the imported bases' operations,
   forwarding each to the base's C function through the generated upcast, as Java already
@@ -198,6 +216,7 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 - Add native checked sample-processing callbacks that decode ordinary/key-only
   values and publish hashes only on success, including keyless ALIVE data and
   allocation-failure cleanup. Existing registration remains explicit opt-in.
+
 - Keep binding-only aliases separate from encoded-value diagnostic roots, so
   interface sequences can coexist with ordinary codecs.
 
@@ -297,10 +316,12 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   instances. Primitive arrays are unchanged. Nine independent byte/hash witnesses
   agree with Cyclone DDS key-hash extraction. Further collection framing is
   described in `docs/design/native-cdr-collection-keys.md`.
+
 - Java scalar field filtering skips array typedefs, avoiding invalid `.getValue()`
   calls on enum arrays in generated single-file and split output.
 
 - Preserve nested key-only sequence projections during allocation-free native preflight.
+
 - Contain allocating C++ hash-callback defaults and preserve valid union arms when construction fails, including partial arrays.
 
 - Preserve IDL module namespaces and codec C linkage in per-type C++ split
@@ -375,6 +396,7 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   v0.3.25 its mutex and map were created with `new`; they now live in static storage, so an
   application that forbids heap allocation once started can still create its first entity of
   a family (e.g. a `GuardCondition`) afterwards.
+
 - Java: boxing an entity no longer returns a destroyed entity's wrapper of the wrong class. The
   shared box-identity cache of a `@shared_c_abi_box` family kept an entry until its Java object
   was collected, so once an entity was deleted and its address reused for an entity of another
@@ -383,9 +405,11 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   cached object is now returned only if it implements the requested interface; otherwise a new
   wrapper is made. Every Java entity interface now has an identity cache, hashed on the handle,
   that keeps every live wrapper of a handle and reclaims collected ones as it is searched.
+
 - C++: a family root's `_getOrCreate` (e.g. `EntityImpl`, used by `StatusCondition::get_entity`
   and WaitSet results) boxes a handle as the member it really is, resolved through the provider's
   checked downcasts, so it no longer returns a destroyed entity's wrapper of another class.
+
 - New `--handle-retire-hook <name>` (C++ `--cpp-generate-impl`, Java): the provider exports
   `<name>_observe`/`<name>_unobserve` and reports each entity handle it frees, including by
   cascading deletes. The binding drops the handle's wrapper from its cache and retires it: its
@@ -394,12 +418,15 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   two functions. New `@retired_result(value)` on a typedef sets what a retired wrapper's
   operations returning it give (e.g. `RETCODE_ALREADY_DELETED`). See
   `docs/design/handle-lifetime.md`.
+
 - C++: `get_listener()` reads the listener back from the provider instead of a copy in the
   wrapper, which was empty for an entity created with a listener and outlived the entity.
+
 - Callback structs (C and Zig) end with an optional `retain_listener_data`, after
   `listener_identity`: a provider handing `listener_data` back through a `get_listener` calls it
   first, and the caller releases that reference, so a concurrent replacement cannot free it.
   The C++ and Java bindings set it.
+
 - Listener identity: callback structs (C and Zig) end with `listener_identity`, after
   `release_listener_data`. A middleware treats registrations with the same non-null identity,
   or else the same `listener_data`, as one listener. New `@shared_base` interface annotation:
@@ -408,11 +435,13 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   complete object) as the identity. The Java bridge keeps one reference-counted native
   context per listener object, found through a registry at registration, so every
   registration of an object passes the same `listener_data`.
+
 - C++: a listener registration owns a reference to its listener. `c_listener` takes a
   `shared_ptr` and sets `release_listener_data`, so a listener replaced or cleared while one
   of its callbacks runs, or passed only to a `create_*` call, stays alive until the core
   releases it. A `set_listener` or `create_*` that installs no listener releases its
   registration at once.
+
 - C++: the generated bindings compile and work without RTTI or exceptions, and use RTTI
   where the compiler provides it.
   - Every entity interface declares a virtual `_zidl_handle_<C type>()` accessor that each
@@ -434,6 +463,7 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 - Extend generated authoring with conditional `_setting` handling, owned skip
   reports, explicit compatibility choices and independent reads from existing values
   (`decodeTomlFrom`). Keep legacy `applyToml` unchanged.
+
 - Add opt-in `--zig-generate-authoring` metadata and strict arena-owned decoding
   through `zidl_rt.authoring`: presence/provenance, bounded record collections,
   named-key injection, canonical enums and failure-safe cleanup. Keep legacy
@@ -513,6 +543,7 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
     TypeObjects instead of a `TK_NONE` placeholder; and a plain sequence of a fully
     descriptive element is itself fully descriptive. The result is byte-identical to
     the reference.
+
 - **All backends: nested sequences and array-typedef elements work.**
   `sequence<sequence<T>>` (anonymous, bounded, or through a typedef) and sequences or
   arrays of array typedefs previously failed to compile (Zig, C, Java) or compiled and
@@ -540,6 +571,7 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   - **Java:** nested and array-typedef sequence elements decode; `sequence<Triple>` is
     `List<int[]>`; arrays of array typedefs and of sequences compile; enums and
     bitmasks use their `@bit_bound` width (Java wrote every bitmask as 4 bytes).
+
 - **Zig backend: bounded sequences of struct/union/bitset elements no longer generate
   uncompilable decoders.** A bounded sequence stores its elements inline, so
   `typeRefNeedsAllocator` treated it as allocation-free. However, the element read for
@@ -553,6 +585,7 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   union and enum elements; appendable/mutable holders; a union case; an over-bound
   count) and a codegen regression test. Found while generating the zzdds discovery-broker
   control schema.
+
 - **Zig backend: sequences now release and deep-copy heap-owning elements.** Sequence
   cleanup handled only the element buffer (plus plain string elements), so struct and
   union elements that own strings or buffers leaked, and `clone` copied them shallowly:
@@ -574,6 +607,7 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   Plain scalar/enum/POD-struct element sequences generate the same code as before. The
   integration fixture covers every sequence form, clone independence,
   allocation-failure rollback for clone and decode, and truncated input.
+
 - **C backend: sequences of union and alias elements compile, and a failed decode stays
   freeable.**
   - Headers no longer name union or typedef-alias element types before declaring them.
@@ -606,6 +640,7 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
   `Foo_deserialize` still expects a zeroed or default-initialized `Foo`. The new C
   integration test runs every truncation point and every allocation failure through a
   tracking allocator, against both single-file and `--split-files` output.
+
 - **C++ backend: unions and `@optional` members compile.**
   - A union's CDR prototypes were declared once with C++ linkage after the class and
     again in the header's `extern "C"` block. Any IDL with a union and type support
@@ -718,6 +753,7 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
     `deserializeInto` at all) is still unsafe — see `docs/roadmap.md`.
   - Unbounded `wstring` fields are unaffected — they have no generated cleanup at all yet,
     a separate pre-existing gap (`docs/roadmap.md`).
+
 - **PL_CDR decode gained a strictness `mode` and an opt-in lossless-retention mode**
   (`--zig-pl-cdr`, `@mutable` types), for a DDS core adopting the generated codec for real
   RTPS SPDP/SEDP traffic instead of a hand-rolled parser.
@@ -770,6 +806,7 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
     tests in `test/integration/zig_pl_cdr/` covering `@optional sequence<octet>` /
     `sequence<string>` / `octet[16]` decode, serialize, deinit, clone, and the
     absent-→-`null` path on all three decoder families.
+
 - **Zig backend: fixed a vendor-specific PID aliasing a standard `@id` in the PL_CDR
   decoder's switch.** `deserializeFromPlCdr` dispatched on `_p.pid & 0x3FFF`, but RTPS 2.5
   §9.6.4.2.1 reserves bit `0x8000` for vendor-specific PIDs whose low 15 bits are the

@@ -13,6 +13,7 @@
 //!   --default-extensibility <ext>  Default extensibility when no @extensibility present
 //!                                  (default: final, per IDL4 §8.3.1) (all backends)
 //!   --generate-zzdds-wrappers      Emit typed zzdds topic wrappers (Zig, C, C++)
+//!   --generate-views               Emit zero-copy view types for structs (C)
 //!   --generate-interfaces          Emit binding layer for IDL interface declarations (all backends)
 //!   --no-typeobject-support        Suppress TypeObject/TypeIdentifier (all backends, currently Zig only)
 //!   --no-typesupport               Suppress CDR serialize/deserialize (all backends)
@@ -96,6 +97,7 @@ const Opts = struct {
     cpp_namespace: []const u8 = "",
     pl_cdr: bool = false,
     generate_zzdds_wrappers: bool = false,
+    generate_views: bool = false,
     java_import_packages: std.ArrayListUnmanaged([]const u8) = .empty,
     zig_generate_c_api: bool = false,
     zig_generate_c_api_cdr_allocator: bool = false,
@@ -312,6 +314,8 @@ pub fn main(init: std.process.Init) !void {
             opts.split_files = false;
         } else if (std.mem.eql(u8, arg, "--generate-zzdds-wrappers")) {
             opts.generate_zzdds_wrappers = true;
+        } else if (std.mem.eql(u8, arg, "--generate-views")) {
+            opts.generate_views = true;
         } else if (std.mem.eql(u8, arg, "--zig-pl-cdr")) {
             opts.pl_cdr = true;
         } else if (std.mem.eql(u8, arg, "--zig-generate-c-api")) {
@@ -743,6 +747,7 @@ fn processFile(
         .zig_generate_toml_config = opts.zig_generate_toml_config,
         .zig_generate_authoring = opts.zig_generate_authoring,
         .generate_zzdds_wrappers = opts.generate_zzdds_wrappers,
+        .generate_views = opts.generate_views,
         .java_import_packages = opts.java_import_packages.items,
         .cpp_generate_impl = opts.cpp_generate_impl,
         .cpp_pmr_containers = opts.cpp_pmr_containers,
@@ -844,6 +849,7 @@ fn printUsage(w: *Io.Writer) !void {
         \\  --default-extensibility <ext>  Default extensibility when no @extensibility present
         \\                                 (default: final, per IDL4 §8.3.1) (all backends)
         \\  --generate-zzdds-wrappers      Emit typed zzdds topic wrappers (Zig, C, C++)
+        \\  --generate-views               Emit zero-copy view types for structs (C)
         \\  --generate-interfaces          Emit binding layer for IDL interface declarations (all backends)
         \\  --experimental-typesupport-library Emit experimental Zig wire library descriptors
         \\  --no-typeobject-support        Suppress TypeObject/TypeIdentifier (all backends, currently Zig only)
