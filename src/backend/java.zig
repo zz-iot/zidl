@@ -6429,10 +6429,27 @@ const JniBridgeGenerator = struct {
                 "    (*env)->DeleteLocalRef(env, cls);\n" ++
                 "}\n\n",
         );
-        if (self.opts.handle_retire_query.len > 0) {
+        if (self.opts.handle_retire_query.len > 0)
             try self.print("extern int {s}(void *handle);\n#define ZIDL_JAVA_HANDLE_RETIRED(h) {s}(h)\n", .{ self.opts.handle_retire_query, self.opts.handle_retire_query });
+        // A listener bridge's failure: `reason` 1 when the listener threw, 2
+        // when its arguments could not be built. Clears the pending
+        // exception, which must not reach the provider, and reports it, or
+        // without a report function prints it.
+        const report = self.opts.listener_failure_report;
+        if (report.len > 0) {
+            try self.print(
+                "extern _Bool {[r]s}(int reason);\n" ++
+                    "static ZIDL_JAVA_MAYBE_UNUSED void zidl_java_callback_failed(JNIEnv *env, int reason) {{\n" ++
+                    "    if (!(*env)->ExceptionCheck(env)) return;\n" ++
+                    "    (*env)->ExceptionClear(env);\n" ++
+                    "    (void){[r]s}(reason);\n" ++
+                    "}}\n",
+                .{ .r = report },
+            );
+        } else {
             try self.write(
-                "static ZIDL_JAVA_MAYBE_UNUSED void zidl_java_callback_clear_exception(JNIEnv *env) {\n" ++
+                "static ZIDL_JAVA_MAYBE_UNUSED void zidl_java_callback_failed(JNIEnv *env, int reason) {\n" ++
+                    "    (void)reason;\n" ++
                     "    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionDescribe(env); (*env)->ExceptionClear(env); }\n" ++
                     "}\n",
             );
@@ -6941,10 +6958,15 @@ const JniBridgeGenerator = struct {
         try self.write("void *listener_data) {\n");
         try self.write("    zidl_java_listener_ctx *ctx = (zidl_java_listener_ctx *)listener_data;\n");
         try self.write("    JNIEnv *env = zidl_java_get_env();\n");
-        try self.write("    if (env == NULL) return;\n");
+        const report = self.opts.listener_failure_report;
+        const framed = self.opts.handle_retire_query.len > 0;
+        if (report.len > 0)
+            try self.print("    if (env == NULL) {{ (void){s}(2); return; }}\n", .{report})
+        else
+            try self.write("    if (env == NULL) return;\n");
 
-        if (self.opts.handle_retire_query.len > 0)
-            try self.print("    if ((*env)->PushLocalFrame(env, {d}) < 0) {{ zidl_java_callback_clear_exception(env); return; }}\n", .{16 + op.params.len * 3});
+        if (framed)
+            try self.print("    if ((*env)->PushLocalFrame(env, {d}) < 0) {{ zidl_java_callback_failed(env, 2); return; }}\n", .{16 + op.params.len * 3});
 
         var descriptor = std.ArrayList(u8).empty;
         defer descriptor.deinit(self.alloc);
@@ -6959,7 +6981,7 @@ const JniBridgeGenerator = struct {
                     defer self.alloc.free(ebin);
                     try self.print("    jobject _a{d} = zidl_java_box_{s}(env, p{d});\n", .{ i, ec, i });
                     if (self.opts.handle_retire_query.len > 0)
-                        try self.print("    if (p{d} != NULL && _a{d} == NULL) {{ zidl_java_callback_clear_exception(env); (*env)->PopLocalFrame(env, NULL); return; }}\n", .{ i, i });
+                        try self.print("    if (p{d} != NULL && _a{d} == NULL) {{ zidl_java_callback_failed(env, 2); (*env)->PopLocalFrame(env, NULL); return; }}\n", .{ i, i });
                     const _d0 = try std.fmt.allocPrint(self.alloc, "L{s};", .{ebin});
                     defer self.alloc.free(_d0);
                     try descriptor.appendSlice(self.alloc, _d0);
@@ -6969,11 +6991,13 @@ const JniBridgeGenerator = struct {
                     defer self.alloc.free(sc);
                     const sbin = try dataTypeBinaryClassName(self.alloc, self.opts, self.stem_class, self.cross_file, ir.typeDeclQualifiedName(resolveToNamedDecl(p.type_ref)));
                     defer self.alloc.free(sbin);
+                    // Each step only after the last succeeded: none may run
+                    // with an exception pending (checked below).
                     try self.print(
                         "    jclass _c{[i]d} = (*env)->FindClass(env, \"{[sbin]s}\");\n" ++
-                            "    jmethodID _ctor{[i]d} = (*env)->GetMethodID(env, _c{[i]d}, \"<init>\", \"()V\");\n" ++
-                            "    jobject _a{[i]d} = (*env)->NewObject(env, _c{[i]d}, _ctor{[i]d});\n" ++
-                            "    {[sc]s}_fill_java(env, p{[i]d}, _a{[i]d});\n",
+                            "    jmethodID _ctor{[i]d} = _c{[i]d} != NULL ? (*env)->GetMethodID(env, _c{[i]d}, \"<init>\", \"()V\") : NULL;\n" ++
+                            "    jobject _a{[i]d} = _ctor{[i]d} != NULL ? (*env)->NewObject(env, _c{[i]d}, _ctor{[i]d}) : NULL;\n" ++
+                            "    if (_a{[i]d} != NULL) {[sc]s}_fill_java(env, p{[i]d}, _a{[i]d});\n",
                         .{ .i = i, .sbin = sbin, .sc = sc },
                     );
                     const _d1 = try std.fmt.allocPrint(self.alloc, "L{s};", .{sbin});
@@ -6996,14 +7020,13 @@ const JniBridgeGenerator = struct {
 
         try self.write("    jclass cls = (*env)->GetObjectClass(env, ctx->ref);\n");
         try self.print("    jmethodID mid = (*env)->GetMethodID(env, cls, \"{s}\", \"{s}\");\n", .{ op.name, descriptor.items });
+        // Arguments or method lookup failed: the listener is not called.
+        try self.print("    if ((*env)->ExceptionCheck(env) || mid == NULL) {{ zidl_java_callback_failed(env, 2);{s} return; }}\n", .{if (framed) " (*env)->PopLocalFrame(env, NULL);" else ""});
         try self.write("    (*env)->CallVoidMethod(env, ctx->ref, mid");
         for (op.params, 0..) |_, i| try self.print(", _a{d}", .{i});
         try self.write(");\n");
-        if (self.opts.handle_retire_query.len > 0)
-            try self.write("    zidl_java_callback_clear_exception(env);\n")
-        else
-            try self.write("    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionDescribe(env); (*env)->ExceptionClear(env); }\n");
-        if (self.opts.handle_retire_query.len > 0)
+        try self.write("    zidl_java_callback_failed(env, 1);\n");
+        if (framed)
             try self.write("    (*env)->PopLocalFrame(env, NULL);\n");
         try self.write("}\n\n");
     }
@@ -12072,8 +12095,32 @@ test "java: retirement query protects boxing and callback exception cleanup" {
     try testing.expect(std.mem.indexOf(u8, src, "extern int is_retired(void *handle);") != null);
     try testing.expect(std.mem.indexOf(u8, src, "pthread_mutex_lock(&_zidl_family_M_Entity_mtx);\n    if (ZIDL_JAVA_HANDLE_RETIRED(handle))") != null);
     try testing.expect(std.mem.indexOf(u8, src, "zidl_java_mark_retired(env, obj);\n        (*env)->DeleteLocalRef(env, obj);\n        return NULL;") != null);
-    try testing.expect(std.mem.indexOf(u8, src, "if ((*env)->PushLocalFrame(env, 19) < 0) { zidl_java_callback_clear_exception(env); return; }") != null);
-    try testing.expect(std.mem.indexOf(u8, src, "if (p0 != NULL && _a0 == NULL) { zidl_java_callback_clear_exception(env); (*env)->PopLocalFrame(env, NULL); return; }") != null);
+    try testing.expect(std.mem.indexOf(u8, src, "if ((*env)->PushLocalFrame(env, 19) < 0) { zidl_java_callback_failed(env, 2); return; }") != null);
+    try testing.expect(std.mem.indexOf(u8, src, "if (p0 != NULL && _a0 == NULL) { zidl_java_callback_failed(env, 2); (*env)->PopLocalFrame(env, NULL); return; }") != null);
+}
+
+test "java: a failure report replaces printing, and no step runs with an exception pending" {
+    const alloc = testing.allocator;
+    var spec = try buildIrSpec(alloc,
+        \\module M {
+        \\    interface Entity {};
+        \\    struct Status { long count; };
+        \\    @callback interface Listener { void on_entity(in Entity entity, in Status status); };
+        \\    interface Factory { void set_listener(in Listener listener); };
+        \\};
+    );
+    defer spec.deinit();
+    var output = std.ArrayList(u8).empty;
+    defer output.deinit(alloc);
+    try generateJniSource(alloc, &spec, .{ .input_stem = "widget", .listener_failure_report = "failed" }, &output);
+    const src = output.items;
+    try testing.expect(std.mem.indexOf(u8, src, "extern _Bool failed(int reason);") != null);
+    try testing.expect(std.mem.indexOf(u8, src, "    (*env)->ExceptionClear(env);\n    (void)failed(reason);") != null);
+    try testing.expect(std.mem.indexOf(u8, src, "ExceptionDescribe") == null);
+    try testing.expect(std.mem.indexOf(u8, src, "if (env == NULL) { (void)failed(2); return; }") != null);
+    try testing.expect(std.mem.indexOf(u8, src, "jmethodID _ctor1 = _c1 != NULL ? (*env)->GetMethodID(env, _c1, \"<init>\", \"()V\") : NULL;") != null);
+    try testing.expect(std.mem.indexOf(u8, src, "if ((*env)->ExceptionCheck(env) || mid == NULL) { zidl_java_callback_failed(env, 2); return; }") != null);
+    try testing.expect(std.mem.indexOf(u8, src, "_a1);\n    zidl_java_callback_failed(env, 1);\n}") != null);
 }
 
 const standalone_java_idl =

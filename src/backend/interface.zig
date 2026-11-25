@@ -90,6 +90,12 @@ pub const Options = struct {
     handle_retire_hook: []const u8 = "",
     /// Optional int query(void *handle); requires a retire hook.
     handle_retire_query: []const u8 = "",
+    /// Optional `bool name(int reason)` provider function a generated
+    /// listener bridge calls, on the callback's own thread before returning,
+    /// when its listener throws (1) or its arguments cannot be built (2).
+    /// Empty: C++ bridges catch nothing, and Java ones print and clear the
+    /// exception.
+    listener_failure_report: []const u8 = "",
     /// Target profile.  Backends may use this to adjust output; the CLI
     /// calls `validateXrce` before invoking backends when profile is `.xrce`.
     profile: Profile = .full,
@@ -324,6 +330,10 @@ pub const Options = struct {
     c_no_free: bool = false,
 
     pub fn validateHandleRetirement(self: Options) !void {
+        for (self.listener_failure_report, 0..) |c, i| {
+            if (!(std.ascii.isAlphabetic(c) or c == '_' or (i > 0 and std.ascii.isDigit(c))))
+                return error.InvalidListenerFailureReportName;
+        }
         if (self.handle_retire_query.len == 0) return;
         if (self.handle_retire_hook.len == 0) return error.HandleRetireQueryRequiresHook;
         for (self.handle_retire_query, 0..) |c, i| {
@@ -851,6 +861,8 @@ test "xrce validate: @appendable in nested module fails" {
 
 test "retirement query requires a hook and a C function name" {
     try (Options{ .input_stem = "test" }).validateHandleRetirement();
+    try (Options{ .input_stem = "test", .listener_failure_report = "report_2" }).validateHandleRetirement();
+    try std.testing.expectError(error.InvalidListenerFailureReportName, (Options{ .input_stem = "test", .listener_failure_report = "2report" }).validateHandleRetirement());
     try (Options{ .input_stem = "test", .handle_retire_hook = "observe" }).validateHandleRetirement();
     try std.testing.expectError(error.HandleRetireQueryRequiresHook, (Options{ .input_stem = "test", .handle_retire_query = "query" }).validateHandleRetirement());
     try (Options{ .input_stem = "test", .handle_retire_hook = "observe", .handle_retire_query = "query_2" }).validateHandleRetirement();

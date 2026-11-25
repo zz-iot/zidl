@@ -7,6 +7,7 @@
 #include <cassert>
 #include <type_traits>
 #include <unordered_set>
+#include <stdexcept>
 
 static_assert(std::is_convertible_v<std::shared_ptr<DDS::QueryCondition>, std::shared_ptr<DDS::ReadCondition>>);
 static_assert(!std::is_convertible_v<std::shared_ptr<DDS::GuardCondition>, std::shared_ptr<DDS::ReadCondition>>);
@@ -74,7 +75,15 @@ static void retire(void* handle) {
     if (retire_observer) retire_observer(retire_ctx, handle);
 }
 
+static int listener_failures[3];
+
 extern "C" {
+// --listener-failure-report test_listener_failed
+bool test_listener_failed(int reason) {
+    if (reason < 1 || reason > 2) return false;
+    ++listener_failures[reason];
+    return true;
+}
 int test_is_retired(void* handle) {
     if (retired_handles.count(handle)) return 1;
     for (int i = 0; i < known_count; ++i) {
@@ -159,9 +168,13 @@ DDS_ReturnCode_t DDS_DataReader_return_loan_raw_failed(DDS_DataReader, DDS_Octet
 
 struct ReaderListener : DDS::ReaderListenerBase {
     int calls = 0;
+    bool fail = false;
     void on_reader(std::shared_ptr<DDS::DataReader> reader) override {
         assert(reader);
         ++calls;
+#if defined(__cpp_exceptions)
+        if (fail) throw std::runtime_error("listener failed");
+#endif
     }
 };
 
@@ -392,6 +405,15 @@ int main() {
     auto bridge = DDS::ReaderListenerBase::c_listener(listener);
     bridge.on_reader(&doomed_handle, bridge.listener_data);
     assert(listener->calls == 1);
+#if defined(__cpp_exceptions)
+    // A throwing listener is reported and its bridge returns normally:
+    // nothing unwinds into the provider.
+    listener->fail = true;
+    bridge.on_reader(&doomed_handle, bridge.listener_data);
+    assert(listener->calls == 2 && listener_failures[1] == 1 && listener_failures[2] == 0);
+    listener->fail = false;
+    listener->calls = 1;
+#endif
     retire(&doomed_handle);
     assert(doomed->_zidl_is_retired());
     assert(doomed->enable() == 9 && enables == 1);
@@ -399,7 +421,8 @@ int main() {
     // An admitted callback may arrive here while native storage is pinned.
     assert(!DDS::DataReaderImpl::_getOrCreate(&doomed_handle));
     bridge.on_reader(&doomed_handle, bridge.listener_data);
-    assert(listener->calls == 1);
+    // A retired handle's late callback is skipped, not a failure.
+    assert(listener->calls == 1 && listener_failures[2] == 0);
     bridge.release_listener_data(bridge.listener_data);
     retired_handles.erase(&doomed_handle); // a new native allocation at this address
     auto reborn = DDS::DataReaderImpl::_getOrCreate(&doomed_handle);
