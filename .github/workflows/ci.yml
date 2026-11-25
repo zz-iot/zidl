@@ -200,8 +200,12 @@ jobs:
             [ -x "$bin" ] || continue
             echo "=== valgrind: $(basename $bin) ==="
             VALOUT=$(mktemp)
+            # Zig's self-hosted x86 backend (Debug) probes a frame larger
+            # than a page by reading 4 bytes one page below the stack pointer
+            # before moving it; Valgrind reports exactly that read otherwise.
             if ! valgrind \
                 --error-exitcode=1 \
+                --ignore-range-below-sp=4096-4093 \
                 --leak-check=full \
                 --show-leak-kinds=definite,indirect \
                 --errors-for-leak-kinds=definite,indirect \
