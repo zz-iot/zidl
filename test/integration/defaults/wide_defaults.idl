@@ -1,0 +1,20 @@
+// Defaults every backend must give a fresh value: a wide string literal or a
+// constant's (its UTF-16 units, a supplementary character as a surrogate
+// pair), copied into an unbounded member or a bounded one, and a default
+// naming a constant of another kind. C, C++ and Java each check it.
+module wd {
+    const wstring GREETING = L"hi";
+    const long COUNT = 5;
+    const unsigned long ALL_BITS = 0xFFFFFFFF;
+
+    struct WideDefaults {
+        @default(GREETING) wstring named;
+        @default(L"lit") wstring literal;
+        @default(GREETING) wstring<4> bounded;
+        @optional @default(L"o") wstring maybe;
+        @default(L"😀") wstring emoji;
+        @default(COUNT) long count;
+        // Beyond a signed 32-bit range: Java keeps its bits.
+        @default(ALL_BITS) unsigned long all_bits;
+    };
+};

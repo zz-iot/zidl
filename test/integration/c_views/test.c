@@ -223,12 +223,16 @@ static int defaults(int version, int order) {
  * member (freed by _free), in place for a bounded one. */
 static int wide_defaults(int version, int order) {
     static const uint16_t hi[] = { 'h', 'i', 0 }, lit[] = { 'l', 'i', 't', 0 }, o[] = { 'o', 0 };
+    static const uint16_t emoji[] = { 0xD83D, 0xDE00, 0 };
     wd_WideDefaults d;
     wd_WideDefaults_default(&d);
     CHECK(d.named && memcmp(d.named, hi, sizeof hi) == 0);
     CHECK(d.literal && memcmp(d.literal, lit, sizeof lit) == 0);
     CHECK(memcmp(d.bounded, hi, sizeof hi) == 0);
     CHECK((d._present & 1u) && d.maybe && memcmp(d.maybe, o, sizeof o) == 0);
+    CHECK(d.emoji && memcmp(d.emoji, emoji, sizeof emoji) == 0);
+    CHECK(d.count == 5);
+    CHECK(d.all_bits == 0xFFFFFFFFu);
     wd_WideDefaults_free(&d);
     return 0;
 }

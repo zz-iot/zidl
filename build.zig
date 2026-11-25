@@ -1111,7 +1111,7 @@ pub fn build(b: *std.Build) void {
         const gen_wide = gens.run();
         gen_wide.addArgs(&.{ "-b", "c", "-o" });
         const wide = gen_wide.addOutputDirectoryArg("c-wide-defaults");
-        gen_wide.addFileArg(b.path("test/integration/c_views/wide_defaults.idl"));
+        gen_wide.addFileArg(b.path("test/integration/defaults/wide_defaults.idl"));
         const consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true });
         const flags = &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" };
         consumer.addCSourceFile(.{ .file = b.path("test/integration/c_views/test.c"), .flags = flags });
@@ -1136,13 +1136,19 @@ pub fn build(b: *std.Build) void {
         gen_named.addArgs(&.{ "-b", "cpp", "--generate-views", "-o" });
         const named = gen_named.addOutputDirectoryArg("cpp-views-named");
         gen_named.addFileArg(b.path("test/integration/cpp_views/named.idl"));
+        const gen_wide = gens.run();
+        gen_wide.addArgs(&.{ "-b", "cpp", "-o" });
+        const wide = gen_wide.addOutputDirectoryArg("cpp-wide-defaults");
+        gen_wide.addFileArg(b.path("test/integration/defaults/wide_defaults.idl"));
         const consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = true });
         const flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" };
         consumer.addCSourceFile(.{ .file = b.path("test/integration/cpp_views/test.cpp"), .flags = flags });
         consumer.addCSourceFile(.{ .file = generated.path(b, "views_cdr.cpp"), .flags = flags });
         consumer.addCSourceFile(.{ .file = named.path(b, "named_cdr.cpp"), .flags = flags });
+        consumer.addCSourceFile(.{ .file = wide.path(b, "wide_defaults_cdr.cpp"), .flags = flags });
         consumer.addIncludePath(generated);
         consumer.addIncludePath(named);
+        consumer.addIncludePath(wide);
         consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
         linkCdr(consumer, cdr_library);
         const app = b.addExecutable(.{ .name = "cpp-views", .root_module = consumer });
@@ -1163,7 +1169,7 @@ pub fn build(b: *std.Build) void {
     }
 
     {
-        const step = b.step("test-zig-views","Check generated Zig view types decode in place, and take_view ends its loan");
+        const step = b.step("test-zig-views", "Check generated Zig view types decode in place, and take_view ends its loan");
         test_step.dependOn(step);
         const gen = gens.run();
         gen.addArgs(&.{ "-b", "zig", "--generate-views", "--generate-zzdds-wrappers", "-o" });

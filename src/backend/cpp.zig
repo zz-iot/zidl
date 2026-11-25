@@ -768,7 +768,7 @@ const Generator = struct {
         }
         try self.write(" {\n");
         for (s.members) |m| {
-            try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, m.annotations.is_optional, m.annotations.default_value, "    ");
+            try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, m.annotations.is_optional, memberDefaultCpp(m), "    ");
         }
         // Aggregate value-initialization zero-fills members without explicit
         // initializers, including raw array members.
@@ -791,7 +791,7 @@ const Generator = struct {
         for (s.members) |m| {
             const optional = m.annotations.is_optional;
             switch (cdr_skip.viewKind(m.type_ref, m.dimensions)) {
-                .owned => try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, optional, m.annotations.default_value, "    "),
+                .owned => try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, optional, memberDefaultCpp(m), "    "),
                 .primitives => {
                     const elem = if (m.dimensions.len > 0) m.type_ref else cdr_skip.resolveAlias(m.type_ref).sequence.element.*;
                     const t = baseToCppType(cdr_skip.bulkBase(elem).?);
@@ -1422,10 +1422,13 @@ const Generator = struct {
                 "constexpr wchar_t {s}{{wchar_t(0x{X:0>4})}};\n",
                 .{ c.name, wc },
             ),
-            .wide_string => try self.print(
-                "// {s}: wide string const — no constexpr wchar_t[] in C++11\n",
-                .{c.name},
-            ),
+            // Its UTF-16 code units, as a std::wstring holds them whatever
+            // wchar_t's size: an L"" literal would not be UTF-16 everywhere.
+            .wide_string => |cps| {
+                const units = try wideUnitsCpp(self.alloc, cps);
+                defer self.alloc.free(units);
+                try self.print("constexpr wchar_t {s}[]{{{s}wchar_t(0)}};\n", .{ c.name, units });
+            },
             .fixed_pt => |fp| try self.print(
                 "// {s}: fixed-point const {s}\n",
                 .{ c.name, fp },
@@ -1536,6 +1539,12 @@ const Generator = struct {
                 break :blk std.fmt.allocPrint(self.alloc, "\"{s}\"", .{esc});
             },
             .scoped_name => |n| self.formatScopedNameDefaultCpp(n, type_ref),
+            // Its UTF-16 code units, as a std::wstring holds them.
+            .wide_string => |cps| blk: {
+                const units = try wideUnitsCpp(self.alloc, cps);
+                defer self.alloc.free(units);
+                break :blk std.fmt.allocPrint(self.alloc, "{s}{{{s}}}", .{ wstringTypeName(self.opts), std.mem.trimEnd(u8, units, ", ") });
+            },
             else => self.alloc.dupe(u8, "{}"),
         };
     }
@@ -1647,6 +1656,30 @@ fn vectorTypeName(opts: interface.Options) []const u8 {
 
 fn stringTypeName(opts: interface.Options) []const u8 {
     return if (opts.cpp_pmr_containers) "std::pmr::string" else "std::string";
+}
+
+/// A member's `@default` as C++ declares it. A default naming a wide string
+/// constant is the constant's units (resolved when building the IR): the
+/// constant is a wchar_t array, which a std::wstring built from it would
+/// read only up to a zero unit. Any other default is as written.
+fn memberDefaultCpp(m: ir.StructMember) ?ir.AnnotationParamValue {
+    const dv = m.annotations.default_value orelse return null;
+    if (dv == .scoped_name) if (m.annotations.default_constant) |c| if (c == .wide_string) return c;
+    return dv;
+}
+
+/// `wchar_t(0x....), ` per UTF-16 code unit of `cps`, surrogate pairs
+/// included. Caller owns the result.
+fn wideUnitsCpp(alloc: std.mem.Allocator, cps: []const u32) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+    for (cps) |cp| {
+        if (cp >= 0x10000) {
+            const v = cp - 0x10000;
+            try out.print(alloc, "wchar_t(0x{X:0>4}), wchar_t(0x{X:0>4}), ", .{ 0xD800 + (v >> 10), 0xDC00 + (v & 0x3FF) });
+        } else try out.print(alloc, "wchar_t(0x{X:0>4}), ", .{cp});
+    }
+    return out.toOwnedSlice(alloc);
 }
 
 fn wstringTypeName(opts: interface.Options) []const u8 {
@@ -12286,4 +12319,30 @@ test "cpp_backend: take_view and ViewLoan in the zzdds wrappers" {
     try testing.expect(has(src.items, "if (!_rc) _rc = Frame_deserialize_view(&_r, &*_loan.view_);"));
     try testing.expect(has(src.items, "DDS_DataReader_return_loan_raw_failed(reader_, &_loan_payloads, &_c_no_hashes, &_loan_infos, &_failed);"));
     try testing.expect(has(src.items, "void FrameDataReader::ViewLoan::reset() noexcept {\n    view_.reset();"));
+}
+
+test "cpp_backend: wide string units, and their allocation failure" {
+    const units = try wideUnitsCpp(testing.allocator, &.{ 'a', 0x1F600 });
+    defer testing.allocator.free(units);
+    try testing.expectEqualStrings("wchar_t(0x0061), wchar_t(0xD83D), wchar_t(0xDE00), ", units);
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            alloc.free(try wideUnitsCpp(alloc, &.{ 'a', 0x1F600, 'b', 'c', 'd', 'e', 'f', 'g' }));
+        }
+    }.run, .{});
+}
+
+test "cpp_backend: wide string constants and defaults hold UTF-16 units" {
+    var out = try testGen(
+        "module M { const wstring W = L\"h\u{1F600}\"; struct T { @default(W) wstring named; @default(L\"ab\") wstring lit; @default(L\"\") wstring empty; @optional @default(L\"o\") wstring opt; }; };",
+        "m",
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "constexpr wchar_t W[]{wchar_t(0x0068), wchar_t(0xD83D), wchar_t(0xDE00), wchar_t(0)};"));
+    // A named default is the constant's units, not the array read to a zero.
+    try testing.expect(has(s, "std::wstring named{std::wstring{wchar_t(0x0068), wchar_t(0xD83D), wchar_t(0xDE00)}};"));
+    try testing.expect(has(s, "std::wstring lit{std::wstring{wchar_t(0x0061), wchar_t(0x0062)}};"));
+    try testing.expect(has(s, "std::wstring empty{std::wstring{}};"));
+    try testing.expect(has(s, "std::optional<std::wstring> opt{std::wstring{wchar_t(0x006F)}};"));
 }

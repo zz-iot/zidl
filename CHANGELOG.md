@@ -18,6 +18,10 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- C++: a `wstring` constant is declared, as a `constexpr wchar_t` array of its UTF-16
+  units (it was skipped, so a default naming it did not compile), and a `wstring`
+  `@default` literal holds its units, as a decoded `std::wstring` does (it held one NUL).
+
 - C: a `wstring` `@default`, literal or a named constant's, copies its UTF-16 units: into
   storage from the registered allocator for an unbounded member, in place for a bounded
   one. It was `0` (NULL). A default containing a NUL is refused at generation.
