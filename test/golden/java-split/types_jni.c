@@ -185,6 +185,10 @@ static ZIDL_JAVA_MAYBE_UNUSED void zidl_java_mark_retired(JNIEnv *env, jobject o
     (*env)->DeleteLocalRef(env, cls);
 }
 
+static ZIDL_JAVA_MAYBE_UNUSED void zidl_java_callback_failed(JNIEnv *env, int reason) {
+    (void)reason;
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionDescribe(env); (*env)->ExceptionClear(env); }
+}
 #define ZIDL_JAVA_OBSERVE_RETIRE() ((void)0)
 
 /* Box-identity cache for Greeter and every interface sharing its box. */

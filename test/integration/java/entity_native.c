@@ -95,17 +95,33 @@ static jobject JNICALL fail_new_object(JNIEnv *env, jclass cls, jmethodID ctor, 
     return NULL;
 }
 
-static int callback_errors_reported;
+/* --listener-failure-report entity_listener_failed: counts by reason. */
+static int listener_failures[3];
+_Bool entity_listener_failed(int reason) {
+    if (reason < 1 || reason > 2) return 0;
+    ++listener_failures[reason];
+    return 1;
+}
+
+JNIEXPORT jint JNICALL Java_EntityTest_nListenerFailures(JNIEnv *env, jclass cls, jint reason) {
+    (void)env;
+    (void)cls;
+    return reason >= 1 && reason <= 2 ? listener_failures[reason] : -1;
+}
+
+/* With a failure report, a bridge never prints an exception. */
+static int callback_errors_printed;
 static void JNICALL report_callback_error(JNIEnv *env) {
     (void)env;
-    ++callback_errors_reported;
+    ++callback_errors_printed;
 }
 
 JNIEXPORT jboolean JNICALL Java_EntityTest_nFailCallback(JNIEnv *env, jclass cls, jboolean frame) {
     (void)cls;
     const struct JNINativeInterface_ *original = *env;
     struct JNINativeInterface_ injected = *original;
-    callback_errors_reported = 0;
+    callback_errors_printed = 0;
+    int reported = listener_failures[2];
     injected.ExceptionDescribe = report_callback_error;
     if (frame) injected.PushLocalFrame = fail_push_frame;
     else injected.NewObject = fail_new_object;
@@ -115,7 +131,7 @@ JNIEXPORT jboolean JNICALL Java_EntityTest_nFailCallback(JNIEnv *env, jclass cls
     *env = original;
     jboolean clean = !(*env)->ExceptionCheck(env);
     if (!clean) (*env)->ExceptionClear(env);
-    return clean && callback_errors_reported == 1;
+    return clean && callback_errors_printed == 0 && listener_failures[2] == reported + 1;
 }
 
 Widgets_Gear Widgets_Factory_create_gear(Widgets_Factory self, int32_t teeth) {

@@ -4580,6 +4580,8 @@ const ConcreteImplGenerator = struct {
             );
         }
         try self.emitRetireObserverDecls();
+        if (self.opts.listener_failure_report.len > 0)
+            try self.srcPrint("extern \"C\" bool {s}(int reason);\n", .{self.opts.listener_failure_report});
         try self.srcWrite("\n");
         try self.emitItems(spec.items);
         try self.emitRetireObserver();
@@ -6441,7 +6443,52 @@ const ConcreteImplGenerator = struct {
             }
             if (op.params.len > 0) try self.srcWrite(", ");
             try self.srcWrite("void* d) {\n");
-            if (self.opts.handle_retire_query.len > 0) {
+            // With a failure report, conversions and the call each get a
+            // try block: an exception from building the arguments (2) or
+            // from the listener (1) is reported, not let into the provider.
+            // Built without exceptions, neither can be caught.
+            const report = self.opts.listener_failure_report;
+            const hoist = self.opts.handle_retire_query.len > 0 or report.len > 0;
+            if (report.len > 0) {
+                for (op.params) |p| {
+                    switch (p.type_ref) {
+                        .named => |td| switch (td) {
+                            .interface => |pi| if (!isCallbackIface(pi)) {
+                                const impl = try self.entityImplName(p.type_ref);
+                                defer self.alloc.free(impl);
+                                try self.srcPrint("    decltype({[impl]s}::_getOrCreate(nullptr)) _entity_{[p]s};\n", .{ .p = p.name, .impl = impl });
+                            },
+                            else => {},
+                        },
+                        // Copied into the listener's own string type, which
+                        // can throw: built here, with the other conversions.
+                        .string, .wstring => {
+                            const cpp_t = try self.typeRefToCpp(p.type_ref);
+                            defer self.alloc.free(cpp_t);
+                            try self.srcPrint("    {s} _arg_{s};\n", .{ cpp_t, p.name });
+                        },
+                        else => {},
+                    }
+                }
+                try self.srcWrite("#if defined(__cpp_exceptions)\n    try {\n#endif\n");
+                for (op.params) |p| {
+                    switch (p.type_ref) {
+                        .named => |td| switch (td) {
+                            .interface => |pi| if (!isCallbackIface(pi)) {
+                                const impl = try self.entityImplName(p.type_ref);
+                                defer self.alloc.free(impl);
+                                try self.srcPrint("    _entity_{[p]s} = {[impl]s}::_getOrCreate({[p]s});\n", .{ .p = p.name, .impl = impl });
+                                if (self.opts.handle_retire_query.len > 0)
+                                    try self.srcPrint("    if ({[p]s} && !_entity_{[p]s}) return;\n", .{ .p = p.name });
+                            },
+                            else => {},
+                        },
+                        .string, .wstring => try self.srcPrint("    _arg_{[p]s} = {[p]s};\n", .{ .p = p.name }),
+                        else => {},
+                    }
+                }
+                try self.srcPrint("#if defined(__cpp_exceptions)\n    }} catch (...) {{\n        {s}(2);\n        return;\n    }}\n    try {{\n#endif\n", .{report});
+            } else if (self.opts.handle_retire_query.len > 0) {
                 for (op.params) |p| {
                     switch (p.type_ref) {
                         .named => |td| switch (td) {
@@ -6482,7 +6529,7 @@ const ConcreteImplGenerator = struct {
                                 const impl_name = try self.entityImplName(p.type_ref);
                                 defer self.alloc.free(impl_name);
                                 try self.markWrapped(p.type_ref);
-                                if (self.opts.handle_retire_query.len > 0)
+                                if (hoist)
                                     try self.srcPrint("_entity_{s}", .{p.name})
                                 else
                                     try self.srcPrint("{s}::_getOrCreate({s})", .{ impl_name, p.name });
@@ -6506,10 +6553,17 @@ const ConcreteImplGenerator = struct {
                         },
                     },
                     .base => try self.srcWrite(p.name),
+                    .string, .wstring => if (report.len > 0)
+                        try self.srcPrint("std::move(_arg_{s})", .{p.name})
+                    else
+                        try self.srcPrint("/* TODO({s}) */ {s}", .{ p.name, p.name }),
                     else => try self.srcPrint("/* TODO({s}) */ {s}", .{ p.name, p.name }),
                 }
             }
-            try self.srcWrite(");\n}\n\n");
+            try self.srcWrite(");\n");
+            if (report.len > 0)
+                try self.srcPrint("#if defined(__cpp_exceptions)\n    }} catch (...) {{\n        {s}(1);\n    }}\n#endif\n", .{report});
+            try self.srcWrite("}\n\n");
         }
     }
 
@@ -10003,6 +10057,7 @@ fn testGenConcreteImplOpts(source: []const u8, extra: struct {
     cpp_impl_includes: []const []const u8 = &.{},
     handle_retire_hook: []const u8 = "",
     handle_retire_query: []const u8 = "",
+    listener_failure_report: []const u8 = "",
 }) !ConcreteImplResult {
     const alloc = testing.allocator;
     var ast_arena = std.heap.ArenaAllocator.init(alloc);
@@ -10022,6 +10077,7 @@ fn testGenConcreteImplOpts(source: []const u8, extra: struct {
         .cpp_impl_includes = extra.cpp_impl_includes,
         .handle_retire_hook = extra.handle_retire_hook,
         .handle_retire_query = extra.handle_retire_query,
+        .listener_failure_report = extra.listener_failure_report,
     };
     var hdr_out = std.ArrayList(u8).empty;
     errdefer hdr_out.deinit(alloc);
@@ -11549,6 +11605,38 @@ test "cpp_backend: retirement query guards cache lookup and callback arguments" 
     try testing.expect(has(src, "::_zidl_observe_retire();\n    std::lock_guard<std::mutex> _lock(_soloMutex());\n    if (::is_retired(h)) return nullptr;"));
     try testing.expect(has(src, "auto _entity_entity = ::M::EntityImpl::_getOrCreate(entity);\n    if (entity && !_entity_entity) return;"));
     try testing.expect(has(src, "owner->on_entity(_entity_entity, count)"));
+}
+
+test "cpp_backend: a failure report wraps a listener's conversions and call, reporting each failure" {
+    const idl =
+        \\module M {
+        \\    interface Entity {};
+        \\    @callback interface Listener { void on_entity(in Entity entity, in long count); };
+        \\    interface Factory { void set_listener(in Listener listener); };
+        \\};
+    ;
+    var res = try testGenConcreteImplOpts(idl, .{ .listener_failure_report = "failed" });
+    defer res.deinit();
+    const src = res.src.items;
+    try testing.expect(has(src, "extern \"C\" bool failed(int reason);"));
+    try testing.expect(has(src, "    decltype(::M::EntityImpl::_getOrCreate(nullptr)) _entity_entity;\n#if defined(__cpp_exceptions)\n    try {\n#endif\n    _entity_entity = ::M::EntityImpl::_getOrCreate(entity);\n#if defined(__cpp_exceptions)\n    } catch (...) {\n        failed(2);\n        return;\n    }\n    try {\n#endif\n    static_cast<_Reg*>(d)->owner->on_entity(_entity_entity, count);\n#if defined(__cpp_exceptions)\n    } catch (...) {\n        failed(1);\n    }\n#endif\n}"));
+
+    // A string argument is copied into the listener's type in the first block.
+    var strings = try testGenConcreteImplOpts(
+        \\module M {
+        \\    @callback interface Listener { void on_message(in string message); };
+        \\    interface Factory { void set_listener(in Listener listener); };
+        \\};
+    , .{ .listener_failure_report = "failed" });
+    defer strings.deinit();
+    try testing.expect(has(strings.src.items, "    std::string _arg_message;\n#if defined(__cpp_exceptions)\n    try {\n#endif\n    _arg_message = message;\n#if defined(__cpp_exceptions)\n    } catch (...) {\n        failed(2);"));
+    try testing.expect(has(strings.src.items, "owner->on_message(std::move(_arg_message));"));
+
+    // Without one, nothing is caught, as before.
+    var plain = try testGenConcreteImplOpts(idl, .{});
+    defer plain.deinit();
+    try testing.expect(!has(plain.src.items, "catch (...)"));
+    try testing.expect(has(plain.src.items, "owner->on_entity(::M::EntityImpl::_getOrCreate(entity), count)"));
 }
 
 const standalone_test_idl =

@@ -18,6 +18,16 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- `--listener-failure-report <name>` (C++ `--cpp-generate-impl`, Java): a generated
+  listener bridge calls the provider's `bool name(int reason)` on the callback's own
+  thread when its listener throws (1) or its arguments cannot be built (2), then returns
+  normally, so no exception reaches the provider. C++ bridges wrap the conversions and
+  the call in try blocks, omitted when exceptions are disabled; Java bridges report and
+  clear the pending exception instead of printing it. Without the option, C++ catches
+  nothing and Java prints and clears, as before.
+- Java listener bridges no longer continue with an exception pending: a failed class
+  lookup, constructor or method lookup skips the listener, where it used to carry on
+  into further JNI calls.
 - Zero-copy write reservations of bulk primitive bodies: `zidl_cdr_reserve_primitives`
   (natively `CdrWriter.reservePrimitives`) pads and advances the writer but leaves the
   elements for the caller to fill in place, found by offset across a dynamic writer's

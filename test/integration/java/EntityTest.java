@@ -10,6 +10,7 @@ public class EntityTest {
     static native long nGetFactory();
     static native int nTurns();
     static native boolean nFailCallback(boolean frame);
+    static native int nListenerFailures(int reason);
 
     static void check(boolean cond, String msg) {
         if (!cond) throw new AssertionError("FAIL: " + msg);
@@ -74,11 +75,22 @@ public class EntityTest {
         factory.set_listener(new Entity.Widgets.PartListener() {
             public void on_part(Entity.Widgets.Gear part) { callbacks[0]++; }
         });
-        check(nFailCallback(true), "failed local frame leaves no pending exception");
-        check(nFailCallback(false), "failed entity boxing leaves no pending exception");
+        check(nFailCallback(true), "failed local frame is reported as unbuilt arguments, leaving no pending exception");
+        check(nFailCallback(false), "failed entity boxing is reported as unbuilt arguments, leaving no pending exception");
         check(callbacks[0] == 0, "allocation failures skip callback delivery");
         factory.fire_part();
         check(callbacks[0] == 1, "a later callback still succeeds");
+
+        int thrown = nListenerFailures(1);
+        factory.set_listener(new Entity.Widgets.PartListener() {
+            public void on_part(Entity.Widgets.Gear part) {
+                callbacks[0]++;
+                throw new IllegalStateException("listener failed");
+            }
+        });
+        factory.fire_part();
+        check(callbacks[0] == 2 && nListenerFailures(1) == thrown + 1,
+              "a throwing listener is reported, and its exception does not escape");
         factory.set_listener(null);
     }
 
