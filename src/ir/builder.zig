@@ -1366,6 +1366,36 @@ const Builder = struct {
         return result;
     }
 
+    /// The value of a `@default` that names a constant, looked up from
+    /// `scope` as IDL resolves names; null when it names anything else.
+    fn resolveDefaultConstant(self: *Builder, params: *const ast.AnnotationApplParams, scope: *const Scope) !?ir.AnnotationParamValue {
+        const expr: *const ast.ConstExpr = switch (params.*) {
+            .none => return null,
+            .positional => |*e| e,
+            .named => |named| blk: {
+                for (named) |*p| {
+                    if (std.ascii.eqlIgnoreCase(p.name, "value")) break :blk &p.value;
+                }
+                return null;
+            },
+        };
+        if (expr.* != .scoped_name) return null;
+        var diagnostics: std.ArrayListUnmanaged(error_mod.Diagnostic) = .empty;
+        // Anything but a constant (an enumerator, say) is not one to resolve.
+        const value = const_eval.evaluate(expr, scope, self.alloc, &diagnostics) catch |err|
+            return if (err == error.OutOfMemory) error.OutOfMemory else null;
+        return switch (value) {
+            .integer => |v| .{ .integer = v },
+            .float => |v| .{ .float = v },
+            .fixed_pt => |v| .{ .fixed_pt = try self.alloc.dupe(u8, v) },
+            .boolean => |v| .{ .boolean = v },
+            .character => |v| .{ .character = v },
+            .wide_character => |v| .{ .wide_character = v },
+            .string => |v| .{ .string = try self.alloc.dupe(u8, v) },
+            .wide_string => |v| .{ .wide_string = try self.alloc.dupe(u32, v) },
+        };
+    }
+
     fn interpretMemberAnnotations(self: *Builder, annotations: []const ast.AnnotationAppl, scope: *const Scope) !ir.MemberAnnotations {
         var result = ir.MemberAnnotations{};
         var raw: std.ArrayListUnmanaged(ir.RawAnnotation) = .empty;
@@ -1404,6 +1434,7 @@ const Builder = struct {
                 result.is_pl_repeated = true;
             } else if (std.ascii.eqlIgnoreCase(name, "default")) {
                 result.default_value = try extractDefaultParam(self.alloc, &a.params);
+                result.default_constant = try self.resolveDefaultConstant(&a.params, scope);
             } else if (std.ascii.eqlIgnoreCase(name, "bound") or
                 std.ascii.eqlIgnoreCase(name, "max"))
             {
@@ -2369,6 +2400,28 @@ test "builder: @default named form (value=N) is stored in default_value" {
     const m = ir_spec.items[0].type_decl.struct_.members[0];
     try testing.expect(m.annotations.default_value != null);
     try testing.expectEqual(@as(i64, 42), m.annotations.default_value.?.integer);
+}
+
+test "builder: @default naming a constant resolves it as IDL scoping does" {
+    var spec = try testBuild(
+        \\const long X = 1;
+        \\module M { const long X = 2;
+        \\  module Other { const string S = "other"; };
+        \\  struct T { @default(X) long inner; @default(::X) long outer; @default(Other::S) string sibling; };
+        \\};
+        \\enum Color { RED, GREEN };
+        \\struct U { @default(GREEN) Color c; @default(7) long lit; };
+    );
+    defer spec.deinit();
+    const t = spec.items[1].module.items[2].type_decl.struct_;
+    try testing.expectEqual(@as(i64, 2), t.members[0].annotations.default_constant.?.integer);
+    try testing.expectEqual(@as(i64, 1), t.members[1].annotations.default_constant.?.integer);
+    try testing.expectEqualStrings("other", t.members[2].annotations.default_constant.?.string);
+    try testing.expectEqualStrings("X", t.members[1].annotations.default_value.?.scoped_name);
+    // An enumerator, and a literal, are not constants.
+    const u = spec.items[3].type_decl.struct_;
+    try testing.expect(u.members[0].annotations.default_constant == null);
+    try testing.expect(u.members[1].annotations.default_constant == null);
 }
 
 test "builder: @default with no parameter leaves default_value null" {

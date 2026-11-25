@@ -5210,9 +5210,14 @@ const CdrGenerator = struct {
         s: *const ir.Struct,
         m: ir.StructMember,
         idx: usize,
-        dv: ir.AnnotationParamValue,
+        named_dv: ir.AnnotationParamValue,
         from_default_ctor: bool,
     ) !void {
+        // A default naming a constant is the constant's value (resolved when
+        // building the IR): C has no scopes to find the name in, as the
+        // constant is #defined with its module prefix, and a string value then
+        // takes the literal's paths (copied, or checked against a bound).
+        const dv = if (named_dv == .scoped_name) m.annotations.default_constant orelse named_dv else named_dv;
         const is_string = switch (dv) {
             .string => true,
             else => false,
@@ -5391,6 +5396,7 @@ const CdrGenerator = struct {
                 defer self.alloc.free(esc);
                 break :blk std.fmt.allocPrint(self.alloc, "zidl_cdr_strdup(\"{s}\")", .{esc});
             },
+            .wide_character => |v| std.fmt.allocPrint(self.alloc, "{d}", .{v}),
             .scoped_name => |n| self.scopedNameDefaultToC(n, type_ref),
             else => self.alloc.dupe(u8, "0"),
         };
@@ -7788,7 +7794,8 @@ test "c_backend cdr: @default scoped_name in apply_defaults" {
     ;
     var src = try testGenCdr(idl, "cfg");
     defer src.deinit(testing.allocator);
-    try testing.expect(has(src.items, "_v->limit = MY_MAX;"));
+    // C has no scopes to find a constant's name in: the default is its value.
+    try testing.expect(has(src.items, "_v->limit = 100;"));
 }
 
 test "c_backend cdr: @default enum scoped_name emits prefixed enumerator" {
@@ -8309,4 +8316,49 @@ test "c_backend: @static operations are declared with no receiver" {
     try testing.expect(has(s, "void M_Thing_reset(void);\n"));
     // Nothing to own, so nothing pulls in the allocator header.
     try testing.expect(!has(s, "#include \"zidl_allocator.h\""));
+}
+
+test "c_backend: a @default naming a constant takes its value, found from the struct's scope outward" {
+    var out = try testGenCdr(
+        \\const long OUTER = 9;
+        \\module M {
+        \\  const long MAXV = 5; const string NAME = "nm";
+        \\  module N { struct T { @default(MAXV) long n; @default(NAME) string s; @default(NAME) string<4> b; @default(OUTER) long o; }; };
+        \\};
+    , "m");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "_v->n = 5;"));
+    try testing.expect(has(s, "char *_s_s = zidl_cdr_strdup(\"nm\");"));
+    try testing.expect(has(s, "{ const char _default[] = {(char)110, (char)109, 0}; memcpy(_v->b, _default, sizeof _default); }"));
+    try testing.expect(has(s, "_v->o = 9;"));
+    try testing.expect(!has(s, "MAXV;"));
+}
+
+test "c_backend: a qualified @default reference finds the constant it names" {
+    var out = try testGenCdr(
+        \\const long X = 1;
+        \\module M { const long X = 2; module Other { const long Y = 3; };
+        \\  struct T { @default(::X) long outer; @default(X) long inner; @default(Other::Y) long sibling; }; };
+    , "m");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "_v->outer = 1;"));
+    try testing.expect(has(s, "_v->inner = 2;"));
+    try testing.expect(has(s, "_v->sibling = 3;"));
+}
+
+test "c_backend: a wide character @default, literal or a constant's, is its code" {
+    var out = try testGenCdr(
+        \\module M { const wchar W = L'a'; struct T { @default(W) wchar named; @default(L'b') wchar lit; }; };
+    , "m");
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "_v->named = 97;"));
+    try testing.expect(has(out.items, "_v->lit = 98;"));
+}
+
+test "c_backend: a constant default too long for its bounded string is refused" {
+    try testing.expectError(error.DefaultStringTooLong, testGenCdr(
+        \\module M { const string NAME = "toolong"; struct T { @default(NAME) string<3> b; }; };
+    , "m"));
 }

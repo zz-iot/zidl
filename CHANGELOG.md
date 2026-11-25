@@ -18,6 +18,12 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- C: a `@default` naming a constant declared in a module compiles. It used the
+  constant's bare name, but C `#define`s it with its module prefix; the default is now
+  the constant's value, resolved as IDL resolves the name (`::X` and `Other::X`
+  included; the IR's new `default_constant`). A wide character default is its code
+  (it was 0).
+
 - Zig: a string `@default` naming a constant is static, like a literal one: `deinit`
   no longer frees it.
 
