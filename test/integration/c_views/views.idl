@@ -76,12 +76,15 @@ module views {
         sequence<octet> data;
     };
 
+    const string NAMED_FALLBACK = "named fallback";
+
     @mutable
     struct Defaults {
         string name;
         sequence<octet> data;
         @default("fallback") string label;
         @optional @default("kept") string maybe;
+        @default(NAMED_FALLBACK) string named;
     };
 
     @final

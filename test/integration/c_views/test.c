@@ -207,6 +207,17 @@ static int bounded(int version, int order) {
     return 0;
 }
 
+/* Defaults: a literal and a constant's (views do not apply defaults in C,
+ * as the struct's decoder does not, but the struct's own defaults hold). */
+static int defaults(int version, int order) {
+    views_Defaults d;
+    views_Defaults_default(&d);
+    CHECK(d.label && strcmp(d.label, "fallback") == 0);
+    CHECK(d.named && strcmp(d.named, "named fallback") == 0);
+    views_Defaults_free(&d);
+    return 0;
+}
+
 int main(void) {
     for (int order = ZIDL_CDR_LE; order <= ZIDL_CDR_BE; ++order) {
         for (int version = ZIDL_XCDR1; version <= ZIDL_XCDR2; ++version) {
@@ -214,7 +225,7 @@ int main(void) {
                 derived(version, order) || bounded(version, order)) return 1;
         }
         /* XCDR1 has no ordinary mutable encoding. */
-        if (mutable_frame(ZIDL_XCDR2, order)) return 1;
+        if (mutable_frame(ZIDL_XCDR2, order) || defaults(ZIDL_XCDR2, order)) return 1;
     }
     puts("views: all checks passed");
     return 0;
