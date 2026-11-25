@@ -1,0 +1,33 @@
+// Wide strings in Zig structs: a decoded wstring member is owned and freed,
+// a sequence of them holds NUL-terminated units, and a wstring @default is a
+// static UTF-16 literal that deinit leaves alone.
+module wide {
+    @appendable
+    struct Wide {
+        wstring text;
+        sequence<wstring> lines;
+        @default(L"dflt") wstring fallback;
+        @optional wstring note;
+    };
+
+    // In XCDR1, a Lines sample with one line and a OneLine sample share a
+    // layout, so a OneLine can carry a line a sequence element cannot hold.
+    @final
+    struct Lines {
+        sequence<wstring> items;
+    };
+
+    @final
+    struct OneLine {
+        unsigned long count;
+        wstring item;
+    };
+
+    // Its key hash decodes the key alone; one that fails cleans up a key
+    // still holding its static default.
+    @final
+    struct Keyed {
+        @key @default(L"key") wstring id;
+        long value;
+    };
+};

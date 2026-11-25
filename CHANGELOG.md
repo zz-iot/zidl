@@ -18,6 +18,11 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Zig: a decoded `wstring` member is owned and freed by `deinit` (it leaked),
+  `sequence<wstring>` compiles (its elements are NUL-terminated UTF-16 units), and a
+  `wstring` `@default` is a static UTF-16 literal that `deinit` leaves alone (it was
+  `undefined`).
+
 - `--generate-views` (C++ backend): each struct also gets a `{Type}View`, decoded in place
   by `{Type}_deserialize_view`, with the C and Zig backends' member kinds: primitive
   sequences and arrays become `zidl::PrimitivesView<T>`s of the input (new header
