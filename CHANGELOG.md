@@ -18,6 +18,9 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Zig: a bounded `string<N>` or `wstring<N>` `@default` compiles: it fills the
+  member's `BoundedArray`, and a literal longer than the bound is refused at generation.
+
 - C: a `@default` naming a constant declared in a module compiles. It used the
   constant's bare name, but C `#define`s it with its module prefix; the default is now
   the constant's value, resolved as IDL resolves the name (`::X` and `Other::X`

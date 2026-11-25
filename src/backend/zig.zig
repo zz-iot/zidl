@@ -3888,7 +3888,7 @@ const Generator = struct {
             // non-optional array path (below) ignores it too, so an
             // `@optional` array member always initializes to `null`.
             if (dims.len == 0) if (default_value) |dv| {
-                const dv_str = try self.formatDefaultValueZig(dv, type_ref);
+                const dv_str = try self.fieldDefaultZig(dv, type_ref);
                 defer self.alloc.free(dv_str);
                 try self.print("    {s}: ?{s} = {s},\n", .{ name, inner, dv_str });
                 return;
@@ -3901,7 +3901,7 @@ const Generator = struct {
             defer self.alloc.free(default);
             try self.print("    {s}: {s} = {s},\n", .{ name, arr_type, default });
         } else if (default_value) |dv| {
-            const dv_str = try self.formatDefaultValueZig(dv, type_ref);
+            const dv_str = try self.fieldDefaultZig(dv, type_ref);
             defer self.alloc.free(dv_str);
             try self.print("    {s}: {s} = {s},\n", .{ name, zig_type, dv_str });
         } else {
@@ -4282,6 +4282,31 @@ const Generator = struct {
         }
         try self.ind();
         try self.print("{s}out.{s} = {s};\n", .{ indent, m.name, opt_var });
+    }
+
+    /// A member's `@default` as its field's initial value. A bounded string
+    /// or wide string is a `BoundedArray`, built from the literal, which must
+    /// fit the bound (a named constant's fit is checked when Zig evaluates
+    /// the default).
+    fn fieldDefaultZig(self: *Generator, dv: ir.AnnotationParamValue, type_ref: ir.TypeRef) ![]u8 {
+        const literal = try self.formatDefaultValueZig(dv, type_ref);
+        const elem: []const u8, const bound: u64 = switch (resolveAlias(type_ref)) {
+            .string => |b| .{ "u8", b orelse return literal },
+            .wstring => |b| .{ "u16", b orelse return literal },
+            else => return literal,
+        };
+        defer self.alloc.free(literal);
+        const units: ?u64 = switch (dv) {
+            .string => |s| s.len,
+            .wide_string => |cps| blk: {
+                var n: u64 = 0;
+                for (cps) |cp| n += if (cp >= 0x10000) 2 else 1;
+                break :blk n;
+            },
+            else => null,
+        };
+        if (units) |n| if (n > bound) return error.DefaultStringTooLong;
+        return std.fmt.allocPrint(self.alloc, "zidl_cdr.BoundedArray({s}, {d}).fromSlice({s}) catch unreachable", .{ elem, bound, literal });
     }
 
     /// Format an `AnnotationParamValue` as a Zig literal expression.
@@ -13397,6 +13422,21 @@ test "zig_backend: a wstring @default is a static UTF-16 literal deinit keeps" {
     // An empty default allocates nothing and needs no guard.
     try testing.expect(has(s, "empty: []const u16 = &[_:0]u16{},"));
     try testing.expect(has(s, "zidl_bindings.deinitOwned(&self.empty, alloc);"));
+}
+
+test "zig_backend: a bounded string or wide string @default fills its BoundedArray" {
+    var out = try testGen("struct B { @default(\"abc\") string<4> text; @default(L\"x\") wstring<2> wide; @optional @default(\"o\") string<1> opt; };", "b");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "text: zidl_cdr.BoundedArray(u8, 4) = zidl_cdr.BoundedArray(u8, 4).fromSlice(\"abc\") catch unreachable,"));
+    try testing.expect(has(s, "wide: zidl_cdr.BoundedArray(u16, 2) = zidl_cdr.BoundedArray(u16, 2).fromSlice(&[_:0]u16{ 0x0078 }) catch unreachable,"));
+    try testing.expect(has(s, "opt: ?zidl_cdr.BoundedArray(u8, 1) = zidl_cdr.BoundedArray(u8, 1).fromSlice(\"o\") catch unreachable,"));
+}
+
+test "zig_backend: a bounded @default longer than its bound is refused" {
+    try testing.expectError(error.DefaultStringTooLong, testGen("struct B { @default(\"abc\") string<2> text; };", "b"));
+    // A supplementary character takes two units.
+    try testing.expectError(error.DefaultStringTooLong, testGen("struct B { @default(L\"\u{1F600}\") wstring<1> wide; };", "b"));
 }
 
 test "zig_backend: a string @default naming a constant is static too" {

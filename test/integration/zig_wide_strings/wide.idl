@@ -8,6 +8,9 @@ module wide {
         sequence<wstring> lines;
         @default(L"dflt") wstring fallback;
         @optional wstring note;
+        // Bounded defaults fill their BoundedArray.
+        @default(L"bnd") wstring<4> bounded_wide;
+        @default("abc") string<4> bounded_text;
     };
 
     // In XCDR1, a Lines sample with one line and a OneLine sample share a

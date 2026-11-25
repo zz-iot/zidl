@@ -20,6 +20,8 @@ fn units(comptime s: []const u8) []const u16 {
 test "a default-constructed struct frees nothing it does not own" {
     var d: Wide = .{};
     try t.expectEqualSlices(u16, units("dflt"), d.fallback);
+    try t.expectEqualSlices(u16, units("bnd"), d.bounded_wide.slice());
+    try t.expectEqualStrings("abc", d.bounded_text.slice());
     var copy = try d.clone(t.allocator);
     try t.expectEqualSlices(u16, units("dflt"), copy.fallback);
     copy.deinit(t.allocator);
@@ -99,6 +101,8 @@ test "wide strings round-trip, clone and free, in both XCDR versions" {
         try t.expectEqualSlices(u16, &second, std.mem.span(out.lines._buffer.?[1]));
         try t.expectEqualSlices(u16, units("dflt"), out.fallback);
         try t.expectEqualSlices(u16, units("note"), out.note.?);
+        try t.expectEqualSlices(u16, units("bnd"), out.bounded_wide.slice());
+        try t.expectEqualStrings("abc", out.bounded_text.slice());
 
         var copy = try out.clone(t.allocator);
         defer copy.deinit(t.allocator);
