@@ -40,6 +40,11 @@ static int expected_op;
 static int32_t expected_handle;
 static DDS_ReturnCode_t typed_result = DDS_RETCODE_OK;
 static int loans;
+// take_view takes one sample; every other typed take here asks for 8.
+static int32_t expected_max = 8;
+// Only take_view's checks decode a sample that fails.
+static bool allow_failed;
+static int failed_loans;
 // XCDR1 little-endian encapsulation followed by Topic.id = 123.
 static uint8_t sample_bytes[] = {0, 1, 0, 0, 123, 0, 0, 0};
 static DDS_OctetSeq sample_payload{8, 8, sample_bytes, false};
@@ -138,7 +143,7 @@ int32_t DDS_DataReader_##name(DDS_DataReader reader, DDS_OctetSeqSeq *payloads, 
     assert(reader && condition == expected_condition); \
     if (typed_mode) { \
         assert(expected_op == result && handle == expected_handle); \
-        assert(ss == DDS_ANY_SAMPLE_STATE && vs == DDS_ANY_VIEW_STATE && is == DDS_ANY_INSTANCE_STATE && max == 8); \
+        assert(ss == DDS_ANY_SAMPLE_STATE && vs == DDS_ANY_VIEW_STATE && is == DDS_ANY_INSTANCE_STATE && max == expected_max); \
         assert(payloads->_maximum == 0 && payloads->_length == 0); \
         if (typed_result == DDS_RETCODE_OK) { \
             payloads->_length = 1; payloads->_buffer = &sample_payload; \
@@ -160,9 +165,12 @@ DDS_ReturnCode_t DDS_DataReader_return_loan_raw(DDS_DataReader reader, DDS_Octet
     ++loans;
     return DDS_RETCODE_OK;
 }
-// Typed reads and takes here decode what they are given: none fails.
+// Typed reads and takes here decode what they are given: none fails, except
+// in take_view's checks.
 DDS_ReturnCode_t DDS_DataReader_return_loan_raw_failed(DDS_DataReader, DDS_OctetSeqSeq*, DDS_OctetSeq*, DDS_SampleInfoSeq*, const DDS_OctetSeq*) {
-    std::abort();
+    if (!allow_failed) std::abort();
+    ++failed_loans;
+    return DDS_RETCODE_OK;
 }
 }
 
@@ -345,6 +353,44 @@ int main() {
     assert(calls == 29 && loans == 13);
     sample_payload._length = 8;
     sample_info.valid_data = true;
+
+    // take_view (--generate-views): a view of a sample on loan, which the
+    // ViewLoan returns once, on reset or destruction. The key hashes are
+    // released at once, a loan return of their own.
+    {
+        expected_condition = nullptr;
+        expected_handle = DDS_HANDLE_NIL;
+        expected_op = 11;
+        expected_max = 1;
+        TopicDataReader::ViewLoan loan;
+        assert(!loan.active());
+        assert(typed.take_view(loan) == DDS_RETCODE_OK);
+        assert(loan.active() && loan.view().id == 123 && loan.info().valid_data);
+        assert(calls == 30 && loans == 14);
+        TopicDataReader::ViewLoan moved = std::move(loan);
+        assert(!loan.active() && moved.active() && moved.view().id == 123);
+        moved.reset();
+        assert(!moved.active() && loans == 15);
+        moved.reset();
+        assert(loans == 15);
+        // Without valid data: an empty view, still on loan.
+        sample_info.valid_data = false;
+        assert(typed.take_view(moved) == DDS_RETCODE_OK && moved.active() && moved.view().id == 0);
+        assert(calls == 31 && loans == 16);
+        sample_info.valid_data = true;
+        // Taking into a ViewLoan that holds one returns it first.
+        assert(typed.take_view(moved) == DDS_RETCODE_OK && moved.view().id == 123);
+        assert(calls == 32 && loans == 18);
+        // A view that does not decode: the sample is returned failed, and
+        // the ViewLoan holds nothing.
+        allow_failed = true;
+        sample_payload._length = 5;
+        assert(typed.take_view(moved) != DDS_RETCODE_OK && !moved.active());
+        assert(calls == 33 && loans == 20 && failed_loans == 1);
+        sample_payload._length = 8;
+        allow_failed = false;
+        expected_max = 8;
+    }
     typed_result = DDS_RETCODE_BAD_PARAMETER;
     assert(DDS::DataReaderImpl::_getOrCreate(&reader_handle) == reader);
 
@@ -378,7 +424,7 @@ int main() {
     // C ABI's error.
     auto foreign = std::make_shared<DDS::ReadCondition>();
     exercise_typed(foreign, nullptr);
-    assert(calls == 33 && loans == 13);
+    assert(calls == 37 && loans == 20);
 
     // A root-typed lookup boxes the member a handle really is. A destroyed
     // ReadCondition's still-live wrapper is not returned for the

@@ -13,7 +13,7 @@
 //!   --default-extensibility <ext>  Default extensibility when no @extensibility present
 //!                                  (default: final, per IDL4 §8.3.1) (all backends)
 //!   --generate-zzdds-wrappers      Emit typed zzdds topic wrappers (Zig, C, C++)
-//!   --generate-views               Emit zero-copy view types for structs (C, Zig)
+//!   --generate-views               Emit zero-copy view types for structs (C, C++, Zig)
 //!   --generate-interfaces          Emit binding layer for IDL interface declarations (all backends)
 //!   --no-typeobject-support        Suppress TypeObject/TypeIdentifier (all backends, currently Zig only)
 //!   --no-typesupport               Suppress CDR serialize/deserialize (all backends)
@@ -849,7 +849,7 @@ fn printUsage(w: *Io.Writer) !void {
         \\  --default-extensibility <ext>  Default extensibility when no @extensibility present
         \\                                 (default: final, per IDL4 §8.3.1) (all backends)
         \\  --generate-zzdds-wrappers      Emit typed zzdds topic wrappers (Zig, C, C++)
-        \\  --generate-views               Emit zero-copy view types for structs (C, Zig)
+        \\  --generate-views               Emit zero-copy view types for structs (C, C++, Zig)
         \\  --generate-interfaces          Emit binding layer for IDL interface declarations (all backends)
         \\  --experimental-typesupport-library Emit experimental Zig wire library descriptors
         \\  --no-typeobject-support        Suppress TypeObject/TypeIdentifier (all backends, currently Zig only)

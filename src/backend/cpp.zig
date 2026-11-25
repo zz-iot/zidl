@@ -302,6 +302,7 @@ const Generator = struct {
         if (!self.opts.no_typesupport) {
             try self.write("#include \"zidl_cdr.h\"\n");
         }
+        if (viewsEnabledCpp(self.opts)) try self.write("#include <optional>\n#include <string_view>\n#include \"zidl_cdr_view.hpp\"\n");
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveZzddsTopicStructCpp(spec.items)) {
             try self.write("#include \"zzdds_c.h\"\n");
             try self.write("#include \"dcps.hpp\"\n");
@@ -353,6 +354,12 @@ const Generator = struct {
                 hasCallbackInterfaces(spec.items));
         if (!self.opts.no_typesupport and !has_c_header) {
             try self.emitCdrProtos(spec.items);
+        } else if (has_c_header and viewsEnabledCpp(self.opts)) {
+            // The C header declares the C ABI decoders, but not these: they
+            // take the C++ view types, so they keep C++ linkage, overloading
+            // any C view decoder of the same name rather than clashing with it.
+            try self.write("// --- C++ view decoders ---\n\n");
+            try self.emitViewProtos(spec.items);
         }
 
         if (self.opts.cpp_namespace.len > 0) {
@@ -361,6 +368,24 @@ const Generator = struct {
         if (!self.opts.pragma_once) {
             try self.print("#endif // {s}\n", .{guard});
         }
+    }
+
+    /// `{Type}_deserialize_view` for every struct, as `emitStructCdrProtos`
+    /// declares it.
+    fn emitViewProtos(self: *Generator, items: []const ir.ModuleItem) anyerror!void {
+        for (items) |item| switch (item) {
+            .module => |m| try self.emitViewProtos(m.items),
+            .type_decl => |td| switch (td) {
+                .struct_ => |s| {
+                    const c_name = try self.prefixedCName(s.qualified_name);
+                    defer self.alloc.free(c_name);
+                    const em = self.opts.export_macro;
+                    try self.print("{s}{s}int {s}_deserialize_view(ZidlCdrReader *_r, ::{s}View *_v);\n", .{ em, if (em.len > 0) " " else "", c_name, s.qualified_name });
+                },
+                else => {},
+            },
+            else => {},
+        };
     }
 
     fn emitCdrProtos(self: *Generator, items: []const ir.ModuleItem) anyerror!void {
@@ -437,6 +462,10 @@ const Generator = struct {
         try self.print("{s}{s}int {s}_deserialize_key_value(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
         try self.print("{s}{s}int {s}_skip_key_value(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         try self.print("{s}{s}int {s}_deserialize(ZidlCdrReader *_r, {s} *_v);\n", .{ em, sp, c_name, cpp_qname });
+        if (viewsEnabledCpp(self.opts)) {
+            try self.write("/* Decodes a view of the sample at _r, valid while _r's input is; on failure\n   *_v is reset. */\n");
+            try self.print("{s}{s}int {s}_deserialize_view(ZidlCdrReader *_r, {s}View *_v);\n", .{ em, sp, c_name, cpp_qname });
+        }
         try self.write("/* Structural traversal only; success is not sample admission. */\n");
         try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
         if (true) {
@@ -588,6 +617,41 @@ const Generator = struct {
         try self.print("    int take_next_instance_w_condition(std::shared_ptr<::DDS::ReadCondition> condition, DDS_InstanceHandle_t prev, {s} *values, DDS_SampleInfo *infos, int max);\n", .{cpp_qname});
         try self.print("    int read_next_instance_w_condition(std::shared_ptr<::DDS::ReadCondition> condition, DDS_InstanceHandle_t prev, {s} *values, DDS_SampleInfo *infos, int max);\n", .{cpp_qname});
         try self.write("    DDS_ReturnCode_t take_loaned(Loan& out);\n");
+        if (viewsEnabledCpp(self.opts)) {
+            // A sample taken on loan with a view of it: the view is valid
+            // while the ViewLoan holds the loan, which reset() or destruction
+            // returns. The view is held in a std::optional so that dropping
+            // it only destroys it: a fresh view may allocate (an owned
+            // member's @default string), and reset() runs in the destructor.
+            try self.write("    class ViewLoan {\n");
+            try self.write("    public:\n");
+            try self.write("        ViewLoan() = default;\n");
+            try self.write("        ViewLoan(const ViewLoan&) = delete;\n");
+            try self.write("        ViewLoan& operator=(const ViewLoan&) = delete;\n");
+            try self.print("        ViewLoan(ViewLoan&& other) noexcept(std::is_nothrow_move_constructible<{s}View>::value) : reader_(other.reader_), loan_payloads_(other.loan_payloads_), loan_infos_(other.loan_infos_), view_(std::move(other.view_)), info_(other.info_), active_(other.active_) {{ other.active_ = false; other.view_.reset(); }}\n", .{cpp_qname});
+            try self.print("        ViewLoan& operator=(ViewLoan&& other) noexcept(std::is_nothrow_move_constructible<{s}View>::value && std::is_nothrow_move_assignable<{s}View>::value) {{ if (this != &other) {{ reset(); reader_ = other.reader_; loan_payloads_ = other.loan_payloads_; loan_infos_ = other.loan_infos_; view_ = std::move(other.view_); info_ = other.info_; active_ = other.active_; other.active_ = false; other.view_.reset(); }} return *this; }}\n", .{ cpp_qname, cpp_qname });
+            try self.write("        ~ViewLoan() { reset(); }\n");
+            try self.write("        /* The view, while active(). */\n");
+            try self.print("        const {s}View& view() const {{ return *view_; }}\n", .{cpp_qname});
+            try self.write("        const DDS_SampleInfo& info() const { return info_; }\n");
+            try self.write("        bool active() const { return active_; }\n");
+            try self.write("        /* Drops the view and returns the loan; never allocates. */\n");
+            try self.write("        void reset() noexcept;\n");
+            try self.write("    private:\n");
+            try self.print("        friend class {s}DataReader;\n", .{class_name});
+            try self.print("        {s}DataReader *reader_ = nullptr;\n", .{class_name});
+            try self.write("        DDS_OctetSeqSeq loan_payloads_{};\n");
+            try self.write("        DDS_SampleInfoSeq loan_infos_{};\n");
+            try self.print("        std::optional<{s}View> view_{{}};\n", .{cpp_qname});
+            try self.write("        DDS_SampleInfo info_{};\n");
+            try self.write("        bool active_ = false;\n");
+            try self.write("    };\n");
+            try self.write("    /* Takes one sample on loan into out (reset first) with a view of it. A\n");
+            try self.write("       sample without valid data has an empty view (its key: get_key_value);\n");
+            try self.write("       one whose view does not decode is returned failed. OUT_OF_RESOURCES\n");
+            try self.write("       if an empty view cannot be allocated. */\n");
+            try self.write("    DDS_ReturnCode_t take_view(ViewLoan& out);\n");
+        }
         try self.write("private:\n");
         try self.write("    DDS_DataReader reader_;\n");
         try self.write("};\n\n");
@@ -711,6 +775,52 @@ const Generator = struct {
         try self.print("\n    static {s} default_value() {{ return {s}{{}}; }}\n", .{ s.name, s.name });
         try self.print("}}; // struct {s}\n\n", .{s.name});
         try self.emitVerbatimForPlacement(s.annotations.raw, "after-declaration");
+        if (viewsEnabledCpp(self.opts)) try self.emitStructView(s);
+    }
+
+    /// `{Name}View`, the struct decoded in place (`cdr_skip.viewKind`). A
+    /// view of a derived struct derives from its base's view.
+    fn emitStructView(self: *Generator, s: *const ir.Struct) !void {
+        try self.write("// This struct decoded in place: primitive sequences and arrays view the\n");
+        try self.write("// CDR input, strings are zero-copy into it and nested structs are views,\n");
+        try self.write("// all valid while that input is. Other members are decoded as in the\n");
+        try self.write("// struct, and owned.\n");
+        try self.print("struct {s}View", .{s.name});
+        if (s.base) |base| try self.print(" : ::{s}View", .{ir.typeDeclQualifiedName(base)});
+        try self.write(" {\n");
+        for (s.members) |m| {
+            const optional = m.annotations.is_optional;
+            switch (cdr_skip.viewKind(m.type_ref, m.dimensions)) {
+                .owned => try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, optional, m.annotations.default_value, "    "),
+                .primitives => {
+                    const elem = if (m.dimensions.len > 0) m.type_ref else cdr_skip.resolveAlias(m.type_ref).sequence.element.*;
+                    const t = baseToCppType(cdr_skip.bulkBase(elem).?);
+                    if (optional) {
+                        try self.print("    std::optional<::zidl::PrimitivesView<{s}>> {s}{{}};\n", .{ t, m.name });
+                    } else {
+                        try self.print("    ::zidl::PrimitivesView<{s}> {s}{{}};\n", .{ t, m.name });
+                    }
+                },
+                .string => {
+                    // A string's `@default` stays, as in the struct.
+                    const initial: []u8 = if (m.annotations.default_value) |dv|
+                        try self.formatDefaultValueCpp(dv, m.type_ref)
+                    else
+                        try self.alloc.dupe(u8, "");
+                    defer self.alloc.free(initial);
+                    try self.print("    {s}{s}{s} {s}{{{s}}};\n", .{ if (optional) "std::optional<" else "", "std::string_view", if (optional) ">" else "", m.name, initial });
+                },
+                .struct_view => {
+                    const nested = cdr_skip.viewStructQname(m.type_ref);
+                    if (optional) {
+                        try self.print("    std::optional<::{s}View> {s}{{}};\n", .{ nested, m.name });
+                    } else {
+                        try self.print("    ::{s}View {s}{{}};\n", .{ nested, m.name });
+                    }
+                },
+            }
+        }
+        try self.print("}}; // struct {s}View\n\n", .{s.name});
     }
 
     // ── Union ─────────────────────────────────────────────────────────────────
@@ -1624,6 +1734,11 @@ fn bitsetCdrFnSuffix(bs: *const ir.Bitset) []const u8 {
 
 // ── CDR source generation ─────────────────────────────────────────────────────
 
+/// Whether struct view types are generated (`--generate-views`).
+fn viewsEnabledCpp(opts: interface.Options) bool {
+    return opts.generate_views and !opts.no_typesupport;
+}
+
 const CdrGenerator = struct {
     /// Nesting depth of the collection whose element code is being emitted;
     /// suffixes loop locals so nested loops never shadow (see cdr_skip.collName).
@@ -1633,6 +1748,8 @@ const CdrGenerator = struct {
     goto_label: ?[]const u8 = null,
     canonical_key: bool = false,
     wire_key: bool = false,
+    /// Inherited fields are read through the base's view type.
+    view_owner: bool = false,
     alloc: std.mem.Allocator,
     opts: interface.Options,
     out: *std.ArrayList(u8),
@@ -1866,7 +1983,7 @@ const CdrGenerator = struct {
             try self.writeI("{\n");
             self.indent_depth += 1;
         }
-        try self.printI("auto *_base_value = static_cast<{s}::{s} *>(_v);\n", .{ if (read_only) "const " else "", field.owner_name });
+        try self.printI("auto *_base_value = static_cast<{s}::{s}{s} *>(_v);\n", .{ if (read_only) "const " else "", field.owner_name, if (self.view_owner) "View" else "" });
         try self.writeI("auto *_v = _base_value;\n");
     }
 
@@ -1912,6 +2029,186 @@ const CdrGenerator = struct {
         try self.printI("else _v->{s} = std::nullopt;\n", .{m.name});
 
         try self.writeI("return _rc;\n");
+        try self.write("}\n\n");
+    }
+
+    /// Reads member `m` into `lval` as its view type has it (`cdr_skip.viewKind`).
+    fn emitViewMemberRead(self: *CdrGenerator, m: ir.StructMember, lval: []const u8) !void {
+        switch (cdr_skip.viewKind(m.type_ref, m.dimensions)) {
+            .owned => if (m.dimensions.len > 0) {
+                try self.emitReadArray(m.type_ref, m.name, lval, m.dimensions, 0);
+            } else {
+                try self.emitReadForTypeRef(m.type_ref, m.name, lval);
+            },
+            .primitives => {
+                const width = cdr_skip.viewWidth(m.type_ref, m.dimensions);
+                if (m.dimensions.len > 0) {
+                    var total: u64 = 1;
+                    for (m.dimensions) |d| total *= d;
+                    try self.printI("_rc = zidl_cdr_read_primitives_view(_r, {d}u, {d}u, {s}.c_view());\n", .{ total, width, lval });
+                    try cdr_skip.readRcCheck(self);
+                } else {
+                    const bound = cdr_skip.resolveAlias(m.type_ref).sequence.bound orelse 0;
+                    try self.writeI("{ uint32_t _vn;\n");
+                    self.indent_depth += 1;
+                    try self.printI("_rc = zidl_cdr_read_sequence_count(_r, {d}u, {d}u, &_vn);\n", .{ width, bound });
+                    try cdr_skip.readRcCheck(self);
+                    try self.printI("_rc = zidl_cdr_read_primitives_view(_r, _vn, {d}u, {s}.c_view());\n", .{ width, lval });
+                    try cdr_skip.readRcCheck(self);
+                    self.indent_depth -= 1;
+                    try self.writeI("}\n");
+                }
+            },
+            .string => {
+                try self.writeI("{ const char *_vs; uint32_t _vl;\n");
+                self.indent_depth += 1;
+                try self.writeI("_rc = zidl_cdr_read_string_zerocopy(_r, &_vs, &_vl);\n");
+                try cdr_skip.readRcCheck(self);
+                if (cdr_skip.resolveAlias(m.type_ref).string) |n| {
+                    try self.printI("if (_vl > {d}u) return ZIDL_CDR_INVALID;\n", .{n});
+                }
+                try self.printI("{s} = std::string_view(_vs, _vl);\n", .{lval});
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            },
+            .struct_view => {
+                const nested = try self.prefixedCName(cdr_skip.viewStructQname(m.type_ref));
+                defer self.alloc.free(nested);
+                try self.printI("_rc = {s}_deserialize_view(_r, &{s});\n", .{ nested, lval });
+                try cdr_skip.readRcCheck(self);
+            },
+        }
+    }
+
+    /// The view counterparts of `emitOptionalValueFns`' read helpers.
+    fn emitOptionalViewReadFns(self: *CdrGenerator, c_name: []const u8, field: canonical.Field) !void {
+        const m = field.member.*;
+        const id = m.annotations.memberId(@intCast(field.index));
+        const deref = try std.fmt.allocPrint(self.alloc, "(*_v->{s})", .{m.name});
+        defer self.alloc.free(deref);
+        try self.print("static int {s}_optional_read_view_value_{d}(ZidlCdrReader *_r, ::{s}View *_v) {{\n", .{ c_name, id, field.owner_name });
+        try self.writeI("int _rc = 0; (void)_rc;\n");
+        try self.printI("_v->{s}.emplace();\n", .{m.name});
+        try self.emitViewMemberRead(m, deref);
+        try self.writeI("return 0;\n");
+        try self.write("}\n\n");
+        try self.print("static int {s}_optional_read_view_{d}(ZidlCdrReader *_r, ::{s}View *_v) {{\n", .{ c_name, id, field.owner_name });
+        try self.writeI("ZidlCdrOptionalRead _scope; bool _present;\n");
+        try self.printI("int _rc = zidl_cdr_begin_optional_read(_r, {d}, &_scope, &_present);\n", .{id});
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.writeI("struct _restore { ZidlCdrReader *r; const ZidlCdrOptionalRead *s; ~_restore() { zidl_cdr_end_optional_read(r, s); } } _guard{_r, &_scope};\n");
+        try self.printI("if (_present) _rc = {s}_optional_read_view_value_{d}(_r, _v);\n", .{ c_name, id });
+        try self.printI("else _v->{s} = std::nullopt;\n", .{m.name});
+        try self.writeI("return _rc;\n");
+        try self.write("}\n\n");
+    }
+
+    /// `{Type}_deserialize_view`: `_deserialize`'s framing, member order and
+    /// optional and mutable handling, reading members as the view has them.
+    fn emitStructViewFns(self: *CdrGenerator, s: *const ir.Struct, c_name: []const u8, cpp_qname: []const u8) !void {
+        const mutable = s.annotations.extensibility == .mutable;
+        const appendable = s.annotations.extensibility != .final;
+        const wire_fields = try canonical.wireFields(self.alloc, s, false);
+        defer self.alloc.free(wire_fields);
+        const previous = self.view_owner;
+        self.view_owner = true;
+        defer self.view_owner = previous;
+        const frame = try std.fmt.allocPrint(self.alloc, "{s}_deserialize_view_frame", .{c_name});
+        defer self.alloc.free(frame);
+        const view_type = try std.fmt.allocPrint(self.alloc, "{s}View", .{cpp_qname});
+        defer self.alloc.free(view_type);
+
+        if (!mutable) for (wire_fields) |field| {
+            if (field.member.annotations.is_optional) try self.emitOptionalViewReadFns(c_name, field);
+        };
+
+        try self.print("int {s}(ZidlCdrReader *_r, {s} *_v);\n", .{ frame, view_type });
+        try cdr_skip.emitReadFunction(self, frame, view_type, false, if (mutable) "1" else if (appendable) "_r->xcdr_version == ZIDL_XCDR2" else "0");
+        try self.writeI("int _rc = ZIDL_CDR_OK; (void)_rc;\n");
+        if (mutable) {
+            try self.writeI("size_t _em_end;\n");
+            try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_em_end);\n");
+            try self.writeI("if (_rc) return _rc;\n");
+            try cdr_skip.limitReader(self, "_em_end");
+            // As in _deserialize: an omitted optional is disengaged.
+            for (wire_fields) |field| {
+                if (!field.member.annotations.is_optional) continue;
+                try self.openWireField(field, false, true);
+                try self.printI("_v->{s}.reset();\n", .{field.member.name});
+                try self.closeWireField(field, true);
+            }
+            try self.writeI("for (size_t _frame_limit = _r->data_len, _member_end = _r->pos; zidl_cdr_mutable_has_more(_r, _em_end); _r->pos = _member_end, _r->data_len = _frame_limit) {\n");
+            self.indent_depth += 1;
+            try self.writeI("ZidlEmHeader _emh;\n");
+            try self.writeI("_rc = zidl_cdr_read_emheader(_r, &_emh);\n");
+            try self.writeI("if (_rc) return _rc;\n");
+            try cdr_skip.memberWindow(self);
+            try self.writeI("switch (_emh.member_id) {\n");
+            self.indent_depth += 1;
+            for (wire_fields) |field| {
+                const m = field.member.*;
+                try self.printI("case {d}: {{\n", .{memberIdAtCpp(m, field.index)});
+                self.indent_depth += 1;
+                try self.openWireField(field, false, false);
+                const lval = if (m.annotations.is_optional)
+                    try std.fmt.allocPrint(self.alloc, "(*_v->{s})", .{m.name})
+                else
+                    try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
+                defer self.alloc.free(lval);
+                if (m.annotations.is_optional) try self.printI("_v->{s}.emplace();\n", .{m.name});
+                try self.emitViewMemberRead(m, lval);
+                try self.writeI("break;\n");
+                try self.closeWireField(field, false);
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            }
+            try self.writeI("default:\n");
+            self.indent_depth += 1;
+            try self.writeI("if (_emh.must_understand) return ZIDL_CDR_INVALID;\n");
+            try self.writeI("_rc = zidl_cdr_skip_emheader_payload(_r, &_emh);\n");
+            try self.writeI("if (_rc) return _rc;\n");
+            try self.writeI("break;\n");
+            self.indent_depth -= 2;
+            try self.writeI("}\n");
+            self.indent_depth -= 1;
+            try self.writeI("}\n");
+        } else {
+            if (appendable) {
+                try self.writeI("if (_r->xcdr_version == ZIDL_XCDR2) {\n");
+                self.indent_depth += 1;
+                try self.writeI("size_t _body_end;\n");
+                try self.writeI("_rc = zidl_cdr_read_mutable_dheader(_r, &_body_end);\n");
+                try cdr_skip.readRcCheck(self);
+                try cdr_skip.limitReader(self, "_body_end");
+                self.indent_depth -= 1;
+                try self.writeI("}\n");
+            }
+            for (wire_fields) |field| {
+                const m = field.member.*;
+                try self.openWireField(field, false, true);
+                if (m.annotations.is_optional) {
+                    try self.printI("_rc = {s}_optional_read_view_{d}(_r, _v);\n", .{ c_name, m.annotations.memberId(@intCast(field.index)) });
+                    try self.writeI("if (_rc) return _rc;\n");
+                } else {
+                    const lval = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
+                    defer self.alloc.free(lval);
+                    try self.emitViewMemberRead(m, lval);
+                }
+                try self.closeWireField(field, true);
+            }
+        }
+        try self.writeI("return ZIDL_CDR_OK;\n");
+        try self.write("}\n\n");
+
+        // The resets construct a fresh view, which may allocate (an owned
+        // member's @default string), so they run under the allocation catch.
+        try self.print("int {s}_deserialize_view(ZidlCdrReader *_r, {s} *_v) {{\n", .{ c_name, view_type });
+        try self.emitAllocationTry();
+        try self.printI("*_v = {s}{{}};\n", .{view_type});
+        try self.printI("int _rc = {s}(_r, _v);\n", .{frame});
+        try self.printI("if (_rc) *_v = {s}{{}};\n", .{view_type});
+        try self.writeI("return _rc;\n");
+        try self.emitAllocationCatch();
         try self.write("}\n\n");
     }
 
@@ -2094,6 +2391,7 @@ const CdrGenerator = struct {
         try canonical.emitCStruct(self, s, c_name, cpp_qname, true, has_key);
 
         try self.emitStructValueFns(s, c_name, cpp_qname, false);
+        if (viewsEnabledCpp(self.opts)) try self.emitStructViewFns(s, c_name, cpp_qname);
         try self.emitStructValueFns(s, c_name, cpp_qname, true);
         try cdr_skip.emitKeyValueSkip(self, s, c_name);
 
@@ -3038,6 +3336,62 @@ const CdrGenerator = struct {
         self.indent_depth -= 1;
         try self.writeI("}\n");
         try self.write("}\n\n");
+
+        if (viewsEnabledCpp(self.opts)) {
+            try self.print("DDS_ReturnCode_t {s}DataReader::take_view(ViewLoan& out) {{\n", .{class_name});
+            try self.writeI("out.reset();\n");
+            try self.writeI("DDS_OctetSeqSeq _loan_payloads = { 0, 0, NULL, false };\n");
+            try self.writeI("DDS_SampleInfoSeq _loan_infos = {0};\n");
+            try self.writeI("DDS_OctetSeq _c_hashes = {0};\n");
+            try self.writeI("DDS_ReturnCode_t _n = DDS_DataReader_take_raw(reader_, &_loan_payloads, &_c_hashes, &_loan_infos, DDS_HANDLE_NIL, nullptr, DDS_ANY_SAMPLE_STATE, DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE, 1);\n");
+            // As take_loaned: the key hashes are a copy, released at once.
+            try self.writeI("{ DDS_OctetSeqSeq _c_empty_payloads = {0}; DDS_SampleInfoSeq _c_empty_infos = {0}; DDS_DataReader_return_loan_raw(reader_, &_c_empty_payloads, &_c_hashes, &_c_empty_infos); }\n");
+            try self.writeI("if (_n != DDS_RETCODE_OK) return _n;\n");
+            try self.writeI("if (_loan_payloads._length == 0) return DDS_RETCODE_NO_DATA;\n");
+            try self.writeI("ViewLoan _loan;\n");
+            try self.writeI("_loan.reader_ = this;\n");
+            try self.writeI("_loan.loan_payloads_ = _loan_payloads;\n");
+            try self.writeI("_loan.loan_infos_ = _loan_infos;\n");
+            try self.writeI("_loan.info_ = _loan_infos._buffer[0];\n");
+            try self.writeI("_loan.active_ = true;\n");
+            // Its destructor returns the loan if creating the view throws.
+            try self.write("#if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND)\n");
+            try self.writeI("try { _loan.view_.emplace(); } catch (const std::bad_alloc&) { return DDS_RETCODE_OUT_OF_RESOURCES; } catch (const std::length_error&) { return DDS_RETCODE_OUT_OF_RESOURCES; }\n");
+            try self.write("#else\n");
+            try self.writeI("_loan.view_.emplace();\n");
+            try self.write("#endif\n");
+            try self.writeI("if (_loan.info_.valid_data) {\n");
+            self.indent_depth += 1;
+            try self.writeI("ZidlCdrReader _r;\n");
+            try self.writeI("int _rc = zidl_cdr_reader_init(&_r, _loan_payloads._buffer[0]._buffer, _loan_payloads._buffer[0]._length);\n");
+            try self.printI("if (!_rc) _rc = {s}_deserialize_view(&_r, &*_loan.view_);\n", .{c_name});
+            try self.writeI("if (_rc) {\n");
+            self.indent_depth += 1;
+            try self.writeI("_loan.active_ = false;\n");
+            try self.writeI("uint8_t _flag = 1;\n");
+            try self.writeI("DDS_OctetSeq _failed = { 1, 1, &_flag, false };\n");
+            try self.writeI("DDS_OctetSeq _c_no_hashes = {0};\n");
+            try self.writeI("DDS_DataReader_return_loan_raw_failed(reader_, &_loan_payloads, &_c_no_hashes, &_loan_infos, &_failed);\n");
+            try self.writeI("return _rc;\n");
+            self.indent_depth -= 1;
+            try self.writeI("}\n");
+            self.indent_depth -= 1;
+            try self.writeI("}\n");
+            try self.writeI("out = std::move(_loan);\n");
+            try self.writeI("return DDS_RETCODE_OK;\n");
+            try self.write("}\n\n");
+
+            try self.print("void {s}DataReader::ViewLoan::reset() noexcept {{\n", .{class_name});
+            try self.writeI("view_.reset();\n");
+            try self.writeI("if (active_ && reader_) {\n");
+            self.indent_depth += 1;
+            try self.writeI("DDS_OctetSeq _c_no_hashes = {0};\n");
+            try self.writeI("DDS_DataReader_return_loan_raw(reader_->reader_, &loan_payloads_, &_c_no_hashes, &loan_infos_);\n");
+            try self.writeI("active_ = false;\n");
+            self.indent_depth -= 1;
+            try self.writeI("}\n");
+            try self.write("}\n\n");
+        }
 
         // A2: close namespace opened above
         if (ns.len > 0) {
@@ -8012,6 +8366,7 @@ fn generateTypeHeader(
             .struct_, .exception, .union_ => try gen.write("#include \"zidl_cdr.h\"\n"),
             else => {},
         }
+        if (td == .struct_ and viewsEnabledCpp(opts)) try gen.write("#include <optional>\n#include <string_view>\n#include \"zidl_cdr_view.hpp\"\n");
     }
     if (opts.generate_zzdds_wrappers and !opts.no_typesupport) {
         switch (td) {
@@ -8208,6 +8563,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra: struct {
     no_typesupport: bool = false,
     generate_zzdds_wrappers: bool = false,
     cpp_pmr_containers: bool = false,
+    generate_views: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
     var ast_arena = std.heap.ArenaAllocator.init(alloc);
@@ -8231,6 +8587,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra: struct {
         .no_typesupport = extra.no_typesupport,
         .generate_zzdds_wrappers = extra.generate_zzdds_wrappers,
         .cpp_pmr_containers = extra.cpp_pmr_containers,
+        .generate_views = extra.generate_views,
     };
     try generateHeader(alloc, &ir_spec, opts, &out);
     return out;
@@ -8245,6 +8602,7 @@ fn testGenCdrOpts(source: []const u8, stem: []const u8, extra: struct {
     type_prefix: []const u8 = "",
     generate_zzdds_wrappers: bool = false,
     cpp_pmr_containers: bool = false,
+    generate_views: bool = false,
 }) !std.ArrayList(u8) {
     const alloc = testing.allocator;
     var ast_arena = std.heap.ArenaAllocator.init(alloc);
@@ -8263,6 +8621,7 @@ fn testGenCdrOpts(source: []const u8, stem: []const u8, extra: struct {
         .type_prefix = extra.type_prefix,
         .generate_zzdds_wrappers = extra.generate_zzdds_wrappers,
         .cpp_pmr_containers = extra.cpp_pmr_containers,
+        .generate_views = extra.generate_views,
     };
     try generateCdrSource(alloc, &ir_spec, opts, &out);
     return out;
@@ -11802,4 +12161,129 @@ test "cpp_backend: a @static's interface result is borrowed" {
     try testing.expect(has(s, "void Thing::reset() {\n    M_Thing_reset();\n}"));
     // Not adopted: dropping the result releases nothing.
     try testing.expect(!has(s, "_zidlAdopt"));
+}
+
+// ── View types (--generate-views) ─────────────────────────────────────────────
+
+test "cpp_backend: no view types without --generate-views or typesupport" {
+    var plain = try testGenOpts("struct S { sequence<long> v; };", "s", .{ .generate_zzdds_wrappers = true });
+    defer plain.deinit(testing.allocator);
+    try testing.expect(!has(plain.items, "SView"));
+    try testing.expect(!has(plain.items, "zidl_cdr_view.hpp"));
+    var bare = try testGenOpts("struct S { sequence<long> v; };", "s", .{ .generate_views = true, .no_typesupport = true });
+    defer bare.deinit(testing.allocator);
+    try testing.expect(!has(bare.items, "SView"));
+}
+
+test "cpp_backend: view members by kind" {
+    var out = try testGenOpts(
+        \\module M { struct Inner { long id; };
+        \\struct Base { string id; };
+        \\struct S : Base { sequence<double, 4> v; short grid[2][3]; string<5> name; Inner nested;
+        \\  sequence<boolean> flags; @optional sequence<octet> extra; @optional Inner maybe;
+        \\  @default("x") string d; @optional string o; }; };
+    , "s", .{ .generate_views = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "#include <string_view>\n#include \"zidl_cdr_view.hpp\"\n"));
+    try testing.expect(has(s, "struct SView : ::M::BaseView {"));
+    try testing.expect(has(s, "    ::zidl::PrimitivesView<double> v{};"));
+    try testing.expect(has(s, "    ::zidl::PrimitivesView<int16_t> grid{};"));
+    try testing.expect(has(s, "    std::string_view name{};"));
+    try testing.expect(has(s, "    ::M::InnerView nested{};"));
+    try testing.expect(has(s, "    std::vector<bool> flags{};"));
+    try testing.expect(has(s, "    std::optional<::zidl::PrimitivesView<uint8_t>> extra{};"));
+    try testing.expect(has(s, "    std::optional<::M::InnerView> maybe{};"));
+    try testing.expect(has(s, "    std::string_view d{\"x\"};"));
+    try testing.expect(has(s, "    std::optional<std::string_view> o{};"));
+    try testing.expect(has(s, "int M_S_deserialize_view(ZidlCdrReader *_r, ::M::SView *_v);"));
+}
+
+test "cpp_backend: view decoding reads members in place" {
+    var out = try testGenCdrOpts(
+        \\struct Inner { long id; };
+        \\struct Base { string id; };
+        \\struct S : Base { sequence<double, 4> v; short grid[2][3]; string<5> name; Inner nested; @optional sequence<octet> extra; };
+    , "s", .{ .generate_views = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "auto *_base_value = static_cast<::BaseView *>(_v);"));
+    try testing.expect(has(s, "_rc = zidl_cdr_read_sequence_count(_r, 8u, 4u, &_vn);"));
+    try testing.expect(has(s, "_rc = zidl_cdr_read_primitives_view(_r, _vn, 8u, _v->v.c_view());"));
+    try testing.expect(has(s, "_rc = zidl_cdr_read_primitives_view(_r, 6u, 2u, _v->grid.c_view());"));
+    try testing.expect(has(s, "if (_vl > 5u) return ZIDL_CDR_INVALID;"));
+    try testing.expect(has(s, "_v->name = std::string_view(_vs, _vl);"));
+    try testing.expect(has(s, "_rc = Inner_deserialize_view(_r, &_v->nested);"));
+    try testing.expect(has(s, "static int S_optional_read_view_value_5(ZidlCdrReader *_r, ::SView *_v) {"));
+    try testing.expect(has(s, "_rc = zidl_cdr_read_primitives_view(_r, _vn, 1u, (*_v->extra).c_view());"));
+    try testing.expect(has(s, "else _v->extra = std::nullopt;"));
+    const entry = s[std.mem.indexOf(u8, s, "int S_deserialize_view(ZidlCdrReader *_r, ::SView *_v) {").?..];
+    try testing.expect(std.mem.indexOf(u8, entry, "try {").? < std.mem.indexOf(u8, entry, "*_v = ::SView{};").?);
+    try testing.expect(has(entry, "*_v = ::SView{};\n        int _rc = S_deserialize_view_frame(_r, _v);\n        if (_rc) *_v = ::SView{};"));
+    try testing.expect(std.mem.indexOf(u8, entry, "} catch (const std::bad_alloc&) {\n    return ZIDL_CDR_OVERFLOW;").? < std.mem.indexOf(u8, entry, "\n}\n").?);
+}
+
+test "cpp_backend: a view decodes owned arrays as the struct does" {
+    var out = try testGenCdrOpts("struct A { boolean marks[2]; string names[2]; };", "a", .{ .generate_views = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    const view = s[std.mem.indexOf(u8, s, "A_deserialize_view_frame_bounded_impl(ZidlCdrReader *_r, ::AView *_v) {").?..];
+    const frame = view[0..std.mem.indexOf(u8, view, "\n}\n").?];
+    try testing.expect(has(frame, "zidl_cdr_read_bool_array(_r, &(_v->marks)[0], 2u);"));
+    try testing.expect(has(frame, "_v->names[_ai0].assign(_sp, _sl);"));
+    try testing.expect(!has(frame, "c_view()"));
+}
+
+test "cpp_backend: views keep named string defaults" {
+    var out = try testGenOpts(
+        \\const string FALLBACK = "fallback";
+        \\@mutable struct S { @default(FALLBACK) string label; @optional @default(FALLBACK) string maybe; };
+    , "s", .{ .generate_views = true });
+    defer out.deinit(testing.allocator);
+    const view = out.items[std.mem.indexOf(u8, out.items, "struct SView").?..];
+    try testing.expect(has(view, "    std::string_view label{FALLBACK};"));
+    try testing.expect(has(view, "    std::optional<std::string_view> maybe{FALLBACK};"));
+}
+
+test "cpp_backend: view decoders are declared when the C header replaces the CDR declarations" {
+    var out = try testGenOpts(
+        \\module M { interface Entity { void f(); }; struct S { string s; sequence<long> v; }; };
+    , "m", .{ .generate_views = true, .generate_interfaces = true, .export_macro = "API" });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "#include \"m.h\""));
+    try testing.expect(!has(s, "int M_S_deserialize(ZidlCdrReader"));
+    const at = std.mem.indexOf(u8, s, "API int M_S_deserialize_view(ZidlCdrReader *_r, ::M::SView *_v);").?;
+    // Outside any extern "C" block: C++ linkage.
+    try testing.expect(std.mem.indexOf(u8, s[0..at], "extern \"C\"") == null);
+}
+
+test "cpp_backend: a mutable view resets optionals and dispatches on member ids" {
+    var out = try testGenCdrOpts("@mutable struct M { string a; @optional sequence<long> b; };", "m", .{ .generate_views = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    const body = s[std.mem.indexOf(u8, s, "M_deserialize_view_frame_bounded_impl(ZidlCdrReader *_r, ::MView *_v) {").?..];
+    try testing.expect(has(body, "_v->b.reset();"));
+    try testing.expect(has(body, "case 1: {\n"));
+    try testing.expect(has(body, "_v->b.emplace();"));
+    try testing.expect(has(body, "(*_v->b).c_view()"));
+}
+
+test "cpp_backend: take_view and ViewLoan in the zzdds wrappers" {
+    var h = try testGenOpts("struct Frame { @key long id; sequence<float> v; };", "frame", .{ .generate_views = true, .generate_zzdds_wrappers = true });
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "    class ViewLoan {"));
+    try testing.expect(has(h.items, "        const ::FrameView& view() const { return *view_; }"));
+    try testing.expect(has(h.items, "        std::optional<::FrameView> view_{};"));
+    try testing.expect(has(h.items, "        void reset() noexcept;"));
+    try testing.expect(has(h.items, "ViewLoan(ViewLoan&& other) noexcept(std::is_nothrow_move_constructible<::FrameView>::value)"));
+    try testing.expect(has(h.items, "        friend class FrameDataReader;"));
+    try testing.expect(has(h.items, "    DDS_ReturnCode_t take_view(ViewLoan& out);"));
+    var src = try testGenCdrOpts("struct Frame { @key long id; sequence<float> v; };", "frame", .{ .generate_views = true, .generate_zzdds_wrappers = true });
+    defer src.deinit(testing.allocator);
+    try testing.expect(has(src.items, "DDS_ReturnCode_t FrameDataReader::take_view(ViewLoan& out) {"));
+    try testing.expect(has(src.items, "try { _loan.view_.emplace(); } catch (const std::bad_alloc&) { return DDS_RETCODE_OUT_OF_RESOURCES; }"));
+    try testing.expect(has(src.items, "if (!_rc) _rc = Frame_deserialize_view(&_r, &*_loan.view_);"));
+    try testing.expect(has(src.items, "DDS_DataReader_return_loan_raw_failed(reader_, &_loan_payloads, &_c_no_hashes, &_loan_infos, &_failed);"));
+    try testing.expect(has(src.items, "void FrameDataReader::ViewLoan::reset() noexcept {\n    view_.reset();"));
 }
