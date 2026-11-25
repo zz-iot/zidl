@@ -1120,6 +1120,19 @@ pub fn build(b: *std.Build) void {
     }
 
     {
+        const step = b.step("test-zig-views", "Check generated Zig view types decode in place, and take_view ends its loan");
+        test_step.dependOn(step);
+        const gen = gens.run();
+        gen.addArgs(&.{ "-b", "zig", "--generate-views", "--generate-zzdds-wrappers", "-o" });
+        const out = gen.addOutputDirectoryArg("zig-views");
+        gen.addFileArg(b.path("test/integration/c_views/views.idl"));
+        const middleware = b.createModule(.{ .root_source_file = b.path("test/integration/zig_wrapper_contract/fake_middleware.zig"), .target = target });
+        const fixture = b.createModule(.{ .root_source_file = out.path(b, "views.zig"), .target = target, .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings }, .{ .name = "zzdds", .module = middleware } } });
+        const tests = b.addTest(.{ .name = "zig-views", .root_module = b.createModule(.{ .root_source_file = b.path("test/integration/zig_views/test.zig"), .target = target, .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zzdds", .module = middleware }, .{ .name = "fixture", .module = fixture } } }) });
+        step.dependOn(&b.addRunArtifact(tests).step);
+    }
+
+    {
         const step = b.step("test-skip-admission", "Check structural traversal and projection are distinct from admission");
         test_step.dependOn(step);
         const dir = "test/integration/skip_admission/";

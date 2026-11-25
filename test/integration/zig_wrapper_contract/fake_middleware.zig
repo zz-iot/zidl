@@ -83,12 +83,15 @@ pub const OwnedRawSample = struct {
     failed: bool = false,
 
     pub fn deinit(self: *const @This()) void {
+        ended_samples += 1;
         if (self.failed) failed_samples += 1;
     }
 };
 
 /// How many samples typed readers ended as failed.
 pub var failed_samples: usize = 0;
+/// How many samples typed readers ended, failed or not.
+pub var ended_samples: usize = 0;
 
 pub fn writerUsesXcdr2(writer: DDS.DataWriter) bool {
     _ = writer;

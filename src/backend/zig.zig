@@ -609,6 +609,7 @@ const Generator = struct {
         // --zig-pl-cdr is set (PL_CDR fns are part of the struct, not TypeSupport).
         if (!self.opts.no_typesupport or self.opts.pl_cdr) {
             try self.emitStructSerializeFns(s);
+            if (self.viewsEnabledZig()) try self.emitStructView(s);
         } else if (self.structNeedsCleanup(s)) {
             // deinit/clone are lifecycle operations, not CDR typesupport — a
             // struct with heap-owning sequence (or, under
@@ -3915,6 +3916,350 @@ const Generator = struct {
         }
     }
 
+    /// Whether struct view types are generated (`--generate-views`).
+    fn viewsEnabledZig(self: *Generator) bool {
+        return self.opts.generate_views and !self.opts.no_typesupport;
+    }
+
+    /// The type and initial value of a view member of kind `kind`, as an
+    /// optional's payload or a plain field.
+    fn viewMemberType(self: *Generator, m: ir.StructMember, kind: cdr_skip.ViewKind) !struct { ty: []u8, init: []u8 } {
+        return switch (kind) {
+            .primitives => .{
+                .ty = try self.alloc.dupe(u8, "zidl_cdr.cdr_primitives.PrimitivesView"),
+                .init = try std.fmt.allocPrint(self.alloc, ".{{ .width = {d}, .order = .little }}", .{cdr_skip.viewWidth(m.type_ref, m.dimensions)}),
+            },
+            .string => .{ .ty = try self.alloc.dupe(u8, "[]const u8"), .init = try self.alloc.dupe(u8, "\"\"") },
+            .struct_view => blk: {
+                const nested = try self.qualNameToZig(cdr_skip.viewStructQname(m.type_ref));
+                defer self.alloc.free(nested);
+                break :blk .{ .ty = try std.fmt.allocPrint(self.alloc, "{s}.View", .{nested}), .init = try self.alloc.dupe(u8, ".{}") };
+            },
+            .owned => unreachable,
+        };
+    }
+
+    /// `View`, the struct decoded in place (`cdr_skip.viewKind`), with its
+    /// `deinit`, and `deserializeView`.
+    fn emitStructView(self: *Generator, s: *const ir.Struct) !void {
+        try self.write("\n");
+        try self.ind();
+        try self.write("    /// This struct decoded in place: primitive sequences and arrays view the CDR\n");
+        try self.ind();
+        try self.write("    /// input, strings are zero-copy slices of it and nested structs are views,\n");
+        try self.ind();
+        try self.write("    /// all valid while that input is. Other members are decoded as in the\n");
+        try self.ind();
+        try self.write("    /// struct and owned by the view until `deinit`.\n");
+        try self.ind();
+        try self.write("    pub const View = struct {\n");
+        self.depth += 1;
+        if (s.base) |base| {
+            const base_zig = try self.qualNameToZig(ir.typeDeclQualifiedName(base));
+            defer self.alloc.free(base_zig);
+            try self.ind();
+            try self.print("    _base: {s}.View = .{{}},\n", .{base_zig});
+        }
+        for (s.members) |m| {
+            const kind = cdr_skip.viewKind(m.type_ref, m.dimensions);
+            if (kind == .owned) {
+                try self.emitField(m.name, m.type_ref, m.dimensions, m.annotations.is_optional, m.annotations.default_value);
+                continue;
+            }
+            const t = try self.viewMemberType(m, kind);
+            defer self.alloc.free(t.ty);
+            defer self.alloc.free(t.init);
+            // A string's `@default` stays, as in the struct: a mutable sample
+            // that omits the member keeps it.
+            const default_literal: ?[]u8 = if (kind == .string) if (m.annotations.default_value) |dv| switch (dv) {
+                .string => |text| blk: {
+                    const esc = try escapeStringLiteral(self.alloc, text);
+                    defer self.alloc.free(esc);
+                    break :blk try std.fmt.allocPrint(self.alloc, "\"{s}\"", .{esc});
+                },
+                else => null,
+            } else null else null;
+            defer if (default_literal) |d| self.alloc.free(d);
+            try self.ind();
+            if (m.annotations.is_optional) {
+                try self.print("    {s}: ?{s} = {s},\n", .{ m.name, t.ty, default_literal orelse "null" });
+            } else {
+                try self.print("    {s}: {s} = {s},\n", .{ m.name, t.ty, default_literal orelse t.init });
+            }
+        }
+        try self.write("\n");
+        try self.ind();
+        try self.write("    /// Frees what the view owns and resets it; its input is not touched.\n");
+        try self.ind();
+        try self.write("    pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {\n");
+        var frees = false;
+        if (s.base != null) {
+            try self.ind();
+            try self.write("        self._base.deinit(alloc);\n");
+            frees = true;
+        }
+        for (s.members) |m| {
+            switch (cdr_skip.viewKind(m.type_ref, m.dimensions)) {
+                .primitives, .string => {},
+                .struct_view => {
+                    try self.ind();
+                    if (m.annotations.is_optional) {
+                        try self.print("        if (self.{s}) |*_nested| _nested.deinit(alloc);\n", .{m.name});
+                    } else {
+                        try self.print("        self.{s}.deinit(alloc);\n", .{m.name});
+                    }
+                    frees = true;
+                },
+                .owned => {
+                    if (!self.memberNeedsCleanup(m)) continue;
+                    if (m.annotations.is_optional) {
+                        const fa = try std.fmt.allocPrint(self.alloc, "{s}.?", .{m.name});
+                        defer self.alloc.free(fa);
+                        try self.ind();
+                        try self.print("        if (self.{s} != null) {{\n", .{m.name});
+                        try self.emitFieldSeqDeinit(fa, m.type_ref, m.dimensions, "            ");
+                        try self.ind();
+                        try self.write("        }\n");
+                    } else {
+                        try self.emitFieldSeqDeinit(m.name, m.type_ref, m.dimensions, "        ");
+                    }
+                    frees = true;
+                },
+            }
+        }
+        if (!frees) {
+            try self.ind();
+            try self.write("        _ = alloc;\n");
+        }
+        try self.ind();
+        try self.write("        self.* = .{};\n");
+        try self.ind();
+        try self.write("    }\n");
+        self.depth -= 1;
+        try self.ind();
+        try self.write("    };\n");
+
+        // deserializeView: deserializeInto's framing, members read as the view has them.
+        const mutable = s.annotations.extensibility == .mutable;
+        const appendable = s.annotations.extensibility == .appendable;
+        const wire_fields = try canonical.wireFields(self.alloc, s, false);
+        defer self.alloc.free(wire_fields);
+        try self.write("\n");
+        try self.ind();
+        try self.write("    /// Decodes a view of the sample at `reader` into `out`, valid while the\n");
+        try self.ind();
+        try self.write("    /// reader's input is. On failure `out` is reset and owns nothing.\n");
+        try self.ind();
+        try self.write("    pub fn deserializeView(out: *View, reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {\n");
+        try self.ind();
+        try self.write("        out.* = .{};\n");
+        try self.ind();
+        try self.write("        errdefer out.deinit(allocator);\n");
+        if (mutable) {
+            try self.ind();
+            try self.write("        const _em_end = try reader.readMutableDheader();\n");
+            try self.emitReaderWindow("        ", "@as(?usize, _em_end)");
+            if (wire_fields.len > 0) {
+                try self.ind();
+                try self.print("        var _seen: [{d}]bool = @splat(false);\n", .{wire_fields.len});
+            }
+            try self.ind();
+            try self.write("        while (reader.mutableHasMore(_em_end)) {\n");
+            try self.ind();
+            try self.write("            const _emh = try reader.readEmheader();\n");
+            try self.emitReaderWindow("            ", "@as(?usize, try reader.emheaderEnd(_emh))");
+            try self.ind();
+            try self.write("            switch (_emh.member_id) {\n");
+            for (wire_fields, 0..) |field, seen_idx| {
+                var m = field.member.*;
+                const path = try canonical.zigMemberPath(self.alloc, field);
+                defer self.alloc.free(path);
+                m.name = path;
+                try self.ind();
+                try self.print("                {d} => {{\n", .{memberIdAt(m, field.index)});
+                try self.ind();
+                try self.print("                    if (_seen[{d}]) return error.DuplicateMember; _seen[{d}] = true;\n", .{ seen_idx, seen_idx });
+                if (m.annotations.is_optional) {
+                    try self.emitViewOptionalDecode(m, "                    ");
+                } else {
+                    const out_expr = try std.fmt.allocPrint(self.alloc, "out.{s}", .{m.name});
+                    defer self.alloc.free(out_expr);
+                    try self.emitViewMemberRead(m, out_expr, "                    ");
+                }
+                try self.ind();
+                try self.write("                    if (reader.strict_validation and reader.pos != reader.data.len) return error.InvalidMemberLength;\n");
+                try self.ind();
+                try self.write("                },\n");
+            }
+            try self.ind();
+            try self.write("                else => {\n");
+            try self.ind();
+            try self.write("                    if (_emh.must_understand) return error.UnknownMustUnderstand;\n");
+            try self.ind();
+            try self.write("                    try reader.skipEmheaderPayload(_emh);\n");
+            try self.ind();
+            try self.write("                },\n");
+            try self.ind();
+            try self.write("            }\n");
+            try self.ind();
+            try self.write("        }\n");
+            for (wire_fields, 0..) |field, seen_idx| {
+                if (field.member.annotations.is_optional) continue;
+                try self.ind();
+                try self.print("        if (reader.strict_validation and !_seen[{d}]) return error.MissingRequiredMember;\n", .{seen_idx});
+            }
+        } else {
+            if (appendable) {
+                try self.emitReaderWindow("        ", "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
+            }
+            for (wire_fields) |field| {
+                var m = field.member.*;
+                const path = try canonical.zigMemberPath(self.alloc, field);
+                defer self.alloc.free(path);
+                m.name = path;
+                if (m.annotations.is_optional) {
+                    try self.ind();
+                    try self.print("        {{ var _scope = try reader.beginOptionalMember({d});\n", .{m.annotations.memberId(@intCast(field.index))});
+                    try self.ind();
+                    try self.write("        defer _scope.close();\n");
+                    try self.ind();
+                    try self.write("        if (_scope.present) {\n");
+                    try self.emitViewOptionalDecode(m, "            ");
+                    try self.ind();
+                    try self.write("        } else {\n");
+                    try self.ind();
+                    try self.print("            out.{s} = null;\n", .{m.name});
+                    try self.ind();
+                    try self.write("        } }\n");
+                    continue;
+                }
+                const out_expr = try std.fmt.allocPrint(self.alloc, "out.{s}", .{m.name});
+                defer self.alloc.free(out_expr);
+                try self.emitViewMemberRead(m, out_expr, "        ");
+            }
+        }
+        try self.ind();
+        try self.write("    }\n");
+    }
+
+    /// Reads member `m` into `out_expr` as its view type has it
+    /// (`cdr_skip.viewKind`).
+    fn emitViewMemberRead(self: *Generator, m: ir.StructMember, out_expr: []const u8, indent: []const u8) !void {
+        switch (cdr_skip.viewKind(m.type_ref, m.dimensions)) {
+            .owned => if (m.dimensions.len > 0) {
+                try self.emitReadArray(m.type_ref, out_expr, m.dimensions, indent, 0);
+            } else {
+                try self.emitReadForTypeRef(m.type_ref, out_expr, indent);
+            },
+            .primitives => {
+                const width = cdr_skip.viewWidth(m.type_ref, m.dimensions);
+                try self.ind();
+                if (m.dimensions.len > 0) {
+                    var total: u64 = 1;
+                    for (m.dimensions) |d| total *= d;
+                    try self.print("{s}{s} = try reader.viewPrimitives({d}, {d});\n", .{ indent, out_expr, width, total });
+                } else if (cdr_skip.resolveAlias(m.type_ref).sequence.bound) |n| {
+                    try self.print("{s}{s} = try reader.viewPrimitives({d}, try reader.readSequenceCount({d}, {d}));\n", .{ indent, out_expr, width, width, n });
+                } else {
+                    try self.print("{s}{s} = try reader.viewPrimitives({d}, try reader.readSequenceCount({d}, null));\n", .{ indent, out_expr, width, width });
+                }
+            },
+            .string => {
+                try self.ind();
+                try self.print("{s}{s} = try reader.readStringZeroCopy();\n", .{ indent, out_expr });
+                if (cdr_skip.resolveAlias(m.type_ref).string) |n| {
+                    try self.ind();
+                    try self.print("{s}if ({s}.len > {d}) return error.StringTooLong;\n", .{ indent, out_expr, n });
+                }
+            },
+            .struct_view => {
+                const nested = try self.qualNameToZig(cdr_skip.viewStructQname(m.type_ref));
+                defer self.alloc.free(nested);
+                try self.ind();
+                try self.print("{s}try {s}.deserializeView(&{s}, reader, allocator);\n", .{ indent, nested, out_expr });
+            },
+        }
+    }
+
+    /// Decodes a present optional member of a view.
+    fn emitViewOptionalDecode(self: *Generator, m: ir.StructMember, indent: []const u8) !void {
+        const kind = cdr_skip.viewKind(m.type_ref, m.dimensions);
+        if (kind == .owned) return self.emitOptionalMemberDecode(m, indent);
+        const leaf = m.name[if (std.mem.lastIndexOfScalar(u8, m.name, '.')) |i| i + 1 else 0..];
+        const opt_var = try std.fmt.allocPrint(self.alloc, "_opt_{s}", .{leaf});
+        defer self.alloc.free(opt_var);
+        const t = try self.viewMemberType(m, kind);
+        defer self.alloc.free(t.ty);
+        defer self.alloc.free(t.init);
+        try self.ind();
+        try self.print("{s}var {s}: {s} = {s};\n", .{ indent, opt_var, t.ty, t.init });
+        try self.emitViewMemberRead(m, opt_var, indent);
+        try self.ind();
+        try self.print("{s}out.{s} = {s};\n", .{ indent, m.name, opt_var });
+    }
+
+    /// The DataReader's `take_view` and the `ViewSample` it returns: a
+    /// sample taken on loan with a view of it, which `deinit` frees and ends.
+    fn emitReaderTakeView(self: *Generator, type_name: []const u8) !void {
+        try self.write("\n");
+        try self.ind();
+        try self.print("    /// A sample taken on loan with a view of it (`{s}.View`), valid until\n", .{type_name});
+        try self.ind();
+        try self.write("    /// `deinit`, which frees what the view owns and ends the loan.\n");
+        try self.ind();
+        try self.write("    pub const ViewSample = struct {\n");
+        try self.ind();
+        try self.print("        view: {s}.View = .{{}},\n", .{type_name});
+        try self.ind();
+        try self.write("        info: _zzdds.DDS.SampleInfo,\n");
+        try self.ind();
+        try self.write("        raw: _zzdds.OwnedRawSample,\n");
+        try self.ind();
+        try self.write("        alloc: std.mem.Allocator,\n\n");
+        try self.ind();
+        try self.write("        pub fn deinit(self: *@This()) void {\n");
+        try self.ind();
+        try self.write("            self.view.deinit(self.alloc);\n");
+        try self.ind();
+        try self.write("            self.raw.deinit();\n");
+        try self.ind();
+        try self.write("        }\n");
+        try self.ind();
+        try self.write("    };\n\n");
+        try self.ind();
+        try self.write("    /// Takes one sample on loan and decodes a view of it, or null without one.\n");
+        try self.ind();
+        try self.write("    /// A sample without valid data has an empty view (its key: get_key_value).\n");
+        try self.ind();
+        try self.write("    /// A sample whose view does not decode is ended failed, for the reader's policy.\n");
+        try self.ind();
+        try self.write("    pub fn take_view(self: @This()) !?ViewSample {\n");
+        try self.ind();
+        try self.write("        var _raw = _zzdds.takeRaw(self._dr) orelse return null;\n");
+        try self.ind();
+        try self.write("        errdefer {\n");
+        try self.ind();
+        try self.write("            _raw.failed = true;\n");
+        try self.ind();
+        try self.write("            _raw.deinit();\n");
+        try self.ind();
+        try self.write("        }\n");
+        try self.ind();
+        try self.write("        var _sample: ViewSample = .{ .info = _raw.info, .raw = _raw, .alloc = self._alloc };\n");
+        try self.ind();
+        try self.write("        if (_raw.info.valid_data) {\n");
+        try self.ind();
+        try self.write("            var _r = try zidl_cdr.CdrReader.init(_raw.data);\n");
+        try self.ind();
+        try self.print("            try {s}.deserializeView(&_sample.view, &_r, self._alloc);\n", .{type_name});
+        try self.ind();
+        try self.write("        }\n");
+        try self.ind();
+        try self.write("        return _sample;\n");
+        try self.ind();
+        try self.write("    }\n");
+    }
+
     /// Decode the exact optional payload type, including inherited fields.
     fn emitOptionalMemberDecode(self: *Generator, m: ir.StructMember, indent: []const u8) !void {
         const opt_var = try std.fmt.allocPrint(self.alloc, "_opt_{s}", .{m.name[if (std.mem.lastIndexOfScalar(u8, m.name, '.')) |i| i + 1 else 0..]});
@@ -5505,6 +5850,7 @@ const Generator = struct {
         try self.ind();
         try self.write("    };\n");
         try self.emitReaderDecodeHelper(type_name, needs_deinit);
+        if (self.viewsEnabledZig()) try self.emitReaderTakeView(type_name);
         try self.write("\n");
 
         // take_next_sample
@@ -8969,6 +9315,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
     zig_idiomatic_enums: bool = false,
     zig_generate_toml_config: bool = false,
     zig_generate_authoring: bool = false,
+    generate_views: bool = false,
     /// Module names to inject as if they came from `import "file.idl";` directives.
     imports: []const []const u8 = &.{},
 }) !std.ArrayList(u8) {
@@ -8997,6 +9344,7 @@ fn testGenOpts(source: []const u8, stem: []const u8, extra_opts: struct {
         .generate_interfaces = extra_opts.generate_interfaces,
         .type_prefix = extra_opts.type_prefix,
         .pl_cdr = extra_opts.pl_cdr,
+        .generate_views = extra_opts.generate_views,
         .generate_zzdds_wrappers = extra_opts.generate_zzdds_wrappers,
         .zig_generate_c_api = extra_opts.zig_generate_c_api,
         .zig_generate_c_api_cdr_allocator = extra_opts.zig_generate_c_api_cdr_allocator,
@@ -12825,4 +13173,80 @@ test "zig: --zig-provider-module rejects a static or constructor named like a me
     // Without the flag, nothing is generated for them, so nothing clashes.
     var out = try testGenOpts("module M { interface Thing { @static void deinit(); }; };", "t", .{ .generate_interfaces = true });
     out.deinit(testing.allocator);
+}
+
+// ── View types (--generate-views) ─────────────────────────────────────────────
+
+test "zig_backend: no view types without --generate-views" {
+    var out = try testGenOpts("struct S { sequence<long> v; };", "s", .{ .generate_zzdds_wrappers = true });
+    defer out.deinit(testing.allocator);
+    try testing.expect(!has(out.items, "pub const View"));
+    try testing.expect(!has(out.items, "take_view"));
+}
+
+test "zig_backend: no view types without typesupport" {
+    var out = try testGenOpts("struct S { sequence<long> v; };", "s", .{ .generate_views = true, .no_typesupport = true });
+    defer out.deinit(testing.allocator);
+    try testing.expect(!has(out.items, "pub const View"));
+}
+
+test "zig_backend: view members by kind, with deserializeView and take_view" {
+    var out = try testGenOpts(
+        \\struct Inner { long id; };
+        \\struct Base { string id; };
+        \\struct S : Base { sequence<double, 4> v; short grid[2][3]; string<5> name; Inner nested;
+        \\  sequence<boolean> flags; @optional sequence<octet> extra; @optional Inner maybe; };
+    , "s", .{ .generate_views = true, .generate_zzdds_wrappers = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "_base: Base.View = .{},"));
+    try testing.expect(has(s, "v: zidl_cdr.cdr_primitives.PrimitivesView = .{ .width = 8, .order = .little },"));
+    try testing.expect(has(s, "out.v = try reader.viewPrimitives(8, try reader.readSequenceCount(8, 4));"));
+    try testing.expect(has(s, "out.grid = try reader.viewPrimitives(2, 6);"));
+    try testing.expect(has(s, "name: []const u8 = \"\","));
+    try testing.expect(has(s, "if (out.name.len > 5) return error.StringTooLong;"));
+    try testing.expect(has(s, "nested: Inner.View = .{},"));
+    try testing.expect(has(s, "try Inner.deserializeView(&out.nested, reader, allocator);"));
+    // Owned: decoded as in the struct, freed by the view.
+    try testing.expect(has(s, "flags: extern struct {"));
+    try testing.expect(has(s, "if (self.flags._release) {"));
+    try testing.expect(has(s, "extra: ?zidl_cdr.cdr_primitives.PrimitivesView = null,"));
+    try testing.expect(has(s, "maybe: ?Inner.View = null,"));
+    try testing.expect(has(s, "if (self.maybe) |*_nested| _nested.deinit(alloc);"));
+    try testing.expect(has(s, "out._base.id = try reader.readStringZeroCopy();"));
+    try testing.expect(has(s, "pub fn deserializeView(out: *View, reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {"));
+    try testing.expect(has(s, "pub fn take_view(self: @This()) !?ViewSample {"));
+    try testing.expect(has(s, "try S.deserializeView(&_sample.view, &_r, self._alloc);"));
+}
+
+test "zig_backend: a view keeps string defaults; an absent final optional is null" {
+    var out = try testGenOpts(
+        \\struct D { @default("a\"b") string s; @optional @default("o") string o; @default(3) long n; };
+    , "d", .{ .generate_views = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    const view = s[std.mem.indexOf(u8, s, "pub const View").?..];
+    try testing.expect(has(view, "s: []const u8 = \"a\\\"b\","));
+    try testing.expect(has(view, "o: ?[]const u8 = \"o\","));
+    try testing.expect(has(view, "n: i32 = 3,"));
+    try testing.expect(has(view, "            out.o = null;\n"));
+}
+
+test "zig_backend: a view of a struct owning nothing frees nothing" {
+    var out = try testGenOpts("struct P { long x; sequence<float> v; };", "p", .{ .generate_views = true });
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "            _ = alloc;\n            self.* = .{};"));
+}
+
+test "zig_backend: a mutable view dispatches on member ids" {
+    var out = try testGenOpts("@mutable struct M { string a; @optional sequence<long> b; };", "m", .{ .generate_views = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    const start = std.mem.indexOf(u8, s, "pub fn deserializeView").?;
+    const body = s[start..];
+    try testing.expect(has(body, "const _em_end = try reader.readMutableDheader();"));
+    try testing.expect(has(body, "if (_seen[0]) return error.DuplicateMember; _seen[0] = true;"));
+    try testing.expect(has(body, "var _opt_b: zidl_cdr.cdr_primitives.PrimitivesView = .{ .width = 4, .order = .little };"));
+    try testing.expect(has(body, "if (reader.strict_validation and !_seen[0]) return error.MissingRequiredMember;"));
+    try testing.expect(!has(body, "!_seen[1]"));
 }

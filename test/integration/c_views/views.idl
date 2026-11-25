@@ -66,4 +66,26 @@ module views {
     struct NarrowTag {
         string<4> tag;
     };
+
+    // String defaults: kept by a view when a mutable sample omits the member
+    // (as DefaultsOld's samples do), and an absent final optional is null, as
+    // in the struct.
+    @mutable
+    struct DefaultsOld {
+        string name;
+        sequence<octet> data;
+    };
+
+    @mutable
+    struct Defaults {
+        string name;
+        sequence<octet> data;
+        @default("fallback") string label;
+        @optional @default("kept") string maybe;
+    };
+
+    @final
+    struct FinalDefaults {
+        @optional @default("unused") string maybe;
+    };
 };
