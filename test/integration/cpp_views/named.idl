@@ -1,0 +1,17 @@
+// A view keeps a string default that names a constant, as the struct does,
+// when a mutable sample (an Old one) omits the member.
+module named {
+    const string FALLBACK = "named fallback";
+
+    @mutable
+    struct Old {
+        string name;
+    };
+
+    @mutable
+    struct New {
+        string name;
+        @default(FALLBACK) string label;
+        @optional @default(FALLBACK) string maybe;
+    };
+};

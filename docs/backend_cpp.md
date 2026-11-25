@@ -116,6 +116,48 @@ int Foo_deserialize(ZidlCdrReader *r, Foo *v);
 
 ---
 
+## View types (`--generate-views`)
+
+With `--generate-views`, each struct also gets a **view type**, `FooView`,
+decoded in place from its CDR input instead of into owned storage. It is part
+B of zzdds' `docs/design/shmem-zero-copy.md`, built on the C API's zero-copy
+views (`docs/design/bulk-cdr-zero-copy.md`), and matches the C and Zig
+backends' views member by member. Views need C++17 (`std::string_view`,
+`std::optional`) and `zidl_cdr_view.hpp` from `zidl-cdr`'s include directory.
+
+```cpp
+struct FooView : ::BaseView { ... };  // a view of a derived struct derives from its base's
+/* On a decode failure *_v is reset; on allocation failure, ZIDL_CDR_OVERFLOW
+   (see Decoder allocation failures). */
+int Foo_deserialize_view(ZidlCdrReader *_r, FooView *_v);
+```
+
+| Member | In the view |
+|---|---|
+| Primitive sequence or array (not `boolean`) | `zidl::PrimitivesView<T>` of the input; an array of any rank is one view of all its elements |
+| String, bounded or not | `std::string_view` into the input (zero-copy); a bounded string's bound is checked; a `@default` is kept |
+| Struct | Its view type |
+| Anything else (`boolean` sequences, strings in sequences, unions, maps, ...) | As in the struct, owned by the view |
+| `@optional` | `std::optional` of the above |
+
+Views and zero-copy strings are valid while the input is. A view's elements
+are in the stream's byte order and promise no memory alignment:
+`PrimitivesView<T>::as_native()` returns them in place only when they are
+unswapped and aligned for `T` (otherwise `nullptr`), and `copy_to` and
+`to_vector` copy them as host values. Owned members are RAII, so a view needs
+no free function.
+
+With `--generate-zzdds-wrappers`, a typed reader also gets `take_view`, which
+takes a sample on loan into a move-only `FooDataReader::ViewLoan`. While
+`active()`, `view()` and `info()` are valid and the `ViewLoan` holds the loan,
+which `reset()` or its destruction returns, once; neither allocates. A sample
+without valid data has an empty view; its key comes from `get_key_value`. A
+sample whose view does not decode is returned failed, as `take` does, and the
+`ViewLoan` holds nothing. If the empty view cannot be allocated, `take_view`
+returns `DDS_RETCODE_OUT_OF_RESOURCES`.
+
+---
+
 ## Key Serialization
 
 For structs with `@key` members:
@@ -182,6 +224,7 @@ wire codec, rather than compiling that C file alone.
 | `--c-export-macro <macro>` | DLL export macro prepended to CDR function declarations |
 | `--no-typesupport` | Suppress CDR serialize/deserialize output |
 | `--generate-zzdds-wrappers` | Emit typed zzdds TypeSupport/DataWriter/DataReader wrappers for keyed, non-mutable topic structs |
+| `--generate-views` | Also emit zero-copy view types (see View types) |
 
 ---
 

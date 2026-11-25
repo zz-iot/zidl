@@ -430,7 +430,7 @@ pub fn build(b: *std.Build) void {
         const cpp_dir = gen_cpp.addOutputDirectoryArg("cpp-conditions-cpp");
         gen_cpp.addFileArg(b.path("test/integration/cpp_conditions/dcps.idl"));
         const gen_topic = gens.run();
-        gen_topic.addArgs(&.{ "-b", "cpp", "--generate-zzdds-wrappers", "-o" });
+        gen_topic.addArgs(&.{ "-b", "cpp", "--generate-zzdds-wrappers", "--generate-views", "-o" });
         const topic_dir = gen_topic.addOutputDirectoryArg("cpp-conditions-topic");
         gen_topic.addFileArg(b.path("test/integration/cpp_conditions/topic.idl"));
         // get_key_value with std::pmr containers (see keyed.idl).
@@ -1116,6 +1116,30 @@ pub fn build(b: *std.Build) void {
         consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
         linkCdr(consumer, cdr_library);
         const app = b.addExecutable(.{ .name = "c-views", .root_module = consumer });
+        views_step.dependOn(&b.addRunArtifact(app).step);
+    }
+
+    {
+        const views_step = b.step("test-cpp-views", "Check generated C++ view types decode in place across encodings");
+        test_step.dependOn(views_step);
+        const gen = gens.run();
+        gen.addArgs(&.{ "-b", "cpp", "--generate-views", "-o" });
+        const generated = gen.addOutputDirectoryArg("cpp-views");
+        gen.addFileArg(b.path("test/integration/c_views/views.idl"));
+        const gen_named = gens.run();
+        gen_named.addArgs(&.{ "-b", "cpp", "--generate-views", "-o" });
+        const named = gen_named.addOutputDirectoryArg("cpp-views-named");
+        gen_named.addFileArg(b.path("test/integration/cpp_views/named.idl"));
+        const consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = true });
+        const flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" };
+        consumer.addCSourceFile(.{ .file = b.path("test/integration/cpp_views/test.cpp"), .flags = flags });
+        consumer.addCSourceFile(.{ .file = generated.path(b, "views_cdr.cpp"), .flags = flags });
+        consumer.addCSourceFile(.{ .file = named.path(b, "named_cdr.cpp"), .flags = flags });
+        consumer.addIncludePath(generated);
+        consumer.addIncludePath(named);
+        consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
+        linkCdr(consumer, cdr_library);
+        const app = b.addExecutable(.{ .name = "cpp-views", .root_module = consumer });
         views_step.dependOn(&b.addRunArtifact(app).step);
     }
 
