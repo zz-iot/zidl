@@ -51,6 +51,53 @@ pub fn bulkBase(tr: ir.TypeRef) ?ast.BaseTypeSpec {
     };
 }
 
+/// How a struct member appears in the struct's view type (`--generate-views`,
+/// zzdds docs/design/shmem-zero-copy.md part B). Shared by every backend that
+/// generates views, so they agree member by member.
+pub const ViewKind = enum {
+    /// A primitive sequence or array (not bool, whose bytes must be
+    /// checked): a view of the input. An array of any rank is one view of
+    /// all its elements.
+    primitives,
+    /// A string, bounded or not: zero-copy, into the input.
+    string,
+    /// A struct: its own view type.
+    struct_view,
+    /// Anything else: decoded as in the struct, and owned by the view.
+    owned,
+};
+
+pub fn viewKind(tr: ir.TypeRef, dims: []const u64) ViewKind {
+    if (dims.len > 0) {
+        if (arrayTypedefOf(tr) != null) return .owned;
+        const base = bulkBase(tr) orelse return .owned;
+        return if (base == .boolean) .owned else .primitives;
+    }
+    return switch (resolveAlias(tr)) {
+        .sequence => |seq| blk: {
+            const base = bulkBase(seq.element.*) orelse break :blk .owned;
+            break :blk if (base == .boolean) .owned else .primitives;
+        },
+        .string => .string,
+        .named => |td| if (td == .struct_) .struct_view else .owned,
+        else => .owned,
+    };
+}
+
+/// The qualified name of a `.struct_view` member's struct.
+pub fn viewStructQname(tr: ir.TypeRef) []const u8 {
+    return switch (resolveAlias(tr)) {
+        .named => |td| ir.typeDeclQualifiedName(td),
+        else => unreachable,
+    };
+}
+
+/// The element width of a `.primitives` member.
+pub fn viewWidth(tr: ir.TypeRef, dims: []const u64) usize {
+    const elem = if (dims.len > 0) tr else resolveAlias(tr).sequence.element.*;
+    return baseWireSize(bulkBase(elem).?).?;
+}
+
 /// Wire size of a type that skips as a flat run of fixed-size elements
 /// (base primitive, or an enum/bitmask by its storage width), else null.
 pub fn typeRefPrimWireSize(tr: ir.TypeRef) ?usize {
