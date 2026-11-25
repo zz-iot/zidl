@@ -7015,13 +7015,17 @@ const JniBridgeGenerator = struct {
                 },
                 .callback => return error.UnsupportedNestedListenerParam,
             }
+            // A failed step leaves an exception pending, under which no
+            // further JNI call may run: the listener is not called.
+            if (classifyTypeRef(p.type_ref) != .scalar)
+                try self.print("    if ((*env)->ExceptionCheck(env)) {{ zidl_java_callback_failed(env, 2);{s} return; }}\n", .{if (framed) " (*env)->PopLocalFrame(env, NULL);" else ""});
         }
         try descriptor.appendSlice(self.alloc, ")V");
 
         try self.write("    jclass cls = (*env)->GetObjectClass(env, ctx->ref);\n");
         try self.print("    jmethodID mid = (*env)->GetMethodID(env, cls, \"{s}\", \"{s}\");\n", .{ op.name, descriptor.items });
-        // Arguments or method lookup failed: the listener is not called.
-        try self.print("    if ((*env)->ExceptionCheck(env) || mid == NULL) {{ zidl_java_callback_failed(env, 2);{s} return; }}\n", .{if (framed) " (*env)->PopLocalFrame(env, NULL);" else ""});
+        // The method lookup failed: the listener is not called.
+        try self.print("    if (mid == NULL) {{ zidl_java_callback_failed(env, 2);{s} return; }}\n", .{if (framed) " (*env)->PopLocalFrame(env, NULL);" else ""});
         try self.write("    (*env)->CallVoidMethod(env, ctx->ref, mid");
         for (op.params, 0..) |_, i| try self.print(", _a{d}", .{i});
         try self.write(");\n");
@@ -12119,7 +12123,11 @@ test "java: a failure report replaces printing, and no step runs with an excepti
     try testing.expect(std.mem.indexOf(u8, src, "ExceptionDescribe") == null);
     try testing.expect(std.mem.indexOf(u8, src, "if (env == NULL) { (void)failed(2); return; }") != null);
     try testing.expect(std.mem.indexOf(u8, src, "jmethodID _ctor1 = _c1 != NULL ? (*env)->GetMethodID(env, _c1, \"<init>\", \"()V\") : NULL;") != null);
-    try testing.expect(std.mem.indexOf(u8, src, "if ((*env)->ExceptionCheck(env) || mid == NULL) { zidl_java_callback_failed(env, 2); return; }") != null);
+    // Checked after each argument, before any later JNI call, and after the
+    // method lookup.
+    try testing.expect(std.mem.indexOf(u8, src, "if (_a1 != NULL) M_Status_fill_java(env, p1, _a1);\n    if ((*env)->ExceptionCheck(env)) { zidl_java_callback_failed(env, 2); return; }\n    jclass cls") != null);
+    try testing.expect(std.mem.indexOf(u8, src, "jobject _a0 = zidl_java_box_M_Entity(env, p0);\n    if ((*env)->ExceptionCheck(env)) { zidl_java_callback_failed(env, 2); return; }") != null);
+    try testing.expect(std.mem.indexOf(u8, src, "if (mid == NULL) { zidl_java_callback_failed(env, 2); return; }") != null);
     try testing.expect(std.mem.indexOf(u8, src, "_a1);\n    zidl_java_callback_failed(env, 1);\n}") != null);
 }
 

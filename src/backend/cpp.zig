@@ -6460,6 +6460,13 @@ const ConcreteImplGenerator = struct {
                             },
                             else => {},
                         },
+                        // Copied into the listener's own string type, which
+                        // can throw: built here, with the other conversions.
+                        .string, .wstring => {
+                            const cpp_t = try self.typeRefToCpp(p.type_ref);
+                            defer self.alloc.free(cpp_t);
+                            try self.srcPrint("    {s} _arg_{s};\n", .{ cpp_t, p.name });
+                        },
                         else => {},
                     }
                 }
@@ -6476,6 +6483,7 @@ const ConcreteImplGenerator = struct {
                             },
                             else => {},
                         },
+                        .string, .wstring => try self.srcPrint("    _arg_{[p]s} = {[p]s};\n", .{ .p = p.name }),
                         else => {},
                     }
                 }
@@ -6545,6 +6553,10 @@ const ConcreteImplGenerator = struct {
                         },
                     },
                     .base => try self.srcWrite(p.name),
+                    .string, .wstring => if (report.len > 0)
+                        try self.srcPrint("std::move(_arg_{s})", .{p.name})
+                    else
+                        try self.srcPrint("/* TODO({s}) */ {s}", .{ p.name, p.name }),
                     else => try self.srcPrint("/* TODO({s}) */ {s}", .{ p.name, p.name }),
                 }
             }
@@ -11608,6 +11620,17 @@ test "cpp_backend: a failure report wraps a listener's conversions and call, rep
     const src = res.src.items;
     try testing.expect(has(src, "extern \"C\" bool failed(int reason);"));
     try testing.expect(has(src, "    decltype(::M::EntityImpl::_getOrCreate(nullptr)) _entity_entity;\n#if defined(__cpp_exceptions)\n    try {\n#endif\n    _entity_entity = ::M::EntityImpl::_getOrCreate(entity);\n#if defined(__cpp_exceptions)\n    } catch (...) {\n        failed(2);\n        return;\n    }\n    try {\n#endif\n    static_cast<_Reg*>(d)->owner->on_entity(_entity_entity, count);\n#if defined(__cpp_exceptions)\n    } catch (...) {\n        failed(1);\n    }\n#endif\n}"));
+
+    // A string argument is copied into the listener's type in the first block.
+    var strings = try testGenConcreteImplOpts(
+        \\module M {
+        \\    @callback interface Listener { void on_message(in string message); };
+        \\    interface Factory { void set_listener(in Listener listener); };
+        \\};
+    , .{ .listener_failure_report = "failed" });
+    defer strings.deinit();
+    try testing.expect(has(strings.src.items, "    std::string _arg_message;\n#if defined(__cpp_exceptions)\n    try {\n#endif\n    _arg_message = message;\n#if defined(__cpp_exceptions)\n    } catch (...) {\n        failed(2);"));
+    try testing.expect(has(strings.src.items, "owner->on_message(std::move(_arg_message));"));
 
     // Without one, nothing is caught, as before.
     var plain = try testGenConcreteImplOpts(idl, .{});
