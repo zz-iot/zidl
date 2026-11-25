@@ -13032,6 +13032,7 @@ fn memberHasBorrowedStringDefault(m: ir.StructMember) bool {
     const static_default = switch (dv) {
         .string => |s| s.len > 0,
         .wide_string => |s| s.len > 0,
+        .scoped_name => true,
         else => false,
     };
     if (!static_default) return false;
@@ -13396,4 +13397,15 @@ test "zig_backend: a wstring @default is a static UTF-16 literal deinit keeps" {
     // An empty default allocates nothing and needs no guard.
     try testing.expect(has(s, "empty: []const u16 = &[_:0]u16{},"));
     try testing.expect(has(s, "zidl_bindings.deinitOwned(&self.empty, alloc);"));
+}
+
+test "zig_backend: a string @default naming a constant is static too" {
+    var out = try testGen(
+        \\module M { const string FALLBACK = "f"; struct S { @default(FALLBACK) string s; }; };
+    , "m");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "s: []const u8 = _zidl_default_0,"));
+    try testing.expect(has(s, "const _zidl_default_0: []const u8 = FALLBACK;"));
+    try testing.expect(has(s, "if (self.s.len != 0 and self.s.ptr != _zidl_default_0.ptr) alloc.free(self.s);"));
 }

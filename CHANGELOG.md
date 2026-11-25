@@ -18,6 +18,9 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Zig: a string `@default` naming a constant is static, like a literal one: `deinit`
+  no longer frees it.
+
 - Zig: a decoded `wstring` member is owned and freed by `deinit` (it leaked),
   `sequence<wstring>` compiles (its elements are NUL-terminated UTF-16 units), and a
   `wstring` `@default` is a static UTF-16 literal that `deinit` leaves alone (it was
