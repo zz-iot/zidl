@@ -121,6 +121,13 @@ pub const Options = struct {
     /// Emit typed zzdds topic wrappers for keyed, non-mutable topic structs.
     /// Zig uses a consuming-build `dds` adapter; C/C++ call zzdds C ABI helpers.
     generate_zzdds_wrappers: bool = false,
+    /// Emit a zero-copy view type per struct, decoded from CDR in place:
+    /// primitive sequences and arrays are views of the input, strings are
+    /// zero-copy, nested structs are views, and other members decode as in
+    /// the struct (zzdds docs/design/shmem-zero-copy.md, part B). With
+    /// --generate-zzdds-wrappers, readers also get take_view/return_view.
+    /// C backend so far.
+    generate_views: bool = false,
     /// Java backend only: which Java package an imported module's own
     /// generated output lives in, when it differs from this invocation's own
     /// `java_package` — e.g. `"DDS=".len == 0` (empty package) tells this

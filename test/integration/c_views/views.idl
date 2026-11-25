@@ -1,0 +1,69 @@
+// View types (--generate-views): primitive sequences and arrays become views,
+// strings zero-copy, nested structs views; other members decode as owned.
+module views {
+    struct Inner {
+        long id;
+        string label;
+        sequence<float> weights;
+    };
+
+    @final
+    struct FinalFrame {
+        octet first;
+        string name;
+        string<8> tag;
+        sequence<octet> data;
+        sequence<double> samples;
+        long grid[2][3];
+        sequence<boolean> flags;
+        sequence<string> labels;
+        Inner nested;
+        @optional string note;
+        @optional sequence<long> extra;
+    };
+
+    @appendable
+    struct AppendInner {
+        short code;
+        sequence<unsigned short> codes;
+    };
+
+    @appendable
+    struct AppendFrame {
+        string name;
+        sequence<octet> data;
+        AppendInner nested;
+        @optional sequence<long long> stamps;
+    };
+
+    @mutable
+    struct MutableFrame {
+        string name;
+        sequence<octet> data;
+        Inner nested;
+        @optional long count;
+    };
+
+    @final
+    struct Base {
+        string id;
+        sequence<long long> stamps;
+    };
+
+    @final
+    struct Derived : Base {
+        sequence<unsigned short> pixels;
+    };
+
+    // The same wire layout, one with a bounded tag: a view of NarrowTag
+    // refuses a WideTag whose tag is too long.
+    @final
+    struct WideTag {
+        string tag;
+    };
+
+    @final
+    struct NarrowTag {
+        string<4> tag;
+    };
+};

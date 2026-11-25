@@ -159,6 +159,44 @@ int Foo_compute_key_hash(const Foo *v, uint8_t hash[16]);
 
 ---
 
+## View types (`--generate-views`)
+
+With `--generate-views`, each struct also gets a **view type**, decoded in
+place from its CDR input instead of into owned storage. It is part B of zzdds'
+`docs/design/shmem-zero-copy.md`, built on the C API's zero-copy views
+(`docs/design/bulk-cdr-zero-copy.md`).
+
+```c
+typedef struct FooView_s { ... } FooView;
+/* On failure the view is zeroed and owns nothing. */
+int Foo_deserialize_view(ZidlCdrReader *r, FooView *v);
+/* Releases what the view owns and zeroes it. */
+void FooView_free(FooView *v);
+```
+
+A view type mirrors its struct, member by member:
+
+| Member | In the view |
+|---|---|
+| Primitive sequence or array (not `boolean`) | `ZidlCdrPrimitivesView` of the input; an array of any rank is one view of all its elements |
+| String, bounded or not | `const char *` into the input (zero-copy); a bounded string's bound is checked |
+| Struct | Its view type |
+| Anything else (`boolean` sequences, strings in sequences, unions, maps, ...) | As in the struct, owned by the view until `FooView_free` |
+
+Views and zero-copy strings are valid while the input buffer is. A view's
+elements are in the stream's byte order and promise no memory alignment: use
+them in place through `ZIDL_CDR_VIEW_AS`, which checks both, and otherwise
+copy them with `zidl_cdr_view_copy`. Base types, `@optional` members (with the
+same `_present` bits) and all extensibilities are supported.
+
+With `--generate-zzdds-wrappers`, a typed reader also gets `take_view` and
+`return_view`, which take a sample on loan, so the view is valid until it is
+returned. A sample without valid data leaves the view zeroed; its key comes
+from `get_key_value`. Views are not generated under `--c-no-free`, because a
+view's owned members rely on the generated `_free` functions.
+
+---
+
 ## `zidl-cdr` Dependency
 
 The generated `.c` file includes `zidl_cdr.h` and uses the following from `zidl-cdr`:
@@ -200,6 +238,7 @@ provide the wire functions.
 | `--c-extern-c` | Wrap header in `extern "C" {}` |
 | `--c-export-macro <macro>` | DLL export macro prepended to CDR function declarations |
 | `--no-typesupport` | Suppress CDR serialize/deserialize output |
+| `--generate-views` | Also emit zero-copy view types (see View types) |
 
 ---
 

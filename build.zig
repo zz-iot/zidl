@@ -1056,6 +1056,24 @@ pub fn build(b: *std.Build) void {
     }
 
     {
+        const views_step = b.step("test-c-views", "Check generated C view types decode in place across encodings");
+        test_step.dependOn(views_step);
+        const gen = b.addRunArtifact(exe);
+        gen.addArgs(&.{ "-b", "c", "--generate-views", "-o" });
+        const generated = gen.addOutputDirectoryArg("c-views");
+        gen.addFileArg(b.path("test/integration/c_views/views.idl"));
+        const consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true });
+        const flags = &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" };
+        consumer.addCSourceFile(.{ .file = b.path("test/integration/c_views/test.c"), .flags = flags });
+        consumer.addCSourceFile(.{ .file = generated.path(b, "views_cdr.c"), .flags = flags });
+        consumer.addIncludePath(generated);
+        consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
+        linkCdr(consumer, cdr_library);
+        const app = b.addExecutable(.{ .name = "c-views", .root_module = consumer });
+        views_step.dependOn(&b.addRunArtifact(app).step);
+    }
+
+    {
         const step = b.step("test-skip-admission", "Check structural traversal and projection are distinct from admission");
         test_step.dependOn(step);
         const dir = "test/integration/skip_admission/";
