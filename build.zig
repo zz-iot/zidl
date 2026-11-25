@@ -1108,11 +1108,17 @@ pub fn build(b: *std.Build) void {
         gen.addArgs(&.{ "-b", "c", "--generate-views", "-o" });
         const generated = gen.addOutputDirectoryArg("c-views");
         gen.addFileArg(b.path("test/integration/c_views/views.idl"));
+        const gen_wide = gens.run();
+        gen_wide.addArgs(&.{ "-b", "c", "-o" });
+        const wide = gen_wide.addOutputDirectoryArg("c-wide-defaults");
+        gen_wide.addFileArg(b.path("test/integration/c_views/wide_defaults.idl"));
         const consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true });
         const flags = &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" };
         consumer.addCSourceFile(.{ .file = b.path("test/integration/c_views/test.c"), .flags = flags });
         consumer.addCSourceFile(.{ .file = generated.path(b, "views_cdr.c"), .flags = flags });
+        consumer.addCSourceFile(.{ .file = wide.path(b, "wide_defaults_cdr.c"), .flags = flags });
         consumer.addIncludePath(generated);
+        consumer.addIncludePath(wide);
         consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
         linkCdr(consumer, cdr_library);
         const app = b.addExecutable(.{ .name = "c-views", .root_module = consumer });

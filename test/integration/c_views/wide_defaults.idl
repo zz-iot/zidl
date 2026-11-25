@@ -1,0 +1,12 @@
+// C wide string defaults: a literal or a constant's UTF-16 units, copied into
+// an unbounded member or a bounded one's array.
+module wd {
+    const wstring GREETING = L"hi";
+
+    struct WideDefaults {
+        @default(GREETING) wstring named;
+        @default(L"lit") wstring literal;
+        @default(GREETING) wstring<4> bounded;
+        @optional @default(L"o") wstring maybe;
+    };
+};

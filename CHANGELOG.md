@@ -18,6 +18,10 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- C: a `wstring` `@default`, literal or a named constant's, copies its UTF-16 units: into
+  storage from the registered allocator for an unbounded member, in place for a bounded
+  one. It was `0` (NULL). A default containing a NUL is refused at generation.
+
 - Zig: a bounded `string<N>` or `wstring<N>` `@default` compiles: it fills the
   member's `BoundedArray`, and a literal longer than the bound is refused at generation.
 
