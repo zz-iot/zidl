@@ -18,6 +18,11 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Java: a default naming a constant is the constant's value. It named the constant's
+  holder class, which did not compile. A `wstring` constant or `@default` is its text
+  (they were `""` and `null`), a supplementary character as its surrogate pair. An
+  integer default beyond its field's signed Java range keeps its bits, in hex as constants are.
+
 - C++: a `wstring` constant is declared, as a `constexpr wchar_t` array of its UTF-16
   units (it was skipped, so a default naming it did not compile), and a `wstring`
   `@default` literal holds its units, as a decoded `std::wstring` does (it held one NUL).

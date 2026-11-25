@@ -202,6 +202,20 @@ pub fn build(b: *std.Build) void {
             run_helpers.addDirectoryArg(runtime_classes);
             run_helpers.addArg("io.zidl.cdr.HelperTest");
             runtime_tests.dependOn(&run_helpers.step);
+            {
+                const gen = gens.run();
+                gen.addArgs(&.{ "-b", "java", "-o" });
+                const generated = gen.addOutputDirectoryArg("java-wide-defaults");
+                gen.addFileArg(b.path("test/integration/defaults/wide_defaults.idl"));
+                const compile_java = javaCommand(b, &.{ javac, "-Xlint:unchecked", "-Werror", "-d" }, java_cdr);
+                const classes = compile_java.addOutputDirectoryArg("classes");
+                compile_java.addFileArg(generated.path(b, "Wide_defaults.java"));
+                compile_java.addFileArg(b.path("test/integration/defaults/WideDefaultsTest.java"));
+                const run = javaCommand(b, &.{ java, "-cp" }, java_cdr);
+                run.addDirectoryArg(classes);
+                run.addArg("WideDefaultsTest");
+                java_validation_step.dependOn(&run.step);
+            }
             for (0..3) |mode| {
                 const split = mode != 0;
                 const prefix: []const u8 = switch (mode) {
