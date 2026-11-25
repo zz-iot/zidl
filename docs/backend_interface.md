@@ -115,7 +115,7 @@ Every backend receives the same `Options` struct:
 | `cpp_namespace` | `[]const u8` | C++: outer namespace wrapping all output |
 | `pl_cdr` | `bool` | Generate PL_CDR functions for `@mutable` types (Zig backend) — `--zig-pl-cdr` |
 | `generate_zzdds_wrappers` | `bool` | Emit typed zzdds topic wrappers for keyed, non-mutable topic structs — `--generate-zzdds-wrappers` |
-| `generate_views` | `bool` | Emit a zero-copy view type per struct (C so far) — `--generate-views` |
+| `generate_views` | `bool` | Emit a zero-copy view type per struct (C and Zig so far) — `--generate-views` |
 | `zig_generate_c_api` | `bool` | Emit Zig-backend C ABI exports for generated interface operations — `--zig-generate-c-api` |
 | `zig_generate_toml_config` | `bool` | Emit `applyToml(alloc, table: anytype) !void` per struct (Zig backend) — `--zig-generate-toml-config`. `table` is duck-typed; no compile-time dependency on any concrete TOML parser. See `docs/backend_zig.md` §TOML config application. |
 

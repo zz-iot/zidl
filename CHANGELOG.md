@@ -18,12 +18,19 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- `--generate-views` (Zig backend): each struct also gets a `View`, decoded in place by
+  `deserializeView`, with the C backend's member kinds: primitive sequences and arrays
+  become `PrimitivesView`s of the input, strings zero-copy `[]const u8`, nested structs
+  views, and other members decode as in the struct, owned until `View.deinit`. With
+  `--generate-zzdds-wrappers`, readers gain `take_view`, whose `ViewSample.deinit` ends
+  the loan.
+
 - `--generate-views` (C backend): each struct also gets a view type, decoded in place
   from its CDR input by `{Type}_deserialize_view`. Primitive sequences and arrays become
   `ZidlCdrPrimitivesView`s of the input, strings zero-copy `const char *`, nested structs
   views, and other members decode as in the struct, owned until `{Type}View_free`. With
   `--generate-zzdds-wrappers`, readers gain `take_view`/`return_view` over a loan. Part B
-  of zzdds' `docs/design/shmem-zero-copy.md`; Zig and C++ follow.
+  of zzdds' `docs/design/shmem-zero-copy.md`; C++ follows.
 
 - `--listener-failure-report <name>` (C++ `--cpp-generate-impl`, Java): a generated
   listener bridge calls the provider's `bool name(int reason)` on the callback's own

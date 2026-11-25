@@ -726,7 +726,7 @@ const Generator = struct {
     }
 
     /// `{Type}View`: the struct as decoded in place from its CDR input
-    /// (`viewKindC`), with `{Type}_deserialize_view` and `{Type}View_free`.
+    /// (`cdr_skip.viewKind`), with `{Type}_deserialize_view` and `{Type}View_free`.
     fn emitStructView(self: *Generator, s: *const ir.Struct, c_name: []const u8) !void {
         const em = self.opts.export_macro;
         const sp: []const u8 = if (em.len > 0) " " else "";
@@ -747,11 +747,11 @@ const Generator = struct {
             }
         }
         for (s.members) |m| {
-            switch (viewKindC(m.type_ref, m.dimensions)) {
+            switch (cdr_skip.viewKind(m.type_ref, m.dimensions)) {
                 .primitives => try self.print("    ZidlCdrPrimitivesView {s};\n", .{m.name}),
                 .string => try self.print("    const char *{s};\n", .{m.name}),
                 .struct_view => {
-                    const nested = try self.prefixedCName(viewStructQname(m.type_ref));
+                    const nested = try self.prefixedCName(cdr_skip.viewStructQname(m.type_ref));
                     defer self.alloc.free(nested);
                     try self.print("    {s}View {s};\n", .{ nested, m.name });
                 },
@@ -1825,45 +1825,6 @@ fn viewsEnabledC(opts: interface.Options) bool {
     return opts.generate_views and !opts.no_typesupport and !opts.c_no_free;
 }
 
-/// How a struct member appears in the struct's view type.
-const ViewKindC = enum {
-    /// A primitive sequence or array (not bool, whose bytes must be
-    /// checked): a `ZidlCdrPrimitivesView` of the input. An array of any
-    /// rank is one view of all its elements.
-    primitives,
-    /// A string, bounded or not: a zero-copy `const char *` into the input.
-    string,
-    /// A struct: its own view type.
-    struct_view,
-    /// Anything else: decoded as in the struct, and owned by the view.
-    owned,
-};
-
-fn viewKindC(tr: ir.TypeRef, dims: []const u64) ViewKindC {
-    if (dims.len > 0) {
-        if (cdr_skip.arrayTypedefOf(tr) != null) return .owned;
-        const base = cdr_skip.bulkBase(tr) orelse return .owned;
-        return if (base == .boolean) .owned else .primitives;
-    }
-    return switch (cdr_skip.resolveAlias(tr)) {
-        .sequence => |seq| blk: {
-            const base = cdr_skip.bulkBase(seq.element.*) orelse break :blk .owned;
-            break :blk if (base == .boolean) .owned else .primitives;
-        },
-        .string => .string,
-        .named => |td| if (td == .struct_) .struct_view else .owned,
-        else => .owned,
-    };
-}
-
-/// The qualified name of a `.struct_view` member's struct.
-fn viewStructQname(tr: ir.TypeRef) []const u8 {
-    return switch (cdr_skip.resolveAlias(tr)) {
-        .named => |td| ir.typeDeclQualifiedName(td),
-        else => unreachable,
-    };
-}
-
 fn typeRefHasSequence(tr: ir.TypeRef) bool {
     return switch (tr) {
         .string => |b| b == null,
@@ -2450,9 +2411,9 @@ const CdrGenerator = struct {
         try self.write("}\n\n");
     }
 
-    /// Reads member `m` into `lval` as its view type has it (`viewKindC`).
+    /// Reads member `m` into `lval` as its view type has it (`cdr_skip.viewKind`).
     fn emitViewMemberRead(self: *CdrGenerator, m: ir.StructMember, lval: []const u8) !void {
-        switch (viewKindC(m.type_ref, m.dimensions)) {
+        switch (cdr_skip.viewKind(m.type_ref, m.dimensions)) {
             .owned => if (m.dimensions.len > 0) {
                 try self.emitReadArray(m.type_ref, m.name, lval, m.dimensions, 0);
             } else {
@@ -2492,7 +2453,7 @@ const CdrGenerator = struct {
                 try self.writeI("}\n");
             },
             .struct_view => {
-                const nested = try self.prefixedCName(viewStructQname(m.type_ref));
+                const nested = try self.prefixedCName(cdr_skip.viewStructQname(m.type_ref));
                 defer self.alloc.free(nested);
                 try self.printI("_rc = {s}_deserialize_view(_r, &{s});\n", .{ nested, lval });
                 try self.emitRcCheck();
@@ -2640,11 +2601,11 @@ const CdrGenerator = struct {
         for (s.members) |m| {
             const lval = try std.fmt.allocPrint(self.alloc, "v->{s}", .{m.name});
             defer self.alloc.free(lval);
-            switch (viewKindC(m.type_ref, m.dimensions)) {
+            switch (cdr_skip.viewKind(m.type_ref, m.dimensions)) {
                 .primitives, .string => {},
                 // An absent optional nested view is zero, which frees as nothing.
                 .struct_view => {
-                    const nested = try self.prefixedCName(viewStructQname(m.type_ref));
+                    const nested = try self.prefixedCName(cdr_skip.viewStructQname(m.type_ref));
                     defer self.alloc.free(nested);
                     try self.printI("{s}View_free(&{s});\n", .{ nested, lval });
                 },

@@ -581,6 +581,49 @@ value.field = if (present) try deserializeT(reader, alloc) else null;
 
 ---
 
+## View types (`--generate-views`)
+
+With `--generate-views`, each struct also gets a **view type**, `View`, decoded
+in place from its CDR input instead of into owned storage. It is part B of
+zzdds' `docs/design/shmem-zero-copy.md`, built on the reader's zero-copy views
+(`docs/design/bulk-cdr-zero-copy.md`), and matches the C backend's views member
+by member.
+
+```zig
+pub const Foo = struct {
+    // ...
+    pub const View = struct {
+        // ...
+        /// Frees what the view owns and resets it; its input is not touched.
+        pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void { ... }
+    };
+    /// On failure `out` is reset and owns nothing.
+    pub fn deserializeView(out: *View, reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void { ... }
+};
+```
+
+| Member | In the view |
+|---|---|
+| Primitive sequence or array (not `boolean`) | `zidl_cdr.cdr_primitives.PrimitivesView` of the input; an array of any rank is one view of all its elements |
+| String, bounded or not | `[]const u8` into the input (zero-copy); a bounded string's bound is checked (`error.StringTooLong`) |
+| Struct | Its `View` |
+| Anything else (`boolean` sequences, strings in sequences, unions, maps, ...) | As in the struct, owned by the view until `deinit` |
+
+Views and zero-copy strings are valid while the input is. A view's elements
+are in the stream's byte order and promise no memory alignment: use them in
+place through `asNative(T)`, which returns null when they need swapping, and
+otherwise copy them with `copyTo`. Base types (`_base: Base.View`), `@optional`
+members (`?` of the view member) and all extensibilities are supported.
+
+With `--generate-zzdds-wrappers`, a typed reader also gets `take_view`, which
+takes a sample on loan and returns a `ViewSample` (`view`, `info`) whose
+`deinit` frees the view and ends the loan; null when there is no sample. A
+sample without valid data has an empty view; its key comes from
+`get_key_value`. A sample whose view does not decode is ended failed, for the
+reader's policy, as `take` does.
+
+---
+
 ## TypeObject Constants
 
 Every struct body (unless `--no-typeobject-support`) includes:
