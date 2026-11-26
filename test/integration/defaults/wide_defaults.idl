@@ -1,7 +1,8 @@
 // Defaults every backend must give a fresh value: a wide string literal or a
-// constant's (its UTF-16 units, a supplementary character as a surrogate
-// pair), copied into an unbounded member or a bounded one, and a default
-// naming a constant of another kind. C, C++ and Java each check it.
+// constant's (its UTF-16 units; a supplementary character, here written as
+// \u escapes, as a surrogate pair), copied into an unbounded member or a
+// bounded one, and a default naming a constant of another kind. C, C++ and
+// Java each check it.
 module wd {
     const wstring GREETING = L"hi";
     const long COUNT = 5;
@@ -12,7 +13,7 @@ module wd {
         @default(L"lit") wstring literal;
         @default(GREETING) wstring<4> bounded;
         @optional @default(L"o") wstring maybe;
-        @default(L"😀") wstring emoji;
+        @default(L"\uD83D\uDE00") wstring emoji;
         @default(COUNT) long count;
         // Beyond a signed 32-bit range: Java keeps its bits.
         @default(ALL_BITS) unsigned long all_bits;

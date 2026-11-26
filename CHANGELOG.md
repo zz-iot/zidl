@@ -18,6 +18,11 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- IDL: a `\uhhhh` escape (1 to 4 hex digits) in a wide literal is the Unicode character it
+  names, and a high/low surrogate pair of them is one character outside the BMP. It was
+  kept verbatim (`\`, `u` and the digits). A `\u` escape in a narrow literal, an escape
+  without digits and an unpaired surrogate are errors.
+
 - Java: a default naming a constant is the constant's value. It named the constant's
   holder class, which did not compile. A `wstring` constant or `@default` is its text
   (they were `""` and `null`), a supplementary character as its surrogate pair. An
