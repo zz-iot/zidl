@@ -644,7 +644,7 @@ pub const PlCdrWriter = struct {
         const padded = try framing.parameterSize(raw);
         const zeros: [4]u8 = @splat(0);
         if (padded > raw) try self.inner.writeBytes(zeros[0 .. padded - raw]);
-        try framing.patchParameter(self.inner.buf.items, self.inner.byteLen(), h.len_offset, h.buf_value_start);
+        try framing.patchParameter(self.inner.buf.items, self.inner.byteLen(), h.len_offset, h.buf_value_start, .little);
     }
 
     /// Write the PID_SENTINEL (0x0001, 0) to terminate the parameter list.
@@ -666,7 +666,7 @@ pub const PlCdrWriter = struct {
     }
 
     pub fn writePlSentinel(self: *PlCdrWriter) !void {
-        try framing.writeSentinel(&self.inner);
+        try framing.writeSentinel(&self.inner, .little);
     }
 
     /// Re-emit a parameter retained verbatim (`zidl_cdr.RawParam`): the raw `pid`

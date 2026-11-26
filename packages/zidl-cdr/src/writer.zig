@@ -393,11 +393,11 @@ pub fn Writer(comptime cfg: WriterConfig) type {
             const padded = try framing.parameterSize(raw);
             const zeros: [4]u8 = @splat(0);
             if (padded > raw) try self.writeBytes(zeros[0 .. padded - raw]);
-            try framing.patchParameter(self.storage(), self.len, h.len_offset, h.value_start);
+            try framing.patchParameter(self.storage(), self.len, h.len_offset, h.value_start, self.order());
         }
 
         pub fn writePlSentinel(self: *Self) !void {
-            try framing.writeSentinel(self);
+            try framing.writeSentinel(self, self.order());
         }
 
         /// A parameter retained verbatim, re-padded to 4 bytes.
@@ -690,9 +690,24 @@ test "the remaining framing calls, and running out of room in bulk writes" {
     try testing.expectError(error.Overflow, w.reservePrimitives(8, 2));
     try testing.expectError(error.Overflow, w.writePrimitiveArray(u64, &[_]u64{ 1, 2 }));
     try w.writePrimitiveArray(u8, &[_]u8{});
+}
 
-    var pl: [8]u8 = undefined;
+test "a big-endian parameter list reads back: lengths and sentinel in its byte order" {
+    var pl: [32]u8 = undefined;
     var b = RuntimeWriter.initFixed(&pl, .xcdr1, .big);
     try b.writePlEncapHeader();
-    try testing.expectEqualSlices(u8, &[_]u8{ 0, 2, 0, 0 }, b.bytes());
+    const h = try b.reservePlParam(0x0050);
+    try b.writeU32(0x01020304);
+    try b.patchPlParam(h);
+    try b.writePlSentinel();
+    try testing.expectEqualSlices(u8, &[_]u8{ 0, 2, 0, 0, 0, 0x50, 0, 4, 1, 2, 3, 4, 0, 1, 0, 0 }, b.bytes());
+
+    var r = try cdr.CdrReader.init(b.bytes());
+    try testing.expect(r.is_pl_cdr);
+    const p = (try r.readPlParam(.strict)).?;
+    try testing.expectEqual(@as(u16, 0x0050), p.pid);
+    try testing.expectEqual(@as(u16, 4), p.byte_len);
+    try testing.expectEqual(@as(u32, 0x01020304), try r.readU32());
+    try r.seekTo(p.end_pos);
+    try testing.expectEqual(@as(?cdr.CdrReader.PlParam, null), try r.readPlParam(.strict));
 }

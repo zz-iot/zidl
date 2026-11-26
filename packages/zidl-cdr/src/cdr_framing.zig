@@ -231,21 +231,24 @@ pub fn reserveParameter(sink: anytype, pid: u16, offset: *usize, start: *usize) 
     start.* = sink.byteLen();
 }
 
-/// Call after emitting padding. PL_CDR's dedicated writer remains LE-only.
-pub fn patchParameter(storage: ?[]u8, len: usize, offset: usize, start: usize) error{ InvalidPatch, Overflow }!void {
+/// Call after emitting padding. `order` is the stream's, which
+/// `reserveParameter` wrote the header in.
+pub fn patchParameter(storage: ?[]u8, len: usize, offset: usize, start: usize, order: primitives.ByteOrder) error{ InvalidPatch, Overflow }!void {
     try validateParameter(len, offset, start);
     const raw = len - start;
     const size = try parameterSize(raw);
     if (size != raw) return error.InvalidPatch;
     if (storage) |bytes| {
         if (len > bytes.len) return error.InvalidPatch;
-        const encoded = primitives.encodeUnsigned(u16, size, .little);
+        const encoded = primitives.encodeUnsigned(u16, size, order);
         @memcpy(bytes[offset..][0..2], &encoded);
     }
 }
 
-pub fn writeSentinel(sink: anytype) !void {
-    try sink.writeBytes(&.{ 1, 0, 0, 0 });
+/// PID_SENTINEL (1) and a zero length, in the stream's byte order.
+pub fn writeSentinel(sink: anytype, order: primitives.ByteOrder) !void {
+    const pid = primitives.encodeUnsigned(u16, 1, order);
+    try sink.writeBytes(&(pid ++ [_]u8{ 0, 0 }));
 }
 
 test "framing sizes and patch offsets cannot wrap" {

@@ -436,12 +436,12 @@ export fn zidl_cdr_pl_patch_param(w: *Writer, handle: PlHandle) c_int {
     const zeros: [4]u8 = @splat(0);
     var sink = Sink{ .writer = w };
     if (padded > raw) sink.writeBytes(zeros[0 .. padded - raw]) catch return sink.status;
-    rt.cdr_framing.patchParameter(patchStorage(w), w.len, handle.len_offset, handle.buf_value_start) catch |err| return patchStatus(err);
+    rt.cdr_framing.patchParameter(patchStorage(w), w.len, handle.len_offset, handle.buf_value_start, if (w.byte_order == 1) .big else .little) catch |err| return patchStatus(err);
     return 0;
 }
 export fn zidl_cdr_pl_write_sentinel(w: *Writer) c_int {
     var sink = Sink{ .writer = w };
-    rt.cdr_framing.writeSentinel(&sink) catch return sink.status;
+    rt.cdr_framing.writeSentinel(&sink, if (w.byte_order == 1) .big else .little) catch return sink.status;
     return 0;
 }
 export fn zidl_cdr_pl_read_param(r: *Reader, out: *PlParam) c_int {
