@@ -5591,9 +5591,15 @@ const ConcreteImplGenerator = struct {
                     try self.srcPrint(");\n    return {s}::_getOrCreate(_h);\n", .{impl_name});
                 },
                 .direct => {
-                    try self.srcPrint("    {s}{s}_{s}(", .{ if (op.return_type != null) "return " else "", c_name, op.name });
+                    const enum_cpp: ?[]const u8 = if (op.return_type) |rt| (if (typeRefIsEnumLike(rt)) try self.typeRefToCpp(rt) else null) else null;
+                    defer if (enum_cpp) |e| self.alloc.free(e);
+                    if (enum_cpp) |e| {
+                        try self.srcPrint("    return static_cast<{s}>({s}_{s}(", .{ e, c_name, op.name });
+                    } else {
+                        try self.srcPrint("    {s}{s}_{s}(", .{ if (op.return_type != null) "return " else "", c_name, op.name });
+                    }
                     try self.emitStaticArgs(op.params);
-                    try self.srcWrite(");\n");
+                    try self.srcWrite(if (enum_cpp != null) "));\n" else ");\n");
                 },
                 // The builder admits only interface, primitive and enum results.
                 .str_ret, .todo => return error.UnsupportedStaticResult,
@@ -6094,15 +6100,26 @@ const ConcreteImplGenerator = struct {
                             .{ .ok = ok, .n = p.name, .b = bridge_name },
                         );
                     };
-                    if (op.return_type != null) try self.srcWrite("    return _rc;\n");
+                    if (op.return_type) |rt| {
+                        if (typeRefIsEnumLike(rt)) {
+                            const cpp = try self.typeRefToCpp(rt);
+                            defer self.alloc.free(cpp);
+                            try self.srcPrint("    return static_cast<{s}>(_rc);\n", .{cpp});
+                        } else try self.srcWrite("    return _rc;\n");
+                    }
                 } else {
-                    if (op.return_type != null) {
+                    // A C enum converts to the C++ enum class only by a cast.
+                    const enum_cpp: ?[]const u8 = if (op.return_type) |rt| (if (typeRefIsEnumLike(rt)) try self.typeRefToCpp(rt) else null) else null;
+                    defer if (enum_cpp) |e| self.alloc.free(e);
+                    if (enum_cpp) |e| {
+                        try self.srcPrint("    return static_cast<{s}>({s}_{s}({s}", .{ e, owner_c_name, op.name, handle_expr });
+                    } else if (op.return_type != null) {
                         try self.srcPrint("    return {s}_{s}({s}", .{ owner_c_name, op.name, handle_expr });
                     } else {
                         try self.srcPrint("    {s}_{s}({s}", .{ owner_c_name, op.name, handle_expr });
                     }
                     try self.emitAdaptedParams(op.params);
-                    try self.srcWrite(");\n");
+                    try self.srcWrite(if (enum_cpp != null) "));\n" else ");\n");
                 }
             },
             .todo => {
@@ -12151,6 +12168,25 @@ test "cpp_backend: a constructor on a family root is rejected" {
         \\    interface Maker { Root make(); Leaf leaf(); };
         \\};
     ));
+}
+
+test "cpp_backend: an enum result is cast from the C enum, for operations and @static operations" {
+    var res = try testGenConcreteImpl(
+        \\module M {
+        \\    enum Mode { M_A, M_B };
+        \\    typedef sequence<long> Longs;
+        \\    interface Thing {
+        \\        @static Mode default_mode();
+        \\        Mode mode();
+        \\        Mode modes(inout Longs xs);
+        \\    };
+        \\};
+    );
+    defer res.deinit();
+    const s = res.src.items;
+    try testing.expect(has(s, "::M::Mode Thing::default_mode() {\n    return static_cast<::M::Mode>(M_Thing_default_mode());\n}"));
+    try testing.expect(has(s, "    return static_cast<::M::Mode>(M_Thing_mode(ptr_));\n"));
+    try testing.expect(has(s, "    return static_cast<::M::Mode>(_rc);\n"));
 }
 
 const static_test_idl =
