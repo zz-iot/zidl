@@ -947,6 +947,7 @@ fn printUsage(w: *Io.Writer) !void {
         \\  --zig-generate-toml-config     Emit applyToml(alloc, table: anytype) !void per struct (Zig backend)
         \\  --zig-generate-authoring       Emit strict presence-aware decodeToml using zidl_bindings.authoring
         \\  --zig-pl-cdr                   Generate PL_CDR functions for @mutable types (Zig backend)
+        \\  --cdr-fast <list>              Encodings with fast CDR instances: xcdr1-le,xcdr2-le (default) or none (Zig backend)
         \\
         \\  -h, --help                     Show this help
         \\  -v, --version                  Show version

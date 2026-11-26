@@ -3,6 +3,7 @@
 const std = @import("std");
 const zidl_cdr = @import("zidl_cdr");
 const zidl_bindings = @import("zidl_bindings");
+const _cdr_fast: zidl_cdr.FastSet = .{ .xcdr1_le = true, .xcdr2_le = true };
 
 pub const Color = enum(u32) {
     RED = 0,
