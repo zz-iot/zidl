@@ -9,6 +9,7 @@
 #include <vector>
 #include "views.hpp"
 #include "named.hpp"
+#include "wide_defaults.hpp"
 
 static int version, order;
 #define CHECK(c) do { if (!(c)) { std::fprintf(stderr, "%s:%d: CHECK(%s) failed (version %d, order %d)\n", __FILE__, __LINE__, #c, version, order); std::exit(1); } } while (0)
@@ -188,6 +189,20 @@ static void named_default() {
     CHECK(!view.maybe);
 }
 
+// Wide string defaults hold UTF-16 units, as a decoded std::wstring does,
+// whatever wchar_t's size; a constant's too.
+static void wide_defaults() {
+    const wd::WideDefaults d{};
+    const std::wstring hi{wchar_t('h'), wchar_t('i')};
+    CHECK(std::wstring(wd::GREETING) == hi);
+    CHECK(d.named == hi && d.bounded == hi);
+    CHECK(d.literal == std::wstring({wchar_t('l'), wchar_t('i'), wchar_t('t')}));
+    CHECK(d.maybe && *d.maybe == std::wstring(1, wchar_t('o')));
+    CHECK(d.emoji == std::wstring({wchar_t(0xD83D), wchar_t(0xDE00)}));
+    CHECK(d.count == 5);
+    CHECK(d.all_bits == 0xFFFFFFFFu);
+}
+
 int main() {
     for (order = ZIDL_CDR_LE; order <= ZIDL_CDR_BE; ++order) {
         for (version = ZIDL_XCDR1; version <= ZIDL_XCDR2; ++version) {
@@ -201,6 +216,7 @@ int main() {
         mutable_frame();
         defaults();
         named_default();
+        wide_defaults();
     }
     std::free(bytes);
     std::puts("cpp views: all checks passed");

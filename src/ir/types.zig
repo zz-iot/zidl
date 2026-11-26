@@ -101,6 +101,13 @@ pub const MemberAnnotations = struct {
     /// Used by all backends: C emits `apply_defaults` for optional+default members;
     /// C++, Zig, and Java emit inline initializers for both optional and non-optional members.
     default_value: ?AnnotationParamValue = null,
+    /// The value of a `@default` naming a constant (`@default(X)`,
+    /// `@default(::M::X)`), resolved as IDL scoping resolves the name.
+    /// `default_value` keeps the name (its last part) for backends that refer
+    /// to the constant; a backend that cannot (C, whose constants are
+    /// module-prefixed macros) uses this. Null for anything else, enumerators
+    /// included.
+    default_constant: ?AnnotationParamValue = null,
     raw: []const RawAnnotation = &.{},
     /// Fallback supports manually constructed IR; built struct/union Specs resolve IDs.
     pub fn memberId(self: MemberAnnotations, fallback: u32) u32 {

@@ -1808,7 +1808,11 @@ const Generator = struct {
                 try self.write("\"");
             },
             .wide_character => |wc| try self.print("(char)0x{X:0>4}", .{wc}),
-            .wide_string => try self.write("\"\""),
+            .wide_string => |cps| {
+                const literal = try javaWideLiteral(self.alloc, cps);
+                defer self.alloc.free(literal);
+                try self.write(literal);
+            },
             .fixed_pt => |fp| try self.write(fp),
         }
     }
@@ -3407,7 +3411,10 @@ const Generator = struct {
     fn memberDefault(self: *Generator, m: ir.StructMember) ![]u8 {
         if (m.annotations.is_optional) return self.alloc.dupe(u8, "null");
         if (m.annotations.default_value) |dv| {
-            return self.formatDefaultValueJava(dv, m.type_ref);
+            // A default naming a constant is its value (resolved when building
+            // the IR): a Java constant is a holder class, not the value.
+            const resolved = if (dv == .scoped_name) m.annotations.default_constant orelse dv else dv;
+            return self.formatDefaultValueJava(resolved, m.type_ref);
         }
         return self.defaultForMember(m.type_ref, m.dimensions);
     }
@@ -3415,13 +3422,7 @@ const Generator = struct {
     /// Format an `AnnotationParamValue` as a Java literal expression.
     fn formatDefaultValueJava(self: *Generator, dv: ir.AnnotationParamValue, type_ref: ir.TypeRef) ![]u8 {
         return switch (dv) {
-            .integer => |v| switch (type_ref) {
-                .base => |b| switch (b) {
-                    .long_long, .int64, .unsigned_long_long, .uint64 => std.fmt.allocPrint(self.alloc, "{d}L", .{v}),
-                    else => std.fmt.allocPrint(self.alloc, "{d}", .{v}),
-                },
-                else => std.fmt.allocPrint(self.alloc, "{d}", .{v}),
-            },
+            .integer => |v| javaIntegerDefault(self.alloc, v, type_ref),
             .float => |v| switch (type_ref) {
                 .base => |b| switch (b) {
                     .float => std.fmt.allocPrint(self.alloc, "{d}f", .{v}),
@@ -3444,6 +3445,8 @@ const Generator = struct {
                 break :blk std.fmt.allocPrint(self.alloc, "\"{s}\"", .{esc});
             },
             .scoped_name => |n| self.formatScopedNameDefaultJava(n, type_ref),
+            .wide_character => |v| std.fmt.allocPrint(self.alloc, "(char)0x{X:0>4}", .{v}),
+            .wide_string => |cps| javaWideLiteral(self.alloc, cps),
             else => self.alloc.dupe(u8, "null"),
         };
     }
@@ -11784,12 +11787,13 @@ test "java: @default non-printable char emits unicode escape" {
     , "cfg", "this.ctrl = '\\u0001';");
 }
 
-test "java: @default scoped_name emits identifier" {
+test "java: @default naming a constant emits its value" {
     const alloc = testing.allocator;
+    // A Java constant is a holder class (MY_MAX.value), not the value itself.
     try testGen(alloc,
         \\const long MY_MAX = 100;
         \\struct Cfg { @default(MY_MAX) long limit; };
-    , "cfg", "this.limit = MY_MAX;");
+    , "cfg", "this.limit = 100;");
 }
 
 test "java: @default enum scoped_name emits enum value" {
@@ -12294,4 +12298,127 @@ test "java: a @static's JNI bridge has no receiver and boxes a borrowed result" 
     ) != null);
     try testing.expect(std.mem.indexOf(u8, s, "    jint _ret = (jint)M_Thing_count_with(_n_t, _p_c, (int32_t)n);\n") != null);
     try testing.expect(std.mem.indexOf(u8, s, "    M_Thing_reset();\n") != null);
+}
+
+/// An integer default for a field of IDL type `tr`. Java's integer types are
+/// signed, so an unsigned value beyond the signed range (an `unsigned long`
+/// 0xFFFFFFFF, say) is written as its bit pattern in hex, as constants are,
+/// and cast for a `short` or `byte` field. Caller owns the result.
+fn javaIntegerDefault(alloc: std.mem.Allocator, v: i64, tr: ir.TypeRef) ![]u8 {
+    const b = switch (tr) {
+        .base => |b| b,
+        .named => |td| switch (td) {
+            .typedef => |t| if (t.dimensions.len == 0) return javaIntegerDefault(alloc, v, t.type_ref) else return std.fmt.allocPrint(alloc, "{d}", .{v}),
+            else => return std.fmt.allocPrint(alloc, "{d}", .{v}),
+        },
+        else => return std.fmt.allocPrint(alloc, "{d}", .{v}),
+    };
+    const bits: u64 = @bitCast(v);
+    return switch (b) {
+        .long_long, .int64, .unsigned_long_long, .uint64 => std.fmt.allocPrint(alloc, "{d}L", .{v}),
+        .long, .int32, .unsigned_long, .uint32 => if (std.math.cast(i32, v) != null)
+            std.fmt.allocPrint(alloc, "{d}", .{v})
+        else
+            std.fmt.allocPrint(alloc, "0x{X}", .{@as(u32, @truncate(bits))}),
+        .short, .int16, .unsigned_short, .uint16 => if (std.math.cast(i16, v) != null)
+            std.fmt.allocPrint(alloc, "{d}", .{v})
+        else
+            std.fmt.allocPrint(alloc, "(short)0x{X}", .{@as(u16, @truncate(bits))}),
+        .octet, .int8, .uint8 => if (std.math.cast(i8, v) != null)
+            std.fmt.allocPrint(alloc, "{d}", .{v})
+        else
+            std.fmt.allocPrint(alloc, "(byte)0x{X}", .{@as(u8, @truncate(bits))}),
+        else => std.fmt.allocPrint(alloc, "{d}", .{v}),
+    };
+}
+
+/// A Java string literal of a wide string's code points: a String is UTF-16,
+/// so one outside the BMP is a surrogate pair. Quotes, backslashes and line
+/// breaks take ordinary escapes, as Java reads `\u` escapes before it reads
+/// string literals; other control and non-ASCII characters take `\u` ones.
+/// Caller owns the result.
+fn javaWideLiteral(alloc: std.mem.Allocator, cps: []const u32) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(alloc);
+    try out.append(alloc, '"');
+    for (cps) |cp| switch (cp) {
+        '"' => try out.appendSlice(alloc, "\\\""),
+        '\\' => try out.appendSlice(alloc, "\\\\"),
+        '\n' => try out.appendSlice(alloc, "\\n"),
+        '\r' => try out.appendSlice(alloc, "\\r"),
+        0x20...'!', '#'...'[', ']'...0x7E => try out.append(alloc, @intCast(cp)),
+        0x10000...0x10FFFF => {
+            const v = cp - 0x10000;
+            try out.print(alloc, "\\u{X:0>4}\\u{X:0>4}", .{ 0xD800 + (v >> 10), 0xDC00 + (v & 0x3FF) });
+        },
+        else => try out.print(alloc, "\\u{X:0>4}", .{cp}),
+    };
+    try out.append(alloc, '"');
+    return out.toOwnedSlice(alloc);
+}
+
+test "java: wide string constants and defaults are their UTF-16 text" {
+    const idl = "module M { const wstring W = L\"h\\\"\u{1F600}\"; struct T { @default(W) wstring named; @default(L\"a\u{E9}\") wstring lit; }; };";
+    // The constant's holder, and both defaults.
+    try testGen(testing.allocator, idl, "m", "public static final String value = \"h\\\"\\uD83D\\uDE00\";");
+    try testGen(testing.allocator, idl, "m", "this.named = \"h\\\"\\uD83D\\uDE00\";");
+    try testGen(testing.allocator, idl, "m", "this.lit = \"a\\u00E9\";");
+}
+
+test "java: a default naming a constant is its value, not the constant's holder class" {
+    const idl =
+        \\const long TOP = 7;
+        \\module M { const long long BIG = 5; const string NAME = "nm"; const wchar W = L'w';
+        \\  struct Cfg { @default(BIG) long long n; @default(NAME) string s; @default(TOP) long top; @default(W) wchar w; }; };
+    ;
+    try testGen(testing.allocator, idl, "m", "this.n = 5L;");
+    try testGen(testing.allocator, idl, "m", "this.s = \"nm\";");
+    try testGen(testing.allocator, idl, "m", "this.top = 7;");
+    try testGen(testing.allocator, idl, "m", "this.w = (char)0x0077;");
+}
+
+test "java: an unsigned default beyond the signed range keeps its bits" {
+    const idl =
+        \\const unsigned long BIG = 0xFFFFFFFF;
+        \\struct Cfg { @default(BIG) unsigned long named; @default(4294967295) unsigned long lit;
+        \\  @default(65535) unsigned short half; @default(255) octet small; @default(7) unsigned long plain; };
+    ;
+    try testGen(testing.allocator, idl, "cfg", "this.named = 0xFFFFFFFF;");
+    try testGen(testing.allocator, idl, "cfg", "this.lit = 0xFFFFFFFF;");
+    try testGen(testing.allocator, idl, "cfg", "this.half = (short)0xFFFF;");
+    try testGen(testing.allocator, idl, "cfg", "this.small = (byte)0xFF;");
+    try testGen(testing.allocator, idl, "cfg", "this.plain = 7;");
+    // Through a typedef too.
+    try testGen(testing.allocator,
+        \\typedef unsigned long Mask; struct Cfg { @default(4294967295) Mask m; };
+    , "cfg", "this.m = 0xFFFFFFFF;");
+}
+
+test "java: integer defaults that fit, or are not for an integer field, are written as they are" {
+    const cases = [_]struct { tr: ir.TypeRef, v: i64, want: []const u8 }{
+        .{ .tr = .{ .base = .short }, .v = -5, .want = "-5" },
+        .{ .tr = .{ .base = .octet }, .v = 100, .want = "100" },
+        .{ .tr = .{ .base = .double }, .v = 2, .want = "2" },
+        .{ .tr = .{ .string = null }, .v = 3, .want = "3" },
+    };
+    for (cases) |c| {
+        const got = try javaIntegerDefault(testing.allocator, c.v, c.tr);
+        defer testing.allocator.free(got);
+        try testing.expectEqualStrings(c.want, got);
+    }
+    // A named type other than a typedef (a bitmask's storage, say).
+    try testGen(testing.allocator,
+        \\bitmask Flags { A, B }; struct Cfg { @default(3) Flags f; };
+    , "cfg", "this.f = 3;");
+}
+
+test "java: a wide literal escapes what Java reads before string literals" {
+    const lit = try javaWideLiteral(testing.allocator, &.{ 'a', '\n', '\r', 0x0007, '\\' });
+    defer testing.allocator.free(lit);
+    try testing.expectEqualStrings("\"a\\n\\r\\u0007\\\\\"", lit);
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            alloc.free(try javaWideLiteral(alloc, &.{ 'a', 0x1F600, 'b', 'c', 'd', 'e', 'f', 'g' }));
+        }
+    }.run, .{});
 }

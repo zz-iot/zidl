@@ -5205,20 +5205,66 @@ const CdrGenerator = struct {
         try self.writeI("}\n");
     }
 
+    /// An unbounded wstring member's default: its units copied into storage
+    /// from the registered allocator, which zidl_cdr_free_wstr releases. As
+    /// for a string default, the member is replaced only once the copy
+    /// exists; an optional one is set only while absent, unless constructing.
+    fn emitWideHeapDefault(self: *CdrGenerator, s: *const ir.Struct, m: ir.StructMember, idx: usize, units: []const u16, from_default_ctor: bool) !void {
+        const optional = m.annotations.is_optional;
+        const bit = if (optional) optBitIdxForMember(s.*, idx) else 0;
+        if (optional and !from_default_ctor) {
+            try self.printI("if (!(_v->_present & (1ULL << {d}u))) {{\n", .{bit});
+            self.indent_depth += 1;
+        }
+        try self.printI("{{ static const uint16_t _w_default[] = {{", .{});
+        for (units) |unit| try self.print("{d}, ", .{unit});
+        try self.write("0};\n");
+        self.indent_depth += 1;
+        try self.printI("uint16_t *_s_{s} = (uint16_t *)zidl_cdr_alloc(sizeof _w_default);\n", .{m.name});
+        try self.printI("if (_s_{s}) {{\n", .{m.name});
+        self.indent_depth += 1;
+        try self.printI("memcpy(_s_{s}, _w_default, sizeof _w_default);\n", .{m.name});
+        if (!optional and !from_default_ctor) try self.printI("zidl_cdr_free_wstr(_v->{s});\n", .{m.name});
+        try self.printI("_v->{s} = _s_{s};\n", .{ m.name, m.name });
+        if (optional) try self.printI("_v->_present |= (1ULL << {d}u);\n", .{bit});
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        if (optional and !from_default_ctor) {
+            self.indent_depth -= 1;
+            try self.writeI("}\n");
+        }
+    }
+
     fn emitMemberDefaultAssign(
         self: *CdrGenerator,
         s: *const ir.Struct,
         m: ir.StructMember,
         idx: usize,
-        dv: ir.AnnotationParamValue,
+        named_dv: ir.AnnotationParamValue,
         from_default_ctor: bool,
     ) !void {
+        // A default naming a constant is the constant's value (resolved when
+        // building the IR): C has no scopes to find the name in, as the
+        // constant is #defined with its module prefix, and a string value then
+        // takes the literal's paths (copied, or checked against a bound).
+        const dv = if (named_dv == .scoped_name) m.annotations.default_constant orelse named_dv else named_dv;
         const is_string = switch (dv) {
             .string => true,
             else => false,
         };
-        if (is_string) {
-            if (boundedStringElem(m.type_ref)) |bound| {
+        // A wide string default, as the UTF-16 units a wstring member holds.
+        const wide_units: ?[]u16 = switch (dv) {
+            .wide_string => |cps| try utf16Units(self.alloc, cps),
+            else => null,
+        };
+        defer if (wide_units) |u| self.alloc.free(u);
+        if (wide_units) |units| if (boundedStringElem(m.type_ref) == null and cdr_skip.resolveAlias(m.type_ref) == .wstring) {
+            return self.emitWideHeapDefault(s, m, idx, units, from_default_ctor);
+        };
+        if (is_string or wide_units != null) {
+            if (boundedStringElem(m.type_ref)) |bound| if (bound.wide or wide_units == null) {
                 if (m.annotations.is_optional and !from_default_ctor) {
                     const bit = optBitIdxForMember(s.*, idx);
                     try self.printI("if (!(_v->_present & (1ULL << {d}u))) {{\n", .{bit});
@@ -5227,9 +5273,11 @@ const CdrGenerator = struct {
                 // Inline storage owns no allocation. Use an initializer so wide
                 // strings have uint16_t units independent of host wchar_t size.
                 try self.printI("{{ const {s} _default[] = {{", .{if (bound.wide) "uint16_t" else "char"});
-                const text = dv.string;
+                const text = if (wide_units == null) dv.string else "";
                 var i: usize = 0;
                 var units: u64 = 0;
+                if (wide_units) |wu| for (wu) |unit| try self.print("{d}, ", .{unit});
+                if (wide_units) |wu| units = wu.len;
                 while (i < text.len) {
                     if (bound.wide) {
                         const len = try std.unicode.utf8ByteSequenceLength(text[i]);
@@ -5257,7 +5305,7 @@ const CdrGenerator = struct {
                     }
                 }
                 return;
-            }
+            };
         }
         const dv_str = try self.defaultValueToC(dv, m.type_ref);
         defer self.alloc.free(dv_str);
@@ -5391,6 +5439,7 @@ const CdrGenerator = struct {
                 defer self.alloc.free(esc);
                 break :blk std.fmt.allocPrint(self.alloc, "zidl_cdr_strdup(\"{s}\")", .{esc});
             },
+            .wide_character => |v| std.fmt.allocPrint(self.alloc, "{d}", .{v}),
             .scoped_name => |n| self.scopedNameDefaultToC(n, type_ref),
             else => self.alloc.dupe(u8, "0"),
         };
@@ -5702,6 +5751,21 @@ fn generateTypeHeader(
     if (!opts.pragma_once) {
         try gen.print("#endif /* {s} */\n", .{guard});
     }
+}
+
+/// The UTF-16 units of a wide string's code points. A NUL is refused: a
+/// wstring is NUL-terminated, and zidl_cdr_free_wstr measures it so.
+fn utf16Units(alloc: std.mem.Allocator, cps: []const u32) ![]u16 {
+    var out = std.ArrayList(u16).empty;
+    errdefer out.deinit(alloc);
+    for (cps) |cp| {
+        if (cp == 0) return error.DefaultStringHasNul;
+        if (cp >= 0x10000) {
+            try out.append(alloc, @intCast(0xD800 + ((cp - 0x10000) >> 10)));
+            try out.append(alloc, @intCast(0xDC00 + ((cp - 0x10000) & 0x3FF)));
+        } else try out.append(alloc, @intCast(cp));
+    }
+    return out.toOwnedSlice(alloc);
 }
 
 /// Generate a single-type CDR source file into `out`.
@@ -7788,7 +7852,8 @@ test "c_backend cdr: @default scoped_name in apply_defaults" {
     ;
     var src = try testGenCdr(idl, "cfg");
     defer src.deinit(testing.allocator);
-    try testing.expect(has(src.items, "_v->limit = MY_MAX;"));
+    // C has no scopes to find a constant's name in: the default is its value.
+    try testing.expect(has(src.items, "_v->limit = 100;"));
 }
 
 test "c_backend cdr: @default enum scoped_name emits prefixed enumerator" {
@@ -8309,4 +8374,81 @@ test "c_backend: @static operations are declared with no receiver" {
     try testing.expect(has(s, "void M_Thing_reset(void);\n"));
     // Nothing to own, so nothing pulls in the allocator header.
     try testing.expect(!has(s, "#include \"zidl_allocator.h\""));
+}
+
+test "c_backend: a @default naming a constant takes its value, found from the struct's scope outward" {
+    var out = try testGenCdr(
+        \\const long OUTER = 9;
+        \\module M {
+        \\  const long MAXV = 5; const string NAME = "nm";
+        \\  module N { struct T { @default(MAXV) long n; @default(NAME) string s; @default(NAME) string<4> b; @default(OUTER) long o; }; };
+        \\};
+    , "m");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "_v->n = 5;"));
+    try testing.expect(has(s, "char *_s_s = zidl_cdr_strdup(\"nm\");"));
+    try testing.expect(has(s, "{ const char _default[] = {(char)110, (char)109, 0}; memcpy(_v->b, _default, sizeof _default); }"));
+    try testing.expect(has(s, "_v->o = 9;"));
+    try testing.expect(!has(s, "MAXV;"));
+}
+
+test "c_backend: a qualified @default reference finds the constant it names" {
+    var out = try testGenCdr(
+        \\const long X = 1;
+        \\module M { const long X = 2; module Other { const long Y = 3; };
+        \\  struct T { @default(::X) long outer; @default(X) long inner; @default(Other::Y) long sibling; }; };
+    , "m");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "_v->outer = 1;"));
+    try testing.expect(has(s, "_v->inner = 2;"));
+    try testing.expect(has(s, "_v->sibling = 3;"));
+}
+
+test "c_backend: a wide character @default, literal or a constant's, is its code" {
+    var out = try testGenCdr(
+        \\module M { const wchar W = L'a'; struct T { @default(W) wchar named; @default(L'b') wchar lit; }; };
+    , "m");
+    defer out.deinit(testing.allocator);
+    try testing.expect(has(out.items, "_v->named = 97;"));
+    try testing.expect(has(out.items, "_v->lit = 98;"));
+}
+
+test "c_backend: a wide string @default, literal or a constant's, copies its UTF-16 units" {
+    var out = try testGenCdr(
+        "module M { const wstring W = L\"hi\"; struct T { @default(W) wstring named; @default(L\"a\u{1F600}\") wstring lit; @default(W) wstring<4> bounded; @optional @default(L\"o\") wstring opt; }; };",
+        "m",
+    );
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "{ static const uint16_t _w_default[] = {104, 105, 0};"));
+    try testing.expect(has(s, "{ static const uint16_t _w_default[] = {97, 55357, 56832, 0};"));
+    try testing.expect(has(s, "uint16_t *_s_named = (uint16_t *)zidl_cdr_alloc(sizeof _w_default);"));
+    try testing.expect(has(s, "memcpy(_s_named, _w_default, sizeof _w_default);"));
+    try testing.expect(has(s, "zidl_cdr_free_wstr(_v->named);"));
+    try testing.expect(has(s, "{ const uint16_t _default[] = {104, 105, 0}; memcpy(_v->bounded, _default, sizeof _default); }"));
+    try testing.expect(!has(s, "_v->named = 0;"));
+}
+
+test "c_backend: a wide string default's UTF-16 units, and their allocation failure" {
+    const units = try utf16Units(testing.allocator, &.{ 'a', 0x1F600 });
+    defer testing.allocator.free(units);
+    try testing.expectEqualSlices(u16, &.{ 'a', 0xD83D, 0xDE00 }, units);
+    try testing.expectError(error.DefaultStringHasNul, utf16Units(testing.allocator, &.{ 'a', 0 }));
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            alloc.free(try utf16Units(alloc, &.{ 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i' }));
+        }
+    }.run, .{});
+}
+
+test "c_backend: a wide string @default too long for its bound is refused" {
+    try testing.expectError(error.DefaultStringTooLong, testGenCdr("struct T { @default(L\"abc\") wstring<2> w; };", "t"));
+}
+
+test "c_backend: a constant default too long for its bounded string is refused" {
+    try testing.expectError(error.DefaultStringTooLong, testGenCdr(
+        \\module M { const string NAME = "toolong"; struct T { @default(NAME) string<3> b; }; };
+    , "m"));
 }

@@ -202,6 +202,20 @@ pub fn build(b: *std.Build) void {
             run_helpers.addDirectoryArg(runtime_classes);
             run_helpers.addArg("io.zidl.cdr.HelperTest");
             runtime_tests.dependOn(&run_helpers.step);
+            {
+                const gen = gens.run();
+                gen.addArgs(&.{ "-b", "java", "-o" });
+                const generated = gen.addOutputDirectoryArg("java-wide-defaults");
+                gen.addFileArg(b.path("test/integration/defaults/wide_defaults.idl"));
+                const compile_java = javaCommand(b, &.{ javac, "-Xlint:unchecked", "-Werror", "-d" }, java_cdr);
+                const classes = compile_java.addOutputDirectoryArg("classes");
+                compile_java.addFileArg(generated.path(b, "Wide_defaults.java"));
+                compile_java.addFileArg(b.path("test/integration/defaults/WideDefaultsTest.java"));
+                const run = javaCommand(b, &.{ java, "-cp" }, java_cdr);
+                run.addDirectoryArg(classes);
+                run.addArg("WideDefaultsTest");
+                java_validation_step.dependOn(&run.step);
+            }
             for (0..3) |mode| {
                 const split = mode != 0;
                 const prefix: []const u8 = switch (mode) {
@@ -1108,11 +1122,17 @@ pub fn build(b: *std.Build) void {
         gen.addArgs(&.{ "-b", "c", "--generate-views", "-o" });
         const generated = gen.addOutputDirectoryArg("c-views");
         gen.addFileArg(b.path("test/integration/c_views/views.idl"));
+        const gen_wide = gens.run();
+        gen_wide.addArgs(&.{ "-b", "c", "-o" });
+        const wide = gen_wide.addOutputDirectoryArg("c-wide-defaults");
+        gen_wide.addFileArg(b.path("test/integration/defaults/wide_defaults.idl"));
         const consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true });
         const flags = &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" };
         consumer.addCSourceFile(.{ .file = b.path("test/integration/c_views/test.c"), .flags = flags });
         consumer.addCSourceFile(.{ .file = generated.path(b, "views_cdr.c"), .flags = flags });
+        consumer.addCSourceFile(.{ .file = wide.path(b, "wide_defaults_cdr.c"), .flags = flags });
         consumer.addIncludePath(generated);
+        consumer.addIncludePath(wide);
         consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
         linkCdr(consumer, cdr_library);
         const app = b.addExecutable(.{ .name = "c-views", .root_module = consumer });
@@ -1130,17 +1150,36 @@ pub fn build(b: *std.Build) void {
         gen_named.addArgs(&.{ "-b", "cpp", "--generate-views", "-o" });
         const named = gen_named.addOutputDirectoryArg("cpp-views-named");
         gen_named.addFileArg(b.path("test/integration/cpp_views/named.idl"));
+        const gen_wide = gens.run();
+        gen_wide.addArgs(&.{ "-b", "cpp", "-o" });
+        const wide = gen_wide.addOutputDirectoryArg("cpp-wide-defaults");
+        gen_wide.addFileArg(b.path("test/integration/defaults/wide_defaults.idl"));
         const consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = true });
         const flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" };
         consumer.addCSourceFile(.{ .file = b.path("test/integration/cpp_views/test.cpp"), .flags = flags });
         consumer.addCSourceFile(.{ .file = generated.path(b, "views_cdr.cpp"), .flags = flags });
         consumer.addCSourceFile(.{ .file = named.path(b, "named_cdr.cpp"), .flags = flags });
+        consumer.addCSourceFile(.{ .file = wide.path(b, "wide_defaults_cdr.cpp"), .flags = flags });
         consumer.addIncludePath(generated);
         consumer.addIncludePath(named);
+        consumer.addIncludePath(wide);
         consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
         linkCdr(consumer, cdr_library);
         const app = b.addExecutable(.{ .name = "cpp-views", .root_module = consumer });
         views_step.dependOn(&b.addRunArtifact(app).step);
+    }
+
+    {
+        const step = b.step("test-zig-wide-strings", "Check generated Zig structs own, clone and free wide strings");
+        test_step.dependOn(step);
+        const gen = gens.run();
+        gen.addArgs(&.{ "-b", "zig", "--generate-views", "--generate-zzdds-wrappers", "-o" });
+        const out = gen.addOutputDirectoryArg("zig-wide-strings");
+        gen.addFileArg(b.path("test/integration/zig_wide_strings/wide.idl"));
+        const middleware = b.createModule(.{ .root_source_file = b.path("test/integration/zig_wrapper_contract/fake_middleware.zig"), .target = target });
+        const fixture = b.createModule(.{ .root_source_file = out.path(b, "wide.zig"), .target = target, .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings }, .{ .name = "zzdds", .module = middleware } } });
+        const tests = b.addTest(.{ .name = "zig-wide-strings", .root_module = b.createModule(.{ .root_source_file = b.path("test/integration/zig_wide_strings/test.zig"), .target = target, .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "fixture", .module = fixture } } }) });
+        step.dependOn(&b.addRunArtifact(tests).step);
     }
 
     {

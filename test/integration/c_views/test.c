@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "views.h"
+#include "wide_defaults.h"
 
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%s:%d: CHECK(%s) failed (version %d, order %d)\n", __FILE__, __LINE__, #c, version, order); return 1; } } while (0)
 
@@ -207,6 +208,35 @@ static int bounded(int version, int order) {
     return 0;
 }
 
+/* Defaults: a literal and a constant's (views do not apply defaults in C,
+ * as the struct's decoder does not, but the struct's own defaults hold). */
+static int defaults(int version, int order) {
+    views_Defaults d;
+    views_Defaults_default(&d);
+    CHECK(d.label && strcmp(d.label, "fallback") == 0);
+    CHECK(d.named && strcmp(d.named, "named fallback") == 0);
+    views_Defaults_free(&d);
+    return 0;
+}
+
+/* Wide string defaults copy their UTF-16 units: allocated for an unbounded
+ * member (freed by _free), in place for a bounded one. */
+static int wide_defaults(int version, int order) {
+    static const uint16_t hi[] = { 'h', 'i', 0 }, lit[] = { 'l', 'i', 't', 0 }, o[] = { 'o', 0 };
+    static const uint16_t emoji[] = { 0xD83D, 0xDE00, 0 };
+    wd_WideDefaults d;
+    wd_WideDefaults_default(&d);
+    CHECK(d.named && memcmp(d.named, hi, sizeof hi) == 0);
+    CHECK(d.literal && memcmp(d.literal, lit, sizeof lit) == 0);
+    CHECK(memcmp(d.bounded, hi, sizeof hi) == 0);
+    CHECK((d._present & 1u) && d.maybe && memcmp(d.maybe, o, sizeof o) == 0);
+    CHECK(d.emoji && memcmp(d.emoji, emoji, sizeof emoji) == 0);
+    CHECK(d.count == 5);
+    CHECK(d.all_bits == 0xFFFFFFFFu);
+    wd_WideDefaults_free(&d);
+    return 0;
+}
+
 int main(void) {
     for (int order = ZIDL_CDR_LE; order <= ZIDL_CDR_BE; ++order) {
         for (int version = ZIDL_XCDR1; version <= ZIDL_XCDR2; ++version) {
@@ -214,7 +244,7 @@ int main(void) {
                 derived(version, order) || bounded(version, order)) return 1;
         }
         /* XCDR1 has no ordinary mutable encoding. */
-        if (mutable_frame(ZIDL_XCDR2, order)) return 1;
+        if (mutable_frame(ZIDL_XCDR2, order) || defaults(ZIDL_XCDR2, order) || wide_defaults(ZIDL_XCDR2, order)) return 1;
     }
     puts("views: all checks passed");
     return 0;

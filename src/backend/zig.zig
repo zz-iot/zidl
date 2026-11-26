@@ -561,12 +561,7 @@ const Generator = struct {
         }
         for (s.members, 0..) |m, index| {
             if (memberHasBorrowedStringDefault(m)) {
-                const name = try self.defaultLiteralName(s, index);
-                defer self.alloc.free(name);
-                const mapped = try self.typeRefToZig(m.type_ref);
-                defer self.alloc.free(mapped);
-                try self.ind();
-                try self.print("    {s}: {s}{s} = {s},\n", .{ m.name, if (m.annotations.is_optional) "?" else "", mapped, name });
+                try self.emitBorrowedDefaultField(s, m, index);
             } else try self.emitField(m.name, m.type_ref, m.dimensions, m.annotations.is_optional, m.annotations.default_value);
         }
         if (self.plRetainsUnknown(s)) {
@@ -3893,7 +3888,7 @@ const Generator = struct {
             // non-optional array path (below) ignores it too, so an
             // `@optional` array member always initializes to `null`.
             if (dims.len == 0) if (default_value) |dv| {
-                const dv_str = try self.formatDefaultValueZig(dv, type_ref);
+                const dv_str = try self.fieldDefaultZig(dv, type_ref);
                 defer self.alloc.free(dv_str);
                 try self.print("    {s}: ?{s} = {s},\n", .{ name, inner, dv_str });
                 return;
@@ -3906,7 +3901,7 @@ const Generator = struct {
             defer self.alloc.free(default);
             try self.print("    {s}: {s} = {s},\n", .{ name, arr_type, default });
         } else if (default_value) |dv| {
-            const dv_str = try self.formatDefaultValueZig(dv, type_ref);
+            const dv_str = try self.fieldDefaultZig(dv, type_ref);
             defer self.alloc.free(dv_str);
             try self.print("    {s}: {s} = {s},\n", .{ name, zig_type, dv_str });
         } else {
@@ -3960,10 +3955,14 @@ const Generator = struct {
             try self.ind();
             try self.print("    _base: {s}.View = .{{}},\n", .{base_zig});
         }
-        for (s.members) |m| {
+        for (s.members, 0..) |m, index| {
             const kind = cdr_skip.viewKind(m.type_ref, m.dimensions);
             if (kind == .owned) {
-                try self.emitField(m.name, m.type_ref, m.dimensions, m.annotations.is_optional, m.annotations.default_value);
+                if (memberHasBorrowedStringDefault(m)) {
+                    try self.emitBorrowedDefaultField(s, m, index);
+                } else {
+                    try self.emitField(m.name, m.type_ref, m.dimensions, m.annotations.is_optional, m.annotations.default_value);
+                }
                 continue;
             }
             const t = try self.viewMemberType(m, kind);
@@ -3994,7 +3993,7 @@ const Generator = struct {
             try self.write("        self._base.deinit(alloc);\n");
             frees = true;
         }
-        for (s.members) |m| {
+        for (s.members, 0..) |m, index| {
             switch (cdr_skip.viewKind(m.type_ref, m.dimensions)) {
                 .primitives, .string => {},
                 .struct_view => {
@@ -4008,7 +4007,9 @@ const Generator = struct {
                 },
                 .owned => {
                     if (!self.memberNeedsCleanup(m)) continue;
-                    if (m.annotations.is_optional) {
+                    if (memberHasBorrowedStringDefault(m)) {
+                        try self.emitBorrowedDefaultFree(s, m, index, "        ");
+                    } else if (m.annotations.is_optional) {
                         const fa = try std.fmt.allocPrint(self.alloc, "{s}.?", .{m.name});
                         defer self.alloc.free(fa);
                         try self.ind();
@@ -4283,6 +4284,31 @@ const Generator = struct {
         try self.print("{s}out.{s} = {s};\n", .{ indent, m.name, opt_var });
     }
 
+    /// A member's `@default` as its field's initial value. A bounded string
+    /// or wide string is a `BoundedArray`, built from the literal, which must
+    /// fit the bound (a named constant's fit is checked when Zig evaluates
+    /// the default).
+    fn fieldDefaultZig(self: *Generator, dv: ir.AnnotationParamValue, type_ref: ir.TypeRef) ![]u8 {
+        const literal = try self.formatDefaultValueZig(dv, type_ref);
+        const elem: []const u8, const bound: u64 = switch (resolveAlias(type_ref)) {
+            .string => |b| .{ "u8", b orelse return literal },
+            .wstring => |b| .{ "u16", b orelse return literal },
+            else => return literal,
+        };
+        defer self.alloc.free(literal);
+        const units: ?u64 = switch (dv) {
+            .string => |s| s.len,
+            .wide_string => |cps| blk: {
+                var n: u64 = 0;
+                for (cps) |cp| n += if (cp >= 0x10000) 2 else 1;
+                break :blk n;
+            },
+            else => null,
+        };
+        if (units) |n| if (n > bound) return error.DefaultStringTooLong;
+        return std.fmt.allocPrint(self.alloc, "zidl_cdr.BoundedArray({s}, {d}).fromSlice({s}) catch unreachable", .{ elem, bound, literal });
+    }
+
     /// Format an `AnnotationParamValue` as a Zig literal expression.
     fn formatDefaultValueZig(self: *Generator, dv: ir.AnnotationParamValue, type_ref: ir.TypeRef) ![]u8 {
         return switch (dv) {
@@ -4299,6 +4325,20 @@ const Generator = struct {
                 break :blk std.fmt.allocPrint(self.alloc, "\"{s}\"", .{esc});
             },
             .scoped_name => |n| self.formatScopedNameDefaultZig(n, type_ref),
+            .wide_string => |cps| blk: {
+                var units = std.ArrayList(u8).empty;
+                defer units.deinit(self.alloc);
+                for (cps, 0..) |cp, i| {
+                    if (i != 0) try units.appendSlice(self.alloc, ", ");
+                    if (cp >= 0x10000) {
+                        const v = cp - 0x10000;
+                        try units.print(self.alloc, "0x{X:0>4}, 0x{X:0>4}", .{ 0xD800 + (v >> 10), 0xDC00 + (v & 0x3FF) });
+                    } else {
+                        try units.print(self.alloc, "0x{X:0>4}", .{cp});
+                    }
+                }
+                break :blk std.fmt.allocPrint(self.alloc, "&[_:0]u16{{{s}{s}{s}}}", .{ if (cps.len > 0) " " else "", units.items, if (cps.len > 0) " " else "" });
+            },
             else => self.alloc.dupe(u8, "undefined"),
         };
     }
@@ -5559,7 +5599,10 @@ const Generator = struct {
                 if (!self.memberNeedsCleanup(m)) continue;
                 try self.ind();
                 try self.print("        if (want & (1 << {d}) != 0) {{\n", .{idx});
-                if (m.annotations.is_optional) {
+                // A field not decoded yet may still hold its static default.
+                if (memberHasBorrowedStringDefault(m)) {
+                    try self.emitBorrowedDefaultFree(s, m, idx, "            ");
+                } else if (m.annotations.is_optional) {
                     try self.ind();
                     try self.print("            zidl_bindings.deinitOwned(&self.{s}, alloc);\n", .{m.name});
                 } else try self.emitFieldSeqDeinit(m.name, m.type_ref, m.dimensions, "            ");
@@ -6299,18 +6342,7 @@ const Generator = struct {
         for (s.members, 0..) |m, index| {
             if (!self.memberNeedsCleanup(m)) continue;
             if (memberHasBorrowedStringDefault(m)) {
-                const name = try self.defaultLiteralName(s, index);
-                defer self.alloc.free(name);
-                try self.ind();
-                if (m.annotations.is_optional) {
-                    try self.print("        if (self.{s}) |_text| {{ if (_text.len != 0 and _text.ptr != {s}.ptr) alloc.free(_text); }}\n", .{ m.name, name });
-                    try self.ind();
-                    try self.print("        self.{s} = null;\n", .{m.name});
-                } else {
-                    try self.print("        if (self.{s}.len != 0 and self.{s}.ptr != {s}.ptr) alloc.free(self.{s});\n", .{ m.name, m.name, name, m.name });
-                    try self.ind();
-                    try self.print("        self.{s} = &.{{}};\n", .{m.name});
-                }
+                try self.emitBorrowedDefaultFree(s, m, index, "        ");
                 continue;
             }
             if (m.annotations.is_optional) {
@@ -6336,6 +6368,35 @@ const Generator = struct {
         }
         try self.ind();
         try self.write("    }\n");
+    }
+
+    /// Declares member `m` of `s`, whose `@default` is static
+    /// (`memberHasBorrowedStringDefault`), to start as its named literal, the
+    /// one `emitBorrowedDefaultFree` compares against.
+    fn emitBorrowedDefaultField(self: *Generator, s: *const ir.Struct, m: ir.StructMember, index: usize) !void {
+        const name = try self.defaultLiteralName(s, index);
+        defer self.alloc.free(name);
+        const mapped = try self.typeRefToZig(m.type_ref);
+        defer self.alloc.free(mapped);
+        try self.ind();
+        try self.print("    {s}: {s}{s} = {s},\n", .{ m.name, if (m.annotations.is_optional) "?" else "", mapped, name });
+    }
+
+    /// Frees member `m` of `s`, whose `@default` is static, unless it still
+    /// holds that default, and empties it.
+    fn emitBorrowedDefaultFree(self: *Generator, s: *const ir.Struct, m: ir.StructMember, index: usize, indent: []const u8) !void {
+        const name = try self.defaultLiteralName(s, index);
+        defer self.alloc.free(name);
+        try self.ind();
+        if (m.annotations.is_optional) {
+            try self.print("{s}if (self.{s}) |_text| {{ if (_text.len != 0 and _text.ptr != {s}.ptr) alloc.free(_text); }}\n", .{ indent, m.name, name });
+            try self.ind();
+            try self.print("{s}self.{s} = null;\n", .{ indent, m.name });
+        } else {
+            try self.print("{s}if (self.{s}.len != 0 and self.{s}.ptr != {s}.ptr) alloc.free(self.{s});\n", .{ indent, m.name, m.name, name, m.name });
+            try self.ind();
+            try self.print("{s}self.{s} = &.{{}};\n", .{ indent, m.name });
+        }
     }
 
     /// Release an ordinary owned string and empty it for idempotent cleanup.
@@ -7335,6 +7396,7 @@ const Generator = struct {
     fn usesGenericOwnership(self: *Generator, tr: ir.TypeRef, dims: []const u64) bool {
         if (!self.typeOwnsHeap(tr)) return false;
         if (dims.len > 0 or arrayTypedefOf(tr) != null or resolveAlias(tr) == .map) return true;
+        if (resolveAlias(tr) == .wstring) return true;
         const seq = resolvedSequence(tr) orelse return false;
         return self.elemUsesGenericOwnership(seq.element.*, seq.bound != null);
     }
@@ -7444,14 +7506,22 @@ const Generator = struct {
                     defer self.alloc.free(inner);
                     try self.ind();
                     try self.print("{s}    for ({s}[0..{s}._length]) |{s}| {{\n", .{ body, sb, access, se });
-                    // String elements in C-ABI buffers are [*:0]const u8; span them for writeString.
+                    // String elements in C-ABI buffers are [*:0]const u8 (wide
+                    // ones [*:0]const u16); span them for writeString.
                     const is_c_str_elem_w = switch (seq.element.*) {
                         .string => |b| b == null,
+                        else => false,
+                    };
+                    const is_c_wstr_elem_w = switch (seq.element.*) {
+                        .wstring => |b| b == null,
                         else => false,
                     };
                     if (is_c_str_elem_w) {
                         try self.ind();
                         try self.print("{s}try writer.writeString(std.mem.span({s}));\n", .{ inner, se });
+                    } else if (is_c_wstr_elem_w) {
+                        try self.ind();
+                        try self.print("{s}try writer.writeWstring(std.mem.span({s}));\n", .{ inner, se });
                     } else {
                         try self.emitWriteForTypeRef(seq.element.*, se, inner);
                     }
@@ -7683,7 +7753,15 @@ const Generator = struct {
                     else
                         try self.alloc.dupe(u8, buf_elem_raw);
                     defer self.alloc.free(buf_elem);
-                    const generic = self.elemUsesGenericOwnership(seq.element.*, false);
+                    // A wide string element is assigned last, from a value
+                    // decoded whole (as a string element is), so it needs no
+                    // destructible start or cleanup of its own: freeing the
+                    // static empty start would be wrong.
+                    const c_wstr_elem = switch (seq.element.*) {
+                        .wstring => |sb| sb == null,
+                        else => false,
+                    };
+                    const generic = self.elemUsesGenericOwnership(seq.element.*, false) and !c_wstr_elem;
                     try self.ind();
                     try self.print("{s}{s}._length = 0;\n", .{ ii, out_expr });
                     try self.ind();
@@ -7720,6 +7798,10 @@ const Generator = struct {
                         .string => |sb| sb == null,
                         else => false,
                     };
+                    const is_c_wstr_elem = switch (seq.element.*) {
+                        .wstring => |sb| sb == null,
+                        else => false,
+                    };
                     const elem_lval = try std.fmt.allocPrint(self.alloc, "{s}.*", .{se});
                     defer self.alloc.free(elem_lval);
                     if (is_c_str_elem) {
@@ -7729,6 +7811,20 @@ const Generator = struct {
                         try self.print("{s}const {s} = try reader.readStringZeroCopy();\n", .{ iv, rs });
                         try self.ind();
                         try self.print("{s}{s} = (try allocator.dupeSentinel(u8, {s}, 0)).ptr;\n", .{ iv, elem_lval, rs });
+                    } else if (is_c_wstr_elem) {
+                        // A wide string decodes into host-order units, which
+                        // the element holds NUL-terminated: one with a zero
+                        // unit inside cannot be held so, and is refused.
+                        const rs = try self.collName("_rws");
+                        defer self.alloc.free(rs);
+                        try self.ind();
+                        try self.print("{s}const {s} = try reader.readWstring(allocator);\n", .{ iv, rs });
+                        try self.ind();
+                        try self.print("{s}defer allocator.free({s});\n", .{ iv, rs });
+                        try self.ind();
+                        try self.print("{s}if (std.mem.indexOfScalar(u16, {s}, 0) != null) return error.InvalidString;\n", .{ iv, rs });
+                        try self.ind();
+                        try self.print("{s}{s} = (try allocator.dupeSentinel(u16, {s}, 0)).ptr;\n", .{ iv, elem_lval, rs });
                     } else {
                         try self.emitReadForTypeRef(seq.element.*, elem_lval, iv);
                     }
@@ -12952,9 +13048,23 @@ test "zig_backend: unsupported map keys fail before output even without codecs" 
     }
 }
 
+/// A string or wide string member whose `@default` is static: a non-empty
+/// literal, or a constant it names. Decoded and cloned values are allocated,
+/// so `deinit` tells them apart from it by identity and frees only those.
 fn memberHasBorrowedStringDefault(m: ir.StructMember) bool {
-    if (m.dimensions.len != 0 or !memberHasNonEmptyStringDefault(m)) return false;
-    return typeRefIsDirectPlainString(m.type_ref);
+    if (m.dimensions.len != 0) return false;
+    const dv = m.annotations.default_value orelse return false;
+    const static_default = switch (dv) {
+        .string => |s| s.len > 0,
+        .wide_string => |s| s.len > 0,
+        .scoped_name => true,
+        else => false,
+    };
+    if (!static_default) return false;
+    return typeRefIsDirectPlainString(m.type_ref) or switch (resolveAlias(m.type_ref)) {
+        .wstring => |bound| bound == null,
+        else => false,
+    };
 }
 
 test "zig: @standalone constructors are exported by the module's exportCAbi, outside the vtable" {
@@ -13238,6 +13348,26 @@ test "zig_backend: a view keeps a string default naming a constant" {
     try testing.expect(has(view, "s: []const u8 = FALLBACK,"));
 }
 
+test "zig_backend: a view frees a wstring member only when it no longer holds its static default" {
+    var out = try testGenOpts("struct S { @default(L\"x\") wstring text; @optional @default(L\"o\") wstring maybe; };", "s", .{ .generate_views = true });
+    defer out.deinit(testing.allocator);
+    const view = out.items[std.mem.indexOf(u8, out.items, "pub const View").?..];
+    try testing.expect(has(view, "text: []const u16 = _zidl_default_0,"));
+    try testing.expect(has(view, "maybe: ?[]const u16 = _zidl_default_1,"));
+    try testing.expect(has(view, "if (self.text.len != 0 and self.text.ptr != _zidl_default_0.ptr) alloc.free(self.text);"));
+    try testing.expect(has(view, "if (self.maybe) |_text| { if (_text.len != 0 and _text.ptr != _zidl_default_1.ptr) alloc.free(_text); }"));
+    try testing.expect(!has(view, "deinitOwned(&self.text"));
+}
+
+test "zig_backend: deinitSelected leaves a static default alone, as deinit does" {
+    var out = try testGenOpts("struct S { @key @default(L\"x\") wstring wide; @key @default(\"s\") string text; long n; };", "s", .{ .generate_zzdds_wrappers = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    const selected = s[std.mem.indexOf(u8, s, "pub fn deinitSelected").?..];
+    try testing.expect(has(selected, "            if (self.wide.len != 0 and self.wide.ptr != _zidl_default_0.ptr) alloc.free(self.wide);"));
+    try testing.expect(has(selected, "            if (self.text.len != 0 and self.text.ptr != _zidl_default_1.ptr) alloc.free(self.text);"));
+}
+
 test "zig_backend: a view of a struct owning nothing frees nothing" {
     var out = try testGenOpts("struct P { long x; sequence<float> v; };", "p", .{ .generate_views = true });
     defer out.deinit(testing.allocator);
@@ -13255,4 +13385,67 @@ test "zig_backend: a mutable view dispatches on member ids" {
     try testing.expect(has(body, "var _opt_b: zidl_cdr.cdr_primitives.PrimitivesView = .{ .width = 4, .order = .little };"));
     try testing.expect(has(body, "if (reader.strict_validation and !_seen[0]) return error.MissingRequiredMember;"));
     try testing.expect(!has(body, "!_seen[1]"));
+}
+
+// ── Wide strings and static string defaults ──────────────────────────────────
+
+test "zig_backend: a wstring member is freed and cloned" {
+    var out = try testGen("struct W { wstring ws; @optional wstring ow; };", "w");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "zidl_bindings.deinitOwned(&self.ws, alloc);"));
+    try testing.expect(has(s, "zidl_bindings.deinitOwned(&self.ow.?, alloc);"));
+    try testing.expect(has(s, "result.ws = try zidl_bindings.cloneOwned(self.ws, alloc);"));
+}
+
+test "zig_backend: sequence<wstring> elements are NUL-terminated units" {
+    var out = try testGen("struct W { sequence<wstring> lines; };", "w");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "try writer.writeWstring(std.mem.span(_se));"));
+    try testing.expect(has(s, "const _rws1 = try reader.readWstring(allocator);"));
+    try testing.expect(has(s, "defer allocator.free(_rws1);"));
+    try testing.expect(has(s, "if (std.mem.indexOfScalar(u16, _rws1, 0) != null) return error.InvalidString;"));
+    // Assigned last, so no static start that an errdefer would free.
+    try testing.expect(!has(s, "errdefer zidl_bindings.deinitOwned(_se, allocator);"));
+    try testing.expect(has(s, "_se.* = (try allocator.dupeSentinel(u16, _rws1, 0)).ptr;"));
+}
+
+test "zig_backend: a wstring @default is a static UTF-16 literal deinit keeps" {
+    // A supplementary character takes a surrogate pair.
+    var out = try testGen("struct S { @default(L\"a😀\") wstring text; @default(L\"\") wstring empty; };", "s");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "text: []const u16 = _zidl_default_0,"));
+    try testing.expect(has(s, "const _zidl_default_0: []const u16 = &[_:0]u16{ 0x0061, 0xD83D, 0xDE00 };"));
+    try testing.expect(has(s, "if (self.text.len != 0 and self.text.ptr != _zidl_default_0.ptr) alloc.free(self.text);"));
+    // An empty default allocates nothing and needs no guard.
+    try testing.expect(has(s, "empty: []const u16 = &[_:0]u16{},"));
+    try testing.expect(has(s, "zidl_bindings.deinitOwned(&self.empty, alloc);"));
+}
+
+test "zig_backend: a bounded string or wide string @default fills its BoundedArray" {
+    var out = try testGen("struct B { @default(\"abc\") string<4> text; @default(L\"x\") wstring<2> wide; @optional @default(\"o\") string<1> opt; };", "b");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "text: zidl_cdr.BoundedArray(u8, 4) = zidl_cdr.BoundedArray(u8, 4).fromSlice(\"abc\") catch unreachable,"));
+    try testing.expect(has(s, "wide: zidl_cdr.BoundedArray(u16, 2) = zidl_cdr.BoundedArray(u16, 2).fromSlice(&[_:0]u16{ 0x0078 }) catch unreachable,"));
+    try testing.expect(has(s, "opt: ?zidl_cdr.BoundedArray(u8, 1) = zidl_cdr.BoundedArray(u8, 1).fromSlice(\"o\") catch unreachable,"));
+}
+
+test "zig_backend: a bounded @default longer than its bound is refused" {
+    try testing.expectError(error.DefaultStringTooLong, testGen("struct B { @default(\"abc\") string<2> text; };", "b"));
+    // A supplementary character takes two units.
+    try testing.expectError(error.DefaultStringTooLong, testGen("struct B { @default(L\"\u{1F600}\") wstring<1> wide; };", "b"));
+}
+
+test "zig_backend: a string @default naming a constant is static too" {
+    var out = try testGen(
+        \\module M { const string FALLBACK = "f"; struct S { @default(FALLBACK) string s; }; };
+    , "m");
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "s: []const u8 = _zidl_default_0,"));
+    try testing.expect(has(s, "const _zidl_default_0: []const u8 = FALLBACK;"));
+    try testing.expect(has(s, "if (self.s.len != 0 and self.s.ptr != _zidl_default_0.ptr) alloc.free(self.s);"));
 }

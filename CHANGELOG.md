@@ -18,6 +18,36 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Java: a default naming a constant is the constant's value. It named the constant's
+  holder class, which did not compile. A `wstring` constant or `@default` is its text
+  (they were `""` and `null`), a supplementary character as its surrogate pair. An
+  integer default beyond its field's signed Java range keeps its bits, in hex as constants are.
+
+- C++: a `wstring` constant is declared, as a `constexpr wchar_t` array of its UTF-16
+  units (it was skipped, so a default naming it did not compile), and a `wstring`
+  `@default` literal holds its units, as a decoded `std::wstring` does (it held one NUL).
+
+- C: a `wstring` `@default`, literal or a named constant's, copies its UTF-16 units: into
+  storage from the registered allocator for an unbounded member, in place for a bounded
+  one. It was `0` (NULL). A default containing a NUL is refused at generation.
+
+- Zig: a bounded `string<N>` or `wstring<N>` `@default` compiles: it fills the
+  member's `BoundedArray`, and a literal longer than the bound is refused at generation.
+
+- C: a `@default` naming a constant declared in a module compiles. It used the
+  constant's bare name, but C `#define`s it with its module prefix; the default is now
+  the constant's value, resolved as IDL resolves the name (`::X` and `Other::X`
+  included; the IR's new `default_constant`). A wide character default is its code
+  (it was 0).
+
+- Zig: a string `@default` naming a constant is static, like a literal one: `deinit`
+  no longer frees it.
+
+- Zig: a decoded `wstring` member is owned and freed by `deinit` (it leaked),
+  `sequence<wstring>` compiles (its elements are NUL-terminated UTF-16 units), and a
+  `wstring` `@default` is a static UTF-16 literal that `deinit` leaves alone (it was
+  `undefined`).
+
 - `--generate-views` (C++ backend): each struct also gets a `{Type}View`, decoded in place
   by `{Type}_deserialize_view`, with the C and Zig backends' member kinds: primitive
   sequences and arrays become `zidl::PrimitivesView<T>`s of the input (new header

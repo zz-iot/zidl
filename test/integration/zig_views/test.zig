@@ -247,6 +247,9 @@ test "a view keeps a string's @default when a mutable sample omits it" {
     try t.expectEqualStrings("n", view.name);
     try t.expectEqualStrings(owned.label, view.label);
     try t.expectEqualStrings("fallback", view.label);
+    // A default naming a constant too.
+    try t.expectEqualStrings(owned.named, view.named);
+    try t.expectEqualStrings("named fallback", view.named);
     try t.expectEqualStrings(owned.maybe.?, view.maybe.?);
 }
 
