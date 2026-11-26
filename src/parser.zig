@@ -243,10 +243,15 @@ pub const Parser = struct {
     }
 
     /// Decode C-style escape sequences from `raw` (without surrounding quotes),
-    /// appending the decoded bytes to `out`.
+    /// appending the decoded bytes to `out`. In a wide literal, `\uhhhh` (1 to
+    /// 4 hex digits) is a Unicode character, appended as UTF-8; a high/low
+    /// surrogate pair of them is the one character outside the BMP they
+    /// encode. A `\u` escape anywhere else is an error (IDL 4.2 §7.2.6.2.2).
     fn decodeEscapes(
         self: *Parser,
         raw: []const u8,
+        span: ast.Span,
+        wide: bool,
         out: *std.ArrayListUnmanaged(u8),
     ) ParseError!void {
         var i: usize = 0;
@@ -318,6 +323,25 @@ pub const Parser = struct {
                     }
                     try out.append(self.alloc, val);
                 },
+                'u' => {
+                    if (!wide) return self.fail(span, "a \\u escape is valid only in a wide literal (L\"...\" or L'...')", .{});
+                    i += 1;
+                    var cp = try self.decodeUnicodeEscapeDigits(raw, &i, span);
+                    if (cp >= 0xD800 and cp <= 0xDBFF) {
+                        if (!(i + 1 < raw.len and raw[i] == '\\' and raw[i + 1] == 'u'))
+                            return self.fail(span, "the high surrogate \\u{X:0>4} must be followed by a low surrogate \\u escape", .{cp});
+                        i += 2;
+                        const low = try self.decodeUnicodeEscapeDigits(raw, &i, span);
+                        if (low < 0xDC00 or low > 0xDFFF)
+                            return self.fail(span, "the high surrogate \\u{X:0>4} must be followed by a low surrogate, not \\u{X:0>4}", .{ cp, low });
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                    } else if (cp >= 0xDC00 and cp <= 0xDFFF) {
+                        return self.fail(span, "the low surrogate \\u{X:0>4} must follow a high surrogate", .{cp});
+                    }
+                    var utf8: [4]u8 = undefined;
+                    const n = std.unicode.utf8Encode(@intCast(cp), &utf8) catch unreachable;
+                    try out.appendSlice(self.alloc, utf8[0..n]);
+                },
                 '0'...'7' => {
                     // \ooo — up to three octal digits
                     var val: u8 = 0;
@@ -338,12 +362,25 @@ pub const Parser = struct {
         }
     }
 
+    /// The 1 to 4 hex digits of a `\u` escape, at `i.*`, which they advance.
+    fn decodeUnicodeEscapeDigits(self: *Parser, raw: []const u8, i: *usize, span: ast.Span) ParseError!u21 {
+        var cp: u21 = 0;
+        var count: usize = 0;
+        while (count < 4 and i.* < raw.len and isHexDigit(raw[i.*])) : (count += 1) {
+            cp = cp * 16 + hexVal(raw[i.*]);
+            i.* += 1;
+        }
+        if (count == 0) return self.fail(span, "a \\u escape needs 1 to 4 hex digits", .{});
+        return cp;
+    }
+
     /// Decode a string literal token source (including surrounding quotes and
     /// optional L" prefix) into a heap-allocated `[]const u8`.
-    fn decodeString(self: *Parser, src: []const u8) ParseError![]const u8 {
+    fn decodeString(self: *Parser, src: []const u8, span: ast.Span) ParseError![]const u8 {
         // Strip optional L prefix and surrounding double-quotes.
         var inner = src;
-        if (inner.len > 0 and inner[0] == 'L') {
+        const wide = inner.len > 0 and inner[0] == 'L';
+        if (wide) {
             inner = inner[1..];
         }
         // Strip leading and trailing quote.
@@ -351,7 +388,7 @@ pub const Parser = struct {
             inner = inner[1 .. inner.len - 1];
         }
         var out = std.ArrayListUnmanaged(u8).empty;
-        try self.decodeEscapes(inner, &out);
+        try self.decodeEscapes(inner, span, wide, &out);
         return out.toOwnedSlice(self.alloc);
     }
 
@@ -361,12 +398,12 @@ pub const Parser = struct {
     fn parseStringLiteralConcat(self: *Parser) ParseError!struct { value: []const u8, span: ast.Span } {
         const first_tok = try self.expect(.string_literal);
         var buf = std.ArrayListUnmanaged(u8).empty;
-        try buf.appendSlice(self.alloc, try self.decodeString(first_tok.source));
+        try buf.appendSlice(self.alloc, try self.decodeString(first_tok.source, first_tok.span));
         var last_span = first_tok.span;
         while (self.peek().kind == .string_literal) {
             const tok = self.advance();
             last_span = tok.span;
-            try buf.appendSlice(self.alloc, try self.decodeString(tok.source));
+            try buf.appendSlice(self.alloc, try self.decodeString(tok.source, tok.span));
         }
         return .{
             .value = try buf.toOwnedSlice(self.alloc),
@@ -375,14 +412,14 @@ pub const Parser = struct {
     }
 
     /// Decode a character literal token source (e.g. `'x'`, `'\n'`) into a `u8`.
-    fn decodeChar(self: *Parser, src: []const u8) ParseError!u8 {
+    fn decodeChar(self: *Parser, src: []const u8, span: ast.Span) ParseError!u8 {
         // Strip surrounding single-quotes.
         var inner = src;
         if (inner.len >= 2 and inner[0] == '\'') {
             inner = inner[1 .. inner.len - 1];
         }
         var out = std.ArrayListUnmanaged(u8).empty;
-        try self.decodeEscapes(inner, &out);
+        try self.decodeEscapes(inner, span, false, &out);
         if (out.items.len == 0) {
             return 0;
         }
@@ -391,7 +428,7 @@ pub const Parser = struct {
 
     /// Decode a wide character literal token source (e.g. `L'x'`) into a Unicode
     /// code point (`u32`).
-    fn decodeWideChar(self: *Parser, src: []const u8) ParseError!u32 {
+    fn decodeWideChar(self: *Parser, src: []const u8, span: ast.Span) ParseError!u32 {
         // Strip L prefix and surrounding single-quotes.
         var inner = src;
         if (inner.len > 0 and inner[0] == 'L') {
@@ -401,7 +438,7 @@ pub const Parser = struct {
             inner = inner[1 .. inner.len - 1];
         }
         var out = std.ArrayListUnmanaged(u8).empty;
-        try self.decodeEscapes(inner, &out);
+        try self.decodeEscapes(inner, span, true, &out);
         // Decode the first UTF-8 codepoint from the raw bytes.
         const bytes = out.items;
         if (bytes.len == 0) {
@@ -413,9 +450,9 @@ pub const Parser = struct {
 
     /// Decode a wide string literal token source (e.g. `L"hello"`) into a
     /// heap-allocated slice of Unicode code points (`[]u32`).
-    fn decodeWideString(self: *Parser, src: []const u8) ParseError![]u32 {
+    fn decodeWideString(self: *Parser, src: []const u8, span: ast.Span) ParseError![]u32 {
         // Decode raw bytes first (same as decodeString).
-        const raw = try self.decodeString(src);
+        const raw = try self.decodeString(src, span);
         // Then convert UTF-8 bytes to codepoints.
         var codepoints = std.ArrayListUnmanaged(u32).empty;
         var i: usize = 0;
@@ -795,7 +832,7 @@ pub const Parser = struct {
             },
 
             .character_literal => {
-                const val = try self.decodeChar(tok.source);
+                const val = try self.decodeChar(tok.source, tok.span);
                 return ast.ConstExpr{ .literal = .{
                     .value = .{ .character = val },
                     .span = tok.span,
@@ -803,7 +840,7 @@ pub const Parser = struct {
             },
 
             .wide_character_literal => {
-                const val = try self.decodeWideChar(tok.source);
+                const val = try self.decodeWideChar(tok.source, tok.span);
                 return ast.ConstExpr{ .literal = .{
                     .value = .{ .wide_character = val },
                     .span = tok.span,
@@ -827,14 +864,14 @@ pub const Parser = struct {
             .string_literal => {
                 // Concatenate adjacent string literals (§7.2.6.3).
                 var buf = std.ArrayListUnmanaged(u8).empty;
-                const first_str = try self.decodeString(tok.source);
+                const first_str = try self.decodeString(tok.source, tok.span);
                 try buf.appendSlice(self.alloc, first_str);
                 var last_span = tok.span;
 
                 while (self.peek().kind == .string_literal) {
                     const next_tok = self.advance();
                     last_span = next_tok.span;
-                    const next_str = try self.decodeString(next_tok.source);
+                    const next_str = try self.decodeString(next_tok.source, next_tok.span);
                     try buf.appendSlice(self.alloc, next_str);
                 }
 
@@ -849,14 +886,14 @@ pub const Parser = struct {
             .wide_string_literal => {
                 // Concatenate adjacent wide string literals.
                 var codepoints = std.ArrayListUnmanaged(u32).empty;
-                const first_wstr = try self.decodeWideString(tok.source);
+                const first_wstr = try self.decodeWideString(tok.source, tok.span);
                 try codepoints.appendSlice(self.alloc, first_wstr);
                 var last_span = tok.span;
 
                 while (self.peek().kind == .wide_string_literal) {
                     const next_tok = self.advance();
                     last_span = next_tok.span;
-                    const next_wstr = try self.decodeWideString(next_tok.source);
+                    const next_wstr = try self.decodeWideString(next_tok.source, next_tok.span);
                     try codepoints.appendSlice(self.alloc, next_wstr);
                 }
 
@@ -3616,6 +3653,50 @@ test "literal: char escape newline" {
     var p = testParser("'\\n'", arena.allocator());
     const expr = try p.parseLiteral();
     try testing.expectEqual(@as(u8, '\n'), expr.literal.value.character);
+}
+
+test "literal: \\u escapes in a wide string, a surrogate pair as one character" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    // 1 to 4 hex digits; a pair is the character outside the BMP it encodes.
+    var p = testParser("L\"\\u41\\u00e9\\uD83D\\uDE00z\"", arena.allocator());
+    const expr = try p.parseLiteral();
+    try testing.expectEqualSlices(u32, &.{ 'A', 0xE9, 0x1F600, 'z' }, expr.literal.value.wide_string);
+}
+
+test "literal: adjacent wide strings are joined, escapes decoded in each" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var p = testParser("L\"a\" L\"\\u00e9\"", arena.allocator());
+    const expr = try p.parseLiteral();
+    try testing.expectEqualSlices(u32, &.{ 'a', 0xE9 }, expr.literal.value.wide_string);
+}
+
+test "literal: a \\u escape in a wide character" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var p = testParser("L'\\u263A'", arena.allocator());
+    const expr = try p.parseLiteral();
+    try testing.expectEqual(@as(u32, 0x263A), expr.literal.value.wide_character);
+}
+
+test "literal: malformed \\u escapes are refused" {
+    const cases = [_][]const u8{
+        "\"\\u0041\"", // narrow string
+        "'\\u41'", // narrow character
+        "L\"\\uzz\"", // no hex digits
+        "L\"\\uD83D\"", // a high surrogate alone
+        "L\"\\uD83Dx\"", // a high surrogate not followed by a \u escape
+        "L\"\\uD83D\\u0041\"", // followed by something other than a low surrogate
+        "L\"\\uDE00\"", // a low surrogate alone
+    };
+    for (cases) |src| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var p = testParser(src, arena.allocator());
+        try testing.expectError(error.UnexpectedToken, p.parseLiteral());
+        try testing.expect(p.diags.items.len == 1);
+    }
 }
 
 test "literal: string simple" {
