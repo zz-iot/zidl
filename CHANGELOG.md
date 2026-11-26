@@ -18,6 +18,10 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- C++ and Java: an operation or `@static` operation that returns an enum compiles and
+  returns the enum. The C++ wrapper returned the C enum where the C++ `enum class` is
+  required, and did not compile; the JNI bridge cast the C value to a Java reference,
+  which failed at the call. Enum attributes and struct members already converted.
 - IDL: a `\uhhhh` escape (1 to 4 hex digits) in a wide literal is the Unicode character it
   names, and a high/low surrogate pair of them is one character outside the BMP. It was
   kept verbatim (`\`, `u` and the digits). A `\u` escape in a narrow literal, an escape

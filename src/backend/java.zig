@@ -7606,6 +7606,13 @@ const JniBridgeGenerator = struct {
         // child's own `deinit()`).
 
         const ret_is_string = if (op.return_type) |rt| classifyTypeRef(rt) == .string else false;
+        // An enum result is a Java enum object, made from the C value with
+        // the enum's `valueOf(int)`, as a struct member's is.
+        const ret_enum_bin: ?[]u8 = if (op.return_type) |rt| (if (!ret_is_entity and !ret_is_callback and resolveMemberShape(rt) == .enum_)
+            try dataTypeBinaryClassName(self.alloc, self.opts, self.stem_class, self.cross_file, ir.typeDeclQualifiedName(resolveToNamedDecl(rt)))
+        else
+            null) else null;
+        defer if (ret_enum_bin) |b| self.alloc.free(b);
 
         // Non-entity, non-void returns are captured in `_ret` rather than
         // returned immediately: an op can both return a scalar (e.g.
@@ -7637,6 +7644,8 @@ const JniBridgeGenerator = struct {
             try self.print("    {s} _l = {s}_{s}({s}", .{ ret_listener_c_name.?, call_c_name, call_op_name, self_expr });
         } else if (ret_is_string) {
             try self.print("    const char *_rets = (const char *){s}_{s}({s}", .{ call_c_name, call_op_name, self_expr });
+        } else if (ret_enum_bin != null) {
+            try self.print("    jint _rete = (jint){s}_{s}({s}", .{ call_c_name, call_op_name, self_expr });
         } else if (op.return_type != null) {
             try self.print("    {s} _ret = ({s}){s}_{s}({s}", .{ jni_ret, jni_ret, call_c_name, call_op_name, self_expr });
         } else {
@@ -7666,7 +7675,8 @@ const JniBridgeGenerator = struct {
             }
         }
         try self.write(");\n");
-        if (ret_c != null) try self.print("    {s} _ret = ({s})_rc;\n", .{ jni_ret, jni_ret });
+        if (ret_c != null and ret_enum_bin == null) try self.print("    {s} _ret = ({s})_rc;\n", .{ jni_ret, jni_ret });
+        if (ret_enum_bin != null and ret_c != null) try self.write("    jint _rete = (jint)_rc;\n");
         try self.emitReleaseEviction(iface, op);
 
         // A call that fails registers none of its callbacks, so the provider
@@ -7765,6 +7775,18 @@ const JniBridgeGenerator = struct {
             );
         } else if (ret_is_string) {
             try self.write("    return _rets != NULL ? (*env)->NewStringUTF(env, _rets) : NULL;\n");
+        } else if (ret_enum_bin) |bin| {
+            // Last: the out/inout parameters above are written back first,
+            // and nothing calls into Java after `valueOf` may have thrown.
+            try self.print(
+                "    jobject _ret = NULL;\n" ++
+                    "    {{ jclass _ecls = (*env)->FindClass(env, \"{[bin]s}\");\n" ++
+                    "       jmethodID _vo = _ecls != NULL ? (*env)->GetStaticMethodID(env, _ecls, \"valueOf\", \"(I)L{[bin]s};\") : NULL;\n" ++
+                    "       if (_vo != NULL) _ret = (*env)->CallStaticObjectMethod(env, _ecls, _vo, _rete);\n" ++
+                    "       if (_ecls != NULL) (*env)->DeleteLocalRef(env, _ecls); }}\n" ++
+                    "    return _ret;\n",
+                .{ .bin = bin },
+            );
         } else if (op.return_type != null) {
             try self.write("    return _ret;\n");
         }
@@ -10552,6 +10574,34 @@ test "java: JNI bridge source" {
     try testing.expect(std.mem.indexOf(u8, s, "Java_CalcImpl_n_1add") != null);
     try testing.expect(std.mem.indexOf(u8, s, "Java_CalcImpl_n_1reset") != null);
     try testing.expect(std.mem.indexOf(u8, s, "jint _ret = (jint)Calc_add") != null);
+}
+
+test "java: JNI bridge makes an enum result with the Java enum's valueOf" {
+    const alloc = testing.allocator;
+    var ir_spec = try buildIrSpec(alloc,
+        \\module M {
+        \\    enum Mode { M_A, M_B };
+        \\    struct Cfg { string name; };
+        \\    interface Thing { Mode mode(); @static Mode default_mode(); Mode modes(inout Cfg c); };
+        \\};
+    );
+    defer ir_spec.deinit();
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(alloc);
+    const opts = interface.Options{ .input_stem = "thing" };
+    try generateJniSource(alloc, &ir_spec, opts, &out);
+    const s = out.items;
+
+    try testing.expect(std.mem.indexOf(u8, s, "    jint _rete = (jint)M_Thing_mode(") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "    jint _rete = (jint)M_Thing_default_mode(") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "GetStaticMethodID(env, _ecls, \"valueOf\", \"(I)LThing$M$Mode;\")") != null);
+    try testing.expect(std.mem.indexOf(u8, s, "(jobject)M_Thing_mode") == null);
+    // The out parameter is written back before valueOf, which may throw.
+    const fn_start = std.mem.indexOf(u8, s, "Java_ThingImpl_n_1modes(").?;
+    const fill = std.mem.indexOfPos(u8, s, fn_start, "_fill_java(").?;
+    const value_of = std.mem.indexOfPos(u8, s, fn_start, "\"valueOf\"").?;
+    try testing.expect(fill < value_of);
 }
 
 test "java: JNI bridge source with package" {
