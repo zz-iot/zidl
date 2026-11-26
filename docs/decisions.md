@@ -15,6 +15,15 @@ route native Zig through the C ABI. See the scope, compatibility constraints and
 acceptance requirements in [Shared native CDR core](design/shared-native-cdr.md).
 This is an agreed direction, not a claim that the migration has shipped.
 
+**Writers and readers come from one generic source, with compile-time fast
+instances and one run-time instance.** Encoding, byte order and output mode are
+each fixed at compile time or chosen at run time. A compile-time `FastSet` at
+each use selects the fast set (default XCDR1-LE and XCDR2-LE); the run-time instance is always
+built. Output is counting or fixed-buffer only: callers count, then write into
+an exact-size buffer, and treat a length mismatch as an error. See
+[Specialized CDR instances](design/cdr-specialized-instances.md) for the
+measurements and rationale.
+
 **Java retains its own codec, with common helpers moving to a shared Java
 runtime.** Generated code continues to traverse Java values. Application builds
 using prebuilt tools and native libraries must not require C or Zig compilers.

@@ -136,7 +136,9 @@ Two specific discrepancies require investigation:
 ## Core and interface requirements
 
 The core must support allocation-free fixed-buffer operation, counting without
-output storage, and growable output. Both reader and writer byte orders are
+output storage, and growable output. (Superseded on 2026-11-26:
+[specialized CDR instances](cdr-specialized-instances.md) drops growable output
+in favor of counting, then writing into a fixed buffer.) Both reader and writer byte orders are
 required for supported encodings. Share primitive encoding, alignment,
 encapsulation, DHEADER/EMHEADER machinery, checked cursor arithmetic and other
 wire operations where semantics match. Inventory discovery ParameterList and

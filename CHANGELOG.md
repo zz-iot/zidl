@@ -18,6 +18,16 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- zidl-cdr: one generic CDR writer and reader, each parameter (encoding, byte order,
+  and for the writer counting or fixed-buffer output) fixed at compile time or left to
+  run time (`docs/design/cdr-specialized-instances.md`). `Writer`, `RuntimeWriter`,
+  `WriterFor`, `serializeAlloc` (count, allocate exactly, write; a length mismatch is an
+  error), `Reader`, `ReaderFor` and `readSample` (one header check per sample, then a
+  fast instance). `CdrReader` is now the generic reader's run-time instance. In
+  `zig build bench-cdr`, the fast writer's count-then-fixed path takes 243 ns against
+  `CdrWriter`'s 416, and the fast reader 199 ns against `CdrReader`'s 682.
+  Generated code and consumers move in later steps; `CdrWriter`, `PlCdrWriter` and
+  `PrimitiveWriter` stay until then.
 - C++ and Java: an operation or `@static` operation that returns an enum compiles and
   returns the enum. The C++ wrapper returned the C enum where the C++ `enum class` is
   required, and did not compile; the JNI bridge cast the C value to a Java reference,

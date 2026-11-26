@@ -117,6 +117,23 @@ pub fn build(b: *std.Build) void {
         break :blk @import("packages/zidl-cdr/c_api_build.zig").add(b, b.path("packages/zidl-cdr"), uninstrumented.codec, target, .Debug, false, true);
     } else cdr_library;
     b.modules.put(b.allocator, "zidl_cdr", runtimes.codec) catch @panic("OOM");
+    {
+        // The CDR instance benchmark (docs/design/cdr-specialized-instances.md).
+        const fast = @import("build/runtime.zig").add(b, b.path("."), target, .ReleaseFast, false);
+        const fast_lib = @import("packages/zidl-cdr/c_api_build.zig").add(b, b.path("packages/zidl-cdr"), fast.codec, target, .ReleaseFast, false, true);
+        const bench_mod = b.createModule(.{
+            .root_source_file = b.path("bench/cdr/bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+            .imports = &.{.{ .name = "zidl_cdr", .module = fast.codec }},
+        });
+        bench_mod.addCSourceFile(.{ .file = b.path("bench/cdr/bench_c.c"), .flags = &.{ "-std=c99", "-O2" } });
+        bench_mod.addIncludePath(b.path("packages/zidl-cdr/include"));
+        bench_mod.linkLibrary(fast_lib);
+        const bench = b.addExecutable(.{ .name = "bench-cdr", .root_module = bench_mod });
+        b.step("bench-cdr", "Benchmark the CDR writer and reader instances (ReleaseFast)").dependOn(&b.addRunArtifact(bench).step);
+    }
     b.modules.put(b.allocator, "zidl_bindings", runtimes.bindings) catch @panic("OOM");
 
     const zidl_xtypes_mod = b.addModule("zidl_xtypes", .{
