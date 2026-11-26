@@ -25,6 +25,19 @@ pub const ENCAP_PL_CDR_LE = cdr.ENCAP_PL_CDR_LE;
 pub const ENCAP_PL_CDR_BE = cdr.ENCAP_PL_CDR_BE;
 pub const cdr_keys = @import("cdr_keys.zig");
 pub const cdr_fixed = @import("cdr_fixed.zig");
+pub const writer = @import("writer.zig");
+pub const Writer = writer.Writer;
+pub const WriterConfig = writer.WriterConfig;
+pub const RuntimeWriter = writer.RuntimeWriter;
+pub const WriterFor = writer.WriterFor;
+pub const FastSet = writer.FastSet;
+pub const Output = writer.Output;
+pub const serializeAlloc = writer.serializeAlloc;
+pub const reader = @import("reader.zig");
+pub const Reader = reader.Reader;
+pub const ReaderConfig = reader.ReaderConfig;
+pub const ReaderFor = reader.ReaderFor;
+pub const readSample = reader.readSample;
 
 test {
     _ = @import("cdr_optional_test.zig");
