@@ -355,6 +355,8 @@ const Generator = struct {
         try self.write("const std = @import(\"std\");\n");
         if (!self.opts.no_typesupport or self.opts.pl_cdr or self.opts.zig_generate_authoring or self.opts.zig_generate_c_api or self.opts.zig_provider_module.len > 0 or itemsHaveCallbackInterfaceOperations(spec.items) or self.itemsNeedLifecycleRuntime(spec.items)) {
             try self.write("const zidl_cdr = @import(\"zidl_cdr\");\nconst zidl_bindings = @import(\"zidl_bindings\");\n");
+            // The encodings with fast CDR instances (--cdr-fast).
+            try self.print("const _cdr_fast: zidl_cdr.FastSet = .{{ .xcdr1_le = {}, .xcdr2_le = {} }};\n", .{ self.opts.cdr_fast_xcdr1, self.opts.cdr_fast_xcdr2 });
         }
         if (self.opts.generate_zzdds_wrappers and !self.opts.no_typesupport and itemsHaveTopicTypes(spec.items)) {
             try self.write("const _zzdds = @import(\"zzdds\");\n");
@@ -741,7 +743,7 @@ const Generator = struct {
     /// Exact-extent admission is opt-in; ordinary DDS evolution decoding keeps
     /// its omitted-member defaults. A local reader preserves caller state on error.
     fn emitValidatedRead(self: *Generator, owns: bool) !void {
-        try self.write("    pub fn deserializeValidated(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {\n        var _reader = reader.*;\n        _reader.strict_validation = true;\n        try @This().deserializeInto(out, &_reader, allocator);\n");
+        try self.write("    pub fn deserializeValidated(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {\n        var _reader = reader.*;\n        _reader.strict_validation = true;\n        try @This().deserializeInto(out, &_reader, allocator);\n");
         if (owns) try self.write("        errdefer out.deinit(allocator);\n");
         try self.write("        if (_reader.pos != _reader.data.len) return error.TrailingBytes;\n        _reader.strict_validation = reader.strict_validation;\n        reader.* = _reader;\n    }\n");
     }
@@ -923,7 +925,7 @@ const Generator = struct {
         const union_has_deinit = self.unionNeedsCleanup(u);
         try self.write("\n");
         try self.ind();
-        try self.write("    pub fn deserializeInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {\n");
+        try self.write("    pub fn deserializeInto(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {\n");
         if (union_has_deinit) {
             // A plain unconditional `errdefer out.deinit(allocator)` (as the
             // struct backend uses) is unsafe here in TWO ways specific to
@@ -1046,7 +1048,7 @@ const Generator = struct {
             try self.write("            }\n        }\n");
         } else {
             if (appendable) {
-                try self.emitReaderWindow("        ", "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
+                try self.emitReaderWindow("        ", "if (reader.isXcdr2()) try reader.readMutableDheader() else null");
             }
             // Read discriminant into a local -- unconditionally overwritten
             // (or the function returns on error) before ever being read, so
@@ -1094,7 +1096,7 @@ const Generator = struct {
         // ── skip ──────────────────────────────────────────────────────────────
         try self.write("\n");
         try self.ind();
-        try self.write("    /// Structural traversal only; success is not sample admission.\n    pub fn skip(reader: *zidl_cdr.CdrReader) !void {\n");
+        try self.write("    /// Structural traversal only; success is not sample admission.\n    pub fn skip(reader: anytype) !void {\n");
         if (mutable) {
             try self.ind();
             try self.write("        const _end = try reader.readMutableDheader();\n");
@@ -1103,7 +1105,7 @@ const Generator = struct {
         } else {
             if (appendable) {
                 try self.ind();
-                try self.write("        if (reader.xcdr_version == .xcdr2) {\n");
+                try self.write("        if (reader.isXcdr2()) {\n");
                 try self.ind();
                 try self.write("            const _size = try reader.readDheader();\n");
                 try self.ind();
@@ -1519,14 +1521,14 @@ const Generator = struct {
                 try self.write("    }\n");
                 try self.write("\n");
                 try self.ind();
-                try self.write("    pub fn deserializeInto(out: *@This(), reader: *zidl_cdr.CdrReader, _: std.mem.Allocator) !void {\n");
+                try self.write("    pub fn deserializeInto(out: *@This(), reader: anytype, _: std.mem.Allocator) !void {\n");
                 try self.ind();
                 try self.print("        out.* = @bitCast(@as(u{d}, @truncate(try reader.{s}())));\n", .{ total, read_m });
                 try self.ind();
                 try self.write("    }\n");
                 try self.write("\n");
                 try self.ind();
-                try self.write("    /// Structural traversal only; success is not sample admission.\n    pub fn skip(reader: *zidl_cdr.CdrReader) !void {\n");
+                try self.write("    /// Structural traversal only; success is not sample admission.\n    pub fn skip(reader: anytype) !void {\n");
                 try self.ind();
                 try self.print("        _ = try reader.{s}();\n", .{read_m});
                 try self.ind();
@@ -4047,7 +4049,7 @@ const Generator = struct {
         try self.ind();
         try self.write("    /// reader's input is. On failure `out` is reset and owns nothing.\n");
         try self.ind();
-        try self.write("    pub fn deserializeView(out: *View, reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {\n");
+        try self.write("    pub fn deserializeView(out: *View, reader: anytype, allocator: std.mem.Allocator) !void {\n");
         try self.ind();
         try self.write("        out.* = .{};\n");
         try self.ind();
@@ -4107,7 +4109,7 @@ const Generator = struct {
             }
         } else {
             if (appendable) {
-                try self.emitReaderWindow("        ", "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
+                try self.emitReaderWindow("        ", "if (reader.isXcdr2()) try reader.readMutableDheader() else null");
             }
             for (wire_fields) |field| {
                 var m = field.member.*;
@@ -4686,7 +4688,7 @@ const Generator = struct {
         // ── deserializeInto ──────────────────────────────────────────────────
         const struct_has_deinit = self.structNeedsCleanup(s);
         try self.ind();
-        try self.print("    pub fn {s}(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {{\n", .{if (projection) "deserializeKeyValueInto" else "deserializeInto"});
+        try self.print("    pub fn {s}(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {{\n", .{if (projection) "deserializeKeyValueInto" else "deserializeInto"});
         if (struct_has_deinit and !projection) {
             // A mid-decode error leaves `out` self-cleaning instead of relying
             // on the caller's `defer out.deinit(alloc)` idiom — safe because
@@ -4702,7 +4704,7 @@ const Generator = struct {
         if (mutable) {
             if (projection) {
                 try self.ind();
-                try self.write("        if (reader.xcdr_version != .xcdr2) return error.UnsupportedKeyEncoding;\n");
+                try self.write("        if (!reader.isXcdr2()) return error.UnsupportedKeyEncoding;\n");
             }
             // @mutable: read DHEADER for end pos, loop on EMHEADER-framed members.
             try self.ind();
@@ -4759,7 +4761,7 @@ const Generator = struct {
             }
         } else {
             if (appendable) {
-                try self.emitReaderWindow("        ", "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
+                try self.emitReaderWindow("        ", "if (reader.isXcdr2()) try reader.readMutableDheader() else null");
             }
 
             for (wire_fields) |field| {
@@ -4819,7 +4821,7 @@ const Generator = struct {
 
         // skip (allocation-free fast-forward over one full serialized sample)
         try self.ind();
-        try self.write("    /// Structural traversal only; success is not sample admission.\n    pub fn skip(reader: *zidl_cdr.CdrReader) !void {\n");
+        try self.write("    /// Structural traversal only; success is not sample admission.\n    pub fn skip(reader: anytype) !void {\n");
         if (mutable) {
             try self.ind();
             try self.write("        const _end = try reader.readMutableDheader();\n");
@@ -4828,7 +4830,7 @@ const Generator = struct {
         } else {
             if (appendable) {
                 try self.ind();
-                try self.write("        if (reader.xcdr_version == .xcdr2) {\n");
+                try self.write("        if (reader.isXcdr2()) {\n");
                 try self.ind();
                 try self.write("            const _size = try reader.readDheader();\n");
                 try self.ind();
@@ -4865,7 +4867,7 @@ const Generator = struct {
             try self.ind();
             try self.write("    }\n\n");
             try self.ind();
-            try self.write("    pub fn deserializeKeyInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {\n");
+            try self.write("    pub fn deserializeKeyInto(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {\n");
             try self.ind();
             try self.write("        try @This().deserializeKeyValueInto(out, reader, allocator);\n");
             try self.ind();
@@ -4936,13 +4938,13 @@ const Generator = struct {
 
             try self.write("\n");
             try self.ind();
-            try self.write("    pub fn deserializeKeyInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {\n");
+            try self.write("    pub fn deserializeKeyInto(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {\n");
             try self.ind();
             try self.write("        _ = out;\n");
             try self.ind();
             try self.write("        _ = allocator;\n");
             if (appendable) {
-                try self.emitReaderWindow("        ", "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
+                try self.emitReaderWindow("        ", "if (reader.isXcdr2()) try reader.readMutableDheader() else null");
             } else {
                 // See serializeKey's matching comment above.
                 try self.ind();
@@ -4972,7 +4974,7 @@ const Generator = struct {
         if (mutable and self.opts.pl_cdr) {
             try self.write("\n");
             try self.ind();
-            try self.write("    pub fn serializePlCdr(writer: *zidl_cdr.PlCdrWriter, value: @This()) !void {\n");
+            try self.write("    pub fn serializePlCdr(writer: anytype, value: @This()) !void {\n");
             for (s.members, 0..) |m, idx| {
                 const pid: u32 = memberIdAt(m, idx);
                 if (m.annotations.is_pl_repeated) {
@@ -5079,7 +5081,7 @@ const Generator = struct {
             try self.ind();
             try self.write("    /// `var v: @This() = .{}; defer v.deinit(a); try deserializeFromPlCdr(&v, ...);`.\n");
             try self.ind();
-            try self.write("    pub fn deserializeFromPlCdr(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator, mode: zidl_cdr.PlMode) !void {\n");
+            try self.write("    pub fn deserializeFromPlCdr(out: *@This(), reader: anytype, allocator: std.mem.Allocator, mode: zidl_cdr.PlMode) !void {\n");
             if (!needs_alloc and !pl_retain and !struct_has_deinit) {
                 try self.ind();
                 try self.write("        _ = allocator;\n");
@@ -5294,29 +5296,31 @@ const Generator = struct {
         try self.ind();
         try self.write("    pub fn keyCdr(value: *const @This(), xcdr2: bool, allocator: std.mem.Allocator) ![]u8 {\n");
         try self.ind();
-        try self.write("        var _buf = std.ArrayList(u8).empty;\n");
+        try self.write("        const _Self = @This();\n");
         try self.ind();
-        try self.write("        errdefer _buf.deinit(allocator);\n");
+        try self.write("        const _Enc = struct {\n");
         try self.ind();
-        try self.write("        if (xcdr2) {\n");
+        try self.write("            fn x2(w: anytype, v: *const _Self) !void {\n");
         try self.ind();
-        try self.write("            var _w = zidl_cdr.CdrWriter(.xcdr2).init(&_buf, allocator);\n");
+        try self.print("                try w.{s}();\n", .{header});
         try self.ind();
-        try self.print("            try _w.{s}();\n", .{header});
+        try self.write("                try _Self.serializeKey(w, v.*);\n");
         try self.ind();
-        try self.write("            try @This().serializeKey(&_w, value.*);\n");
+        try self.write("            }\n");
         try self.ind();
-        try self.write("        } else {\n");
+        try self.write("            fn x1(w: anytype, v: *const _Self) !void {\n");
         try self.ind();
-        try self.write("            var _w = zidl_cdr.CdrWriter(.xcdr1).init(&_buf, allocator);\n");
+        try self.write("                try w.writeEncapHeader();\n");
         try self.ind();
-        try self.write("            try _w.writeEncapHeader();\n");
+        try self.write("                try _Self.serializeKey(w, v.*);\n");
         try self.ind();
-        try self.write("            try @This().serializeKey(&_w, value.*);\n");
+        try self.write("            }\n");
         try self.ind();
-        try self.write("        }\n");
+        try self.write("        };\n");
         try self.ind();
-        try self.write("        return _buf.toOwnedSlice(allocator);\n");
+        try self.write("        if (xcdr2) return zidl_cdr.serializeAlloc(_cdr_fast, .xcdr2, .little, allocator, value, _Enc.x2);\n");
+        try self.ind();
+        try self.write("        return zidl_cdr.serializeAlloc(_cdr_fast, .xcdr1, .little, allocator, value, _Enc.x1);\n");
         try self.ind();
         try self.write("    }\n");
         try self.write("\n");
@@ -5335,7 +5339,7 @@ const Generator = struct {
         try self.ind();
         try self.write("        @This().deserializeSelected(&_reader, @This().KEY_FIELD_MASK, &_key_value, allocator) catch return null;\n");
         try self.ind();
-        try self.write("        return _key_value.keyCdr(_reader.xcdr_version == .xcdr2, allocator) catch null;\n");
+        try self.write("        return _key_value.keyCdr(_reader.isXcdr2(), allocator) catch null;\n");
         try self.ind();
         try self.write("    }\n");
     }
@@ -5543,7 +5547,7 @@ const Generator = struct {
 
         // deserializeSelected
         try self.ind();
-        try self.write("    /// Field projection only; skipped content is not validated.\n    pub fn deserializeSelected(reader: *zidl_cdr.CdrReader, want: FieldMask, out: *@This(), allocator: std.mem.Allocator) !void {\n");
+        try self.write("    /// Field projection only; skipped content is not validated.\n    pub fn deserializeSelected(reader: anytype, want: FieldMask, out: *@This(), allocator: std.mem.Allocator) !void {\n");
         if (fallback) {
             try self.ind();
             try self.write("        _ = want;\n");
@@ -5561,7 +5565,7 @@ const Generator = struct {
             try self.ind();
             try self.write("        out.* = .{};\n");
             if (appendable) {
-                try self.emitReaderWindow("        ", "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
+                try self.emitReaderWindow("        ", "if (reader.isXcdr2()) try reader.readMutableDheader() else null");
             }
             for (s.members, 0..) |m, idx| {
                 const out_expr = try std.fmt.allocPrint(self.alloc, "out.{s}", .{m.name});
@@ -5991,25 +5995,35 @@ const Generator = struct {
         try self.ind();
         try self.write("        if (!info.valid_data and data.len == 0) return;\n");
         try self.ind();
-        try self.write("        var _r = try zidl_cdr.CdrReader.init(data);\n");
+        // One header check per sample, then a fast reader where there is one
+        // (docs/design/cdr-specialized-instances.md).
+        try self.write("        try zidl_cdr.readSample(_cdr_fast, void, data, _DecodeArgs{ .value = value, .alloc = self._alloc, .valid = info.valid_data }, _decodeWith);\n");
         try self.ind();
-        try self.write("        if (info.valid_data) {\n");
+        try self.write("    }\n");
+        try self.write("\n");
         try self.ind();
-        try self.print("            try {s}.deserializeInto(value, &_r, self._alloc);\n", .{type_name});
+        try self.print("    const _DecodeArgs = struct {{ value: *{s}, alloc: std.mem.Allocator, valid: bool }};\n", .{type_name});
+        try self.write("\n");
+        try self.ind();
+        try self.write("    fn _decodeWith(_r: anytype, a: _DecodeArgs) !void {\n");
+        try self.ind();
+        try self.write("        if (a.valid) {\n");
+        try self.ind();
+        try self.print("            try {s}.deserializeInto(a.value, _r, a.alloc);\n", .{type_name});
         try self.ind();
         try self.write("        } else {\n");
         if (needs_deinit) {
             try self.ind();
             try self.print("            var _kv: {s} = .{{}};\n", .{type_name});
             try self.ind();
-            try self.write("            errdefer _kv.deinit(self._alloc);\n");
+            try self.write("            errdefer _kv.deinit(a.alloc);\n");
             try self.ind();
-            try self.print("            try {s}.deserializeKeyInto(&_kv, &_r, self._alloc);\n", .{type_name});
+            try self.print("            try {s}.deserializeKeyInto(&_kv, _r, a.alloc);\n", .{type_name});
             try self.ind();
-            try self.write("            value.* = _kv;\n");
+            try self.write("            a.value.* = _kv;\n");
         } else {
             try self.ind();
-            try self.print("            try {s}.deserializeKeyInto(value, &_r, self._alloc);\n", .{type_name});
+            try self.print("            try {s}.deserializeKeyInto(a.value, _r, a.alloc);\n", .{type_name});
         }
         try self.ind();
         try self.write("        }\n");
@@ -6169,45 +6183,43 @@ const Generator = struct {
         try self.ind();
         try self.print("    pub fn {s}(self: @This(), {s}: {s}, _: _zzdds.DDS.InstanceHandle_t{s}) !void {{\n", .{ method_name, param_name, type_name, ts_param });
         try self.ind();
-        try self.write("        var _buf = std.ArrayList(u8).empty;\n");
+        // Counted, then written into one exact allocation
+        // (docs/design/cdr-specialized-instances.md).
+        const ser = if (use_key) "serializeKey" else "serialize";
+        const x2_header = switch (ext) {
+            // XCDR2 representation id follows the top-level extensibility
+            // (CDR2 / D_CDR2 / PL_CDR2); peers reject a mismatched one.
+            .final => "writeEncapHeader",
+            .appendable => "writeEncapHeaderDelimited",
+            .mutable => "writeEncapHeaderMutable",
+        };
         try self.ind();
-        try self.write("        defer _buf.deinit(self._alloc);\n");
+        try self.write("        const _Enc = struct {\n");
         try self.ind();
-        try self.write("        if (self._xcdr2) {\n");
+        try self.print("            fn x2(w: anytype, v: {s}) !void {{\n", .{type_name});
         try self.ind();
-        try self.write("            var _w = zidl_cdr.CdrWriter(.xcdr2).init(&_buf, self._alloc);\n");
+        try self.print("                try w.{s}();\n", .{x2_header});
         try self.ind();
-        // XCDR2 representation id follows the top-level extensibility
-        // (CDR2 / D_CDR2 / PL_CDR2); peers reject a mismatched one.
-        switch (ext) {
-            .final => try self.write("            try _w.writeEncapHeader();\n"),
-            .appendable => try self.write("            try _w.writeEncapHeaderDelimited();\n"),
-            .mutable => try self.write("            try _w.writeEncapHeaderMutable();\n"),
-        }
+        try self.print("                try {s}.{s}(w, v);\n", .{ type_name, ser });
         try self.ind();
-        if (use_key) {
-            try self.print("            try {s}.serializeKey(&_w, {s});\n", .{ type_name, param_name });
-        } else {
-            try self.print("            try {s}.serialize(&_w, {s});\n", .{ type_name, param_name });
-        }
+        try self.write("            }\n");
         try self.ind();
-        try self.write("        } else {\n");
+        try self.print("            fn x1(w: anytype, v: {s}) !void {{\n", .{type_name});
         try self.ind();
-        try self.write("            var _w = zidl_cdr.CdrWriter(.xcdr1).init(&_buf, self._alloc);\n");
+        try self.write("                try w.writeEncapHeader();\n");
         try self.ind();
-        try self.write("            try _w.writeEncapHeader();\n");
+        try self.print("                try {s}.{s}(w, v);\n", .{ type_name, ser });
         try self.ind();
-        if (use_key) {
-            try self.print("            try {s}.serializeKey(&_w, {s});\n", .{ type_name, param_name });
-        } else {
-            try self.print("            try {s}.serialize(&_w, {s});\n", .{ type_name, param_name });
-        }
+        try self.write("            }\n");
         try self.ind();
-        try self.write("        }\n");
+        try self.write("        };\n");
         try self.ind();
+        try self.print("        const _bytes = if (self._xcdr2) try zidl_cdr.serializeAlloc(_cdr_fast, .xcdr2, .little, self._alloc, {s}, _Enc.x2) else try zidl_cdr.serializeAlloc(_cdr_fast, .xcdr1, .little, self._alloc, {s}, _Enc.x1);\n", .{ param_name, param_name });
+        try self.ind();
+        try self.write("        defer self._alloc.free(_bytes);\n");
         try self.print("        const _hash = {s}.computeKeyHash(&{s});\n", .{ type_name, param_name });
         try self.ind();
-        try self.print("        try {s}(self._dw, .{s}, _hash, _buf.items{s});\n", .{ write_fn, kind_str, ts_arg });
+        try self.print("        try {s}(self._dw, .{s}, _hash, _bytes{s});\n", .{ write_fn, kind_str, ts_arg });
         try self.ind();
         try self.write("    }\n");
     }
@@ -7688,7 +7700,7 @@ const Generator = struct {
                 const se = try self.collName("_se");
                 defer self.alloc.free(se);
                 if (!isPrimitiveElement(seq.element.*)) {
-                    try self.emitReaderWindow(ii, "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
+                    try self.emitReaderWindow(ii, "if (reader.isXcdr2()) try reader.readMutableDheader() else null");
                 }
                 try self.ind();
                 try self.print("{s}const {s} = try reader.readU32();\n", .{ ii, n });
@@ -7850,7 +7862,7 @@ const Generator = struct {
                 const mv = try self.collName("_mv");
                 defer self.alloc.free(mv);
                 if (!(isPrimitiveElement(m.key.*) and isPrimitiveElement(m.value.*))) {
-                    try self.emitReaderWindow(ii, "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
+                    try self.emitReaderWindow(ii, "if (reader.isXcdr2()) try reader.readMutableDheader() else null");
                 }
                 try self.ind();
                 try self.print("{s}const {s} = try reader.readU32();\n", .{ ii, mn });
@@ -8218,7 +8230,9 @@ const Generator = struct {
         const id = self.reader_window_id;
         self.reader_window_id += 1;
         try self.ind();
-        try self.print("{s}var _read_window_{d} = if ({s}) |_limit| try reader.window(_limit) else null;\n", .{ extra, id, end_expr });
+        // Typed: in a fast reader, `isXcdr2()` is compile-time known, so the
+        // limit and the window would otherwise lose their optionality.
+        try self.print("{s}var _read_window_{d}: ?@TypeOf(reader.*).Window = if (@as(?usize, {s})) |_limit| try reader.window(_limit) else null;\n", .{ extra, id, end_expr });
         try self.ind();
         try self.print("{s}defer if (_read_window_{d}) |*_window| _window.close();\n", .{ extra, id });
         try self.ind();
@@ -8231,7 +8245,7 @@ const Generator = struct {
         if (framed) {
             try self.ind();
             try self.print("{s}{{\n", .{extra});
-            try self.emitReaderWindow(extra, "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
+            try self.emitReaderWindow(extra, "if (reader.isXcdr2()) try reader.readMutableDheader() else null");
         }
         try self.emitReadArrayDims(elem_tr, base_access, dims, extra, depth);
         if (framed) {
@@ -8363,7 +8377,7 @@ const Generator = struct {
             try self.ind();
             try self.print("{s}defer _scope.close();\n", .{extra});
             try self.ind();
-            try self.print("{s}if (reader.xcdr_version == .xcdr2 and _scope.present) {{\n", .{extra});
+            try self.print("{s}if (reader.isXcdr2() and _scope.present) {{\n", .{extra});
             const inner = try std.fmt.allocPrint(self.alloc, "{s}    ", .{extra});
             defer self.alloc.free(inner);
             if (m.dimensions.len > 0) {
@@ -8388,7 +8402,7 @@ const Generator = struct {
         if (framed) {
             try self.ind();
             try self.print("{s}{{\n", .{extra});
-            try self.emitReaderWindow(extra, "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
+            try self.emitReaderWindow(extra, "if (reader.isXcdr2()) try reader.readMutableDheader() else null");
         }
         try self.emitSkipArrayDims(elem_tr, dims, extra, depth);
         if (framed) {
@@ -8449,7 +8463,7 @@ const Generator = struct {
                 const n = try self.collName("_n");
                 defer self.alloc.free(n);
                 if (!isPrimitiveElement(seq.element.*)) {
-                    try self.emitReaderWindow(inner, "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
+                    try self.emitReaderWindow(inner, "if (reader.isXcdr2()) try reader.readMutableDheader() else null");
                 }
                 try self.ind();
                 try self.print("{s}const {s} = try reader.readU32();\n", .{ inner, n });
@@ -8479,7 +8493,7 @@ const Generator = struct {
                 const mn = try self.collName("_mn");
                 defer self.alloc.free(mn);
                 if (!(isPrimitiveElement(m.key.*) and isPrimitiveElement(m.value.*))) {
-                    try self.emitReaderWindow(inner, "if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null");
+                    try self.emitReaderWindow(inner, "if (reader.isXcdr2()) try reader.readMutableDheader() else null");
                 }
                 try self.ind();
                 try self.print("{s}const {s} = try reader.readU32();\n", .{ inner, mn });
@@ -9736,7 +9750,7 @@ test "zig_backend: union CDR serialize/deserialize" {
     const s = out.items;
     try testing.expect(has(s, "pub const has_key = false;"));
     try testing.expect(has(s, "pub fn serialize(writer: anytype, value: @This()) !void {"));
-    try testing.expect(has(s, "pub fn deserializeInto(out: *@This(), reader: *zidl_cdr.CdrReader"));
+    try testing.expect(has(s, "pub fn deserializeInto(out: *@This(), reader: anytype"));
     try testing.expect(has(s, "try writer.writeI32(value._d);"));
     try testing.expect(has(s, "_d = try reader.readI32();"));
     try testing.expect(has(s, "out._d = _d;"));
@@ -9995,7 +10009,7 @@ test "zig_backend: serialize @final struct primitives" {
     // No DHEADER for @final
     try testing.expect(!has(s, "reserveDheaderMaybe"));
     // deserializeInto present
-    try testing.expect(has(s, "pub fn deserializeInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {"));
+    try testing.expect(has(s, "pub fn deserializeInto(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {"));
     try testing.expect(has(s, "out.x = try reader.readI32();"));
     try testing.expect(has(s, "out.y = try reader.readF32();"));
     try testing.expect(has(s, "out.flag = try reader.readBool();"));
@@ -10045,7 +10059,7 @@ test "zig_backend: keyed struct emits deserializeKeyInto and computeKeyHash" {
     const s = out.items;
     // Out-param only -- no value-returning deserializeKey.
     try testing.expect(!has(s, "pub fn deserializeKey(reader"));
-    try testing.expect(has(s, "pub fn deserializeKeyInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {"));
+    try testing.expect(has(s, "pub fn deserializeKeyInto(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {"));
     try testing.expect(has(s, "out.id = try reader.readI32();"));
     try testing.expect(has(s, "pub fn computeKeyHash(value: *const @This()) [16]u8 {"));
     try testing.expect(has(s, "var _khw = zidl_cdr.KeyHashWriter.init();"));
@@ -10291,7 +10305,7 @@ test "zig_backend: serialize bitset member" {
     try testing.expect(has(s, "pub fn serialize(writer: anytype, value: @This()) !void {"));
     try testing.expect(has(s, "const _bs: u4 = @bitCast(value);"));
     try testing.expect(has(s, "try writer.writeU8(@intCast(_bs));"));
-    try testing.expect(has(s, "pub fn deserializeInto(out: *@This(), reader: *zidl_cdr.CdrReader, _: std.mem.Allocator) !void {"));
+    try testing.expect(has(s, "pub fn deserializeInto(out: *@This(), reader: anytype, _: std.mem.Allocator) !void {"));
     try testing.expect(has(s, "out.* = @bitCast(@as(u4, @truncate(try reader.readU8())));"));
     // struct member dispatch calls .serialize / .deserializeInto
     try testing.expect(has(s, "try BS.serialize(writer, value.bs);"));
@@ -11315,7 +11329,7 @@ test "zig_backend pl_cdr: serializePlCdr emitted for @mutable struct" {
     });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "pub fn serializePlCdr(writer: *zidl_cdr.PlCdrWriter, value: @This()) !void {"));
+    try testing.expect(has(s, "pub fn serializePlCdr(writer: anytype, value: @This()) !void {"));
     try testing.expect(has(s, "reservePlParam(0)"));
     try testing.expect(has(s, "reservePlParam(1)"));
     try testing.expect(has(s, "patchPlParam(_ph0)"));
@@ -11330,7 +11344,7 @@ test "zig_backend pl_cdr: deserializeFromPlCdr emitted for @mutable struct" {
     });
     defer out.deinit(testing.allocator);
     const s = out.items;
-    try testing.expect(has(s, "pub fn deserializeFromPlCdr(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator, mode: zidl_cdr.PlMode) !void {"));
+    try testing.expect(has(s, "pub fn deserializeFromPlCdr(out: *@This(), reader: anytype, allocator: std.mem.Allocator, mode: zidl_cdr.PlMode) !void {"));
     try testing.expect(has(s, "readPlParam(mode)"));
     // Vendor-specific PIDs (bit 0x8000, RTPS 2.5 §9.6.4.2.1) must never alias a
     // standard @id: the switch discriminant routes them to `else` up front.
@@ -11609,16 +11623,17 @@ test "zig_backend: typed DataWriter/DataReader for keyed @appendable struct" {
     try testing.expect(has(s, "pub fn init(dw: _zzdds.DDS.DataWriter, alloc: std.mem.Allocator) @This() {"));
     // write() — @appendable uses writeEncapHeaderDelimited for xcdr2
     try testing.expect(has(s, "pub fn write(self: @This(), instance_data: ShapeType, _: _zzdds.DDS.InstanceHandle_t) !void {"));
-    try testing.expect(has(s, "try _w.writeEncapHeaderDelimited();"));
-    try testing.expect(has(s, "try ShapeType.serialize(&_w, instance_data);"));
-    try testing.expect(has(s, "try _zzdds.writeRaw(self._dw, .alive, _hash, _buf.items);"));
+    try testing.expect(has(s, "                try w.writeEncapHeaderDelimited();\n"));
+    try testing.expect(has(s, "zidl_cdr.serializeAlloc(_cdr_fast, .xcdr2, .little, self._alloc, instance_data, _Enc.x2)"));
+    try testing.expect(has(s, "                try ShapeType.serialize(w, v);\n"));
+    try testing.expect(has(s, "try _zzdds.writeRaw(self._dw, .alive, _hash, _bytes);"));
     // dispose()
     try testing.expect(has(s, "pub fn dispose(self: @This(), instance_data: ShapeType, _: _zzdds.DDS.InstanceHandle_t) !void {"));
-    try testing.expect(has(s, "try ShapeType.serializeKey(&_w, instance_data);"));
-    try testing.expect(has(s, "try _zzdds.writeRaw(self._dw, .dispose, _hash, _buf.items);"));
+    try testing.expect(has(s, "                try ShapeType.serializeKey(w, v);\n"));
+    try testing.expect(has(s, "try _zzdds.writeRaw(self._dw, .dispose, _hash, _bytes);"));
     // unregister_instance()
     try testing.expect(has(s, "pub fn unregister_instance(self: @This(), instance_data: ShapeType, _: _zzdds.DDS.InstanceHandle_t) !void {"));
-    try testing.expect(has(s, "try _zzdds.writeRaw(self._dw, .unregister, _hash, _buf.items);"));
+    try testing.expect(has(s, "try _zzdds.writeRaw(self._dw, .unregister, _hash, _bytes);"));
     // DataReader struct
     try testing.expect(has(s, "pub const ShapeTypeDataReader = struct {"));
     try testing.expect(has(s, "_dr: _zzdds.DDS.DataReader,"));
@@ -11628,7 +11643,8 @@ test "zig_backend: typed DataWriter/DataReader for keyed @appendable struct" {
     try testing.expect(has(s, "info: _zzdds.DDS.SampleInfo,"));
     try testing.expect(has(s, "pub fn take_next_sample(self: @This(), data_value: *ShapeType, sample_info: *_zzdds.DDS.SampleInfo) !bool {"));
     try testing.expect(has(s, "_zzdds.takeRaw(self._dr)"));
-    try testing.expect(has(s, "ShapeType.deserializeInto(value, &_r, self._alloc)"));
+    try testing.expect(has(s, "try zidl_cdr.readSample(_cdr_fast, void, data, _DecodeArgs{ .value = value, .alloc = self._alloc, .valid = info.valid_data }, _decodeWith);"));
+    try testing.expect(has(s, "ShapeType.deserializeInto(a.value, _r, a.alloc)"));
     // A sample that does not decode is ended failed (zzdds's two-step take).
     try testing.expect(has(s, "errdefer _raw.failed = true;"));
     try testing.expect(has(s, "try self._decode(data_value, _raw.data, _raw.info);"));
@@ -11676,7 +11692,7 @@ test "zig_backend: typed DataWriter uses writeEncapHeader for @final struct" {
     // @final: no writeEncapHeaderDelimited anywhere
     try testing.expect(!has(s, "writeEncapHeaderDelimited"));
     // both xcdr1 and xcdr2 branches use plain writeEncapHeader
-    try testing.expect(has(s, "try _w.writeEncapHeader();"));
+    try testing.expect(has(s, "                try w.writeEncapHeader();\n"));
 }
 
 test "zig_backend: DataWriter/DataReader still emitted for a keyless struct" {
@@ -11702,7 +11718,7 @@ test "zig_backend: keyless struct gets trivial key helpers under --generate-zzdd
     try testing.expect(has(s, "pub fn serializeKey(writer: anytype, value: @This()) !void {"));
     // Out-param only -- no value-returning deserializeKey.
     try testing.expect(!has(s, "pub fn deserializeKey(reader"));
-    try testing.expect(has(s, "pub fn deserializeKeyInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {"));
+    try testing.expect(has(s, "pub fn deserializeKeyInto(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {"));
 }
 
 test "zig_backend: get_key_value frees a string key's old value, with no sequence in the type" {
@@ -11739,10 +11755,10 @@ test "zig_backend: get_key_value / selective parse for a non-leading key" {
     try testing.expect(has(s, "pub const KEY_FIELD_MASK: FieldMask = (1 << 1);"));
     try testing.expect(has(s, "pub fn fieldIndex(name: []const u8) ?u6 {"));
     try testing.expect(has(s, "if (std.mem.eql(u8, name, \"payload\")) return 2;"));
-    try testing.expect(has(s, "pub fn deserializeSelected(reader: *zidl_cdr.CdrReader, want: FieldMask, out: *@This(), allocator: std.mem.Allocator) !void {"));
+    try testing.expect(has(s, "pub fn deserializeSelected(reader: anytype, want: FieldMask, out: *@This(), allocator: std.mem.Allocator) !void {"));
     try testing.expect(has(s, "if (want & (1 << 0) != 0) {"));
     // key-only helpers still emitted (the disposed-sample take path needs them)
-    try testing.expect(has(s, "pub fn deserializeKeyInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {"));
+    try testing.expect(has(s, "pub fn deserializeKeyInto(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {"));
     // get_key_value on both sides drives deserializeSelected with the key mask
     const gkv_w = std.mem.indexOf(u8, s, "const _kv = try _zzdds.getKeyValueWriter(self._dw, handle, self._alloc);").?;
     const gkv_w_end = std.mem.indexOfPos(u8, s, gkv_w, "\n    }\n").?;
@@ -11759,7 +11775,7 @@ test "zig_backend: get_key_value / selective parse for a non-leading key" {
     try testing.expect(has(s, "const _key = instance_data.keyCdr(self._xcdr2, self._alloc) catch return _zzdds.registerInstanceRaw(self._dw, _hash, &.{});"));
     try testing.expect(has(s, "pub fn keyCdr(value: *const @This(), xcdr2: bool, allocator: std.mem.Allocator) ![]u8 {"));
     try testing.expect(has(s, "pub fn projectKeyFromCdr(ctx: *anyopaque, sample: []const u8, allocator: std.mem.Allocator) ?[]u8 {"));
-    try testing.expect(has(s, "return _key_value.keyCdr(_reader.xcdr_version == .xcdr2, allocator) catch null;"));
+    try testing.expect(has(s, "return _key_value.keyCdr(_reader.isXcdr2(), allocator) catch null;"));
     // Only the key members reach key_holder; the decoded temporary is freed.
     try testing.expect(has(s[gkv_r..gkv_r_end], "std.mem.swap(@TypeOf(_tmp."));
     try testing.expect(has(s[gkv_r..gkv_r_end], "defer _tmp.deinit(self._alloc);"));
@@ -13320,7 +13336,7 @@ test "zig_backend: view members by kind, with deserializeView and take_view" {
     try testing.expect(has(s, "maybe: ?Inner.View = null,"));
     try testing.expect(has(s, "if (self.maybe) |*_nested| _nested.deinit(alloc);"));
     try testing.expect(has(s, "out._base.id = try reader.readStringZeroCopy();"));
-    try testing.expect(has(s, "pub fn deserializeView(out: *View, reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {"));
+    try testing.expect(has(s, "pub fn deserializeView(out: *View, reader: anytype, allocator: std.mem.Allocator) !void {"));
     try testing.expect(has(s, "pub fn take_view(self: @This()) !?ViewSample {"));
     try testing.expect(has(s, "try S.deserializeView(&_sample.view, &_r, self._alloc);"));
 }

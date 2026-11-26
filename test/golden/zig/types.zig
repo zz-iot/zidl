@@ -3,6 +3,7 @@
 const std = @import("std");
 const zidl_cdr = @import("zidl_cdr");
 const zidl_bindings = @import("zidl_bindings");
+const _cdr_fast: zidl_cdr.FastSet = .{ .xcdr1_le = true, .xcdr2_le = true };
 
 pub const Color = enum(u32) {
     RED = 0,
@@ -41,7 +42,7 @@ pub const Point = extern struct {
 
     pub const has_key = false;
 
-    pub fn deserializeValidated(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
+    pub fn deserializeValidated(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {
         var _reader = reader.*;
         _reader.strict_validation = true;
         try @This().deserializeInto(out, &_reader, allocator);
@@ -54,7 +55,7 @@ pub const Point = extern struct {
         try writer.writeI32(value.y);
     }
 
-    pub fn deserializeInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
+    pub fn deserializeInto(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {
         _ = allocator;
         out.x = try reader.readI32();
         out.y = try reader.readI32();
@@ -65,14 +66,14 @@ pub const Point = extern struct {
         try writer.writeI32(value.y);
     }
 
-    pub fn deserializeKeyValueInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
+    pub fn deserializeKeyValueInto(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {
         _ = allocator;
         out.x = try reader.readI32();
         out.y = try reader.readI32();
     }
 
     /// Structural traversal only; success is not sample admission.
-    pub fn skip(reader: *zidl_cdr.CdrReader) !void {
+    pub fn skip(reader: anytype) !void {
         _ = try reader.readI32();
         _ = try reader.readI32();
     }
@@ -111,7 +112,7 @@ pub const Sample = struct {
 
     pub const has_key = true;
 
-    pub fn deserializeValidated(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
+    pub fn deserializeValidated(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {
         var _reader = reader.*;
         _reader.strict_validation = true;
         try @This().deserializeInto(out, &_reader, allocator);
@@ -155,7 +156,7 @@ pub const Sample = struct {
         try Point.serialize(writer, value.nested);
     }
 
-    pub fn deserializeInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
+    pub fn deserializeInto(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {
         errdefer out.deinit(allocator);
         out.id = try reader.readU32();
         out.b = try reader.readBool();
@@ -194,13 +195,13 @@ pub const Sample = struct {
         try writer.writeU32(value.id);
     }
 
-    pub fn deserializeKeyValueInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
+    pub fn deserializeKeyValueInto(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {
         _ = allocator;
         out.id = try reader.readU32();
     }
 
     /// Structural traversal only; success is not sample admission.
-    pub fn skip(reader: *zidl_cdr.CdrReader) !void {
+    pub fn skip(reader: anytype) !void {
         _ = try reader.readU32();
         _ = try reader.readBool();
         _ = try reader.readU8();
@@ -227,7 +228,7 @@ pub const Sample = struct {
         try @This().serializeKeyValue(writer, value);
     }
 
-    pub fn deserializeKeyInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
+    pub fn deserializeKeyInto(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {
         try @This().deserializeKeyValueInto(out, reader, allocator);
     }
 
@@ -292,7 +293,7 @@ pub const Frame = struct {
 
     pub const has_key = false;
 
-    pub fn deserializeValidated(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
+    pub fn deserializeValidated(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {
         var _reader = reader.*;
         _reader.strict_validation = true;
         try @This().deserializeInto(out, &_reader, allocator);
@@ -308,9 +309,9 @@ pub const Frame = struct {
         try writer.patchDheaderMaybeChecked(_dh);
     }
 
-    pub fn deserializeInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
+    pub fn deserializeInto(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {
         errdefer out.deinit(allocator);
-        var _read_window_0 = if (if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null) |_limit| try reader.window(_limit) else null;
+        var _read_window_0: ?@TypeOf(reader.*).Window = if (@as(?usize, if (reader.isXcdr2()) try reader.readMutableDheader() else null)) |_limit| try reader.window(_limit) else null;
         defer if (_read_window_0) |*_window| _window.close();
         errdefer if (_read_window_0) |*_window| _window.cancel();
         out.seq_num = try reader.readU32();
@@ -324,8 +325,8 @@ pub const Frame = struct {
         try writer.patchDheaderMaybeChecked(_dh);
     }
 
-    pub fn deserializeKeyValueInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
-        var _read_window_1 = if (if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null) |_limit| try reader.window(_limit) else null;
+    pub fn deserializeKeyValueInto(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {
+        var _read_window_1: ?@TypeOf(reader.*).Window = if (@as(?usize, if (reader.isXcdr2()) try reader.readMutableDheader() else null)) |_limit| try reader.window(_limit) else null;
         defer if (_read_window_1) |*_window| _window.close();
         errdefer if (_read_window_1) |*_window| _window.cancel();
         out.seq_num = try reader.readU32();
@@ -333,8 +334,8 @@ pub const Frame = struct {
     }
 
     /// Structural traversal only; success is not sample admission.
-    pub fn skip(reader: *zidl_cdr.CdrReader) !void {
-        if (reader.xcdr_version == .xcdr2) {
+    pub fn skip(reader: anytype) !void {
+        if (reader.isXcdr2()) {
             const _size = try reader.readDheader();
             try reader.skip(_size);
             return;
@@ -374,7 +375,7 @@ pub const Beacon = struct {
 
     pub const has_key = true;
 
-    pub fn deserializeValidated(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
+    pub fn deserializeValidated(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {
         var _reader = reader.*;
         _reader.strict_validation = true;
         try @This().deserializeInto(out, &_reader, allocator);
@@ -390,9 +391,9 @@ pub const Beacon = struct {
         try writer.patchDheaderMaybeChecked(_dh);
     }
 
-    pub fn deserializeInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
+    pub fn deserializeInto(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {
         errdefer out.deinit(allocator);
-        var _read_window_2 = if (if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null) |_limit| try reader.window(_limit) else null;
+        var _read_window_2: ?@TypeOf(reader.*).Window = if (@as(?usize, if (reader.isXcdr2()) try reader.readMutableDheader() else null)) |_limit| try reader.window(_limit) else null;
         defer if (_read_window_2) |*_window| _window.close();
         errdefer if (_read_window_2) |*_window| _window.cancel();
         out.id = try reader.readU32();
@@ -405,17 +406,17 @@ pub const Beacon = struct {
         try writer.patchDheaderMaybeChecked(_dh);
     }
 
-    pub fn deserializeKeyValueInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
+    pub fn deserializeKeyValueInto(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {
         _ = allocator;
-        var _read_window_3 = if (if (reader.xcdr_version == .xcdr2) try reader.readMutableDheader() else null) |_limit| try reader.window(_limit) else null;
+        var _read_window_3: ?@TypeOf(reader.*).Window = if (@as(?usize, if (reader.isXcdr2()) try reader.readMutableDheader() else null)) |_limit| try reader.window(_limit) else null;
         defer if (_read_window_3) |*_window| _window.close();
         errdefer if (_read_window_3) |*_window| _window.cancel();
         out.id = try reader.readU32();
     }
 
     /// Structural traversal only; success is not sample admission.
-    pub fn skip(reader: *zidl_cdr.CdrReader) !void {
-        if (reader.xcdr_version == .xcdr2) {
+    pub fn skip(reader: anytype) !void {
+        if (reader.isXcdr2()) {
             const _size = try reader.readDheader();
             try reader.skip(_size);
             return;
@@ -428,7 +429,7 @@ pub const Beacon = struct {
         try @This().serializeKeyValue(writer, value);
     }
 
-    pub fn deserializeKeyInto(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator) !void {
+    pub fn deserializeKeyInto(out: *@This(), reader: anytype, allocator: std.mem.Allocator) !void {
         try @This().deserializeKeyValueInto(out, reader, allocator);
     }
 

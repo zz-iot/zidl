@@ -184,6 +184,12 @@ pub const Options = struct {
     /// use the original IDL name as the canonical string representation so that
     /// config files and wire diagnostics remain language-agnostic.
     zig_idiomatic_enums: bool = false,
+    /// Zig backend only: the little-endian encodings generated readers and
+    /// writers get compile-time fast instances for (`--cdr-fast`); every
+    /// other encoding uses the run-time instance.
+    /// docs/design/cdr-specialized-instances.md.
+    cdr_fast_xcdr1: bool = true,
+    cdr_fast_xcdr2: bool = true,
     /// Zig backend only: emit `pub fn applyToml(self: *@This(), alloc: std.mem.Allocator,
     /// table: anytype) !void` for every struct, overriding fields present in `table` and
     /// re-duping absent ones from their current value (see the ownership note below).

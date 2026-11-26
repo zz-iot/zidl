@@ -1,7 +1,7 @@
 # Specialized CDR writer and reader instances
 
-Date: 2026-11-26. Status: agreed design. Step 1 (the zidl-cdr core) is
-implemented: `Writer`, `RuntimeWriter`, `Reader` (with `CdrReader` as its
+Date: 2026-11-26. Status: agreed design. Steps 1 (the zidl-cdr core) and 2a (the Zig
+generator) are implemented: `Writer`, `RuntimeWriter`, `Reader` (with `CdrReader` as its
 run-time instance), `WriterFor`/`ReaderFor`, `readSample`, `serializeAlloc` and
 `zig build bench-cdr`. The generators and consumers have not moved yet.
 
@@ -312,10 +312,13 @@ consumers move, then the old writers go.
    `Reader`, so every existing reader test runs on the new code; fast readers,
    `ReaderFor` and per-sample dispatch (`readSample`) are added. `zig build
    bench-cdr` reproduces the measurements, including the C question above.
-2. **Zig generator.** `--cdr-fast`; count-then-fixed writes through `WriterFor`;
-   generated deserializers take `reader: anytype`, use `isXcdr2()`, and are
-   entered through `readSample`. Then `CdrWriter`, `PlCdrWriter` and
-   `PrimitiveWriter` are removed.
+2. **Zig generator (done).** `--cdr-fast`; the typed DataWriter and `keyCdr`
+   count, then write (`serializeAlloc`); generated deserializers take `reader:
+   anytype` and use `isXcdr2()`, and the typed DataReader enters them through
+   `readSample`. A reader window's variable is typed (`?@TypeOf(reader.*).Window`),
+   since a fast reader makes `isXcdr2()` compile-time known. Then (2b) `CdrWriter`,
+   `PlCdrWriter` and `PrimitiveWriter` are removed and zidl's own tests move to the
+   new writer.
 3. **C ABI and C/C++ generators.** `ZidlCdrWriter` drops growable output; the
    library exports per-fast-instance entry points; C/C++ code is generated per
    instance, counts then writes, and hashes keys with the streaming key hash.

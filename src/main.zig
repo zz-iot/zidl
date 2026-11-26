@@ -52,6 +52,7 @@
 //!   --zig-generate-toml-config     Emit applyToml(alloc, table: anytype) !void per struct (Zig backend)
 //!   --zig-generate-authoring       Emit strict presence-aware decoding (Zig backend)
 //!   --zig-pl-cdr                   Generate PL_CDR functions for @mutable types (Zig backend)
+//!   --cdr-fast <list>              Encodings with fast CDR instances: xcdr1-le,xcdr2-le (default both) or none (Zig backend)
 //!
 //!   -h, --help                     Show this help
 //!   -v, --version                  Show version
@@ -91,6 +92,8 @@ const Opts = struct {
     /// Optional int query(void *handle); requires a retire hook.
     handle_retire_query: []const u8 = "",
     listener_failure_report: []const u8 = "",
+    cdr_fast_xcdr1: bool = true,
+    cdr_fast_xcdr2: bool = true,
     split_files: bool = false,
     pragma_once: bool = false,
     extern_c: bool = false,
@@ -265,6 +268,10 @@ pub fn main(init: std.process.Init) !void {
             opts.handle_retire_hook = args[i];
         } else if (std.mem.eql(u8, arg, "--listener-failure-report")) {
             opts.listener_failure_report = try optionValue(args, &i, stderr);
+        } else if (std.mem.eql(u8, arg, "--cdr-fast")) {
+            const set = try parseCdrFast(try optionValue(args, &i, stderr), stderr);
+            opts.cdr_fast_xcdr1 = set[0];
+            opts.cdr_fast_xcdr2 = set[1];
         } else if (std.mem.eql(u8, arg, "--handle-retire-query")) {
             i += 1;
             if (i >= args.len) {
@@ -735,6 +742,8 @@ fn processFile(
         .handle_retire_hook = opts.handle_retire_hook,
         .handle_retire_query = opts.handle_retire_query,
         .listener_failure_report = opts.listener_failure_report,
+        .cdr_fast_xcdr1 = opts.cdr_fast_xcdr1,
+        .cdr_fast_xcdr2 = opts.cdr_fast_xcdr2,
         .split_files = opts.split_files,
         .pragma_once = opts.pragma_once,
         .extern_c = opts.extern_c,
@@ -760,6 +769,34 @@ fn processFile(
 
 /// The argument after option `args[i.*]`, advancing `i.*` past it. Exits
 /// with an error when there is none.
+/// `--cdr-fast`'s list: `none`, or encodings from xcdr1-le and xcdr2-le.
+fn parseCdrFast(value: []const u8, stderr: *Io.Writer) ![2]bool {
+    var set = [2]bool{ false, false };
+    if (std.mem.eql(u8, value, "none")) return set;
+    var it = std.mem.splitScalar(u8, value, ',');
+    while (it.next()) |item| {
+        if (std.mem.eql(u8, item, "xcdr1-le")) {
+            set[0] = true;
+        } else if (std.mem.eql(u8, item, "xcdr2-le")) {
+            set[1] = true;
+        } else {
+            try stderr.print("error: --cdr-fast: unknown encoding '{s}' (xcdr1-le, xcdr2-le or none)\n", .{item});
+            try stderr.flush();
+            return error.InvalidArgument;
+        }
+    }
+    return set;
+}
+
+test "--cdr-fast takes a list of encodings or none" {
+    var buf: [128]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    try std.testing.expectEqual([2]bool{ true, true }, try parseCdrFast("xcdr1-le,xcdr2-le", &w));
+    try std.testing.expectEqual([2]bool{ false, true }, try parseCdrFast("xcdr2-le", &w));
+    try std.testing.expectEqual([2]bool{ false, false }, try parseCdrFast("none", &w));
+    try std.testing.expectError(error.InvalidArgument, parseCdrFast("xcdr2-be", &w));
+}
+
 fn optionValue(args: []const [:0]const u8, i: *usize, stderr: *Io.Writer) ![]const u8 {
     const name = args[i.*];
     i.* += 1;
