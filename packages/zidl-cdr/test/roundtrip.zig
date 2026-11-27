@@ -1297,6 +1297,11 @@ test "key hash: a stream cannot be patched" {
     try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_u32(&h.writer, 0));
     const handle = c.ZidlPlParamHandle{ .len_offset = 2, .buf_value_start = 4 };
     try testing.expectEqual(@as(c_int, c.ZIDL_CDR_INVALID), c.zidl_cdr_pl_patch_param(&h.writer, handle));
+    // No PL framing at all: nothing reaches the hash.
+    var reserved: c.ZidlPlParamHandle = undefined;
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_INVALID), c.zidl_cdr_pl_write_encap(&h.writer));
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_INVALID), c.zidl_cdr_pl_reserve_param(&h.writer, 5, &reserved));
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_INVALID), c.zidl_cdr_pl_write_sentinel(&h.writer));
     try testing.expectEqual(@as(usize, 8), h.writer.len);
 }
 

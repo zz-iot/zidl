@@ -362,6 +362,7 @@ export fn zidl_cdr_write_encap(w: *Writer) c_int {
     return zidl_cdr_write_encap_kind(w, 0);
 }
 export fn zidl_cdr_pl_write_encap(w: *Writer) c_int {
+    if (w.hash != null) return -3;
     var sink = Sink{ .writer = w };
     rt.cdr_framing.writeEncapsulation(&sink, 3) catch return sink.status;
     return 0;
@@ -470,6 +471,7 @@ export fn zidl_cdr_skip_emheader_payload(r: *Reader, em: *const EmHeader) c_int 
 pub const PlHandle = extern struct { len_offset: usize, buf_value_start: usize };
 pub const PlParam = extern struct { pid: u16, byte_len: u16, end_pos: usize };
 export fn zidl_cdr_pl_reserve_param(w: *Writer, pid: u16, out: *PlHandle) c_int {
+    if (w.hash != null) return -3;
     var sink = Sink{ .writer = w };
     rt.cdr_framing.reserveParameter(&sink, pid, &out.len_offset, &out.buf_value_start) catch return sink.status;
     return 0;
@@ -486,6 +488,7 @@ export fn zidl_cdr_pl_patch_param(w: *Writer, handle: PlHandle) c_int {
     return 0;
 }
 export fn zidl_cdr_pl_write_sentinel(w: *Writer) c_int {
+    if (w.hash != null) return -3;
     var sink = Sink{ .writer = w };
     rt.cdr_framing.writeSentinel(&sink, if (w.byte_order == 1) .big else .little) catch return sink.status;
     return 0;

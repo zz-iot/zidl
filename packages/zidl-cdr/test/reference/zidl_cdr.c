@@ -1138,6 +1138,7 @@ int zidl_cdr_write_key_wstring(ZidlCdrWriter *w, const uint16_t *value, uint32_t
 
 #ifndef ZIDL_CDR_SHARED_PRIMITIVES
 int zidl_cdr_pl_write_encap(ZidlCdrWriter *w) {
+    if (w->hash) return ZIDL_CDR_INVALID;
     static const uint8_t hdr[4] = { 0x00u, 0x03u, 0x00u, 0x00u };
     int rc = writer_ensure(w, 4);
     if (rc) return rc;
@@ -1152,6 +1153,7 @@ int zidl_cdr_pl_write_encap(ZidlCdrWriter *w) {
 #ifndef ZIDL_CDR_SHARED_PRIMITIVES
 int zidl_cdr_pl_reserve_param(ZidlCdrWriter *w, uint16_t pid,
                                ZidlPlParamHandle *out_handle) {
+    if (w->hash) return ZIDL_CDR_INVALID;
     /* Write pid as LE u16; we're always at a 4-byte boundary, so no padding needed */
     int rc = zidl_cdr_write_u16(w, pid);
     if (rc) return rc;
@@ -1181,6 +1183,7 @@ int zidl_cdr_pl_patch_param(ZidlCdrWriter *w, ZidlPlParamHandle handle) {
 }
 
 int zidl_cdr_pl_write_sentinel(ZidlCdrWriter *w) {
+    if (w->hash) return ZIDL_CDR_INVALID;
     static const uint8_t sentinel[4] = { 0x01u, 0x00u, 0x00u, 0x00u };
     int rc = writer_ensure(w, 4);
     if (rc) return rc;
