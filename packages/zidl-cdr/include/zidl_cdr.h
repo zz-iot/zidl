@@ -16,7 +16,7 @@
  *
  * ## Error codes
  *   ZIDL_CDR_OK          ( 0) — success
- *   ZIDL_CDR_OVERFLOW   (-1) — buffer full (fixed mode) or malloc failed
+ *   ZIDL_CDR_OVERFLOW   (-1) — buffer full (fixed mode) or allocation failed
  *   ZIDL_CDR_TRUNCATED  (-2) — reader hit end of data before read completed
  *   ZIDL_CDR_INVALID    (-3) — bad encap ID, invalid bool byte, etc.
  */
@@ -83,18 +83,17 @@ extern "C" {
 /**
  * CDR writer state.
  *
- * Three modes:
- *   - Dynamic (malloc-backed): init with zidl_cdr_writer_init().  Buffer
- *     grows automatically.  Must call zidl_cdr_writer_deinit() when done.
+ * Two output modes, neither of which allocates or needs a deinit:
  *   - Fixed: init with zidl_cdr_writer_init_fixed().  Writes into caller-
- *     supplied buf[0..cap]; returns ZIDL_CDR_OVERFLOW if full.  No deinit.
+ *     supplied buf[0..cap]; returns ZIDL_CDR_OVERFLOW if full.
  *   - Counting: init with zidl_cdr_writer_init_counting().  buf == NULL;
- *     every write advances len/pos exactly as it would in the other modes
- *     but performs no memcpy/store, since there's no buffer to write into.
- *     Used to size a write-loan buffer before allocating it: run a
- *     generated {Type}_serialize() once in counting mode to get the byte
- *     count, then again in fixed mode against the real (loaned) buffer of
- *     that size. No deinit required.
+ *     every write advances len/pos exactly as it would in fixed mode but
+ *     stores nothing.  Run a generated {Type}_serialize() once counting to
+ *     get the exact size, then again fixed into a buffer of that size, and
+ *     check the two lengths match.  zidl_cdr_serialize_alloc() does all of
+ *     that with the registered allocator.
+ * A ZidlCdrKeyHash's writer is a third, internal mode: it streams a key
+ * holder into the key hash (see zidl_cdr_key_hash_init).
  *
  * Fields (treat as opaque; access only via API functions):
  *   buf  — write buffer; NULL in counting mode
@@ -112,21 +111,41 @@ typedef struct ZidlCdrWriter {
     size_t   pos;
     int      xcdr_version;
     int      byte_order;
-    /** Non-NULL → dynamic mode: called to grow buf.  NULL → fixed or
-     *  counting mode (distinguished by whether buf is NULL). */
-    int    (*grow_fn)(struct ZidlCdrWriter *w, size_t needed);
+    /** Non-NULL only in a ZidlCdrKeyHash's writer. */
+    struct ZidlCdrKeyHash *hash;
 } ZidlCdrWriter;
 
-/** Init a malloc-backed writer.  Pair with zidl_cdr_writer_deinit(). */
-int  zidl_cdr_writer_init      (ZidlCdrWriter *w, int xcdr_version);
-/** Init a fixed-buffer writer.  No deinit required. */
+/** Init a fixed-buffer writer. */
 void zidl_cdr_writer_init_fixed(ZidlCdrWriter *w, uint8_t *buf, size_t cap, int xcdr_version);
-/** Init a counting writer: no buffer, writes only advance len/pos.  No deinit required. */
+/** Init a counting writer: no buffer, writes only advance len/pos. */
 void zidl_cdr_writer_init_counting(ZidlCdrWriter *w, int xcdr_version);
-/** Free a malloc-backed writer's buffer.  No-op for fixed-buffer writers. */
-void zidl_cdr_writer_deinit    (ZidlCdrWriter *w);
 /** Set writer byte order. Defaults to ZIDL_CDR_LE. */
 void zidl_cdr_writer_set_byte_order(ZidlCdrWriter *w, int byte_order);
+/** Non-zero for a counting writer. */
+int  zidl_cdr_writer_is_counting(const ZidlCdrWriter *w);
+
+/** Writes a complete payload, encapsulation header included, for
+ * zidl_cdr_serialize_alloc. */
+typedef int (*ZidlCdrSerializeFn)(ZidlCdrWriter *w, const void *ctx);
+/**
+ * Count, allocate exactly with the registered allocator, then write.
+ * On success *out holds *out_len bytes; free them with
+ * zidl_cdr_free(*out, *out_len); an empty payload gives NULL and 0.  OVERFLOW if the payload grew between the
+ * passes or allocation failed, INVALID if it shrank (a sample changed while
+ * it was written); nothing is returned on failure.
+ */
+int zidl_cdr_serialize_alloc(int xcdr_version, int byte_order, ZidlCdrSerializeFn fn,
+                             const void *ctx, uint8_t **out, size_t *out_len);
+
+/**
+ * Canonical key collections (XCDR2 key holders): a DHEADER cannot be patched
+ * into a key hash stream, so the body is counted first.  begin always
+ * initializes *counter and returns non-zero when a counting pass is needed
+ * (the outer writer is not itself counting); write_size then writes the
+ * counted size as the DHEADER (zero when the outer writer is counting).
+ */
+int  zidl_cdr_begin_key_collection(const ZidlCdrWriter *outer, ZidlCdrWriter *counter);
+int  zidl_cdr_write_key_collection_size(ZidlCdrWriter *outer, const ZidlCdrWriter *counter);
 
 /* Encapsulation header ── must be the first call after init */
 int zidl_cdr_write_encap(ZidlCdrWriter *w);
@@ -583,8 +602,7 @@ static inline const void *zidl_cdr_view_native(const ZidlCdrPrimitivesView *v, s
 /** Zero-copy reservations of bulk primitive bodies
  * (docs/design/bulk-cdr-zero-copy.md). A reservation pads and advances the
  * writer as zidl_cdr_write_primitives would, but leaves the elements for the
- * caller to fill in place. It records an offset, not a pointer, so it
- * survives a dynamic writer's growth:
+ * caller to fill in place. It records an offset into the writer's buffer:
  *
  *   ZidlCdrReservation res;
  *   if ((rc = zidl_cdr_reserve_primitives(w, n, 4, &res))) return rc;
@@ -611,13 +629,13 @@ typedef struct ZidlCdrReservation {
  * zidl_cdr_write_primitives' errors: INVALID for another width or a NULL
  * `out`, OVERFLOW when a fixed writer has no room or the size overflows.
  * All-or-nothing: on failure the writer and `*out` are unchanged. A counting
- * writer counts the elements; a count of 0 reserves nothing. */
+ * writer counts the elements; a count of 0 reserves nothing. A key hash
+ * writer has nothing to fill in place: INVALID. */
 int zidl_cdr_reserve_primitives(ZidlCdrWriter *w, size_t count, size_t elem_size, ZidlCdrReservation *out);
 
 /** Where to fill `res`: NULL for a counting writer, a count of 0, or a
- * reservation not within what `w` has written. Valid until `w`'s next
- * write, reserve or deinit, which may move a dynamic writer's buffer; a
- * fixed writer's never moves. */
+ * reservation not within what `w` has written. A fixed writer's buffer
+ * never moves. */
 static inline void *zidl_cdr_reservation_data(const ZidlCdrWriter *w, const ZidlCdrReservation *res) {
     if (!w || !res || !w->buf || res->count == 0 || res->elem_size == 0) return NULL;
     if (res->offset > w->len || res->count > (w->len - res->offset) / res->elem_size) return NULL;
@@ -676,6 +694,20 @@ void zidl_md5(const uint8_t *data, size_t len, uint8_t out[16]);
 /** Type-aware canonical hash: force_md5 is true when the key-holder type's
  * maximum encoded size exceeds 16 bytes (including unbounded types). */
 void zidl_cdr_compute_key_hash_for_type(const uint8_t *key, size_t len, bool force_md5, uint8_t out[16]);
+
+/**
+ * Streaming key hash: serialize a key holder into `writer` (PLAIN_CDR2
+ * big-endian) and the bytes go straight into the hash, without a buffer.
+ * The writer points back at its ZidlCdrKeyHash, so do not copy one after
+ * init.  Patches, in-place reservations and PL framing return INVALID.
+ */
+typedef struct ZidlCdrKeyHash {
+    ZidlCdrWriter writer;
+    uint64_t      state[20];
+} ZidlCdrKeyHash;
+void zidl_cdr_key_hash_init(ZidlCdrKeyHash *h);
+/** The same result as zidl_cdr_compute_key_hash_for_type on the bytes. */
+void zidl_cdr_key_hash_finish(ZidlCdrKeyHash *h, bool force_md5, uint8_t out[16]);
 /** Canonical UTF-16 value: byte length, no terminator. Writer order applies. */
 int zidl_cdr_write_key_wstring(ZidlCdrWriter *w, const uint16_t *value, uint32_t len);
 /** Begin the same value when a language adapter writes code units itself. */

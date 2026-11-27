@@ -5,11 +5,10 @@
 int fixed_external_contract(void) {
     const uint8_t expected[] = {0x10,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x98,0x84,0x62,0x48,0x38,0x65,0x6c};
     int version, order, mode;
-    for (version=1;version<=2;++version) for (order=0;order<2;++order) for (mode=0;mode<3;++mode) {
+    for (version=1;version<=2;++version) for (order=0;order<2;++order) for (mode=1;mode<3;++mode) {
         uint8_t storage[64];
         ZidlCdrWriter w;
-        if (mode==0) REQUIRE(zidl_cdr_writer_init(&w,version)==0);
-        else if (mode==1) zidl_cdr_writer_init_fixed(&w,storage,sizeof storage,version);
+        if (mode==1) zidl_cdr_writer_init_fixed(&w,storage,sizeof storage,version);
         else zidl_cdr_writer_init_counting(&w,version);
         zidl_cdr_writer_set_byte_order(&w,order);
         REQUIRE(zidl_cdr_write_encap(&w)==0);
@@ -31,7 +30,6 @@ int fixed_external_contract(void) {
         }
         REQUIRE(zidl_cdr_write_fixed(&w,255,0,1)==ZIDL_CDR_INVALID);
         REQUIRE(w.len==21 && w.pos==17);
-        zidl_cdr_writer_deinit(&w);
     }
     return 0;
 }

@@ -15,11 +15,10 @@ pub fn check(comptime C: type) !void {
             input[4] = 0xa5;
             @memcpy(input[5..][0..expected.len], expected);
             const len = expected.len + 5;
-            for (0..3) |mode| {
+            for (1..3) |mode| {
                 var w: C.ZidlCdrWriter = undefined;
                 var storage: [32]u8 = undefined;
-                if (mode == 0) try testing.expectEqual(@as(c_int, 0), C.zidl_cdr_writer_init(&w, version)) else if (mode == 1) C.zidl_cdr_writer_init_fixed(&w, &storage, storage.len, version) else C.zidl_cdr_writer_init_counting(&w, version);
-                defer C.zidl_cdr_writer_deinit(&w);
+                if (mode == 1) C.zidl_cdr_writer_init_fixed(&w, &storage, storage.len, version) else C.zidl_cdr_writer_init_counting(&w, version);
                 C.zidl_cdr_writer_set_byte_order(&w, order);
                 try testing.expectEqual(@as(c_int, 0), C.zidl_cdr_write_encap(&w));
                 try testing.expectEqual(@as(c_int, 0), C.zidl_cdr_write_u8(&w, 0xa5));

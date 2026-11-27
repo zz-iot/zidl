@@ -7,10 +7,8 @@ const Writer = adapter.Writer;
 
 extern fn shared_strings_sample(*Writer) c_int;
 extern fn shared_strings_read_sample(*Reader) c_int;
-extern fn zidl_cdr_writer_init(*Writer, c_int) c_int;
 extern fn zidl_cdr_writer_init_fixed(*Writer, [*]u8, usize, c_int) void;
 extern fn zidl_cdr_writer_init_counting(*Writer, c_int) void;
-extern fn zidl_cdr_writer_deinit(*Writer) void;
 extern fn zidl_cdr_writer_set_byte_order(*Writer, c_int) void;
 extern fn zidl_cdr_write_string(*Writer, ?[*]const u8, u32) c_int;
 extern fn zidl_cdr_write_wstring(*Writer, ?[*]const u16, u32) c_int;
@@ -60,14 +58,12 @@ test "independent string/wstring vectors in both orders, versions, and storage m
         native = rt.RuntimeWriter.initCounting(cap, order);
         try sample(&native);
         try testing.expectEqual(@as(usize, 32), native.len);
-        for (0..3) |mode| {
+        for (1..3) |mode| {
             var w: Writer = undefined;
             switch (mode) {
-                0 => try testing.expectEqual(@as(c_int, 0), zidl_cdr_writer_init(&w, version)),
                 1 => zidl_cdr_writer_init_fixed(&w, &fixed, fixed.len, version),
                 else => zidl_cdr_writer_init_counting(&w, version),
             }
-            defer zidl_cdr_writer_deinit(&w);
             zidl_cdr_writer_set_byte_order(&w, if (order == .big) 1 else 0);
             try testing.expectEqual(@as(c_int, 0), shared_strings_sample(&w));
             try testing.expectEqual(@as(usize, 32), w.len);

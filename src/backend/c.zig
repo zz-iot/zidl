@@ -2869,14 +2869,12 @@ const CdrGenerator = struct {
             try self.write("}\n\n");
 
             try self.print("int {s}_compute_key_hash(const {s} *_v, uint8_t _hash[16]) {{\n", .{ c_name, c_name });
-            try self.writeI("ZidlCdrWriter _w;\n");
-            // The key-holder path has no headers; primitives use PLAIN_CDR2 alignment.
-            try self.writeI("int _rc = zidl_cdr_writer_init(&_w, ZIDL_XCDR2);\n");
-            try self.writeI("if (_rc) return _rc;\n");
-            try self.writeI("zidl_cdr_writer_set_byte_order(&_w, ZIDL_CDR_BE);\n");
-            try self.printI("_rc = {s}_serialize_key_holder(&_w, _v);\n", .{c_name});
-            try self.printI("if (!_rc) zidl_cdr_compute_key_hash_for_type(_w.buf, _w.len, {s}, _hash);\n", .{if (try canonical.forceMd5(self.alloc, s)) "true" else "false"});
-            try self.writeI("zidl_cdr_writer_deinit(&_w);\n");
+            // The key holder (PLAIN_CDR2 big-endian, no headers) streams
+            // straight into the hash: nothing is buffered or allocated.
+            try self.writeI("ZidlCdrKeyHash _h;\n");
+            try self.writeI("zidl_cdr_key_hash_init(&_h);\n");
+            try self.printI("int _rc = {s}_serialize_key_holder(&_h.writer, _v);\n", .{c_name});
+            try self.printI("if (!_rc) zidl_cdr_key_hash_finish(&_h, {s}, _hash);\n", .{if (try canonical.forceMd5(self.alloc, s)) "true" else "false"});
             try self.writeI("return _rc;\n");
             try self.write("}\n\n");
 
@@ -3258,13 +3256,19 @@ const CdrGenerator = struct {
     /// complete sample (`zzdds_project_key_fn`): it decodes the @key members
     /// and encodes them key-only, in the sample's XCDR version.
     fn emitKeyCdrFns(self: *CdrGenerator, s: *const ir.Struct, c_name: []const u8) !void {
-        try self.print("static int {s}_key_cdr(const {s} *key, int xcdr_version, ZidlCdrWriter *_w) {{\n", .{ c_name, c_name });
-        try self.writeI("int _rc = zidl_cdr_writer_init(_w, xcdr_version);\n");
-        try self.writeI("if (_rc) return _rc;\n");
-        try self.printI("_rc = zidl_cdr_write_encap_kind(_w, {s});\n", .{encapKindC(s)});
-        try self.printI("if (!_rc) _rc = {s}_serialize_key(_w, key);\n", .{c_name});
-        try self.writeI("if (_rc) zidl_cdr_writer_deinit(_w);\n");
+        // A whole payload, header included, for counting then writing.
+        try self.print("typedef struct {{ const {s} *value; int key_only; }} {s}_Payload;\n", .{ c_name, c_name });
+        try self.print("static int {s}_payload(ZidlCdrWriter *_w, const void *_ctx) {{\n", .{c_name});
+        try self.printI("const {s}_Payload *_p = (const {s}_Payload *)_ctx;\n", .{ c_name, c_name });
+        try self.printI("int _rc = zidl_cdr_write_encap_kind(_w, {s});\n", .{encapKindC(s)});
+        try self.printI("if (!_rc) _rc = _p->key_only ? {s}_serialize_key(_w, _p->value) : {s}_serialize(_w, _p->value);\n", .{ c_name, c_name });
         try self.writeI("return _rc;\n");
+        try self.write("}\n\n");
+
+        // Owned with zidl-cdr's allocator: zidl_cdr_free(*out, *out_len).
+        try self.print("static int {s}_key_cdr(const {s} *key, int xcdr_version, uint8_t **out, size_t *out_len) {{\n", .{ c_name, c_name });
+        try self.printI("{s}_Payload _p = {{ key, 1 }};\n", .{c_name});
+        try self.printI("return zidl_cdr_serialize_alloc(xcdr_version, ZIDL_CDR_LE, {s}_payload, &_p, out, out_len);\n", .{c_name});
         try self.write("}\n\n");
 
         try self.print("static DDS_ReturnCode_t {s}_project_key_from_cdr(void *ctx, const uint8_t *sample, size_t sample_len, uint8_t *out, size_t out_size, size_t *out_len) {{\n", .{c_name});
@@ -3274,16 +3278,20 @@ const CdrGenerator = struct {
         try self.writeI("memset(&_tmp, 0, sizeof(_tmp));\n");
         try self.writeI("ZidlCdrReader _r;\n");
         try self.printI("if (zidl_cdr_reader_init(&_r, sample, sample_len) == 0 && {s}_deserialize_selected(&_r, {s}_KEY_FIELD_MASK, &_tmp) == 0) {{\n", .{ c_name, c_name });
+        // Counted, then written straight into `out` when it fits.
+        try self.writeI("    const int _version = _r.xcdr_version == ZIDL_XCDR2 ? ZIDL_XCDR2 : ZIDL_XCDR1;\n");
+        try self.printI("    {s}_Payload _p = {{ &_tmp, 1 }};\n", .{c_name});
         try self.writeI("    ZidlCdrWriter _w;\n");
-        try self.printI("    if ({s}_key_cdr(&_tmp, _r.xcdr_version == ZIDL_XCDR2 ? ZIDL_XCDR2 : ZIDL_XCDR1, &_w) == 0) {{\n", .{c_name});
-        try self.writeI("        *out_len = _w.len;\n");
-        try self.writeI("        if (_w.len > out_size) {\n");
+        try self.writeI("    zidl_cdr_writer_init_counting(&_w, _version);\n");
+        try self.printI("    if ({s}_payload(&_w, &_p) == 0) {{\n", .{c_name});
+        try self.writeI("        const size_t _len = _w.len;\n");
+        try self.writeI("        *out_len = _len;\n");
+        try self.writeI("        if (_len > out_size) {\n");
         try self.writeI("            _rc = DDS_RETCODE_PRECONDITION_NOT_MET;\n");
         try self.writeI("        } else {\n");
-        try self.writeI("            if (_w.len) memcpy(out, _w.buf, _w.len);\n");
-        try self.writeI("            _rc = DDS_RETCODE_OK;\n");
+        try self.writeI("            zidl_cdr_writer_init_fixed(&_w, out, _len, _version);\n");
+        try self.printI("            if ({s}_payload(&_w, &_p) == 0 && _w.len == _len) _rc = DDS_RETCODE_OK;\n", .{c_name});
         try self.writeI("        }\n");
-        try self.writeI("        zidl_cdr_writer_deinit(&_w);\n");
         try self.writeI("    }\n");
         try self.writeI("}\n");
         if (structHasSequenceFields(s)) try self.printI("{s}_free(&_tmp);\n", .{c_name});
@@ -3339,26 +3347,20 @@ const CdrGenerator = struct {
         try self.write("}\n\n");
 
         try self.print("static int {s}DataWriter_write_kind_w_timestamp({s}DataWriter *self, DDS_WriteKind kind, const {s} *value, int key_only, DDS_InstanceHandle_t handle, DDS_Time_t timestamp) {{\n", .{ c_name, c_name, c_name });
-        try self.writeI("ZidlCdrWriter _w;\n");
         try self.writeI("uint8_t _hash[16];\n");
-        // zidl_cdr_writer_init routes its internal growth through
-        // zidl_cdr_set_allocator's registered allocator (falling back to
-        // libc realloc only if none is registered) -- callers wanting no
-        // heap involvement at all register their own bounded allocator.
-        try self.writeI("int _rc = zidl_cdr_writer_init(&_w, self->xcdr_version);\n");
+        try self.printI("int _rc = {s}_compute_key_hash(value, _hash);\n", .{c_name});
         try self.writeI("if (_rc) return _rc;\n");
-        try self.printI("_rc = zidl_cdr_write_encap_kind(&_w, {s});\n", .{encapKindC(s)});
-        try self.writeI("if (!_rc) _rc = key_only ? ");
-        try self.print("{s}_serialize_key(&_w, value) : {s}_serialize(&_w, value);\n", .{ c_name, c_name });
-        try self.printI("if (!_rc) _rc = {s}_compute_key_hash(value, _hash);\n", .{c_name});
-        try self.writeI("if (!_rc) {\n");
-        self.indent_depth += 1;
+        // Counted, then written into one exact allocation from
+        // zidl_cdr_set_allocator's registered allocator (libc by default).
+        try self.printI("{s}_Payload _p = {{ value, key_only }};\n", .{c_name});
+        try self.writeI("uint8_t *_buf = NULL;\n");
+        try self.writeI("size_t _len = 0;\n");
+        try self.printI("_rc = zidl_cdr_serialize_alloc(self->xcdr_version, ZIDL_CDR_LE, {s}_payload, &_p, &_buf, &_len);\n", .{c_name});
+        try self.writeI("if (_rc) return _rc;\n");
         try self.writeI("DDS_OctetSeq _c_hash = { 16, 16, _hash, false };\n");
-        try self.writeI("DDS_OctetSeq _c_payload = { (uint32_t)_w.len, (uint32_t)_w.len, _w.buf, false };\n");
+        try self.writeI("DDS_OctetSeq _c_payload = { (uint32_t)_len, (uint32_t)_len, _buf, false };\n");
         try self.writeI("_rc = DDS_DataWriter_write_raw(self->writer, &_c_hash, handle, &_c_payload, kind, &timestamp);\n");
-        self.indent_depth -= 1;
-        try self.writeI("}\n");
-        try self.writeI("zidl_cdr_writer_deinit(&_w);\n");
+        try self.writeI("zidl_cdr_free(_buf, _len);\n");
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
 
@@ -3374,20 +3376,20 @@ const CdrGenerator = struct {
         try self.writeI("uint8_t _hash[16];\n");
         try self.printI("int _rc = {s}_compute_key_hash(value, _hash);\n", .{c_name});
         try self.writeI("if (_rc) return _rc;\n");
+        try self.printI("{s}_Payload _p = {{ value, key_only }};\n", .{c_name});
         try self.writeI("ZidlCdrWriter _cw;\n");
         try self.writeI("zidl_cdr_writer_init_counting(&_cw, self->xcdr_version);\n");
-        try self.printI("_rc = zidl_cdr_write_encap_kind(&_cw, {s});\n", .{encapKindC(s)});
-        try self.writeI("if (!_rc) _rc = key_only ? ");
-        try self.print("{s}_serialize_key(&_cw, value) : {s}_serialize(&_cw, value);\n", .{ c_name, c_name });
+        try self.printI("_rc = {s}_payload(&_cw, &_p);\n", .{c_name});
         try self.writeI("if (_rc) return _rc;\n");
+        try self.writeI("if ((uint64_t)_cw.len > UINT32_MAX) return ZIDL_CDR_OVERFLOW;\n");
         try self.writeI("DDS_OctetSeq _c_payload = {0};\n");
         try self.writeI("_rc = DDS_DataWriter_loan_raw(self->writer, (uint32_t)_cw.len, &_c_payload);\n");
         try self.writeI("if (_rc) return _rc;\n");
         try self.writeI("ZidlCdrWriter _w;\n");
         try self.writeI("zidl_cdr_writer_init_fixed(&_w, _c_payload._buffer, _c_payload._maximum, self->xcdr_version);\n");
-        try self.printI("_rc = zidl_cdr_write_encap_kind(&_w, {s});\n", .{encapKindC(s)});
-        try self.writeI("if (!_rc) _rc = key_only ? ");
-        try self.print("{s}_serialize_key(&_w, value) : {s}_serialize(&_w, value);\n", .{ c_name, c_name });
+        try self.printI("_rc = {s}_payload(&_w, &_p);\n", .{c_name});
+        // A sample changed between the passes is an error, not a torn write.
+        try self.writeI("if (!_rc && _w.len != _cw.len) _rc = ZIDL_CDR_INVALID;\n");
         try self.writeI("if (_rc) {\n");
         self.indent_depth += 1;
         try self.writeI("DDS_DataWriter_return_loan_raw(self->writer, &_c_payload);\n");
@@ -3413,10 +3415,11 @@ const CdrGenerator = struct {
         try self.printI("if ({s}_compute_key_hash(key, _hash)) return DDS_HANDLE_NIL;\n", .{c_name});
         // The key-only CDR is the instance's key for get_key_value; if it
         // cannot be encoded, the instance is registered without one.
-        try self.writeI("ZidlCdrWriter _w;\n");
-        try self.printI("if ({s}_key_cdr(key, self->xcdr_version, &_w) != 0) return zzdds_register_instance_raw(self->writer, _hash, NULL, 0);\n", .{c_name});
-        try self.writeI("DDS_InstanceHandle_t _ih = zzdds_register_instance_raw(self->writer, _hash, _w.buf, _w.len);\n");
-        try self.writeI("zidl_cdr_writer_deinit(&_w);\n");
+        try self.writeI("uint8_t *_buf = NULL;\n");
+        try self.writeI("size_t _len = 0;\n");
+        try self.printI("if ({s}_key_cdr(key, self->xcdr_version, &_buf, &_len) != 0) return zzdds_register_instance_raw(self->writer, _hash, NULL, 0);\n", .{c_name});
+        try self.writeI("DDS_InstanceHandle_t _ih = zzdds_register_instance_raw(self->writer, _hash, _buf, _len);\n");
+        try self.writeI("zidl_cdr_free(_buf, _len);\n");
         try self.writeI("return _ih;\n");
         try self.write("}\n\n");
 
@@ -4463,9 +4466,21 @@ const CdrGenerator = struct {
     fn openCollectionDheader(self: *CdrGenerator, needed: bool) !?[]u8 {
         if (!needed) return null;
         const name = try cdr_skip.collName(self.alloc, "_cdh", self.coll_depth);
+        if (self.canonical_key) {
+            // A key hash stream cannot be patched: count the body, write the
+            // count, then the body. The last pass leaves `_w` as it was.
+            try self.printI("{{ ZidlCdrWriter *const {s}_o = _w; ZidlCdrWriter {s}_c; int {s}_p;\n", .{ name, name, name });
+            self.indent_depth += 1;
+            try self.printI("for ({s}_p = zidl_cdr_begin_key_collection({s}_o, &{s}_c) ? 0 : 1; {s}_p < 2; {s}_p++) {{\n", .{ name, name, name, name, name });
+            self.indent_depth += 1;
+            try self.printI("_w = {s}_p ? {s}_o : &{s}_c;\n", .{ name, name, name });
+            try self.printI("if ({s}_p) {{ _rc = zidl_cdr_write_key_collection_size(_w, &{s}_c); if (_rc) return _rc; }}\n", .{ name, name });
+            return name;
+        }
         try self.printI("{{ size_t {s};\n", .{name});
         self.indent_depth += 1;
-        try self.printI("_rc = {s}(_w, &{s});\n", .{ if (self.canonical_key) "zidl_cdr_reserve_dheader" else "zidl_cdr_reserve_dheader_maybe", name });
+        try self.writeI("_rc = zidl_cdr_reserve_dheader_maybe(_w, &");
+        try self.print("{s});\n", .{name});
         try self.writeI("if (_rc) return _rc;\n");
         return name;
     }
@@ -4473,6 +4488,13 @@ const CdrGenerator = struct {
     fn closeCollectionDheader(self: *CdrGenerator, name: ?[]u8) !void {
         const n = name orelse return;
         defer self.alloc.free(n);
+        if (self.canonical_key) {
+            self.indent_depth -= 1;
+            try self.writeI("}\n");
+            self.indent_depth -= 1;
+            try self.writeI("}\n");
+            return;
+        }
         try self.printI("if ({s} != (size_t)-1) {{ _rc = zidl_cdr_patch_dheader_checked(_w, {s}); if (_rc) return _rc; }}\n", .{ n, n });
         self.indent_depth -= 1;
         try self.writeI("}\n");
@@ -7016,10 +7038,18 @@ test "c_backend cdr: get_key_value returns DDS return codes and reads a large sa
     try testing.expect(has(s, "(_key_only ? Topic_deserialize_key(&_r, &_tmp) : Topic_deserialize_selected(&_r, Topic_KEY_FIELD_MASK, &_tmp))"));
     // register_instance passes the key-only CDR, and the type registers its
     // key projection.
-    try testing.expect(has(s, "static int Topic_key_cdr(const Topic *key, int xcdr_version, ZidlCdrWriter *_w) {"));
-    try testing.expect(has(s, "DDS_InstanceHandle_t _ih = zzdds_register_instance_raw(self->writer, _hash, _w.buf, _w.len);"));
+    try testing.expect(has(s, "static int Topic_key_cdr(const Topic *key, int xcdr_version, uint8_t **out, size_t *out_len) {"));
+    try testing.expect(has(s, "return zidl_cdr_serialize_alloc(xcdr_version, ZIDL_CDR_LE, Topic_payload, &_p, out, out_len);"));
+    try testing.expect(has(s, "DDS_InstanceHandle_t _ih = zzdds_register_instance_raw(self->writer, _hash, _buf, _len);"));
     try testing.expect(has(s, "static DDS_ReturnCode_t Topic_project_key_from_cdr(void *ctx, const uint8_t *sample, size_t sample_len, uint8_t *out, size_t out_size, size_t *out_len) {"));
-    try testing.expect(has(s, "if (Topic_key_cdr(&_tmp, _r.xcdr_version == ZIDL_XCDR2 ? ZIDL_XCDR2 : ZIDL_XCDR1, &_w) == 0) {"));
+    // The projection counts, then writes straight into zzdds's buffer.
+    try testing.expect(has(s, "zidl_cdr_writer_init_fixed(&_w, out, _len, _version);"));
+    try testing.expect(has(s, "if (Topic_payload(&_w, &_p) == 0 && _w.len == _len) _rc = DDS_RETCODE_OK;"));
+    // Every write counts, then writes, and checks the two agree.
+    try testing.expect(has(s, "if (!_rc && _w.len != _cw.len) _rc = ZIDL_CDR_INVALID;"));
+    try testing.expect(has(s, "_rc = zidl_cdr_serialize_alloc(self->xcdr_version, ZIDL_CDR_LE, Topic_payload, &_p, &_buf, &_len);"));
+    try testing.expect(has(s, "zidl_cdr_key_hash_init(&_h);"));
+    try testing.expect(!has(s, "zidl_cdr_writer_init("));
     try testing.expect(has(s, "if (_rc == 0) (void)zzdds_set_key_projection(participant, _name, Topic_project_key_from_cdr, NULL, NULL);"));
     try testing.expect(has(s, "(unsigned char *)&_a->id, *_pb = (unsigned char *)&_b->id;"));
     try testing.expect(!has(s, "&_a->data"));
@@ -8224,7 +8254,7 @@ test "c_backend cdr: zzdds writer encapsulation follows top-level extensibility"
     }) |k| {
         var s = try testGenCdrOpts(k[0] ++ " struct T { @key long id; };", "t", .{ .generate_zzdds_wrappers = true });
         defer s.deinit(testing.allocator);
-        try testing.expect(has(s.items, "zidl_cdr_write_encap_kind(&_w, " ++ k[1] ++ ");"));
+        try testing.expect(has(s.items, "int _rc = zidl_cdr_write_encap_kind(_w, " ++ k[1] ++ ");"));
         try testing.expect(!has(s.items, "zidl_cdr_write_encap(&_w);"));
     }
 }

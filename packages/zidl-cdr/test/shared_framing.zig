@@ -8,10 +8,8 @@ const EmHeader = adapter.EmHeader;
 extern fn shared_framing_layout(*[6]usize) void;
 extern fn shared_framing_sample(*Writer) c_int;
 extern fn shared_framing_read_sample(*Reader) c_int;
-extern fn zidl_cdr_writer_init(*Writer, c_int) c_int;
 extern fn zidl_cdr_writer_init_fixed(*Writer, [*]u8, usize, c_int) void;
 extern fn zidl_cdr_writer_init_counting(*Writer, c_int) void;
-extern fn zidl_cdr_writer_deinit(*Writer) void;
 extern fn zidl_cdr_writer_set_byte_order(*Writer, c_int) void;
 extern fn zidl_cdr_write_encap_kind(*Writer, c_int) c_int;
 extern fn zidl_cdr_write_u8(*Writer, u8) c_int;
@@ -91,14 +89,12 @@ test "framing known answers through native/C, both byte orders and every storage
         try sample(&native);
         try testing.expectEqual(@as(usize, 28), native.len);
         try testing.expectEqual(@as(usize, 24), native.pos);
-        for (0..3) |mode| {
+        for (1..3) |mode| {
             var w: Writer = undefined;
             switch (mode) {
-                0 => try testing.expectEqual(@as(c_int, 0), zidl_cdr_writer_init(&w, 2)),
                 1 => zidl_cdr_writer_init_fixed(&w, &bytes, bytes.len, 2),
                 else => zidl_cdr_writer_init_counting(&w, 2),
             }
-            defer zidl_cdr_writer_deinit(&w);
             zidl_cdr_writer_set_byte_order(&w, if (order == .little) 0 else 1);
             try testing.expectEqual(@as(c_int, 0), shared_framing_sample(&w));
             try testing.expectEqual(@as(usize, 28), w.len);
@@ -309,15 +305,13 @@ test "PL handle/value layout and independently known padded bytes are preserved"
     try native.patchPlParam(h);
     try native.writePlSentinel();
     try testing.expectEqualSlices(u8, &expected, native.bytes());
-    for (0..3) |mode| {
+    for (1..3) |mode| {
         var bytes: [16]u8 = undefined;
         var w: Writer = undefined;
         switch (mode) {
-            0 => try testing.expectEqual(@as(c_int, 0), zidl_cdr_writer_init(&w, 3)),
             1 => zidl_cdr_writer_init_fixed(&w, &bytes, bytes.len, 3),
             else => zidl_cdr_writer_init_counting(&w, 3),
         }
-        defer zidl_cdr_writer_deinit(&w);
         try testing.expectEqual(@as(c_int, 0), shared_pl_sample(&w));
         try testing.expectEqual(@as(usize, 16), w.len);
         try testing.expectEqual(@as(usize, 12), w.pos);

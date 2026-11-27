@@ -11,10 +11,8 @@ test {
 
 extern fn shared_primitives_layout(*[17]usize) void;
 extern fn shared_primitives_sample(*Writer) c_int;
-extern fn zidl_cdr_writer_init(*Writer, c_int) c_int;
 extern fn zidl_cdr_writer_init_fixed(*Writer, [*]u8, usize, c_int) void;
 extern fn zidl_cdr_writer_init_counting(*Writer, c_int) void;
-extern fn zidl_cdr_writer_deinit(*Writer) void;
 extern fn zidl_cdr_writer_set_byte_order(*Writer, c_int) void;
 extern fn zidl_cdr_write_u8(*Writer, u8) c_int;
 extern fn zidl_cdr_write_u64(*Writer, u64) c_int;
@@ -31,7 +29,7 @@ test "C compiler and Zig adapter agree on every state offset" {
         @offsetOf(Writer, "buf"),          @offsetOf(Writer, "cap"),
         @offsetOf(Writer, "len"),          @offsetOf(Writer, "pos"),
         @offsetOf(Writer, "xcdr_version"), @offsetOf(Writer, "byte_order"),
-        @offsetOf(Writer, "grow_fn"),      @sizeOf(Reader),
+        @offsetOf(Writer, "hash"),         @sizeOf(Reader),
         @alignOf(Reader),                  @offsetOf(Reader, "data"),
         @offsetOf(Reader, "data_len"),     @offsetOf(Reader, "pos"),
         @offsetOf(Reader, "byte_order"),   @offsetOf(Reader, "xcdr_version"),
@@ -77,14 +75,9 @@ test "independent primitive vectors through native and C paths in all storage mo
         try testing.expectEqual(expected.len, native_counting.len);
         try testing.expectEqual(expected.len, native_counting.pos);
 
-        for (0..3) |mode| {
+        for (1..3) |mode| {
             var w: Writer = undefined;
-            switch (mode) {
-                0 => try testing.expectEqual(@as(c_int, 0), zidl_cdr_writer_init(&w, v.version)),
-                1 => zidl_cdr_writer_init_fixed(&w, &fixed, expected.len, v.version),
-                else => zidl_cdr_writer_init_counting(&w, v.version),
-            }
-            defer zidl_cdr_writer_deinit(&w);
+            if (mode == 1) zidl_cdr_writer_init_fixed(&w, &fixed, expected.len, v.version) else zidl_cdr_writer_init_counting(&w, v.version);
             zidl_cdr_writer_set_byte_order(&w, if (v.order == .big) 1 else 0);
             try testing.expectEqual(@as(c_int, 0), shared_primitives_sample(&w));
             try testing.expectEqual(expected.len, w.len);
@@ -138,21 +131,6 @@ test "remaining C framing uses shared primitives and patches BE or counting stor
     }
 }
 
-fn failGrow(_: *Writer, _: usize) callconv(.c) c_int {
-    return -3;
-}
-
-test "C adapter preserves custom grow status and caller ownership" {
-    var w: Writer = undefined;
-    zidl_cdr_writer_init_counting(&w, 2);
-    w.grow_fn = failGrow;
-    try testing.expectEqual(@as(c_int, -3), zidl_cdr_write_u8(&w, 42));
-    try testing.expectEqual(@as(usize, 0), w.len);
-    try testing.expectEqual(@as(usize, 0), w.pos);
-    zidl_cdr_writer_deinit(&w);
-    try testing.expect(w.grow_fn == failGrow);
-}
-
 extern fn zidl_cdr_set_allocator(?*const @import("c_header").ZidlAllocator) void;
 
 const FailAlloc = struct {
@@ -175,20 +153,74 @@ const FailAlloc = struct {
     }
 };
 
-test "C dynamic OOM keeps the registered allocator and status contract" {
+extern fn zidl_cdr_serialize_alloc(c_int, c_int, *const fn (*Writer, ?*const anyopaque) callconv(.c) c_int, ?*const anyopaque, *?[*]u8, *usize) c_int;
+extern fn zidl_cdr_free(?*anyopaque, usize) void;
+extern fn zidl_cdr_writer_is_counting(*const Writer) c_int;
+
+/// Writes `ctx.*` bytes after the header, changing the count between passes
+/// by `ctx.grow` (a sample changed while it was written).
+const Payload = struct {
+    len: usize,
+    grow: isize = 0,
+    passes: usize = 0,
+
+    fn write(w: *Writer, raw: ?*const anyopaque) callconv(.c) c_int {
+        const self: *Payload = @ptrCast(@alignCast(@constCast(raw.?)));
+        defer self.passes += 1;
+        if (zidl_cdr_writer_is_counting(w) != 0) {
+            if (w.buf != null) return -9;
+        } else if (w.buf == null) return -9;
+        const n: usize = if (self.passes == 0) self.len else @intCast(@as(isize, @intCast(self.len)) + self.grow);
+        for (0..n) |i| {
+            const rc = zidl_cdr_write_u8(w, @truncate(i));
+            if (rc != 0) return rc;
+        }
+        return 0;
+    }
+};
+
+test "serialize_alloc counts, allocates exactly, writes, and rejects a changed sample" {
+    var p = Payload{ .len = 7 };
+    var out: ?[*]u8 = null;
+    var len: usize = 0;
+    try testing.expectEqual(@as(c_int, 0), zidl_cdr_serialize_alloc(2, 1, Payload.write, &p, &out, &len));
+    try testing.expectEqual(@as(usize, 7), len);
+    try testing.expectEqualSlices(u8, &.{ 0, 1, 2, 3, 4, 5, 6 }, out.?[0..len]);
+    zidl_cdr_free(out, len);
+    // Grew: the fixed pass runs out of room. Shrank: a short write.
+    for ([_]isize{ 1, -1 }, [_]c_int{ -1, -3 }) |grow, want| {
+        p = .{ .len = 7, .grow = grow };
+        out = null;
+        try testing.expectEqual(want, zidl_cdr_serialize_alloc(2, 0, Payload.write, &p, &out, &len));
+        try testing.expect(out == null);
+    }
+    // Empty: nothing to allocate.
+    p = .{ .len = 0 };
+    try testing.expectEqual(@as(c_int, 0), zidl_cdr_serialize_alloc(2, 0, Payload.write, &p, &out, &len));
+    try testing.expect(out == null);
+    try testing.expectEqual(@as(usize, 0), len);
+    // A counting-pass failure is returned as is.
+    var fail = Payload{ .len = 1 };
+    const failing = struct {
+        fn write(_: *Writer, _: ?*const anyopaque) callconv(.c) c_int {
+            return -3;
+        }
+    };
+    try testing.expectEqual(@as(c_int, -3), zidl_cdr_serialize_alloc(2, 0, failing.write, &fail, &out, &len));
+}
+
+test "serialize_alloc OOM keeps the registered allocator and status contract" {
     var tracker = FailAlloc{};
     const allocator = @import("c_header").ZidlAllocator{ .ctx = &tracker, .alloc = FailAlloc.alloc, .resize = FailAlloc.resize, .free = FailAlloc.free };
     zidl_cdr_set_allocator(&allocator);
     defer zidl_cdr_set_allocator(null);
-    var w: Writer = undefined;
-    try testing.expectEqual(@as(c_int, 0), zidl_cdr_writer_init(&w, 2));
-    defer zidl_cdr_writer_deinit(&w);
-    try testing.expectEqual(@as(c_int, -1), zidl_cdr_write_u64(&w, 42));
+    var p = Payload{ .len = 8 };
+    var out: ?[*]u8 = null;
+    var len: usize = 0;
+    try testing.expectEqual(@as(c_int, -1), zidl_cdr_serialize_alloc(2, 0, Payload.write, &p, &out, &len));
     try testing.expectEqual(@as(usize, 1), tracker.calls);
     try testing.expectEqual(@as(usize, 8), tracker.alignment);
-    try testing.expectEqual(@as(usize, 0), w.len);
-    try testing.expectEqual(@as(usize, 0), w.pos);
-    try testing.expect(w.buf == null);
+    try testing.expect(out == null);
 }
 
 extern fn shared_primitives_read_sample(*Reader) c_int;
@@ -333,10 +365,8 @@ test "optional scope C and Zig layouts agree" {
 const FixedAPI = struct {
     pub const ZidlCdrWriter = adapter.Writer;
     pub const ZidlCdrReader = adapter.Reader;
-    pub extern fn zidl_cdr_writer_init(*ZidlCdrWriter, c_int) c_int;
     pub extern fn zidl_cdr_writer_init_fixed(*ZidlCdrWriter, [*]u8, usize, c_int) void;
     pub extern fn zidl_cdr_writer_init_counting(*ZidlCdrWriter, c_int) void;
-    pub extern fn zidl_cdr_writer_deinit(*ZidlCdrWriter) void;
     pub extern fn zidl_cdr_writer_set_byte_order(*ZidlCdrWriter, c_int) void;
     pub extern fn zidl_cdr_write_encap(*ZidlCdrWriter) c_int;
     pub extern fn zidl_cdr_write_u8(*ZidlCdrWriter, u8) c_int;
@@ -352,4 +382,46 @@ test "shared C ABI fixed decimal contract" {
 extern fn bulk_primitive_arrays() c_int;
 test "C bulk primitives match scalar CDR across representations and error cases" {
     try testing.expectEqual(@as(c_int, 0), bulk_primitive_arrays());
+}
+
+extern fn zidl_cdr_key_hash_init(*adapter.KeyHash) void;
+extern fn zidl_cdr_key_hash_finish(*adapter.KeyHash, bool, *[16]u8) void;
+extern fn zidl_cdr_compute_key_hash_for_type(?[*]const u8, usize, bool, *[16]u8) void;
+extern fn zidl_cdr_write_primitives(*Writer, ?*const anyopaque, usize, usize) c_int;
+extern fn zidl_cdr_write_bool_array(*Writer, ?[*]const bool, usize) c_int;
+extern fn zidl_cdr_reserve_primitives(*Writer, usize, usize, *adapter.Reservation) c_int;
+
+fn arrays(w: *Writer, wide: []const u64, flags: []const bool) !void {
+    try testing.expectEqual(@as(c_int, 0), zidl_cdr_write_u8(w, 1));
+    try testing.expectEqual(@as(c_int, 0), zidl_cdr_write_primitives(w, wide.ptr, wide.len, 8));
+    try testing.expectEqual(@as(c_int, 0), zidl_cdr_write_bool_array(w, flags.ptr, flags.len));
+    try testing.expectEqual(@as(c_int, 0), zidl_cdr_write_primitives(w, wide.ptr, 3, 2));
+}
+
+test "key hash streams primitive and bool arrays in chunks" {
+    // More than one 256-byte chunk of each.
+    var wide: [100]u64 = undefined;
+    for (&wide, 0..) |*v, i| v.* = 0x0102030405060708 *% (i + 1);
+    var flags: [300]bool = undefined;
+    for (&flags, 0..) |*f, i| f.* = i % 3 == 0;
+    var storage: [2048]u8 = undefined;
+    var fixed: Writer = undefined;
+    zidl_cdr_writer_init_fixed(&fixed, &storage, storage.len, 2);
+    zidl_cdr_writer_set_byte_order(&fixed, 1);
+    try arrays(&fixed, &wide, &flags);
+    var want: [16]u8 = undefined;
+    zidl_cdr_compute_key_hash_for_type(&storage, fixed.len, true, &want);
+    var h: adapter.KeyHash = undefined;
+    zidl_cdr_key_hash_init(&h);
+    try arrays(&h.writer, &wide, &flags);
+    try testing.expectEqual(fixed.len, h.writer.len);
+    var got: [16]u8 = undefined;
+    zidl_cdr_key_hash_finish(&h, true, &got);
+    try testing.expectEqualSlices(u8, &want, &got);
+    // Nothing to fill in place, and no values to read.
+    var res: adapter.Reservation = undefined;
+    try testing.expectEqual(@as(c_int, -3), zidl_cdr_reserve_primitives(&h.writer, 2, 4, &res));
+    try testing.expectEqual(@as(c_int, -3), zidl_cdr_write_primitives(&h.writer, null, 2, 4));
+    try testing.expectEqual(@as(c_int, -3), zidl_cdr_write_bool_array(&h.writer, null, 2));
+    try testing.expectEqual(fixed.len, h.writer.len);
 }

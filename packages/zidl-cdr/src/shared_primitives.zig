@@ -1,5 +1,5 @@
 //! Stable C ABI adapter over the native codec.
-//! Storage growth and allocator registration use the C support layer.
+//! Buffer storage and allocator registration use the C support layer.
 const rt = @import("zidl_cdr");
 const std = @import("std");
 
@@ -10,8 +10,51 @@ pub const Writer = extern struct {
     pos: usize,
     xcdr_version: c_int,
     byte_order: c_int,
-    grow_fn: ?*const fn (*Writer, usize) callconv(.c) c_int,
+    hash: ?*KeyHash,
 };
+
+/// `ZidlCdrKeyHash`: a writer whose bytes stream into the key hash.
+pub const KeyHash = extern struct {
+    writer: Writer,
+    state: [20]u64,
+
+    fn stream(self: *KeyHash) *rt.KeyHashWriter {
+        return @ptrCast(&self.state);
+    }
+};
+
+comptime {
+    std.debug.assert(@sizeOf(rt.KeyHashWriter) <= @sizeOf(@FieldType(KeyHash, "state")));
+    std.debug.assert(@alignOf(rt.KeyHashWriter) <= @alignOf(u64));
+}
+
+export fn zidl_cdr_key_hash_init(h: *KeyHash) void {
+    h.writer = .{ .buf = null, .cap = 0, .len = 0, .pos = 0, .xcdr_version = 2, .byte_order = 1, .hash = h };
+    h.stream().* = rt.KeyHashWriter.init();
+}
+
+export fn zidl_cdr_key_hash_finish(h: *KeyHash, force_md5: bool, out: *[16]u8) void {
+    out.* = h.stream().finalForType(force_md5);
+}
+
+/// The C storage layer's key hash output; it has checked the counters.
+export fn zidl_cdr_shared_hash_bytes(h: *KeyHash, bytes: [*]const u8, len: usize) void {
+    h.stream().writeBytes(bytes[0..len]) catch unreachable;
+}
+
+fn isCounting(w: *const Writer) bool {
+    return w.buf == null and w.hash == null;
+}
+
+export fn zidl_cdr_begin_key_collection(outer: *const Writer, counter: *Writer) c_int {
+    counter.* = .{ .buf = null, .cap = 0, .len = 0, .pos = 0, .xcdr_version = 2, .byte_order = outer.byte_order, .hash = null };
+    return @intFromBool(!isCounting(outer));
+}
+
+export fn zidl_cdr_write_key_collection_size(outer: *Writer, counter: *const Writer) c_int {
+    const size = std.math.cast(u32, counter.len) orelse return -1;
+    return writeUnsigned(outer, u32, size);
+}
 
 extern fn zidl_cdr_shared_write_bytes(w: *Writer, bytes: [*]const u8, len: usize) c_int;
 
@@ -319,6 +362,7 @@ export fn zidl_cdr_write_encap(w: *Writer) c_int {
     return zidl_cdr_write_encap_kind(w, 0);
 }
 export fn zidl_cdr_pl_write_encap(w: *Writer) c_int {
+    if (w.hash != null) return -3;
     var sink = Sink{ .writer = w };
     rt.cdr_framing.writeEncapsulation(&sink, 3) catch return sink.status;
     return 0;
@@ -341,7 +385,7 @@ export fn zidl_cdr_write_dheader(w: *Writer, size: u32) c_int {
     return writeUnsigned(w, u32, size);
 }
 export fn zidl_cdr_reserve_dheader(w: *Writer, out: *usize) c_int {
-    if (w.xcdr_version != 2) return -3;
+    if (w.xcdr_version != 2 or w.hash != null) return -3;
     var sink = Sink{ .writer = w };
     rt.cdr_framing.reserveDheader(&sink, out) catch return sink.status;
     return 0;
@@ -354,6 +398,7 @@ export fn zidl_cdr_reserve_dheader_maybe(w: *Writer, out: *usize) c_int {
     return zidl_cdr_reserve_dheader(w, out);
 }
 export fn zidl_cdr_patch_dheader_checked(w: *Writer, offset: usize) c_int {
+    if (w.hash != null) return -3;
     rt.cdr_framing.patchDheader(patchStorage(w), w.len, offset, order(w)) catch |err| return patchStatus(err);
     return 0;
 }
@@ -380,6 +425,7 @@ export fn zidl_cdr_reserve_emheader(w: *Writer, member_id: u32, mu: bool, out: *
     return 0;
 }
 export fn zidl_cdr_patch_emheader_checked(w: *Writer, offset: usize, start: usize) c_int {
+    if (w.hash != null) return -3;
     rt.cdr_framing.patchEmheader(patchStorage(w), w.len, offset, start, order(w)) catch |err| return patchStatus(err);
     return 0;
 }
@@ -425,11 +471,13 @@ export fn zidl_cdr_skip_emheader_payload(r: *Reader, em: *const EmHeader) c_int 
 pub const PlHandle = extern struct { len_offset: usize, buf_value_start: usize };
 pub const PlParam = extern struct { pid: u16, byte_len: u16, end_pos: usize };
 export fn zidl_cdr_pl_reserve_param(w: *Writer, pid: u16, out: *PlHandle) c_int {
+    if (w.hash != null) return -3;
     var sink = Sink{ .writer = w };
     rt.cdr_framing.reserveParameter(&sink, pid, &out.len_offset, &out.buf_value_start) catch return sink.status;
     return 0;
 }
 export fn zidl_cdr_pl_patch_param(w: *Writer, handle: PlHandle) c_int {
+    if (w.hash != null) return -3;
     rt.cdr_framing.validateParameter(w.len, handle.len_offset, handle.buf_value_start) catch return -3;
     const raw = w.len - handle.buf_value_start;
     const padded = rt.cdr_framing.parameterSize(raw) catch return -1;
@@ -440,6 +488,7 @@ export fn zidl_cdr_pl_patch_param(w: *Writer, handle: PlHandle) c_int {
     return 0;
 }
 export fn zidl_cdr_pl_write_sentinel(w: *Writer) c_int {
+    if (w.hash != null) return -3;
     var sink = Sink{ .writer = w };
     rt.cdr_framing.writeSentinel(&sink, if (w.byte_order == 1) .big else .little) catch return sink.status;
     return 0;
@@ -501,6 +550,7 @@ export fn zidl_cdr_cancel_optional_write(w: *Writer, scope: *const OptionalWrite
 export fn zidl_cdr_end_optional_write(w: *Writer, scope: *const OptionalWrite) c_int {
     defer zidl_cdr_cancel_optional_write(w, scope);
     if (scope.length_offset == std.math.maxInt(usize)) return 0;
+    if (w.hash != null) return -3;
     rt.cdr_framing.finishOptional(patchStorage(w), w.len, scope.*, order(w)) catch |err| return patchStatus(err);
     return 0;
 }
@@ -562,10 +612,36 @@ fn reserveArray(w: *Writer, count: usize, width: usize, dest: *?[*]u8) c_int {
     return zidl_cdr_shared_reserve_array(w, pad, size, dest);
 }
 
+/// A key hash writer has no buffer to fill: encode in chunks and stream them.
+fn hashArray(w: *Writer, source: []const u8, width: usize, comptime bools: bool) c_int {
+    const zeros: [8]u8 = @splat(0);
+    const pad = primitives.arrayPadding(width, w.pos, if (w.xcdr_version == 2) 4 else 8);
+    var rc = zidl_cdr_shared_write_bytes(w, &zeros, pad);
+    var chunk: [256]u8 = undefined;
+    var done: usize = 0;
+    while (rc == 0 and done < source.len) {
+        const n = @min(chunk.len, source.len - done);
+        if (bools) {
+            const values: [*]const bool = @ptrCast(source.ptr);
+            primitives.writeBools(chunk[0..n], values[done..][0..n]);
+        } else {
+            primitives.copyArray(chunk[0..n], source[done..][0..n], width, if (w.byte_order == 1) .big else .little);
+        }
+        rc = zidl_cdr_shared_write_bytes(w, &chunk, n);
+        done += n;
+    }
+    return rc;
+}
+
 export fn zidl_cdr_write_primitives(w: *Writer, values: ?*const anyopaque, count: usize, width: usize) c_int {
     if (!primitives.isArrayWidth(width)) return -3;
     if (count == 0) return 0;
-    if (values == null and (w.buf != null or w.grow_fn != null)) return -3;
+    if (values == null and (w.buf != null or w.hash != null)) return -3;
+    if (w.hash != null) {
+        const size = std.math.mul(usize, count, width) catch return -1;
+        const source: [*]const u8 = @ptrCast(values.?);
+        return hashArray(w, source[0..size], width, false);
+    }
     var dest: ?[*]u8 = null;
     const rc = reserveArray(w, count, width, &dest);
     if (rc != 0) return rc;
@@ -671,7 +747,11 @@ export fn zidl_cdr_commit_primitives(w: ?*Writer, res: ?*Reservation) c_int {
 
 export fn zidl_cdr_write_bool_array(w: *Writer, values: ?[*]const bool, count: usize) c_int {
     if (count == 0) return 0;
-    if (values == null and (w.buf != null or w.grow_fn != null)) return -3;
+    if (values == null and (w.buf != null or w.hash != null)) return -3;
+    if (w.hash != null) {
+        const source: [*]const u8 = @ptrCast(values.?);
+        return hashArray(w, source[0..count], 1, true);
+    }
     var dest: ?[*]u8 = null;
     const rc = reserveArray(w, count, 1, &dest);
     if (rc != 0) return rc;

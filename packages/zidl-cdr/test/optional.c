@@ -69,16 +69,14 @@ int optional_wire_tests(void) {
         uint8_t expected[80], actual[80];
         size_t len = unhex(expected, vectors[version - 1][order]);
         ZidlCdrReader r;
-        for (mode = 0; mode < 3; ++mode) {
+        for (mode = 1; mode < 3; ++mode) {
             ZidlCdrWriter w;
-            if (mode == 0) CHECK(zidl_cdr_writer_init(&w, version) == 0);
-            else if (mode == 1) zidl_cdr_writer_init_fixed(&w, actual, sizeof actual, version);
+            if (mode == 1) zidl_cdr_writer_init_fixed(&w, actual, sizeof actual, version);
             else zidl_cdr_writer_init_counting(&w, version);
             zidl_cdr_writer_set_byte_order(&w, order);
             CHECK(sample(&w) == 0);
             CHECK(w.len == len && w.pos == len - 4);
             if (mode != 2) CHECK(memcmp(w.buf, expected, len) == 0);
-            if (mode == 0) zidl_cdr_writer_deinit(&w);
         }
         CHECK(zidl_cdr_reader_init(&r, expected, len) == 0);
         CHECK(read_sample(&r) == 0 && r.pos == len && r.data == expected);

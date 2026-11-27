@@ -12,7 +12,7 @@ void shared_primitives_layout(size_t out[17]) {
     out[5] = offsetof(ZidlCdrWriter, pos);
     out[6] = offsetof(ZidlCdrWriter, xcdr_version);
     out[7] = offsetof(ZidlCdrWriter, byte_order);
-    out[8] = offsetof(ZidlCdrWriter, grow_fn);
+    out[8] = offsetof(ZidlCdrWriter, hash);
     out[9] = sizeof(ZidlCdrReader);
     out[10] = _Alignof(ZidlCdrReader);
     out[11] = offsetof(ZidlCdrReader, data);
@@ -237,9 +237,10 @@ int bulk_primitive_arrays(void) {
     {
         ZidlCdrWriter w;
         ZidlCdrReader r, limited;
+        static uint8_t storage[4 + 4 + 2048 * 4];
         uint32_t values[2048], decoded[2048];
         for (size_t i = 0; i < 2048; ++i) values[i] = (uint32_t)(i * 17);
-        if (zidl_cdr_writer_init(&w, ZIDL_XCDR1)) return 33;
+        zidl_cdr_writer_init_fixed(&w, storage, sizeof storage, ZIDL_XCDR1);
         int status = 0;
         if (zidl_cdr_write_encap(&w) ||
             zidl_cdr_write_u32_array(&w, NULL, 1) != ZIDL_CDR_INVALID ||
@@ -253,7 +254,6 @@ int bulk_primitive_arrays(void) {
             zidl_cdr_read_u32_array(&limited, decoded, 2048) != ZIDL_CDR_TRUNCATED ||
             limited.pos != 4 || zidl_cdr_read_u32_array(&r, decoded, 2048) ||
             memcmp(values, decoded, sizeof values)) status = 34;
-        zidl_cdr_writer_deinit(&w);
         if (status) return status;
     }
     {
@@ -396,15 +396,13 @@ int bulk_primitive_arrays(void) {
         for (int version = ZIDL_XCDR1; version <= ZIDL_XCDR2; ++version) {
             for (int endian = ZIDL_CDR_LE; endian <= ZIDL_CDR_BE; ++endian) {
                 const double values[] = { 1.5, -2.25, 1e300 };
+                static uint8_t bulk_storage[4608], scalar_storage[4608];
                 ZidlCdrWriter bulk, scalar;
                 ZidlCdrReservation res, empty;
                 uint8_t *data;
                 int status = 0;
-                if (zidl_cdr_writer_init(&bulk, version)) return 55;
-                if (zidl_cdr_writer_init(&scalar, version)) {
-                    zidl_cdr_writer_deinit(&bulk);
-                    return 55;
-                }
+                zidl_cdr_writer_init_fixed(&bulk, bulk_storage, sizeof bulk_storage, version);
+                zidl_cdr_writer_init_fixed(&scalar, scalar_storage, sizeof scalar_storage, version);
                 zidl_cdr_writer_set_byte_order(&bulk, endian);
                 zidl_cdr_writer_set_byte_order(&scalar, endian);
                 if (zidl_cdr_write_encap(&bulk) || zidl_cdr_write_encap(&scalar) ||
@@ -417,9 +415,9 @@ int bulk_primitive_arrays(void) {
                          zidl_cdr_reservation_data(&bulk, &empty) != NULL ||
                          zidl_cdr_commit_primitives(&bulk, &empty) || !empty.committed ||
                          bulk.len != scalar.len) status = 57;
-                /* Reserved, then the writer grows past its first buffer; the
-                 * elements are found by offset, filled late with host values
-                 * and committed into the writer's byte order. */
+                /* Reserved, then more is written; the elements are found by
+                 * offset, filled late with host values and committed into the
+                 * writer's byte order. */
                 else if (zidl_cdr_reserve_primitives(&bulk, 3, 8, &res) || res.count != 3 ||
                          res.elem_size != 8 || res.committed ||
                          res.swap != (host_le != (endian == ZIDL_CDR_LE)) ||
@@ -442,8 +440,6 @@ int bulk_primitive_arrays(void) {
                         forged.committed || zidl_cdr_commit_primitives(NULL, &res) != ZIDL_CDR_INVALID ||
                         zidl_cdr_commit_primitives(&bulk, NULL) != ZIDL_CDR_INVALID) status = 60;
                 }
-                zidl_cdr_writer_deinit(&bulk);
-                zidl_cdr_writer_deinit(&scalar);
                 if (status) return status;
             }
         }
@@ -488,12 +484,10 @@ int main(void) {
     };
     uint8_t buffer[12];
     int mode;
-    for (mode = 0; mode < 3; mode++) {
+    for (mode = 1; mode < 3; mode++) {
         ZidlCdrWriter w;
         int rc;
-        if (mode == 0) {
-            if (zidl_cdr_writer_init(&w, ZIDL_XCDR2)) return 1;
-        } else if (mode == 1) {
+        if (mode == 1) {
             zidl_cdr_writer_init_fixed(&w, buffer, sizeof buffer, ZIDL_XCDR2);
         } else {
             zidl_cdr_writer_init_counting(&w, ZIDL_XCDR2);
@@ -504,7 +498,6 @@ int main(void) {
         if (rc || w.len != sizeof expected || w.pos != sizeof expected) return 2;
         if (mode != 2 && memcmp(w.buf, expected, sizeof expected)) return 3;
         if (mode == 2 && w.buf != NULL) return 4;
-        zidl_cdr_writer_deinit(&w);
     }
     {
         static const uint8_t stream[] = {

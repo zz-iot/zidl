@@ -287,10 +287,9 @@ ZIDL_ENCAP_CDR1_LE = 0x0001, ZIDL_ENCAP_CDR1_BE = 0x0000
 ZIDL_ENCAP_CDR2_LE = 0x0007, ZIDL_ENCAP_CDR2_BE = 0x0006
 
 // Writer init
-int  zidl_cdr_writer_init(ZidlCdrWriter *w, int xcdr_version);       // malloc-backed
 void zidl_cdr_writer_init_fixed(ZidlCdrWriter *w, uint8_t *buf,
                                 size_t cap, int xcdr_version);        // fixed buffer
-void zidl_cdr_writer_deinit(ZidlCdrWriter *w);                       // free malloc buffer
+void zidl_cdr_writer_init_counting(ZidlCdrWriter *w, int xcdr_version); // size only
 
 // Encapsulation (must be first write call)
 int zidl_cdr_write_encap(ZidlCdrWriter *w);

@@ -46,30 +46,31 @@ static void load_file(FILE *file) {
     assert(Canonical_##NAME##_compute_key_hash(&(VALUE),_hash)==ZIDL_CDR_OK); \
     assert(!memcmp(_hash,_expected->hash,16)); \
     for (int _mode=0; _mode<3; _mode++) { \
-        ZidlCdrWriter _w; \
-        if (!_mode) assert(zidl_cdr_writer_init(&_w,ZIDL_XCDR2)==0); \
-        else if (_mode==1) zidl_cdr_writer_init_fixed(&_w,_fixed,sizeof _fixed,ZIDL_XCDR2); \
-        else zidl_cdr_writer_init_counting(&_w,ZIDL_XCDR2); \
-        zidl_cdr_writer_set_byte_order(&_w,ZIDL_CDR_BE); \
-        assert(Canonical_##NAME##_serialize_key_holder(&_w,&(VALUE))==0); \
-        assert(_w.len==_expected->len); \
+        ZidlCdrKeyHash _h; \
+        ZidlCdrWriter _cw, *_w=&_cw; \
+        if (!_mode) { zidl_cdr_key_hash_init(&_h); _w=&_h.writer; } \
+        else if (_mode==1) zidl_cdr_writer_init_fixed(_w,_fixed,sizeof _fixed,ZIDL_XCDR2); \
+        else zidl_cdr_writer_init_counting(_w,ZIDL_XCDR2); \
+        if (_mode) zidl_cdr_writer_set_byte_order(_w,ZIDL_CDR_BE); \
+        assert(Canonical_##NAME##_serialize_key_holder(_w,&(VALUE))==0); \
+        assert(_w->len==_expected->len); \
         if (_mode!=2) { \
-            assert(!memcmp(_w.buf,_expected->bytes,_w.len)); \
-            zidl_cdr_compute_key_hash_for_type(_w.buf,_w.len,Canonical_##NAME##_KEY_HASH_FORCE_MD5,_hash); \
+            if (_mode) { \
+                assert(!memcmp(_w->buf,_expected->bytes,_w->len)); \
+                zidl_cdr_compute_key_hash_for_type(_w->buf,_w->len,Canonical_##NAME##_KEY_HASH_FORCE_MD5,_hash); \
+            } else zidl_cdr_key_hash_finish(&_h,Canonical_##NAME##_KEY_HASH_FORCE_MD5,_hash); \
             assert(!memcmp(_hash,_expected->hash,16)); \
         } \
-        zidl_cdr_writer_deinit(&_w); \
     } \
     for (int _version=1; _version<=2; _version++) for (int _order=0; _order<=1; _order++) { \
         if (_version==1 && !(XCDR1_OK)) continue; \
         ZidlCdrWriter _w; \
-        assert(zidl_cdr_writer_init(&_w,_version)==0); \
+        zidl_cdr_writer_init_fixed(&_w,_fixed,sizeof _fixed,_version); \
         zidl_cdr_writer_set_byte_order(&_w,_order); \
         assert(zidl_cdr_write_encap_kind(&_w,EXT)==0); \
         assert(Canonical_##NAME##_serialize(&_w,&(VALUE))==0); \
         assert(Canonical_##NAME##_compute_key_hash_from_cdr(_w.buf,_w.len,_hash)==0); \
         assert(!memcmp(_hash,_expected->hash,16)); \
-        zidl_cdr_writer_deinit(&_w); \
     } \
 } while (0)
 
@@ -97,19 +98,19 @@ static void load_wire(const char *path) {
     fclose(file);
 }
 #define CHECK_WIRE(NAME, VALUE, INDEX, EXT) do { \
-    ZidlCdrWriter _w; assert(zidl_cdr_writer_init(&_w,ZIDL_XCDR2)==0); \
+    uint8_t _storage[512]; ZidlCdrWriter _w; \
+    zidl_cdr_writer_init_fixed(&_w,_storage,sizeof _storage,ZIDL_XCDR2); \
     assert(zidl_cdr_write_encap_kind(&_w,EXT)==0); \
     assert(Canonical_##NAME##_serialize(&_w,&(VALUE))==0); \
     assert(_w.len==wire_vectors[INDEX].len && !memcmp(_w.buf,wire_vectors[INDEX].bytes,_w.len)); \
-    zidl_cdr_writer_deinit(&_w); \
 } while(0)
 
 static void wide_wire(const char *path) {
     FILE *file=open_sibling(path,"wide_wire.txt");
     char name[16],hex[1025]; int version,order;
     while (fscanf(file,"%15s %d %d %1024s",name,&version,&order,hex)==4) {
-        uint8_t expected[512],hash[16]; size_t len=hex_bytes(hex,expected);
-        ZidlCdrWriter w; assert(zidl_cdr_writer_init(&w,version)==0);
+        uint8_t expected[512],storage[512],hash[16]; size_t len=hex_bytes(hex,expected);
+        ZidlCdrWriter w; zidl_cdr_writer_init_fixed(&w,storage,sizeof storage,version);
         zidl_cdr_writer_set_byte_order(&w,order); assert(zidl_cdr_write_encap(&w)==0);
         if (!strcmp(name,"seq")) {
             TYPE(WideSeq) value=INIT;
@@ -142,7 +143,6 @@ static void wide_wire(const char *path) {
             assert(!memcmp(hash,canonical,16));
         }
         assert(w.len==len && !memcmp(w.buf,expected,len));
-        zidl_cdr_writer_deinit(&w);
         for (size_t n=4;n<len;n++) {
             ZidlCdrReader r; assert(zidl_cdr_reader_init(&r,expected,n)==0);
             assert((!strcmp(name,"seq") ? Canonical_WideSeq_skip(&r) : Canonical_Wide16_skip(&r))==ZIDL_CDR_TRUNCATED);
@@ -170,15 +170,13 @@ static const KeyVector *key_lookup(const char *name,unsigned order) {
 #define CHECK_KEY(NAME, VALUE, EXT) do { \
     for(unsigned _order=0;_order<2;_order++) { \
         const KeyVector *_v=key_lookup(#NAME,_order); uint8_t _buffer[512],_hash[16]; \
-        for(int _mode=0;_mode<3;_mode++) { \
+        for(int _mode=1;_mode<3;_mode++) { \
             ZidlCdrWriter _w; \
-            if(!_mode) assert(zidl_cdr_writer_init(&_w,ZIDL_XCDR2)==0); \
-            else if(_mode==1) zidl_cdr_writer_init_fixed(&_w,_buffer,sizeof _buffer,ZIDL_XCDR2); \
+            if(_mode==1) zidl_cdr_writer_init_fixed(&_w,_buffer,sizeof _buffer,ZIDL_XCDR2); \
             else zidl_cdr_writer_init_counting(&_w,ZIDL_XCDR2); \
             zidl_cdr_writer_set_byte_order(&_w,_order); assert(zidl_cdr_write_encap_kind(&_w,EXT)==0); \
             assert(Canonical_##NAME##_serialize_key(&_w,&(VALUE))==0); assert(_w.len==_v->len); \
             if(_mode!=2) assert(!memcmp(_w.buf,_v->bytes,_v->len)); \
-            zidl_cdr_writer_deinit(&_w); \
         } \
         assert(Canonical_##NAME##_compute_key_hash_from_cdr_key_only(_v->bytes,_v->len,_hash)==0); \
         assert(!memcmp(_hash,_v->hash,16)); \
@@ -226,9 +224,8 @@ static void key_frame_errors(void) {
         }
     }
     TYPE(Nested) value=INIT; ZidlCdrWriter w;
-    assert(zidl_cdr_writer_init(&w,ZIDL_XCDR1)==0);
+    zidl_cdr_writer_init_counting(&w,ZIDL_XCDR1);
     assert(Canonical_Nested_serialize_key(&w,&value)==ZIDL_CDR_INVALID && w.len==0);
-    zidl_cdr_writer_deinit(&w);
 }
 #ifndef __cplusplus
 typedef struct { size_t calls,frees,size; } KeyStats;
@@ -423,10 +420,13 @@ int main(int argc,char **argv) {
     assert(Canonical_TextSeq_serialize_key_holder(&fixed_writer,&text_fixed)==0);
     zidl_cdr_compute_key_hash_for_type(fixed_writer.buf,fixed_writer.len,Canonical_TextSeq_KEY_HASH_FORCE_MD5,hash);
     assert(!memcmp(hash,lookup("TextSeq")->hash,16) && denied_allocations==0);
+    /* Key hashes stream into MD5: no allocation, even for a variable-width
+     * key collection, which is counted before its DHEADER. */
     memset(hash,0xee,sizeof hash);
-    assert(Canonical_Align_compute_key_hash(&align,hash)==ZIDL_CDR_OVERFLOW);
-    assert(denied_allocations>0);
-    for (size_t i=0;i<16;i++) assert(hash[i]==0xee);
+    assert(Canonical_Align_compute_key_hash(&align,hash)==ZIDL_CDR_OK);
+    assert(!memcmp(hash,lookup("Align")->hash,16));
+    assert(Canonical_TextSeq_compute_key_hash(&text_fixed,hash)==ZIDL_CDR_OK);
+    assert(!memcmp(hash,lookup("TextSeq")->hash,16) && denied_allocations==0);
     zidl_cdr_set_allocator(NULL);
 #ifndef __cplusplus
     /* A hostile native count must fail before touching its undersized buffer. */
