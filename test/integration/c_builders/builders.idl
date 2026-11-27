@@ -1,0 +1,43 @@
+// Builder types (--generate-views) for keyed structs: key members stay as
+// declared, whatever their kind, so the key hash is known before the loan.
+module builders {
+    struct Point {
+        long x;
+        long y;
+    };
+
+    @final
+    struct Keyed {
+        @key long id;
+        @key string name;
+        @key sequence<long> ids;
+        @key Point origin;
+        sequence<float> values;
+        string label;
+    };
+
+    @mutable
+    struct MutableKeyed {
+        @key unsigned long long serial;
+        sequence<double> samples;
+        @optional sequence<short> extra;
+    };
+
+    @appendable
+    struct KeyBase {
+        @key long site;
+        sequence<octet> header;
+    };
+
+    @appendable
+    struct KeyDerived : KeyBase {
+        @key string<8> tag;
+        sequence<octet> blob;
+    };
+
+    // A bounded sequence: a builder's count is checked against it.
+    @final
+    struct Bounded {
+        sequence<long, 4> few;
+    };
+};

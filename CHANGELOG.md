@@ -18,6 +18,17 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- C builder types (`--generate-views`): `FooBuilder` mirrors `FooView` for writing.
+  Primitive sequences and arrays are `ZidlCdrReservation`s (a sequence's `count` is
+  set and checked against its bound), strings are borrowed and copied in, nested
+  structs are builders, and key members stay as declared, so the key hash comes from
+  the builder (`FooBuilder_serialize_key_holder`). `Foo_serialize_builder` reserves
+  in place of writing and `Foo_commit_builder` commits every present reservation. With
+  `--generate-zzdds-wrappers`, `FooDataWriter_loan_builder` counts the builder, loans
+  exactly that and serializes into the loan, the application fills each reservation at
+  `FooWriteLoan_data`, and `publish_builder` commits and publishes (`ALIVE`), or
+  `cancel_builder` returns the loan (zzdds `docs/design/loaned-builders.md`).
+
 - C ABI: writes store their bytes in Zig rather than calling back into C, and a
   counting writer only does the alignment arithmetic. Count-then-fixed through the C
   ABI takes about half as long (bench message: about 2,100 ns, from 4,300).
