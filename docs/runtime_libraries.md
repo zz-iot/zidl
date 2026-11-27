@@ -32,35 +32,37 @@ descriptions in older documents are proposals, not implemented backend guarantee
 
 ## zidl-cdr (Native Zig Codec)
 
-**Source:** `packages/zidl-cdr/src/cdr.zig`
-**Tests:** 87
+**Source:** `packages/zidl-cdr/src/writer.zig`, `reader.zig`, `cdr.zig` (KeyHashWriter, BoundedArray, constants)
 
-### CdrWriter
+### Writer
 
-Comptime-parameterized on XCDR version:
+One generic writer, `Writer(config)`: encoding (XCDR1 or XCDR2), byte order and
+output (counting or a fixed buffer) are each fixed at compile time or left to run
+time (`docs/design/cdr-specialized-instances.md`). A fast instance fixes all three;
+`RuntimeWriter` leaves all three to run time. There is no growable output: count,
+allocate exactly, then write.
 
 ```zig
-var buf = std.ArrayListUnmanaged(u8).empty;
-defer buf.deinit(alloc);
-var w = CdrWriter(.xcdr2).init(&buf, alloc);
+// The fast instance for a configuration, or RuntimeWriter when `fast` has none.
+const W = zidl_cdr.WriterFor(.all, .xcdr2, .little, .fixed);
+var w = W.initFixed(&buf, .xcdr2, .little);      // or initCounting(.xcdr2, .little)
+try w.writeEncapHeader();
+try MyStruct.serialize(&w, value);
+const bytes = w.bytes();                          // empty when counting
+
+// Count, allocate exactly and write; a length mismatch is an error.
+const owned = try zidl_cdr.serializeAlloc(.all, .xcdr2, .little, alloc, value, writeFn);
 ```
 
-The writer grows `buf` as needed (uses the allocator for resizing).
-It can also be initialized with a fixed buffer if you own the memory.
-
 **Why `anytype` duck-typing?** Generated `serialize(writer: anytype, …)` functions
-accept any CdrWriter variant (XCDR1 or XCDR2) without code-gen changes.
-Both `CdrWriter(.xcdr1)` and `CdrWriter(.xcdr2)` satisfy the required interface.
+accept every instance (and `KeyHashWriter`) without code-gen changes.
 
-#### CdrWriter API
+#### Writer API
 
 ```zig
-// Initialize
-var w = CdrWriter(.xcdr2).init(&buf, alloc);
-// or: CdrWriter(.xcdr1).init(&buf, alloc)
-
 // First call (required):
 try w.writeEncapHeader();   // 4-byte header; resets pos to 0
+// (writeEncapHeaderDelimited / writeEncapHeaderMutable for @appendable / @mutable)
 
 // Primitives:
 try w.writeBool(v);
@@ -68,27 +70,28 @@ try w.writeU8(v);  try w.writeI8(v);
 try w.writeU16(v); try w.writeI16(v);
 try w.writeU32(v); try w.writeI32(v);
 try w.writeU64(v); try w.writeI64(v);
-try w.writeF32(v); try w.writeF64(v); try w.writeF128(v);
+try w.writeF32(v); try w.writeF64(v);
+try w.writePrimitiveArray(u32, values);
 
 // Strings:
 try w.writeString(s);     // u32 len + bytes + NUL
-try w.writeWstring(ws);   // u32 count + wchars + NUL wchar
+try w.writeWstring(ws);   // u32 byte count + UTF-16 units
 
 // DHEADER (for @appendable types):
 const off = try w.reserveDheader();
 // ... write payload ...
-w.patchDheader(off);
+try w.patchDheaderChecked(off);
 
 // EMHEADER (for @mutable types):
 const h = try w.reserveEmheader(member_id, must_understand);
 // ... write payload ...
-w.patchEmheader(h);
+try w.patchEmheaderChecked(h);
 // or fixed-length shortcut:
 try w.writeEmheaderFixed(member_id, must_understand, lc);
-
-// Result:
-const bytes = buf.items;  // caller still owns buf
 ```
+
+A fixed writer that runs out of room returns `error.Overflow`; a counting writer
+skips patches and only tracks sizes.
 
 **Alignment note:** After `writeEncapHeader()`, `pos` resets to 0.
 All subsequent alignment pads are relative to this reset position (CDR payload start),
@@ -96,7 +99,7 @@ not the start of the buffer. This matches RTPS/Cyclone DDS behavior.
 
 **XCDR2 vs XCDR1 alignment:**
 - XCDR1: max alignment 8 bytes (natural alignment for all types).
-- XCDR2: max alignment 4 bytes (`i64`, `u64`, `f64`, `f128` align to 4, not 8).
+- XCDR2: max alignment 4 bytes (`i64`, `u64`, `f64` align to 4, not 8).
 
 ### KeyHashWriter
 
@@ -114,12 +117,17 @@ const hash: [16]u8 = w.final();
 `final()` returns the zero-padded serialized key when its length is at most 16
 bytes; otherwise it returns `MD5(serialized_key)`.
 
-### CdrReader
+### Reader
 
-Runtime (not comptime) — byte order and XCDR version are parsed from the encapsulation header:
+`Reader(config)` fixes the encoding and byte order at compile time, or takes them
+from each sample's header; `CdrReader` is the run-time instance. A fast instance
+accepts only its own header (`error.EncapsulationMismatch`), and every instance checks
+bounds on every read. `readSample` checks the header once per sample and reads with
+a fast instance where there is one:
 
 ```zig
 var r = try CdrReader.init(cdr_bytes);  // parses encap header
+const v = try zidl_cdr.readSample(.all, T, cdr_bytes, ctx, readFn);  // readFn(reader: anytype, ctx)
 ```
 
 Reader `pos` starts at 4 (past encap header), but alignment computes
@@ -153,26 +161,24 @@ try r.skip(n);
 All read methods return `error.EndOfStream` on truncation.
 Bool reads return `error.InvalidData` for any byte other than 0x00 or 0x01.
 
-### PlCdrWriter
+### ParameterList (PL_CDR)
 
-`PlCdrWriter` wraps `CdrWriter(.xcdr1)` for RTPS PL_CDR (ParameterList CDR, encap `0x0003`).
-Used for `@mutable` types in DDS discovery (SPDP/SEDP). See `--zig-pl-cdr` CLI option.
+Every writer writes RTPS PL_CDR (ParameterList CDR) for RTPS discovery types (see the
+`--zig-pl-cdr` CLI option): use an XCDR1 instance, which sets the alignment.
 
 ```zig
-// Wire format: (pid:u16 LE, len:u16 LE, value:[len]u8, 4-byte aligned)× + PID_SENTINEL
-const ENCAP_PL_CDR_LE: u16 = 0x0003;
-const ENCAP_PL_CDR_BE: u16 = 0x0002;
-
-var w = PlCdrWriter.init(&buf, alloc);
-try w.writeEncapHeader();
+// Wire format: (pid:u16, len:u16, value:[len]u8, 4-byte aligned)× + PID_SENTINEL,
+// in the writer's byte order
+var w = zidl_cdr.Writer(.{ .version = .xcdr1, .order = .little, .output = .fixed }).initFixed(&buf, .xcdr1, .little);
+try w.writePlEncapHeader();            // 0x0003 (0x0002 big-endian)
 const h = try w.reservePlParam(pid);   // returns PlParamHandle
 // ... write param value ...
-w.patchPlParam(h);
+try w.patchPlParam(h);
 // ... more params ...
 try w.writePlSentinel();               // PID_SENTINEL = 0x0001, len = 0x0000
 ```
 
-`PlParamHandle` = `{ len_offset, buf_value_start }`. Alignment is continuous XCDR1 (max 8 bytes)
+`PlParamHandle` = `{ len_offset, value_start }`. Alignment is continuous XCDR1 (max 8 bytes)
 from CDR payload start; parameter length includes trailing pad.
 
 `CdrReader` additions for PL_CDR:
@@ -500,9 +506,10 @@ See `docs/xtypes_typeobject.md` for full context.
 
 ## Performance Notes
 
-**zidl-cdr CdrWriter:**
-- Buffer growth uses Zig's standard doubling strategy (`ArrayListUnmanaged`).
-- No per-write allocation — padding and primitive writes touch only the buffer.
+**zidl-cdr Writer:**
+- No allocation at all: a counting pass sizes the output, then a fixed writer fills
+  an exact buffer. `zig build bench-cdr` measures the instances.
+- Fast instances fold every alignment, byte-order and output branch at compile time.
 - DHEADER patching requires random-access into the buffer (no streaming writers).
 
 **zidl-cdr:**

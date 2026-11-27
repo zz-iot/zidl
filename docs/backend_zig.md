@@ -490,17 +490,18 @@ pub const LABEL: []const u8 = "hello";
 ## CDR Serialization API
 
 Generated `serialize` and `deserialize` methods use `anytype` duck-typing
-so they work with any `CdrWriter`/`CdrReader` variant (XCDR1 or XCDR2).
+so they work with every writer and reader instance (XCDR1 or XCDR2, either byte
+order, fast or run-time; `docs/design/cdr-specialized-instances.md`).
 
 ### Writing
 
 ```zig
-var buf = std.ArrayListUnmanaged(u8).empty;
-defer buf.deinit(alloc);
-var w = zidl_cdr.CdrWriter(.xcdr2).init(&buf, alloc);
+var buf: [1024]u8 = undefined;
+var w = zidl_cdr.WriterFor(_cdr_fast, .xcdr2, .little, .fixed).initFixed(&buf, .xcdr2, .little);
 try w.writeEncapHeader();
-try MyStruct.serialize(&w, &my_value);
-// buf.items is the complete CDR stream
+try MyStruct.serialize(&w, my_value);
+// w.bytes() is the complete CDR stream; zidl_cdr.serializeAlloc counts, allocates
+// exactly and writes in one call
 ```
 
 ### Reading
@@ -524,11 +525,10 @@ defer stored.deinit(alloc);
 For topic types with `@key` members:
 
 ```zig
-var buf = std.ArrayListUnmanaged(u8).empty;
-defer buf.deinit(alloc);
-var w = zidl_cdr.CdrWriter(.xcdr2).init(&buf, alloc);
+var buf: [256]u8 = undefined;
+var w = zidl_cdr.RuntimeWriter.initFixed(&buf, .xcdr2, .little);
 try w.writeEncapHeader();
-try MyStruct.serializeKey(&w, &my_value);
+try MyStruct.serializeKey(&w, my_value);
 ```
 
 Generated keyed structs also provide:

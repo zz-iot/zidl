@@ -14,16 +14,15 @@ const Encap = enum { final, appendable, mutable };
 
 /// `value` serialized with `encap`'s header, in `version`. Caller frees.
 fn encode(comptime T: type, comptime version: cdr.XcdrVersion, encap: Encap, value: T) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(t.allocator);
-    var w = cdr.CdrWriter(version).init(&buf, t.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var w = cdr.RuntimeWriter.initFixed(&buf_fixed, version, .little);
     switch (encap) {
         .final => try w.writeEncapHeader(),
         .appendable => try w.writeEncapHeaderDelimited(),
         .mutable => try w.writeEncapHeaderMutable(),
     }
     try T.serialize(&w, value);
-    return buf.toOwnedSlice(t.allocator);
+    return t.allocator.dupe(u8, w.bytes());
 }
 
 fn within(bytes: []const u8, s: []const u8) bool {

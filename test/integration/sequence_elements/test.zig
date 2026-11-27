@@ -18,12 +18,11 @@ const zidl_cdr = @import("zidl_cdr");
 const fixture = @import("fixture");
 
 fn encode(comptime T: type, value: T) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(testing.allocator);
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
     try T.serialize(&writer, value);
-    return buf.toOwnedSlice(testing.allocator);
+    return testing.allocator.dupe(u8, writer.bytes());
 }
 
 fn decodeWith(comptime T: type, bytes: []const u8, allocator: std.mem.Allocator) !T {

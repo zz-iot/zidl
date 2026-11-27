@@ -28,29 +28,23 @@ fn check(comptime T: type, value: T, name: []const u8, comptime ext: zidl_cdr.cd
     const checked = try T.computeKeyHashChecked(&value);
     try testing.expectEqualSlices(u8, &expected.hash, &checked);
     var fixed: [512]u8 = undefined;
-    var writer = zidl_cdr.PrimitiveWriter.initFixed(&fixed, .four, .big);
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&fixed, .xcdr2, .big);
     try T.serializeKeyHolder(&writer, value);
     try testing.expectEqualSlices(u8, expected.bytes, fixed[0..writer.len]);
-    writer = zidl_cdr.PrimitiveWriter.initCounting(.four, .big);
+    writer = zidl_cdr.RuntimeWriter.initCounting(.xcdr2, .big);
     try T.serializeKeyHolder(&writer, value);
     try testing.expectEqual(expected.bytes.len, writer.len);
-    var dynamic = std.ArrayListUnmanaged(u8).empty;
-    defer dynamic.deinit(testing.allocator);
-    writer = zidl_cdr.PrimitiveWriter.initDynamic(&dynamic, testing.allocator, .four, .big);
-    try T.serializeKeyHolder(&writer, value);
-    try testing.expectEqualSlices(u8, expected.bytes, dynamic.items);
     inline for (.{ zidl_cdr.XcdrVersion.xcdr1, zidl_cdr.XcdrVersion.xcdr2 }) |version| {
         if (version != .xcdr1 or xcdr1_ok) {
-            var bytes = std.ArrayListUnmanaged(u8).empty;
-            defer bytes.deinit(testing.allocator);
-            var wire = zidl_cdr.CdrWriter(version).init(&bytes, testing.allocator);
+            var bytes_fixed: [1 << 16]u8 = undefined;
+            var wire = zidl_cdr.RuntimeWriter.initFixed(&bytes_fixed, version, .little);
             switch (ext) {
                 .final => try wire.writeEncapHeader(),
                 .appendable => try wire.writeEncapHeaderDelimited(),
                 .mutable => try wire.writeEncapHeaderMutable(),
             }
             try T.serialize(&wire, value);
-            var reader = try zidl_cdr.CdrReader.init(bytes.items);
+            var reader = try zidl_cdr.CdrReader.init(wire.bytes());
             var decoded: T = .{};
             try T.deserializeInto(&decoded, &reader, testing.allocator);
             defer if (comptime @hasDecl(T, "deinit")) decoded.deinit(testing.allocator);
@@ -95,9 +89,8 @@ test "normalized IDs agree across canonical holders, mutable wire headers and in
         .{ C.Hashed, C.Hashed{ .color = 0xaa, .size = 0x01020304 }, "Hashed", true },
         .{ C.UnionDefault, C.UnionDefault{ .selection = .{ ._d = 0, ._u = .{ .other = 0x01020304 } } }, "UnionDefault", false },
     }) |entry| {
-        var data = std.ArrayListUnmanaged(u8).empty;
-        defer data.deinit(testing.allocator);
-        var writer = zidl_cdr.CdrWriter(.xcdr2).init(&data, testing.allocator);
+        var data_fixed: [1 << 16]u8 = undefined;
+        var writer = zidl_cdr.RuntimeWriter.initFixed(&data_fixed, .xcdr2, .little);
         if (entry[3]) try writer.writeEncapHeaderMutable() else try writer.writeEncapHeader();
         try entry[0].serialize(&writer, entry[1]);
         var lines = std.mem.tokenizeScalar(u8, @embedFile("wire_ids.txt"), '\n');
@@ -108,7 +101,7 @@ test "normalized IDs agree across canonical holders, mutable wire headers and in
             const hex = parts.next().?;
             var expected: [256]u8 = undefined;
             const bytes = try std.fmt.hexToBytes(&expected, hex);
-            try testing.expectEqualSlices(u8, bytes, data.items);
+            try testing.expectEqualSlices(u8, bytes, writer.bytes());
             found = true;
         }
         try testing.expect(found);
@@ -169,7 +162,7 @@ test "independent ordinary wide wire vectors: both orders/versions, empty and UT
             try testing.expectEqualSlices(u16, &.{ 'A', 0x1234 }, value.values.slice()[0].slice());
             try testing.expectEqual(@as(usize, 0), value.values.slice()[1].len);
             var encoded: [64]u8 = undefined;
-            var writer = zidl_cdr.PrimitiveWriter.initFixed(&encoded, if (version == 1) .eight else .four, if (order == 0) .little else .big);
+            var writer = zidl_cdr.RuntimeWriter.initFixed(&encoded, if (version == 1) .xcdr1 else .xcdr2, if (order == 0) .little else .big);
             try C.WideSeq.serialize(&writer, value);
             try testing.expectEqualSlices(u8, bytes[4..], encoded[0..writer.len]);
         } else if (std.mem.eql(u8, name, "empty")) {
@@ -182,7 +175,7 @@ test "independent ordinary wide wire vectors: both orders/versions, empty and UT
             const units: []const u16 = if (std.mem.eql(u8, name, "pair")) &.{ 0xd83d, 0xde00 } else &.{ 'A', 0x1234 };
             try testing.expectEqualSlices(u16, units, value.text.slice());
             var encoded: [8]u8 = undefined;
-            var writer = zidl_cdr.PrimitiveWriter.initFixed(&encoded, if (version == 1) .eight else .four, if (order == 0) .little else .big);
+            var writer = zidl_cdr.RuntimeWriter.initFixed(&encoded, if (version == 1) .xcdr1 else .xcdr2, if (order == 0) .little else .big);
             try C.Wide16.serialize(&writer, value);
             try testing.expectEqualSlices(u8, bytes[4..], encoded[0..writer.len]);
         }
@@ -207,10 +200,10 @@ fn checkKeyWire(comptime T: type, value: T, comptime name: []const u8) !void {
         var expected: [16]u8 = undefined;
         _ = try std.fmt.hexToBytes(&expected, parts.next().?);
         var fixed: [512]u8 = undefined;
-        var writer = zidl_cdr.PrimitiveWriter.initFixed(&fixed, .four, if (order == 0) .little else .big);
+        var writer = zidl_cdr.RuntimeWriter.initFixed(&fixed, .xcdr2, if (order == 0) .little else .big);
         try T.serializeKey(&writer, value);
         try testing.expectEqualSlices(u8, bytes[4..], fixed[0..writer.len]);
-        writer = zidl_cdr.PrimitiveWriter.initCounting(.four, if (order == 0) .little else .big);
+        writer = zidl_cdr.RuntimeWriter.initCounting(.xcdr2, if (order == 0) .little else .big);
         try T.serializeKey(&writer, value);
         try testing.expectEqual(bytes.len - 4, writer.len);
         var reader = try zidl_cdr.CdrReader.init(bytes);
@@ -236,11 +229,10 @@ test "independent key-only frames and recursive keyed values" {
     try checkKeyWire(C.ArrayKey, .{ .values = values }, "ArrayKey");
     try checkKeyWire(C.SeqAgg, .{ .values = try zidl_cdr.BoundedArray(C.Nested, 2).fromSlice(&values) }, "SeqAgg");
     try checkKeyWire(C.UnkeyedNested, .{ .inner = .{ .hi = 0xaa, .lo = 0x1234 } }, "UnkeyedNested");
-    var data = std.ArrayListUnmanaged(u8).empty;
-    defer data.deinit(testing.allocator);
-    var writer = zidl_cdr.CdrWriter(.xcdr1).init(&data, testing.allocator);
+    var data_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&data_fixed, .xcdr1, .little);
     try testing.expectError(error.UnsupportedKeyEncoding, C.Nested.serializeKey(&writer, .{}));
-    try testing.expectEqual(@as(usize, 0), data.items.len);
+    try testing.expectEqual(@as(usize, 0), writer.bytes().len);
 }
 
 fn keyOracle(name: []const u8, storage: []u8) ![]u8 {
@@ -380,7 +372,7 @@ test "native collection sizing rejects invalid bounded strings before writing a 
     const bad_text: C.TextArray = .{ .values = .{ .{ .len = 5 }, .{} } };
     const bad_wide: C.WideArray = .{ .values = .{ .{ .len = 3 }, .{} } };
     var bytes: [64]u8 = undefined;
-    var writer = zidl_cdr.PrimitiveWriter.initFixed(&bytes, .four, .big);
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&bytes, .xcdr2, .big);
     try testing.expectError(error.StringTooLong, C.TextArray.serializeKeyHolder(&writer, bad_text));
     try testing.expectEqual(@as(usize, 0), writer.len);
     try testing.expectError(error.StringTooLong, C.WideArray.serializeKeyHolder(&writer, bad_wide));
@@ -399,7 +391,7 @@ test "deep canonical counting visits nested collection bodies once" {
     const value: C.DeepKey = .{ .values = singleton(C.Deep12) };
     const count = comptime blk: {
         @setEvalBranchQuota(30000);
-        var writer = zidl_cdr.PrimitiveWriter.initCounting(.four, .big);
+        var writer = zidl_cdr.RuntimeWriter.initCounting(.xcdr2, .big);
         C.DeepKey.serializeKeyHolder(&writer, .{ .values = singleton(C.Deep12) }) catch unreachable;
         break :blk writer.len;
     };
@@ -412,7 +404,7 @@ test "deep canonical counting visits nested collection bodies once" {
     std.mem.writeInt(u32, expected[96..100], 2, .big);
     expected[100] = 'x';
     var actual: [102]u8 = undefined;
-    var writer = zidl_cdr.PrimitiveWriter.initFixed(&actual, .four, .big);
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&actual, .xcdr2, .big);
     try C.DeepKey.serializeKeyHolder(&writer, value);
     try testing.expectEqualSlices(u8, &expected, &actual);
 }

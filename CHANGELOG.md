@@ -18,6 +18,10 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- zidl-cdr: `CdrWriter`, `PlCdrWriter` and `PrimitiveWriter` are removed, with their
+  growable output: use `Writer`/`RuntimeWriter` (`initFixed`, `initCounting`) or
+  `serializeAlloc`, and an XCDR1 instance with `writePlEncapHeader` for parameter
+  lists. `reservedBytes` returns null for a counting writer.
 - Zig: generated deserializers take any CDR reader (`reader: anytype`) and test the
   encoding with `isXcdr2()`, a compile-time constant in a fast reader. The typed
   DataReader decodes each sample through `zidl_cdr.readSample`, one header check per

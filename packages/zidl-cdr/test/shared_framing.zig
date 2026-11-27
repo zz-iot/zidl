@@ -83,16 +83,11 @@ test "framing known answers through native/C, both byte orders and every storage
     for ([_]rt.ByteOrder{ .little, .big }) |order| {
         var expected: [28]u8 = undefined;
         _ = try std.fmt.hexToBytes(&expected, if (order == .little) little else big);
-        var dynamic = std.ArrayListUnmanaged(u8).empty;
-        defer dynamic.deinit(testing.allocator);
-        var native = rt.PrimitiveWriter.initDynamic(&dynamic, testing.allocator, .four, order);
-        try sample(&native);
-        try testing.expectEqualSlices(u8, &expected, dynamic.items);
         var bytes: [28]u8 = undefined;
-        native = rt.PrimitiveWriter.initFixed(&bytes, .four, order);
+        var native = rt.RuntimeWriter.initFixed(&bytes, .xcdr2, order);
         try sample(&native);
         try testing.expectEqualSlices(u8, &expected, &bytes);
-        native = rt.PrimitiveWriter.initCounting(.four, order);
+        native = rt.RuntimeWriter.initCounting(.xcdr2, order);
         try sample(&native);
         try testing.expectEqual(@as(usize, 28), native.len);
         try testing.expectEqual(@as(usize, 24), native.pos);
@@ -123,11 +118,10 @@ test "framing known answers through native/C, both byte orders and every storage
             try testing.expectEqual(reader.pos, c.pos);
         }
         if (order == .little) {
-            var legacy_buffer = std.ArrayListUnmanaged(u8).empty;
-            defer legacy_buffer.deinit(testing.allocator);
-            var legacy = rt.CdrWriter(.xcdr2).init(&legacy_buffer, testing.allocator);
+            var legacy_buffer_fixed: [1 << 16]u8 = undefined;
+            var legacy = rt.RuntimeWriter.initFixed(&legacy_buffer_fixed, .xcdr2, .little);
             try sample(&legacy);
-            try testing.expectEqualSlices(u8, &expected, legacy_buffer.items);
+            try testing.expectEqualSlices(u8, &expected, legacy.bytes());
         }
     }
 }
@@ -259,7 +253,7 @@ test "checked patch failures leave storage untouched; legacy void calls are safe
     zidl_cdr_patch_emheader(&w, max, max);
     try testing.expectEqualSlices(u8, &snapshot, &bytes);
     try testing.expectEqual(@as(usize, 8), w.len);
-    var n = rt.PrimitiveWriter.initFixed(&bytes, .four, .little);
+    var n = rt.RuntimeWriter.initFixed(&bytes, .xcdr2, .little);
     n.len = bytes.len;
     try testing.expectError(error.InvalidPatch, n.patchDheaderChecked(max));
     n.patchDheader(max);
@@ -269,7 +263,7 @@ test "checked patch failures leave storage untouched; legacy void calls are safe
         w.len = @as(usize, std.math.maxInt(u32)) + 5;
         try testing.expectEqual(@as(c_int, -1), zidl_cdr_patch_dheader_checked(&w, 0));
         try testing.expectEqual(@as(c_int, -1), zidl_cdr_patch_emheader_checked(&w, 0, 4));
-        n = rt.PrimitiveWriter.initCounting(.four, .little);
+        n = rt.RuntimeWriter.initCounting(.xcdr2, .little);
         n.len = w.len;
         try testing.expectError(error.Overflow, n.patchDheaderChecked(0));
     }
@@ -307,15 +301,14 @@ test "PL handle/value layout and independently known padded bytes are preserved"
     const expected_layout = [_]usize{ @sizeOf(H), @alignOf(H), @offsetOf(H, "len_offset"), @offsetOf(H, "buf_value_start"), @sizeOf(P), @alignOf(P), @offsetOf(P, "pid"), @offsetOf(P, "byte_len"), @offsetOf(P, "end_pos") };
     try testing.expectEqualSlices(usize, &expected_layout, &layout);
     const expected = [_]u8{ 0, 3, 0, 0, 0x10, 0, 4, 0, 0xa5, 0, 0, 0, 1, 0, 0, 0 };
-    var buffer = std.ArrayListUnmanaged(u8).empty;
-    defer buffer.deinit(testing.allocator);
-    var native = rt.PlCdrWriter.init(&buffer, testing.allocator);
-    try native.writeEncapHeader();
+    var buffer_fixed: [1 << 16]u8 = undefined;
+    var native = rt.Writer(.{ .version = .xcdr1, .order = .little, .output = .fixed }).initFixed(&buffer_fixed, .xcdr1, .little);
+    try native.writePlEncapHeader();
     const h = try native.reservePlParam(0x10);
     try native.writeU8(0xa5);
     try native.patchPlParam(h);
     try native.writePlSentinel();
-    try testing.expectEqualSlices(u8, &expected, buffer.items);
+    try testing.expectEqualSlices(u8, &expected, native.bytes());
     for (0..3) |mode| {
         var bytes: [16]u8 = undefined;
         var w: Writer = undefined;
@@ -372,10 +365,10 @@ test "PL oversized lengths fail before padding or narrowing" {
     const payload = try testing.allocator.alloc(u8, 65533);
     defer testing.allocator.free(payload);
     @memset(payload, 0);
-    var buffer = std.ArrayListUnmanaged(u8).empty;
-    defer buffer.deinit(testing.allocator);
-    var native = rt.PlCdrWriter.init(&buffer, testing.allocator);
-    try native.writeEncapHeader();
+    // Room for the whole payload, so the length patch is what fails.
+    var buffer_fixed: [1 << 17]u8 = undefined;
+    var native = rt.Writer(.{ .version = .xcdr1, .order = .little, .output = .fixed }).initFixed(&buffer_fixed, .xcdr1, .little);
+    try native.writePlEncapHeader();
     try testing.expectError(error.Overflow, native.writeRawParam(0x10, payload));
-    try testing.expectEqual(before, buffer.items.len);
+    try testing.expectEqual(before, native.bytes().len);
 }

@@ -22,8 +22,9 @@ const UNKNOWN_MUST_UNDERSTAND: u16 = 0x4099; // must-understand bit set
 /// encap + a(16)=42 + unknown ignorable(8B) + label(48)="hi" + b(32)=7
 /// + unknown must-understand(4B) + sentinel
 fn buildWire(alloc: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8)) !void {
-    var w = zidl_cdr.PlCdrWriter.init(buf, alloc);
-    try w.writeEncapHeader();
+    var storage: [256]u8 = undefined;
+    var w = zidl_cdr.Writer(.{ .version = .xcdr1, .order = .little, .output = .fixed }).initFixed(&storage, .xcdr1, .little);
+    try w.writePlEncapHeader();
     {
         const h = try w.reservePlParam(16);
         try w.writeI32(42);
@@ -50,6 +51,7 @@ fn buildWire(alloc: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8)) !void {
         try w.patchPlParam(h);
     }
     try w.writePlSentinel();
+    try buf.appendSlice(alloc, w.bytes());
 }
 
 test "pl_cdr fixture: @pl_retain_unknown adds the field; a plain @mutable struct does not" {
@@ -88,13 +90,12 @@ test "pl_cdr fixture: serializePlCdr replays retained unknowns; second decode ma
     try RetainRec.deserializeFromPlCdr(&rec, &reader, alloc, .lenient);
     defer rec.deinit(alloc);
 
-    var out = std.ArrayListUnmanaged(u8).empty;
-    defer out.deinit(alloc);
-    var w = zidl_cdr.PlCdrWriter.init(&out, alloc);
-    try w.writeEncapHeader();
+    var out_fixed: [1 << 16]u8 = undefined;
+    var w = zidl_cdr.Writer(.{ .version = .xcdr1, .order = .little, .output = .fixed }).initFixed(&out_fixed, .xcdr1, .little);
+    try w.writePlEncapHeader();
     try RetainRec.serializePlCdr(&w, rec);
 
-    var reader2 = try zidl_cdr.CdrReader.init(out.items);
+    var reader2 = try zidl_cdr.CdrReader.init(w.bytes());
     var rec2: RetainRec = .{};
     try RetainRec.deserializeFromPlCdr(&rec2, &reader2, alloc, .lenient);
     defer rec2.deinit(alloc);
@@ -131,10 +132,9 @@ test "pl_cdr fixture: strict decode rejects an unknown must-understand parameter
 
 test "pl_cdr fixture: strict decode rejects a repeated non-@pl_repeated PID" {
     const alloc = testing.allocator;
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(alloc);
-    var w = zidl_cdr.PlCdrWriter.init(&buf, alloc);
-    try w.writeEncapHeader();
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var w = zidl_cdr.Writer(.{ .version = .xcdr1, .order = .little, .output = .fixed }).initFixed(&buf_fixed, .xcdr1, .little);
+    try w.writePlEncapHeader();
     inline for (.{ 42, 43 }) |v| {
         const h = try w.reservePlParam(16); // pid 16 == RetainRec.a, twice
         try w.writeI32(v);
@@ -142,7 +142,7 @@ test "pl_cdr fixture: strict decode rejects a repeated non-@pl_repeated PID" {
     }
     try w.writePlSentinel();
 
-    var r_strict = try zidl_cdr.CdrReader.init(buf.items);
+    var r_strict = try zidl_cdr.CdrReader.init(w.bytes());
     var rec: RetainRec = .{};
     defer rec.deinit(alloc);
     try testing.expectError(
@@ -151,7 +151,7 @@ test "pl_cdr fixture: strict decode rejects a repeated non-@pl_repeated PID" {
     );
 
     // lenient: last-wins, no error
-    var r_lenient = try zidl_cdr.CdrReader.init(buf.items);
+    var r_lenient = try zidl_cdr.CdrReader.init(w.bytes());
     var rec2: RetainRec = .{};
     try RetainRec.deserializeFromPlCdr(&rec2, &r_lenient, alloc, .lenient);
     defer rec2.deinit(alloc);
@@ -160,13 +160,12 @@ test "pl_cdr fixture: strict decode rejects a repeated non-@pl_repeated PID" {
 
 test "pl_cdr fixture: strict decode rejects a known member that reads past its declared length" {
     const alloc = testing.allocator;
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(alloc);
     // pid 16 (WideRec.w, an i64) declared with an aligned but too-short 4-byte
     // length, then a second param — decoding the i64 reads 4 bytes into the
     // next parameter's header.
-    var w = zidl_cdr.PlCdrWriter.init(&buf, alloc);
-    try w.writeEncapHeader();
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var w = zidl_cdr.Writer(.{ .version = .xcdr1, .order = .little, .output = .fixed }).initFixed(&buf_fixed, .xcdr1, .little);
+    try w.writePlEncapHeader();
     {
         const h = try w.reservePlParam(16);
         try w.writeI32(0x01020304); // 4 bytes, aligned; w needs 8
@@ -179,7 +178,7 @@ test "pl_cdr fixture: strict decode rejects a known member that reads past its d
     }
     try w.writePlSentinel();
 
-    var r = try zidl_cdr.CdrReader.init(buf.items);
+    var r = try zidl_cdr.CdrReader.init(w.bytes());
     var rec: WideRec = .{};
     try testing.expectError(
         error.TruncatedParameter,
@@ -189,10 +188,9 @@ test "pl_cdr fixture: strict decode rejects a known member that reads past its d
 
 test "pl_cdr fixture: decoding into a populated retaining out is rejected; deinit then reuse works" {
     const alloc = testing.allocator;
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(alloc);
-    var w = zidl_cdr.PlCdrWriter.init(&buf, alloc);
-    try w.writeEncapHeader();
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var w = zidl_cdr.Writer(.{ .version = .xcdr1, .order = .little, .output = .fixed }).initFixed(&buf_fixed, .xcdr1, .little);
+    try w.writePlEncapHeader();
     {
         const h = try w.reservePlParam(16);
         try w.writeI32(1);
@@ -207,13 +205,13 @@ test "pl_cdr fixture: decoding into a populated retaining out is rejected; deini
 
     var rec: RetainRec = .{};
     defer rec.deinit(alloc);
-    var r1 = try zidl_cdr.CdrReader.init(buf.items);
+    var r1 = try zidl_cdr.CdrReader.init(w.bytes());
     try RetainRec.deserializeFromPlCdr(&rec, &r1, alloc, .lenient);
     try testing.expectEqual(@as(usize, 1), rec.unknown_params.len);
 
     // Bare reuse: rejected rather than leaking the retained slice or freeing it
     // through this call's (possibly different) allocator.
-    var r2 = try zidl_cdr.CdrReader.init(buf.items);
+    var r2 = try zidl_cdr.CdrReader.init(w.bytes());
     try testing.expectError(
         error.RetainedOutputNotEmpty,
         RetainRec.deserializeFromPlCdr(&rec, &r2, alloc, .lenient),
@@ -222,7 +220,7 @@ test "pl_cdr fixture: decoding into a populated retaining out is rejected; deini
 
     // deinit first, then the same `rec` is a valid target again.
     rec.deinit(alloc);
-    var r3 = try zidl_cdr.CdrReader.init(buf.items);
+    var r3 = try zidl_cdr.CdrReader.init(w.bytes());
     try RetainRec.deserializeFromPlCdr(&rec, &r3, alloc, .lenient);
     try testing.expectEqual(@as(usize, 1), rec.unknown_params.len);
     try testing.expectEqualSlices(u8, &[_]u8{ 9, 9, 9, 9 }, rec.unknown_params[0].bytes);
@@ -257,10 +255,9 @@ test "pl_cdr fixture: @optional sequence / array members round-trip (decode, ser
     // fields are the same nominal type the decode temp uses.
     try testing.expectEqual(?[16]u8, @FieldType(OptSeqRec, "guid"));
 
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(alloc);
-    var w = zidl_cdr.PlCdrWriter.init(&buf, alloc);
-    try w.writeEncapHeader();
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var w = zidl_cdr.Writer(.{ .version = .xcdr1, .order = .little, .output = .fixed }).initFixed(&buf_fixed, .xcdr1, .little);
+    try w.writePlEncapHeader();
     { // data: sequence<octet> = {0xAA, 0xBB, 0xCC}
         const h = try w.reservePlParam(10);
         try w.writeU32(3);
@@ -286,7 +283,7 @@ test "pl_cdr fixture: @optional sequence / array members round-trip (decode, ser
     }
     try w.writePlSentinel();
 
-    var reader = try zidl_cdr.CdrReader.init(buf.items);
+    var reader = try zidl_cdr.CdrReader.init(w.bytes());
     var rec: OptSeqRec = .{};
     try OptSeqRec.deserializeFromPlCdr(&rec, &reader, alloc, .lenient);
     defer rec.deinit(alloc);
@@ -310,13 +307,12 @@ test "pl_cdr fixture: @optional sequence / array members round-trip (decode, ser
     try testing.expectEqual(@as(u8, 16), cl.guid.?[15]);
 
     // serialize → decode again: values survive a round-trip.
-    var buf2 = std.ArrayListUnmanaged(u8).empty;
-    defer buf2.deinit(alloc);
-    var w2 = zidl_cdr.PlCdrWriter.init(&buf2, alloc);
-    try w2.writeEncapHeader();
+    var buf2_fixed: [1 << 16]u8 = undefined;
+    var w2 = zidl_cdr.Writer(.{ .version = .xcdr1, .order = .little, .output = .fixed }).initFixed(&buf2_fixed, .xcdr1, .little);
+    try w2.writePlEncapHeader();
     try OptSeqRec.serializePlCdr(&w2, rec);
 
-    var r2 = try zidl_cdr.CdrReader.init(buf2.items);
+    var r2 = try zidl_cdr.CdrReader.init(w2.bytes());
     var rec2: OptSeqRec = .{};
     try OptSeqRec.deserializeFromPlCdr(&rec2, &r2, alloc, .lenient);
     defer rec2.deinit(alloc);
@@ -326,10 +322,9 @@ test "pl_cdr fixture: @optional sequence / array members round-trip (decode, ser
 
 test "pl_cdr fixture: @optional sequence / array members absent → null after decode" {
     const alloc = testing.allocator;
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(alloc);
-    var w = zidl_cdr.PlCdrWriter.init(&buf, alloc);
-    try w.writeEncapHeader();
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var w = zidl_cdr.Writer(.{ .version = .xcdr1, .order = .little, .output = .fixed }).initFixed(&buf_fixed, .xcdr1, .little);
+    try w.writePlEncapHeader();
     {
         const h = try w.reservePlParam(40);
         try w.writeI32(1);
@@ -337,7 +332,7 @@ test "pl_cdr fixture: @optional sequence / array members absent → null after d
     }
     try w.writePlSentinel();
 
-    var reader = try zidl_cdr.CdrReader.init(buf.items);
+    var reader = try zidl_cdr.CdrReader.init(w.bytes());
     var rec: OptSeqRec = .{};
     try OptSeqRec.deserializeFromPlCdr(&rec, &reader, alloc, .lenient);
     defer rec.deinit(alloc); // must be a no-op for the null optionals
@@ -360,13 +355,12 @@ test "@optional sequence / array members round-trip on the @mutable (EMHEADER) p
         .tail = 3,
     };
 
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(alloc);
-    var w = zidl_cdr.CdrWriter(.xcdr2).init(&buf, alloc);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var w = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try w.writeEncapHeader();
     try OptSeqRec.serialize(&w, src);
 
-    var r = try zidl_cdr.CdrReader.init(buf.items);
+    var r = try zidl_cdr.CdrReader.init(w.bytes());
     var out: OptSeqRec = .{};
     try OptSeqRec.deserializeInto(&out, &r, alloc);
     defer out.deinit(alloc);
@@ -391,13 +385,12 @@ test "@optional sequence / array members round-trip on the @appendable (XCDR2) p
         .tail = -1,
     };
 
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(alloc);
-    var w = zidl_cdr.CdrWriter(.xcdr2).init(&buf, alloc);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var w = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try w.writeEncapHeaderDelimited();
     try OptSeqRecApp.serialize(&w, src);
 
-    var r = try zidl_cdr.CdrReader.init(buf.items);
+    var r = try zidl_cdr.CdrReader.init(w.bytes());
     var out: OptSeqRecApp = .{};
     try OptSeqRecApp.deserializeInto(&out, &r, alloc);
     defer out.deinit(alloc);
@@ -415,10 +408,9 @@ test "@optional sequence / array members round-trip on the @appendable (XCDR2) p
 
 test "pl_cdr fixture: plain @mutable struct still honours strict must-understand" {
     const alloc = testing.allocator;
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(alloc);
-    var w = zidl_cdr.PlCdrWriter.init(&buf, alloc);
-    try w.writeEncapHeader();
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var w = zidl_cdr.Writer(.{ .version = .xcdr1, .order = .little, .output = .fixed }).initFixed(&buf_fixed, .xcdr1, .little);
+    try w.writePlEncapHeader();
     {
         const h = try w.reservePlParam(16);
         try w.writeI32(5);
@@ -431,12 +423,12 @@ test "pl_cdr fixture: plain @mutable struct still honours strict must-understand
     }
     try w.writePlSentinel();
 
-    var r_lenient = try zidl_cdr.CdrReader.init(buf.items);
+    var r_lenient = try zidl_cdr.CdrReader.init(w.bytes());
     var p_lenient: PlainRec = .{};
     try PlainRec.deserializeFromPlCdr(&p_lenient, &r_lenient, alloc, .lenient);
     try testing.expectEqual(@as(i32, 5), p_lenient.a);
 
-    var r_strict = try zidl_cdr.CdrReader.init(buf.items);
+    var r_strict = try zidl_cdr.CdrReader.init(w.bytes());
     var p_strict: PlainRec = .{};
     try testing.expectError(
         error.UnknownMustUnderstand,
@@ -450,10 +442,9 @@ test "pl_cdr fixture: a vendor-specific PID aliasing a standard @id is retained,
     // (or, for a struct member instead of a scalar, could misparse entirely).
     const VENDOR_ALIASING: u16 = 0x8021;
     const alloc = testing.allocator;
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(alloc);
-    var w = zidl_cdr.PlCdrWriter.init(&buf, alloc);
-    try w.writeEncapHeader();
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var w = zidl_cdr.Writer(.{ .version = .xcdr1, .order = .little, .output = .fixed }).initFixed(&buf_fixed, .xcdr1, .little);
+    try w.writePlEncapHeader();
     {
         const h = try w.reservePlParam(VENDOR_ALIASING);
         try w.writeBytes(&[_]u8{ 0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04 });
@@ -466,7 +457,7 @@ test "pl_cdr fixture: a vendor-specific PID aliasing a standard @id is retained,
     }
     try w.writePlSentinel();
 
-    var reader = try zidl_cdr.CdrReader.init(buf.items);
+    var reader = try zidl_cdr.CdrReader.init(w.bytes());
     var rec: VendorAliasRec = .{};
     try VendorAliasRec.deserializeFromPlCdr(&rec, &reader, alloc, .lenient);
     defer rec.deinit(alloc);
@@ -485,18 +476,17 @@ test "pl_cdr fixture: nested final optional members preserve parent alignment" {
             .item = .{ .prefix = 0xa5, .number = if (present) 0x0102030405060708 else null, .tail = 0x1122334455667788 },
             .tail = -77,
         };
-        var buf = std.ArrayListUnmanaged(u8).empty;
-        defer buf.deinit(alloc);
-        var writer = zidl_cdr.PlCdrWriter.init(&buf, alloc);
-        try writer.writeEncapHeader();
+        var buf_fixed: [1 << 16]u8 = undefined;
+        var writer = zidl_cdr.Writer(.{ .version = .xcdr1, .order = .little, .output = .fixed }).initFixed(&buf_fixed, .xcdr1, .little);
+        try writer.writePlEncapHeader();
         try fixture.NestedOptionalRec.serializePlCdr(&writer, value);
-        var reader = try zidl_cdr.CdrReader.init(buf.items);
+        var reader = try zidl_cdr.CdrReader.init(writer.bytes());
         var decoded: fixture.NestedOptionalRec = .{};
         try fixture.NestedOptionalRec.deserializeFromPlCdr(&decoded, &reader, alloc, .strict);
         try testing.expectEqual(value.item.prefix, decoded.item.prefix);
         try testing.expectEqual(value.item.number, decoded.item.number);
         try testing.expectEqual(value.item.tail, decoded.item.tail);
         try testing.expectEqual(value.tail, decoded.tail);
-        try testing.expectEqual(buf.items.len, reader.pos);
+        try testing.expectEqual(writer.bytes().len, reader.pos);
     }
 }

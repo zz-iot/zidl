@@ -137,8 +137,8 @@ When `opts.pl_cdr && struct.extensibility == .mutable`, emits additional functio
 the normal XCDR2 serialize/deserialize:
 
 ```zig
-fn serializePlCdr(writer: *zidl_cdr.PlCdrWriter, value: @This()) !void
-fn deserializeFromPlCdr(out: *@This(), reader: *zidl_cdr.CdrReader, allocator: std.mem.Allocator, mode: zidl_cdr.PlMode) !void
+fn serializePlCdr(writer: anytype, value: @This()) !void
+fn deserializeFromPlCdr(out: *@This(), reader: anytype, allocator: std.mem.Allocator, mode: zidl_cdr.PlMode) !void
 ```
 
 - PID = `@id(N)` if present on the member, else sequential member index (same as EMHEADER)

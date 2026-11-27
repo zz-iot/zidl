@@ -1,7 +1,7 @@
 const std = @import("std");
 const cdr = @import("cdr.zig");
 const framing = @import("cdr_framing.zig");
-const PrimitiveWriter = @import("primitive_writer.zig").PrimitiveWriter;
+const RuntimeWriter = @import("writer.zig").RuntimeWriter;
 const testing = std.testing;
 
 const vectors = [_][2][]const u8{
@@ -40,26 +40,14 @@ test "optional native writers and readers match independent XCDR1 and XCDR2 byte
         for ([_]cdr.ByteOrder{ .little, .big }, 0..) |order, o| {
             var expected_buf: [80]u8 = undefined;
             const expected = try std.fmt.hexToBytes(&expected_buf, vectors[v][o]);
-            var dynamic: std.ArrayListUnmanaged(u8) = .empty;
-            defer dynamic.deinit(testing.allocator);
-            const cap = if (version == .xcdr1) .eight else .four;
-            var w = PrimitiveWriter.initDynamic(&dynamic, testing.allocator, cap, order);
-            try sample(&w);
-            try testing.expectEqualSlices(u8, expected, dynamic.items);
             var bytes: [80]u8 = undefined;
-            w = PrimitiveWriter.initFixed(&bytes, cap, order);
+            var w = RuntimeWriter.initFixed(&bytes, version, order);
             try sample(&w);
             try testing.expectEqualSlices(u8, expected, bytes[0..w.len]);
-            w = PrimitiveWriter.initCounting(cap, order);
+            w = RuntimeWriter.initCounting(version, order);
             try sample(&w);
             try testing.expectEqual(expected.len, w.len);
             try testing.expectEqual(expected.len - 4, w.pos);
-            if (order == .little) {
-                dynamic.clearRetainingCapacity();
-                var legacy = cdr.CdrWriter(version).init(&dynamic, testing.allocator);
-                try sample(&legacy);
-                try testing.expectEqualSlices(u8, expected, dynamic.items);
-            }
             var r = try cdr.CdrReader.init(expected);
             try readSample(&r);
             try testing.expectEqual(expected.len, r.pos);
@@ -117,7 +105,7 @@ test "optional headers reject invalid IDs, flags, lengths and out of bounds valu
 }
 
 test "optional exact lengths exceed the short header limit and restore on write errors" {
-    var w = PrimitiveWriter.initCounting(.eight, .little);
+    var w = RuntimeWriter.initCounting(.xcdr1, .little);
     try w.writeEncapHeader();
     const scope = try w.beginOptionalMember(0x0fffffff, true, true);
     const bytes: [65537]u8 = @splat(0);
@@ -126,14 +114,14 @@ test "optional exact lengths exceed the short header limit and restore on write 
     try testing.expectEqual(@as(usize, 12 + 65537), w.pos);
     try testing.expectEqual(@as(usize, 16 + 65537), w.len);
     var large: [65553]u8 = undefined;
-    var large_writer = PrimitiveWriter.initFixed(&large, .eight, .little);
+    var large_writer = RuntimeWriter.initFixed(&large, .xcdr1, .little);
     try large_writer.writeEncapHeader();
     const large_scope = try large_writer.beginOptionalMember(0x0fffffff, false, true);
     try large_writer.writeBytes(&bytes);
     try large_writer.finishOptionalMember(large_scope);
     try testing.expectEqualSlices(u8, &.{ 1, 0, 1, 0 }, large[12..16]);
     var fixed: [17]u8 = undefined;
-    w = PrimitiveWriter.initFixed(&fixed, .eight, .little);
+    w = RuntimeWriter.initFixed(&fixed, .xcdr1, .little);
     try w.writeEncapHeader();
     const failed = try w.beginOptionalMember(1, false, true);
     try w.writeU8(42);
@@ -152,7 +140,7 @@ test "optional exact lengths exceed the short header limit and restore on write 
 
 test "nested optional scopes restore enclosing alignment and limits" {
     var bytes: [80]u8 = undefined;
-    var w = PrimitiveWriter.initFixed(&bytes, .eight, .little);
+    var w = RuntimeWriter.initFixed(&bytes, .xcdr1, .little);
     try w.writeEncapHeader();
     const outer = try w.beginOptionalMember(3, false, true);
     try w.writeU8(7);

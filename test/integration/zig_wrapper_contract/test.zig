@@ -19,24 +19,22 @@ const fixture = @import("fixture");
 const mw = @import("zzdds");
 
 test "getFieldFromCdr: IntOnly (no string_like member -- scratch discarded, field not)" {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(testing.allocator);
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeaderDelimited();
     try fixture.IntOnly.serialize(&writer, .{ .seq_num = 7 });
 
     var scratch: [1]u8 = undefined; // never written into -- no string_like member
     const alloc: std.mem.Allocator = testing.allocator;
-    const got = fixture.IntOnly.getFieldFromCdr(@ptrCast(@constCast(&alloc)), buf.items, "seq_num", &scratch);
+    const got = fixture.IntOnly.getFieldFromCdr(@ptrCast(@constCast(&alloc)), writer.bytes(), "seq_num", &scratch);
     try testing.expect(got != null);
     try testing.expectEqual(@as(i64, 7), got.?.int);
-    try testing.expect(fixture.IntOnly.getFieldFromCdr(@ptrCast(@constCast(&alloc)), buf.items, "nonexistent", &scratch) == null);
+    try testing.expect(fixture.IntOnly.getFieldFromCdr(@ptrCast(@constCast(&alloc)), writer.bytes(), "nonexistent", &scratch) == null);
 }
 
 test "getFieldFromCdr: OnlyComplex (no filterable member -- both field and scratch discarded)" {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(testing.allocator);
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeaderDelimited();
     try fixture.OnlyComplex.serialize(&writer, .{ .values = .{}, .nested = .{ .z = 1 } });
 
@@ -45,7 +43,7 @@ test "getFieldFromCdr: OnlyComplex (no filterable member -- both field and scrat
     // No member is filterable -- every lookup returns null, but the point
     // is that this compiles and runs at all (the bug this guards against
     // was a Zig compile error, not a wrong runtime result).
-    try testing.expect(fixture.OnlyComplex.getFieldFromCdr(@ptrCast(@constCast(&alloc)), buf.items, "values", &scratch) == null);
+    try testing.expect(fixture.OnlyComplex.getFieldFromCdr(@ptrCast(@constCast(&alloc)), writer.bytes(), "values", &scratch) == null);
 }
 
 test "wrapper contract: Reading write/take round-trip against the fake middleware" {
@@ -117,9 +115,8 @@ test "wrapper contract: a sample that does not decode is ended failed, and a bat
 }
 
 test "deserializeSelected: extracts a non-leading @key, skips large non-key members" {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(testing.allocator);
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeaderDelimited();
     const big: [4096]u8 = @splat(0xAB);
     try fixture.KeyedBlob.serialize(&writer, .{
@@ -128,7 +125,7 @@ test "deserializeSelected: extracts a non-leading @key, skips large non-key memb
         .blob = .{ ._buffer = @constCast(&big), ._length = big.len, ._maximum = big.len, ._release = false },
     });
 
-    var reader = try zidl_cdr.CdrReader.init(buf.items);
+    var reader = try zidl_cdr.CdrReader.init(writer.bytes());
     var out: fixture.KeyedBlob = undefined;
     try fixture.KeyedBlob.deserializeSelected(&reader, fixture.KeyedBlob.KEY_FIELD_MASK, &out, testing.allocator);
     defer fixture.KeyedBlob.deinitSelected(&out, fixture.KeyedBlob.KEY_FIELD_MASK, testing.allocator);
@@ -148,9 +145,8 @@ test "computeKeyHashFromCdr: full ALIVE payload with a non-leading @key hashes c
     // out of `prefix`'s length prefix/content. computeKeyHashFromCdr uses
     // deserializeSelected(KEY_FIELD_MASK) instead, which skips non-key members
     // properly regardless of where `@key` sits.
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(testing.allocator);
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeaderDelimited();
     const value = fixture.KeyedBlob{
         .prefix = "a-prefix-that-should-be-skipped",
@@ -160,7 +156,7 @@ test "computeKeyHashFromCdr: full ALIVE payload with a non-leading @key hashes c
     try fixture.KeyedBlob.serialize(&writer, value);
 
     const alloc: std.mem.Allocator = testing.allocator;
-    const got = fixture.KeyedBlob.computeKeyHashFromCdr(@ptrCast(@constCast(&alloc)), buf.items);
+    const got = fixture.KeyedBlob.computeKeyHashFromCdr(@ptrCast(@constCast(&alloc)), writer.bytes());
     const want = fixture.KeyedBlob.computeKeyHash(&value);
     try testing.expectEqualSlices(u8, &want, &got);
 }
@@ -172,9 +168,8 @@ test "computeKeyHashFromCdrKeyOnly: genuine key-only payload with a non-leading 
     // @compileError used to block outright for a non-leading @key on a
     // @final struct; KeyedBlob is @appendable, but the underlying decode
     // logic is the same "no skip needed" reasoning either way.
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(testing.allocator);
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeaderDelimited();
     const value = fixture.KeyedBlob{
         .prefix = "irrelevant-to-a-key-only-payload",
@@ -184,15 +179,14 @@ test "computeKeyHashFromCdrKeyOnly: genuine key-only payload with a non-leading 
     try fixture.KeyedBlob.serializeKey(&writer, value);
 
     const alloc: std.mem.Allocator = testing.allocator;
-    const got = fixture.KeyedBlob.computeKeyHashFromCdrKeyOnly(@ptrCast(@constCast(&alloc)), buf.items);
+    const got = fixture.KeyedBlob.computeKeyHashFromCdrKeyOnly(@ptrCast(@constCast(&alloc)), writer.bytes());
     const want = fixture.KeyedBlob.computeKeyHash(&value);
     try testing.expectEqualSlices(u8, &want, &got);
 }
 
 test "getFieldFromCdr: decodes only the referenced field, skips the rest" {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(testing.allocator);
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeaderDelimited();
     const big: [4096]u8 = @splat(0xCD);
     try fixture.KeyedBlob.serialize(&writer, .{
@@ -204,11 +198,11 @@ test "getFieldFromCdr: decodes only the referenced field, skips the rest" {
     var alloc: std.mem.Allocator = testing.allocator;
     var scratch: [64]u8 = undefined;
     // "id" -> decodes id, skips the 4 KB blob and the string
-    const v = fixture.KeyedBlob.getFieldFromCdr(@ptrCast(&alloc), buf.items, "id", &scratch);
+    const v = fixture.KeyedBlob.getFieldFromCdr(@ptrCast(&alloc), writer.bytes(), "id", &scratch);
     try testing.expect(v != null);
     try testing.expectEqual(@as(i64, 12345), v.?.int);
     // an unknown field name -> null, no crash
-    try testing.expect(fixture.KeyedBlob.getFieldFromCdr(@ptrCast(&alloc), buf.items, "nope", &scratch) == null);
+    try testing.expect(fixture.KeyedBlob.getFieldFromCdr(@ptrCast(&alloc), writer.bytes(), "nope", &scratch) == null);
 }
 
 test "selected readers preserve enclosing limits and skip future appendable fields" {
@@ -231,36 +225,34 @@ test "selected nested keys read full samples while key-only reads retain project
     const allocator = testing.allocator;
     const expected = try fixture.KeyOuter.computeKeyHashChecked(&value);
     inline for (.{ .xcdr1, .xcdr2 }) |version| {
-        var bytes = std.ArrayListUnmanaged(u8).empty;
-        defer bytes.deinit(allocator);
-        var writer = zidl_cdr.CdrWriter(version).init(&bytes, allocator);
+        var bytes_fixed: [1 << 16]u8 = undefined;
+        var writer = zidl_cdr.RuntimeWriter.initFixed(&bytes_fixed, version, .little);
         try writer.writeEncapHeader();
         try fixture.KeyOuter.serialize(&writer, value);
-        var reader = try zidl_cdr.CdrReader.init(bytes.items);
+        var reader = try zidl_cdr.CdrReader.init(writer.bytes());
         var selected: fixture.KeyOuter = .{};
         try fixture.KeyOuter.deserializeSelected(&reader, fixture.KeyOuter.KEY_FIELD_MASK, &selected, allocator);
         try testing.expectEqual(@as(i32, 42), selected.inner.id);
         try testing.expectEqual(@as(i32, 7), selected.tail);
-        try testing.expectEqual(bytes.items.len, reader.pos);
-        try testing.expectEqual(expected, fixture.KeyOuter.computeKeyHashFromCdr(@ptrCast(@constCast(&allocator)), bytes.items));
+        try testing.expectEqual(writer.bytes().len, reader.pos);
+        try testing.expectEqual(expected, fixture.KeyOuter.computeKeyHashFromCdr(@ptrCast(@constCast(&allocator)), writer.bytes()));
 
-        bytes.clearRetainingCapacity();
-        writer = zidl_cdr.CdrWriter(version).init(&bytes, allocator);
+        writer = zidl_cdr.RuntimeWriter.initFixed(&bytes_fixed, version, .little);
         try writer.writeEncapHeader();
         try fixture.KeyOuter.serializeKey(&writer, value);
-        reader = try zidl_cdr.CdrReader.init(bytes.items);
+        reader = try zidl_cdr.CdrReader.init(writer.bytes());
         var key: fixture.KeyOuter = .{};
         try fixture.KeyOuter.deserializeKeyInto(&key, &reader, allocator);
         try testing.expectEqual(@as(i32, 0), key.inner.ignored);
         try testing.expectEqual(@as(i32, 42), key.inner.id);
         try testing.expectEqual(@as(i32, 7), key.tail);
-        try testing.expectEqual(bytes.items.len, reader.pos);
+        try testing.expectEqual(writer.bytes().len, reader.pos);
     }
 }
 
 test "a keyless topic retains its empty key while nested values can project" {
     var bytes: [16]u8 = undefined;
-    var writer = zidl_cdr.PrimitiveWriter.initFixed(&bytes, .four, .little);
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&bytes, .xcdr2, .little);
     const value: fixture.KeylessBridge = .{ .inner = .{ .ignored = 99, .id = 42 } };
     try fixture.KeylessBridge.serializeKey(&writer, value);
     try testing.expectEqual(@as(usize, 0), writer.len);
@@ -281,18 +273,17 @@ test "TypeSupport.register registers every generated callback under the IDL name
     try testing.expect(ts.get_field != null);
 
     const value: fixture.Labeled = .{ .name = "probe-7", .reading = 21 };
-    var bytes = std.ArrayListUnmanaged(u8).empty;
-    defer bytes.deinit(allocator);
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&bytes, allocator);
+    var bytes_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&bytes_fixed, .xcdr2, .little);
     try writer.writeEncapHeaderDelimited();
     try fixture.Labeled.serialize(&writer, value);
 
     // The key hash decodes the string key with the registration's allocator.
     const want = fixture.Labeled.computeKeyHash(&value);
-    try testing.expectEqualSlices(u8, &want, &ts.compute_key_hash(ts.ctx, bytes.items));
+    try testing.expectEqualSlices(u8, &want, &ts.compute_key_hash(ts.ctx, writer.bytes()));
 
     const projection = ts.key_projection.?;
-    const key = projection.project(projection.ctx, bytes.items, allocator).?;
+    const key = projection.project(projection.ctx, writer.bytes(), allocator).?;
     defer allocator.free(key);
     const expected_key = try value.keyCdr(true, allocator);
     defer allocator.free(expected_key);
@@ -300,7 +291,7 @@ test "TypeSupport.register registers every generated callback under the IDL name
     try testing.expectEqualSlices(u8, &want, &ts.compute_key_hash_key_only.?(ts.ctx, key));
 
     var scratch: [16]u8 = undefined;
-    try testing.expectEqual(@as(i64, 21), ts.get_field.?(ts.ctx, bytes.items, "reading", &scratch).?.int);
+    try testing.expectEqual(@as(i64, 21), ts.get_field.?(ts.ctx, writer.bytes(), "reading", &scratch).?.int);
 }
 
 test "TypeSupport.register takes an explicit name and releases its context when refused" {

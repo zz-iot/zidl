@@ -1,9 +1,9 @@
-// Interop tests: cross-validate zidl-cdr CdrReader/CdrWriter against
+// Interop tests: cross-validate zidl-cdr CdrReader and the fast writers against
 // Cyclone DDS 11.0.1 byte-level CDR output.
 //
 // Each test pair:
 //   "cyclone → zig":  expected bytes (from cyclone_dump) fed to CdrReader
-//   "zig → cyclone":  CdrWriter output compared byte-for-byte with expected bytes
+//   "zig → cyclone":  fixed writer output compared byte-for-byte with expected bytes
 //
 // Expected bytes were captured by running:
 //   make -C interop   (or: make all from within interop/)
@@ -16,10 +16,8 @@
 const std = @import("std");
 const zidl_cdr = @import("zidl_cdr");
 const CdrReader = zidl_cdr.CdrReader;
-const CdrWriter = zidl_cdr.CdrWriter;
 
 const testing = std.testing;
-const alloc = testing.allocator;
 
 // ── Expected bytes (from cyclone_dump, committed) ─────────────────────────
 
@@ -92,8 +90,12 @@ const POINT_XCDR2 = [_]u8{
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-fn mkWriter(comptime xver: zidl_cdr.XcdrVersion, buf: *std.ArrayListUnmanaged(u8)) CdrWriter(xver) {
-    return CdrWriter(xver).init(buf, alloc);
+fn Fixed(comptime xver: zidl_cdr.XcdrVersion) type {
+    return zidl_cdr.WriterFor(.all, xver, .little, .fixed);
+}
+
+fn mkWriter(comptime xver: zidl_cdr.XcdrVersion, buf: []u8) Fixed(xver) {
+    return Fixed(xver).initFixed(buf, xver, .little);
 }
 
 // ── Direction 1: Cyclone → Zig (CdrReader parsing Cyclone bytes) ──────────
@@ -156,11 +158,10 @@ test "cyclone→zig: point xcdr2 le (@appendable with DHEADER)" {
     try testing.expectEqual(@as(i32, -200), try r.readI32());
 }
 
-// ── Direction 2: Zig → Cyclone (CdrWriter output matches Cyclone bytes) ───
+// ── Direction 2: Zig → Cyclone (writer output matches Cyclone bytes) ───
 
 test "zig→cyclone: primitives xcdr2 le" {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(alloc);
+    var buf: [128]u8 = undefined;
     var w = mkWriter(.xcdr2, &buf);
     try w.writeEncapHeader();
     try w.writeI32(42);
@@ -170,12 +171,11 @@ test "zig→cyclone: primitives xcdr2 le" {
     try w.writeF64(3.14);
     try w.writeI16(-7);
     try w.writeI64(9_000_000_000);
-    try testing.expectEqualSlices(u8, &PRIMITIVES_XCDR2, buf.items);
+    try testing.expectEqualSlices(u8, &PRIMITIVES_XCDR2, w.bytes());
 }
 
 test "zig→cyclone: primitives xcdr1 le" {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(alloc);
+    var buf: [128]u8 = undefined;
     var w = mkWriter(.xcdr1, &buf);
     try w.writeEncapHeader();
     try w.writeI32(42);
@@ -185,12 +185,11 @@ test "zig→cyclone: primitives xcdr1 le" {
     try w.writeF64(3.14);
     try w.writeI16(-7);
     try w.writeI64(9_000_000_000);
-    try testing.expectEqualSlices(u8, &PRIMITIVES_XCDR1, buf.items);
+    try testing.expectEqualSlices(u8, &PRIMITIVES_XCDR1, w.bytes());
 }
 
 test "zig→cyclone: message xcdr2 le (string + sequence)" {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(alloc);
+    var buf: [128]u8 = undefined;
     var w = mkWriter(.xcdr2, &buf);
     try w.writeEncapHeader();
     try w.writeI32(7); // sensor_id
@@ -199,12 +198,11 @@ test "zig→cyclone: message xcdr2 le (string + sequence)" {
     try w.writeI32(10);
     try w.writeI32(20);
     try w.writeI32(30);
-    try testing.expectEqualSlices(u8, &MESSAGE_XCDR2, buf.items);
+    try testing.expectEqualSlices(u8, &MESSAGE_XCDR2, w.bytes());
 }
 
 test "zig→cyclone: message xcdr1 le (string + sequence)" {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(alloc);
+    var buf: [128]u8 = undefined;
     var w = mkWriter(.xcdr1, &buf);
     try w.writeEncapHeader();
     try w.writeI32(7); // sensor_id
@@ -213,17 +211,16 @@ test "zig→cyclone: message xcdr1 le (string + sequence)" {
     try w.writeI32(10);
     try w.writeI32(20);
     try w.writeI32(30);
-    try testing.expectEqualSlices(u8, &MESSAGE_XCDR1, buf.items);
+    try testing.expectEqualSlices(u8, &MESSAGE_XCDR1, w.bytes());
 }
 
 test "zig→cyclone: point xcdr2 le (@appendable with DHEADER)" {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(alloc);
+    var buf: [128]u8 = undefined;
     var w = mkWriter(.xcdr2, &buf);
     try w.writeEncapHeader();
     const dh = try w.reserveDheader();
     try w.writeI32(100);
     try w.writeI32(-200);
     w.patchDheader(dh);
-    try testing.expectEqualSlices(u8, &POINT_XCDR2, buf.items);
+    try testing.expectEqualSlices(u8, &POINT_XCDR2, w.bytes());
 }

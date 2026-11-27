@@ -53,29 +53,25 @@ fn decode(comptime T: type, bytes: []const u8, allocator: std.mem.Allocator, key
 fn check(comptime T: type, present: bool, version: u8, order: u8, full: []const u8, compact: []const u8) !void {
     const v = value(T, present);
     for (0..2) |key| {
-        var dynamic: std.ArrayListUnmanaged(u8) = .empty;
-        defer dynamic.deinit(testing.allocator);
         var actual: [1024]u8 = undefined;
         for (4..full.len) |cap| {
-            var failed = zidl_cdr.PrimitiveWriter.initFixed(actual[0..cap], if (version == 1) .eight else .four, if (order == 0) .little else .big);
+            var failed = zidl_cdr.RuntimeWriter.initFixed(actual[0..cap], if (version == 1) .xcdr1 else .xcdr2, if (order == 0) .little else .big);
             try failed.writeBytes(full[0..4]);
             failed.resetPayload();
             if (key == 1) try testing.expectError(error.Overflow, T.serializeKeyValue(&failed, v)) else try testing.expectError(error.Overflow, T.serialize(&failed, v));
             try testing.expect(failed.len <= cap);
             try testing.expectEqual(failed.len - 4, failed.pos);
         }
-        for (0..3) |mode| {
+        for (0..2) |mode| {
             var w = switch (mode) {
-                0 => zidl_cdr.PrimitiveWriter.initFixed(&actual, if (version == 1) .eight else .four, if (order == 0) .little else .big),
-                1 => zidl_cdr.PrimitiveWriter.initCounting(if (version == 1) .eight else .four, if (order == 0) .little else .big),
-                else => zidl_cdr.PrimitiveWriter.initDynamic(&dynamic, testing.allocator, if (version == 1) .eight else .four, if (order == 0) .little else .big),
+                0 => zidl_cdr.RuntimeWriter.initFixed(&actual, if (version == 1) .xcdr1 else .xcdr2, if (order == 0) .little else .big),
+                else => zidl_cdr.RuntimeWriter.initCounting(if (version == 1) .xcdr1 else .xcdr2, if (order == 0) .little else .big),
             };
             try w.writeBytes(full[0..4]);
             w.resetPayload();
             if (key == 1) try T.serializeKeyValue(&w, v) else try T.serialize(&w, v);
             try testing.expectEqual(full.len, w.len);
             if (mode == 0) try testing.expectEqualSlices(u8, full, actual[0..w.len]);
-            if (mode == 2) try testing.expectEqualSlices(u8, full, dynamic.items);
         }
         for ([_][]const u8{ full, compact }) |bytes| {
             try decode(T, bytes, testing.allocator, key == 1, present);

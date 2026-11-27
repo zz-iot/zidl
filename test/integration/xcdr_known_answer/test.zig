@@ -177,16 +177,15 @@ fn eql(a: anytype, b: @TypeOf(a)) bool {
 const Ext = enum { final, appendable, mutable };
 
 fn encode(comptime T: type, comptime v: zidl_cdr.XcdrVersion, comptime ext: Ext, value: T) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(testing.allocator);
-    var w = zidl_cdr.CdrWriter(v).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var w = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, v, .little);
     switch (ext) {
         .final => try w.writeEncapHeader(),
         .appendable => try w.writeEncapHeaderDelimited(),
         .mutable => try w.writeEncapHeaderMutable(),
     }
     try T.serialize(&w, value);
-    return buf.toOwnedSlice(testing.allocator);
+    return testing.allocator.dupe(u8, w.bytes());
 }
 
 /// The reference sample: the representation id the reference writes for

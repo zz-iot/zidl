@@ -26,7 +26,7 @@ extern fn zidl_cdr_set_allocator(?*const @import("c_header").ZidlAllocator) void
 const little = "a500000003000000686900000400000034125a00010000000000000000000000";
 const big = "a50000000000000368690000000000041234005a000000010000000000000000";
 
-fn sample(w: *rt.PrimitiveWriter) !void {
+fn sample(w: *rt.RuntimeWriter) !void {
     try w.writeU8(0xa5);
     try w.writeString("hi");
     try w.writeWstring(&.{ 0x1234, 'Z' });
@@ -52,17 +52,12 @@ test "independent string/wstring vectors in both orders, versions, and storage m
     for ([_]c_int{ 1, 2 }) |version| for ([_]rt.ByteOrder{ .little, .big }) |order| {
         var bytes: [32]u8 = undefined;
         const expected = try std.fmt.hexToBytes(&bytes, if (order == .little) little else big);
-        const cap: @FieldType(rt.PrimitiveWriter, "alignment_cap") = if (version == 1) .eight else .four;
-        var dynamic = std.ArrayListUnmanaged(u8).empty;
-        defer dynamic.deinit(testing.allocator);
-        var native = rt.PrimitiveWriter.initDynamic(&dynamic, testing.allocator, cap, order);
-        try sample(&native);
-        try testing.expectEqualSlices(u8, expected, dynamic.items);
+        const cap: rt.XcdrVersion = if (version == 1) .xcdr1 else .xcdr2;
         var fixed: [32]u8 = undefined;
-        native = rt.PrimitiveWriter.initFixed(&fixed, cap, order);
+        var native = rt.RuntimeWriter.initFixed(&fixed, cap, order);
         try sample(&native);
         try testing.expectEqualSlices(u8, expected, &fixed);
-        native = rt.PrimitiveWriter.initCounting(cap, order);
+        native = rt.RuntimeWriter.initCounting(cap, order);
         try sample(&native);
         try testing.expectEqual(@as(usize, 32), native.len);
         for (0..3) |mode| {
@@ -273,7 +268,7 @@ test "string fixed-buffer failure preserves partial writes and counting rejects 
     try testing.expectEqual(@as(c_int, -1), zidl_cdr_write_string(&foreign, "hi", 2));
     try testing.expectEqual(@as(usize, 6), foreign.len);
     try testing.expectEqualSlices(u8, &.{ 3, 0, 0, 0, 'h', 'i' }, bytes[0..6]);
-    var native = rt.PrimitiveWriter.initFixed(bytes[0..6], .four, .little);
+    var native = rt.RuntimeWriter.initFixed(bytes[0..6], .xcdr2, .little);
     try testing.expectError(error.Overflow, native.writeString("hi"));
     try testing.expectEqual(foreign.len, native.len);
     const words = [_]u16{ 0x1234, 'Z' };
@@ -282,7 +277,7 @@ test "string fixed-buffer failure preserves partial writes and counting rejects 
     try testing.expectEqual(@as(c_int, -1), zidl_cdr_write_wstring(&foreign, &words, words.len));
     try testing.expectEqual(@as(usize, 6), foreign.len);
     try testing.expectEqual(@as(u8, 0xcc), bytes[6]);
-    native = rt.PrimitiveWriter.initFixed(bytes[0..6], .four, .little);
+    native = rt.RuntimeWriter.initFixed(bytes[0..6], .xcdr2, .little);
     try testing.expectError(error.Overflow, native.writeWstring(&words));
     try testing.expectEqual(foreign.len, native.len);
     zidl_cdr_writer_init_counting(&foreign, 2);

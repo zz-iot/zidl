@@ -352,7 +352,7 @@ pub fn Reader(comptime cfg: ReaderConfig) type {
         /// One PL_CDR parameter retained verbatim by a `@pl_retain_unknown` type's
         /// generated deserializer. `bytes` is the value only (no PID/length header,
         /// no trailing pad), owned by the containing struct's allocator; re-emit it
-        /// with `PlCdrWriter.writeRawParam(pid, bytes)`.
+        /// with the writer's `writeRawParam(pid, bytes)`.
         pub const RawParam = struct {
             pid: u16,
             bytes: []u8,

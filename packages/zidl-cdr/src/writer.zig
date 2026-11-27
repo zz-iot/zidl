@@ -91,6 +91,11 @@ pub fn Writer(comptime cfg: WriterConfig) type {
         inline fn counting(self: *const Self) bool {
             return self.output() == .counting;
         }
+        /// Whether this writer only counts: generated code that sizes a
+        /// nested body itself checks it.
+        pub fn isCounting(self: *const Self) bool {
+            return self.counting();
+        }
 
         /// What has been written; empty when counting.
         pub fn bytes(self: *const Self) []u8 {
@@ -156,8 +161,9 @@ pub fn Writer(comptime cfg: WriterConfig) type {
                 const size = @sizeOf(T);
                 const boundary = @min(size, self.cap());
                 const step = (boundary - self.pos % boundary) % boundary + size;
-                self.len = std.math.add(usize, self.len, step) catch return error.Overflow;
-                self.pos += step;
+                const len = std.math.add(usize, self.len, step) catch return error.Overflow;
+                self.pos = std.math.add(usize, self.pos, step) catch return error.Overflow;
+                self.len = len;
                 return;
             }
             try primitives.writeUnsigned(self, T, v, self.pos, self.cap(), self.order());
@@ -469,7 +475,6 @@ pub fn serializeAlloc(
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
-const cdr = @import("cdr.zig");
 
 /// A message crossing every alignment, framing kind and the bulk paths.
 fn writeMessage(w: anytype) !void {
@@ -504,11 +509,15 @@ fn writeFraming(w: anytype) !void {
     try w.finishOptionalMember(opt);
 }
 
-fn reference(comptime version: XcdrVersion, buf: *std.ArrayListUnmanaged(u8)) !void {
-    var w = cdr.CdrWriter(version).init(buf, testing.allocator);
-    try w.writeEncapHeaderDelimited();
-    try writeMessage(&w);
-}
+/// The message's bytes, checked equal to the removed `CdrWriter`
+/// (little-endian) and `PrimitiveWriter` (big-endian) before they went.
+const known = struct {
+    const xcdr1_le = "000100001100000000000000000000000000f83f3322000000000000f9ffffffffffffff0600000068656c6c6f00000004000000680069000112345c010000000200000003000000010000002a000000070000c00b000000070000006d656d626572000008000020ffffffff017f08000900000008000000efbeadde00000000";
+    const xcdr2_le = "0009000011000000000000000000f83f33220000f9ffffffffffffff0600000068656c6c6f00000004000000680069000112345c01000000020000000300000001000000200000002a000000070000c00b000000070000006d656d626572000008000020ffffffff01000000efbeadde00000000";
+    // Without the arrays.
+    const xcdr1_be = "0000000011000000000000003ff80000000000002233000000000000fffffffffffffff90000000668656c6c6f00000000000004006800690112345c0000002ac00000070000000b000000076d656d626572000020000008ffffffff7f010008000000090000000800000000deadbeef";
+    const xcdr2_be = "00080000110000003ff800000000000022330000fffffffffffffff90000000668656c6c6f00000000000004006800690112345c000000200000002ac00000070000000b000000076d656d626572000020000008ffffffff0100000000000000deadbeef";
+};
 
 fn checkInstance(comptime C: type, comptime W: type, version: XcdrVersion, order: ByteOrder, expected: []const u8) !void {
     var counter = C.initCounting(version, order);
@@ -530,35 +539,28 @@ fn checkInstance(comptime C: type, comptime W: type, version: XcdrVersion, order
     try testing.expectError(error.Overflow, writeMessage(&short));
 }
 
-test "every little-endian instance writes what CdrWriter writes" {
+test "every little-endian instance writes the known bytes" {
     inline for (.{ XcdrVersion.xcdr1, XcdrVersion.xcdr2 }) |version| {
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer buf.deinit(testing.allocator);
-        try reference(version, &buf);
-        try checkInstance(WriterFor(.all, version, .little, .counting), WriterFor(.all, version, .little, .fixed), version, .little, buf.items);
+        var buf: [512]u8 = undefined;
+        const expected = try std.fmt.hexToBytes(&buf, if (version == .xcdr1) known.xcdr1_le else known.xcdr2_le);
+        try checkInstance(WriterFor(.all, version, .little, .counting), WriterFor(.all, version, .little, .fixed), version, .little, expected);
         const Mixed = Writer(.{ .version = version, .order = .little });
-        try checkInstance(Mixed, Mixed, version, .little, buf.items);
-        try checkInstance(RuntimeWriter, RuntimeWriter, version, .little, buf.items);
-        try checkInstance(WriterFor(.none, version, .little, .counting), WriterFor(.none, version, .little, .fixed), version, .little, buf.items);
+        try checkInstance(Mixed, Mixed, version, .little, expected);
+        try checkInstance(RuntimeWriter, RuntimeWriter, version, .little, expected);
+        try checkInstance(WriterFor(.none, version, .little, .counting), WriterFor(.none, version, .little, .fixed), version, .little, expected);
     }
 }
 
-test "the run-time instance writes big-endian as PrimitiveWriter does" {
-    const PrimitiveWriter = @import("primitive_writer.zig").PrimitiveWriter;
+test "the run-time instance writes the known big-endian bytes" {
     inline for (.{ XcdrVersion.xcdr1, XcdrVersion.xcdr2 }) |version| {
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer buf.deinit(testing.allocator);
-        var p = PrimitiveWriter.initDynamic(&buf, testing.allocator, if (version == .xcdr1) .eight else .four, .big);
-        try p.writeEncapHeaderDelimited();
-        try writeScalars(&p);
-        try writeFraming(&p);
-
+        var buf: [512]u8 = undefined;
+        const expected = try std.fmt.hexToBytes(&buf, if (version == .xcdr1) known.xcdr1_be else known.xcdr2_be);
         var out: [256]u8 = undefined;
         var w = RuntimeWriter.initFixed(&out, version, .big);
         try w.writeEncapHeaderDelimited();
         try writeScalars(&w);
         try writeFraming(&w);
-        try testing.expectEqualSlices(u8, buf.items, w.bytes());
+        try testing.expectEqualSlices(u8, expected, w.bytes());
     }
 }
 
@@ -630,26 +632,21 @@ test "reservations fill in place, and counting writers have nothing to fill" {
     try testing.expectEqual(@as(usize, 24), c.len);
 }
 
-test "parameter lists are written as PlCdrWriter writes them" {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    var p = cdr.PlCdrWriter.init(&buf, testing.allocator);
-    try p.writeEncapHeader();
-    const h = try p.reservePlParam(0x0050);
-    try p.writeString("abcde");
-    try p.patchPlParam(h);
-    try p.writeRawParam(0x8001, &[_]u8{ 1, 2, 3 });
-    try p.writePlSentinel();
-
+test "parameter lists are written with padded lengths and a sentinel" {
     var out: [64]u8 = undefined;
     var w = Writer(.{ .version = .xcdr1, .order = .little, .output = .fixed }).initFixed(&out, .xcdr1, .little);
     try w.writePlEncapHeader();
-    const h2 = try w.reservePlParam(0x0050);
+    const h = try w.reservePlParam(0x0050);
     try w.writeString("abcde");
-    try w.patchPlParam(h2);
+    try w.patchPlParam(h);
     try w.writeRawParam(0x8001, &[_]u8{ 1, 2, 3 });
     try w.writePlSentinel();
-    try testing.expectEqualSlices(u8, buf.items, w.bytes());
+    try testing.expectEqualSlices(u8, &[_]u8{
+        0, 3, 0, 0, // PL_CDR_LE
+        0x50, 0, 12, 0, 6, 0, 0, 0, 'a', 'b', 'c', 'd', 'e', 0, 0, 0, // padded to 12
+        0x01, 0x80, 4, 0, 1, 2, 3, 0, // retained verbatim, padded to 4
+        1, 0, 0, 0, // PID_SENTINEL
+    }, w.bytes());
 }
 
 test "a DHEADER is XCDR2-only, and patches outside what was written are refused" {
@@ -702,12 +699,12 @@ test "a big-endian parameter list reads back: lengths and sentinel in its byte o
     try b.writePlSentinel();
     try testing.expectEqualSlices(u8, &[_]u8{ 0, 2, 0, 0, 0, 0x50, 0, 4, 1, 2, 3, 4, 0, 1, 0, 0 }, b.bytes());
 
-    var r = try cdr.CdrReader.init(b.bytes());
+    var r = try @import("reader.zig").CdrReader.init(b.bytes());
     try testing.expect(r.is_pl_cdr);
     const p = (try r.readPlParam(.strict)).?;
     try testing.expectEqual(@as(u16, 0x0050), p.pid);
     try testing.expectEqual(@as(u16, 4), p.byte_len);
     try testing.expectEqual(@as(u32, 0x01020304), try r.readU32());
     try r.seekTo(p.end_pos);
-    try testing.expectEqual(@as(?cdr.CdrReader.PlParam, null), try r.readPlParam(.strict));
+    try testing.expectEqual(@as(?@import("reader.zig").CdrReader.PlParam, null), try r.readPlParam(.strict));
 }

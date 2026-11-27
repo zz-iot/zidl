@@ -4498,7 +4498,7 @@ const Generator = struct {
         try self.ind();
         try self.print("{s}{{\n", .{extra});
         try self.ind();
-        try self.print("{s}    const _key_counting = if (comptime @TypeOf(writer.*) == zidl_cdr.PrimitiveWriter) writer.storage == .counting else false;\n", .{extra});
+        try self.print("{s}    const _key_counting = if (comptime @hasDecl(@TypeOf(writer.*), \"isCounting\")) writer.isCounting() else false;\n", .{extra});
         try self.ind();
         try self.print("{s}    if (_key_counting) {{\n", .{extra});
         try self.ind();
@@ -4512,7 +4512,7 @@ const Generator = struct {
         try self.ind();
         try self.print("{s}    }} else {{\n", .{extra});
         try self.ind();
-        try self.print("{s}        var _key_size = zidl_cdr.PrimitiveWriter.initCounting(.four, .big);\n", .{extra});
+        try self.print("{s}        var _key_size = zidl_cdr.Writer(.{{ .version = .xcdr2, .order = .big, .output = .counting }}).initCounting(.xcdr2, .big);\n", .{extra});
         try self.ind();
         try self.print("{s}        try _zidl_keyCollection{d}(&_key_size, {s});\n", .{ extra, id, access });
         try self.ind();
