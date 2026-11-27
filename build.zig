@@ -1261,6 +1261,24 @@ pub fn build(b: *std.Build) void {
     }
 
     {
+        const step = b.step("test-zig-builders", "Check generated Zig builder types write the struct's bytes, and loan_builder ends its loan");
+        test_step.dependOn(step);
+        const middleware = b.createModule(.{ .root_source_file = b.path("test/integration/zig_wrapper_contract/fake_middleware.zig"), .target = target });
+        const gen_views = gens.run();
+        gen_views.addArgs(&.{ "-b", "zig", "--generate-views", "-o" });
+        const views_out = gen_views.addOutputDirectoryArg("zig-builders-views");
+        gen_views.addFileArg(b.path("test/integration/c_views/views.idl"));
+        const views = b.createModule(.{ .root_source_file = views_out.path(b, "views.zig"), .target = target, .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings } } });
+        const gen = gens.run();
+        gen.addArgs(&.{ "-b", "zig", "--generate-views", "--generate-zzdds-wrappers", "-o" });
+        const out = gen.addOutputDirectoryArg("zig-builders");
+        gen.addFileArg(b.path("test/integration/c_builders/builders.idl"));
+        const builders = b.createModule(.{ .root_source_file = out.path(b, "builders.zig"), .target = target, .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings }, .{ .name = "zzdds", .module = middleware } } });
+        const tests = b.addTest(.{ .name = "zig-builders", .root_module = b.createModule(.{ .root_source_file = b.path("test/integration/zig_builders/test.zig"), .target = target, .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zzdds", .module = middleware }, .{ .name = "views", .module = views }, .{ .name = "builders", .module = builders } } }) });
+        step.dependOn(&b.addRunArtifact(tests).step);
+    }
+
+    {
         const step = b.step("test-skip-admission", "Check structural traversal and projection are distinct from admission");
         test_step.dependOn(step);
         const dir = "test/integration/skip_admission/";

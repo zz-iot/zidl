@@ -18,6 +18,18 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Zig builder types (`--generate-views`): `Foo.Builder` mirrors `Foo.View` for writing,
+  as in C and C++. Primitive sequences and arrays are
+  `zidl_cdr.cdr_primitives.ReservedPrimitives` (new: a sequence's `count` is set, and
+  serializing into a fixed writer binds `bytes`, filled through `asNative(T)` or
+  `copyFrom`), strings `[]const u8`, nested structs builders; key members stay as
+  declared. `Builder.serialize` takes any writer, `commit` commits every present
+  reservation and `computeKeyHash` hashes the builder's key. With
+  `--generate-zzdds-wrappers`, the typed DataWriter's `loan_builder` counts the builder,
+  loans exactly that (`loanRaw`) and serializes into it, returning a `BuilderLoan`
+  whose `publish` commits and publishes (`ALIVE`) and whose `deinit` returns an
+  unpublished loan.
+
 - C++ builder types (`--generate-views`): `FooBuilder` mirrors `FooView` for writing,
   as in C. Primitive sequences and arrays are `zidl::PrimitivesReservation<T>` (new in
   `zidl_cdr_view.hpp`: `resize` sets a sequence's count, and once serialized

@@ -124,9 +124,11 @@ pub const Options = struct {
     /// Emit a zero-copy view type per struct, decoded from CDR in place:
     /// primitive sequences and arrays are views of the input, strings are
     /// zero-copy, nested structs are views, and other members decode as in
-    /// the struct (zzdds docs/design/shmem-zero-copy.md, part B). With
-    /// --generate-zzdds-wrappers, readers also get take_view/return_view.
-    /// C backend so far.
+    /// the struct (zzdds docs/design/shmem-zero-copy.md, part B). Also a
+    /// builder type, its write twin, whose primitive members are reserved
+    /// and filled in place (zzdds docs/design/loaned-builders.md). With
+    /// --generate-zzdds-wrappers, readers also get take_view and writers
+    /// loan_builder. C, C++ and Zig backends.
     generate_views: bool = false,
     /// Java backend only: which Java package an imported module's own
     /// generated output lives in, when it differs from this invocation's own

@@ -113,6 +113,52 @@ pub fn writeRawWithTimestamp(dw: DDS.DataWriter, kind: WriteKind, key_hash: [16]
     _ = timestamp;
 }
 
+/// Write loans: 8-byte aligned, as zzdds gives them, and ended by publishing
+/// (which keeps the bytes and key hash here) or returning.
+pub const WriteLoan = struct { data: []align(8) u8 };
+pub const WriteLoanError = error{ OutOfResources, BadParameter, OutOfMemory };
+
+pub var outstanding_loans: usize = 0;
+pub var returned_loans: usize = 0;
+pub var published: std.ArrayListUnmanaged(u8) = .empty;
+pub var published_hash: [16]u8 = @splat(0);
+pub var published_kind: ?WriteKind = null;
+/// Makes the next publish fail, after ending the loan as zzdds does.
+pub var fail_publish = false;
+
+pub fn loanRaw(dw: DDS.DataWriter, size: usize) WriteLoanError!WriteLoan {
+    _ = dw;
+    const data = try std.testing.allocator.alignedAlloc(u8, .@"8", size);
+    outstanding_loans += 1;
+    return .{ .data = data };
+}
+
+pub fn publishLoanRaw(dw: DDS.DataWriter, loan: *WriteLoan, len: usize, kind: WriteKind, key_hash: [16]u8) WriteLoanError!void {
+    _ = dw;
+    defer returnLoan(loan);
+    if (len > loan.data.len) return error.BadParameter;
+    published.clearRetainingCapacity();
+    try published.appendSlice(std.testing.allocator, loan.data[0..len]);
+    published_hash = key_hash;
+    published_kind = kind;
+    if (fail_publish) {
+        fail_publish = false;
+        return error.OutOfResources;
+    }
+}
+
+pub fn returnLoanRaw(dw: DDS.DataWriter, loan: *WriteLoan) void {
+    _ = dw;
+    returned_loans += 1;
+    returnLoan(loan);
+}
+
+fn returnLoan(loan: *WriteLoan) void {
+    std.testing.allocator.free(loan.data);
+    loan.data = &.{};
+    outstanding_loans -= 1;
+}
+
 pub fn registerInstanceRaw(dw: DDS.DataWriter, key_hash: [16]u8, key_cdr: []const u8) DDS.InstanceHandle_t {
     _ = dw;
     _ = key_hash;

@@ -166,9 +166,9 @@ pub fn swapInPlace(bytes: []u8, width: usize) void {
 }
 
 /// Primitives reserved in a writer's buffer for the caller to fill in place
-/// (docs/design/bulk-cdr-zero-copy.md). Recorded by offset, so it survives
-/// the buffer's reallocation as the writer grows; its bytes are fetched
-/// again after any other write.
+/// (docs/design/bulk-cdr-zero-copy.md). Recorded by offset into the writer's
+/// buffer: its bytes come from the writer (`reservedBytes`), or, for a
+/// fixed writer, whose buffer never moves, once into `ReservedPrimitives`.
 pub const PrimitivesReservation = struct {
     /// The first element's offset in the writer's buffer.
     offset: usize,
@@ -191,6 +191,55 @@ pub const PrimitivesReservation = struct {
     pub fn commit(self: *PrimitivesReservation, buf: []u8) void {
         if (self.committed) return;
         if (self.swap) swapInPlace(self.bytes(buf), self.width);
+        self.committed = true;
+    }
+};
+
+/// Primitives reserved in a fixed writer's buffer, held where the application
+/// fills them: the write twin of `PrimitivesView`, as a generated builder
+/// holds it (`--generate-views`). Set `count` for a sequence before
+/// serializing (an array reserves its declared length); serializing binds the
+/// rest. The elements are valid until that buffer is released. They are not
+/// initialized: fill every one with host values, then `commit`.
+pub const ReservedPrimitives = struct {
+    /// How many elements. Set for a sequence; serializing sets it for an array.
+    count: usize = 0,
+    /// Where the elements go, `count * width` bytes: empty until bound to a
+    /// fixed writer's buffer.
+    bytes: []u8 = &.{},
+    /// 1, 2, 4 or 8, once bound.
+    width: usize = 0,
+    /// The writer's byte order differs from the host's: `commit` swaps.
+    swap: bool = false,
+    committed: bool = false,
+
+    /// Records `res`, reserved for this member, and where its elements are:
+    /// `bytes` from `reservedBytes`, null for a counting writer.
+    pub fn bind(self: *ReservedPrimitives, bytes: ?[]u8, res: PrimitivesReservation) void {
+        self.* = .{ .count = res.count, .bytes = bytes orelse &.{}, .width = res.width, .swap = res.swap };
+    }
+
+    /// The elements as `T` values to fill in place, in host byte order, or
+    /// null when `T` is not `width` bytes. Their memory alignment is not
+    /// `T`'s: CDR aligns them relative to the payload, not to memory.
+    pub fn asNative(self: ReservedPrimitives, comptime T: type) ?[]align(1) T {
+        if (@sizeOf(T) != self.width) return null;
+        const elements: [*]align(1) T = @ptrCast(self.bytes.ptr);
+        return elements[0 .. self.bytes.len / self.width];
+    }
+
+    /// Fills every element from `values`, host values of `width` bytes each.
+    pub fn copyFrom(self: ReservedPrimitives, comptime T: type, values: []const T) error{ InvalidPrimitiveSize, LengthMismatch }!void {
+        if (@sizeOf(T) != self.width) return error.InvalidPrimitiveSize;
+        if (values.len * self.width != self.bytes.len) return error.LengthMismatch;
+        const source: [*]const u8 = @ptrCast(values.ptr);
+        @memcpy(self.bytes, source[0..self.bytes.len]);
+    }
+
+    /// Puts the filled elements in the writer's byte order, in place, once.
+    pub fn commit(self: *ReservedPrimitives) void {
+        if (self.committed) return;
+        if (self.swap) swapInPlace(self.bytes, self.width);
         self.committed = true;
     }
 };
