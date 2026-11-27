@@ -1,4 +1,4 @@
-/* C ABI storage and allocator support; wire operations live in the native Zig core. */
+/* C ABI writer setup and allocator support; writes live in the native Zig core. */
 
 #include "zidl_cdr.h"
 
@@ -39,29 +39,6 @@ int zidl_cdr_writer_is_counting(const ZidlCdrWriter *w) {
     return !w->buf && !w->hash;
 }
 
-static int writer_ensure(ZidlCdrWriter *w, size_t n) {
-    if (n > SIZE_MAX - w->len || n > SIZE_MAX - w->pos) return ZIDL_CDR_OVERFLOW;
-    /* Counting and key hash writers only need the counter bounds above. */
-    if (!w->buf) return ZIDL_CDR_OK;
-    if (n > w->cap - w->len) return ZIDL_CDR_OVERFLOW;
-    return ZIDL_CDR_OK;
-}
-
-/* Feeds a key hash writer's bytes to its hash (shared_primitives.zig). */
-void zidl_cdr_shared_hash_bytes(ZidlCdrKeyHash *h, const uint8_t *bytes, size_t n);
-
-static int writer_write_bytes(ZidlCdrWriter *w, const uint8_t *bytes, size_t n) {
-    int rc = writer_ensure(w, n);
-    if (rc) return rc;
-    if (n) {
-        if (w->buf) memcpy(w->buf + w->len, bytes, n);
-        else if (w->hash) zidl_cdr_shared_hash_bytes(w->hash, bytes, n);
-    }
-    w->len += n;
-    w->pos += n;
-    return ZIDL_CDR_OK;
-}
-
 int zidl_cdr_serialize_alloc(int xcdr_version, int byte_order, ZidlCdrSerializeFn fn,
                              const void *ctx, uint8_t **out, size_t *out_len) {
     ZidlCdrWriter w;
@@ -87,29 +64,6 @@ int zidl_cdr_serialize_alloc(int xcdr_version, int byte_order, ZidlCdrSerializeF
     }
     *out = buf;
     *out_len = counted;
-    return ZIDL_CDR_OK;
-}
-
-/* Internal storage bridge. Wire encoding lives in the shared Zig core. */
-int zidl_cdr_shared_write_bytes(ZidlCdrWriter *w, const uint8_t *bytes, size_t n) {
-    return writer_write_bytes(w, bytes, n);
-}
-
-/* Reserve a complete aligned body before the codec touches its contents. */
-int zidl_cdr_shared_reserve_array(ZidlCdrWriter *w, size_t pad, size_t n,
-                                  uint8_t **out) {
-    if (n > SIZE_MAX - pad) return ZIDL_CDR_OVERFLOW;
-    /* Nothing to fill in place: key hash writers stream elements instead. */
-    if (w->hash) return ZIDL_CDR_INVALID;
-    int rc = writer_ensure(w, pad + n);
-    if (rc) return rc;
-    *out = NULL;
-    if (w->buf) {
-        memset(w->buf + w->len, 0, pad);
-        *out = w->buf + w->len + pad;
-    }
-    w->len += pad + n;
-    w->pos += pad + n;
     return ZIDL_CDR_OK;
 }
 

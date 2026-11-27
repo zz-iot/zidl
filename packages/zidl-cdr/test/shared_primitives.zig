@@ -110,6 +110,10 @@ test "counting overflow is recoverable and does not wrap counters" {
     try testing.expectEqual(@as(c_int, -1), zidl_cdr_write_u8(&w, 1));
     try testing.expectEqual(std.math.maxInt(usize), w.len);
     try testing.expectEqual(@as(usize, 0), w.pos);
+    zidl_cdr_writer_init_counting(&w, 2);
+    w.pos = std.math.maxInt(usize);
+    try testing.expectEqual(@as(c_int, -1), zidl_cdr_write_u8(&w, 1));
+    try testing.expectEqual(@as(usize, 0), w.len);
     var n = rt.RuntimeWriter.initCounting(.xcdr2, .little);
     n.pos = std.math.maxInt(usize);
     try testing.expectError(error.Overflow, n.writeU8(1));

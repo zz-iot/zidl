@@ -49,45 +49,73 @@ fn readMessage(r: anytype, _: void) !u64 {
     return sum;
 }
 
-// ── The C path's specialized exports: one fast instance behind a pointer,
-// as per-instance C entry points would be.
+// ── Per-instance C entry points, measured here only (the library does not
+// export them; see the design note): `bench_x2le_<op>` for the fixed
+// instance and `bench_x2lec_<op>` for the counting one.
 const FastFixed = cdr.Writer(.{ .version = .xcdr2, .order = .little, .output = .fixed });
+const FastCounting = cdr.Writer(.{ .version = .xcdr2, .order = .little, .output = .counting });
+
+fn Exports(comptime W: type) type {
+    return struct {
+        fn len(w: *W) callconv(.c) usize {
+            return w.len;
+        }
+        fn writeU8(w: *W, v: u8) callconv(.c) c_int {
+            w.writeU8(v) catch return -1;
+            return 0;
+        }
+        fn writeU16(w: *W, v: u16) callconv(.c) c_int {
+            w.writeU16(v) catch return -1;
+            return 0;
+        }
+        fn writeU32(w: *W, v: u32) callconv(.c) c_int {
+            w.writeU32(v) catch return -1;
+            return 0;
+        }
+        fn writeU64(w: *W, v: u64) callconv(.c) c_int {
+            w.writeU64(v) catch return -1;
+            return 0;
+        }
+        fn writeF64(w: *W, v: f64) callconv(.c) c_int {
+            w.writeF64(v) catch return -1;
+            return 0;
+        }
+        fn writeString(w: *W, str: [*]const u8, n: u32) callconv(.c) c_int {
+            w.writeString(str[0..n]) catch return -1;
+            return 0;
+        }
+        fn exportAll(comptime prefix: []const u8) void {
+            @export(&len, .{ .name = prefix ++ "_len" });
+            @export(&writeU8, .{ .name = prefix ++ "_write_u8" });
+            @export(&writeU16, .{ .name = prefix ++ "_write_u16" });
+            @export(&writeU32, .{ .name = prefix ++ "_write_u32" });
+            @export(&writeU64, .{ .name = prefix ++ "_write_u64" });
+            @export(&writeF64, .{ .name = prefix ++ "_write_f64" });
+            @export(&writeString, .{ .name = prefix ++ "_write_string" });
+        }
+    };
+}
+
+comptime {
+    Exports(FastFixed).exportAll("bench_x2le");
+    Exports(FastCounting).exportAll("bench_x2lec");
+}
+
 export fn bench_x2le_size() usize {
-    return @sizeOf(FastFixed);
+    return @max(@sizeOf(FastFixed), @sizeOf(FastCounting));
 }
 export fn bench_x2le_init(w: *FastFixed, buf: [*]u8, cap: usize) void {
     w.* = FastFixed.initFixed(buf[0..cap], .xcdr2, .little);
 }
-export fn bench_x2le_len(w: *FastFixed) usize {
-    return w.len;
-}
-export fn bench_x2le_write_u8(w: *FastFixed, v: u8) c_int {
-    w.writeU8(v) catch return -1;
-    return 0;
-}
-export fn bench_x2le_write_u16(w: *FastFixed, v: u16) c_int {
-    w.writeU16(v) catch return -1;
-    return 0;
-}
-export fn bench_x2le_write_u32(w: *FastFixed, v: u32) c_int {
-    w.writeU32(v) catch return -1;
-    return 0;
-}
-export fn bench_x2le_write_u64(w: *FastFixed, v: u64) c_int {
-    w.writeU64(v) catch return -1;
-    return 0;
-}
-export fn bench_x2le_write_f64(w: *FastFixed, v: f64) c_int {
-    w.writeF64(v) catch return -1;
-    return 0;
-}
-export fn bench_x2le_write_string(w: *FastFixed, s: [*]const u8, len: u32) c_int {
-    w.writeString(s[0..len]) catch return -1;
-    return 0;
+export fn bench_x2lec_init(w: *FastCounting) void {
+    w.* = FastCounting.initCounting(.xcdr2, .little);
 }
 
 extern fn bench_c_runtime(buf: [*]u8, cap: usize, seed: u64) usize;
 extern fn bench_c_special(state: *anyopaque, buf: [*]u8, cap: usize, seed: u64) usize;
+extern fn bench_c_runtime_count_fixed(buf: [*]u8, cap: usize, seed: u64) usize;
+extern fn bench_c_special_count_fixed(state: *anyopaque, buf: [*]u8, cap: usize, seed: u64) usize;
+extern fn bench_c_mixed_count_fixed(state: *anyopaque, buf: [*]u8, cap: usize, seed: u64) usize;
 
 const iters: u64 = 400_000;
 const rounds = 7;
@@ -166,6 +194,22 @@ fn cSpecial(ctx: *Ctx) u64 {
     return sum;
 }
 
+fn cWith(comptime f: fn (*anyopaque, [*]u8, usize, u64) callconv(.c) usize) fn (*Ctx) u64 {
+    return struct {
+        fn run(ctx: *Ctx) u64 {
+            var sum: u64 = 0;
+            for (0..iters) |n| sum +%= f(ctx.state.ptr, ctx.buf.ptr, ctx.buf.len, seedOf(n));
+            return sum;
+        }
+    }.run;
+}
+
+fn cRuntimeCountFixed(ctx: *Ctx) u64 {
+    var sum: u64 = 0;
+    for (0..iters) |n| sum +%= bench_c_runtime_count_fixed(ctx.buf.ptr, ctx.buf.len, seedOf(n));
+    return sum;
+}
+
 pub fn main() !void {
     const alloc = std.heap.smp_allocator;
     var ctx: Ctx = .{ .alloc = alloc, .buf = try alloc.alloc(u8, 4096), .state = try alloc.alignedAlloc(u8, .@"16", 256) };
@@ -180,8 +224,11 @@ pub fn main() !void {
         .{ "Fast: count, then fixed", countFixed(.all, .little) },
         .{ "Run-time: count, then fixed (LE)", countFixed(.none, .little) },
         .{ "Run-time: count, then fixed (BE)", countFixed(.none, .big) },
-        .{ "C: today's ABI, fixed (no count)", cRuntime },
-        .{ "C: specialized exports, fixed (no count)", cSpecial },
+        .{ "C: run-time ABI, fixed (no count)", cRuntime },
+        .{ "C: per-instance exports, fixed (no count)", cSpecial },
+        .{ "C: run-time ABI, count, then fixed", cRuntimeCountFixed },
+        .{ "C: run-time count, per-instance fixed", cWith(bench_c_mixed_count_fixed) },
+        .{ "C: per-instance count, then fixed", cWith(bench_c_special_count_fixed) },
         .{ "Reader: CdrReader (run-time)", readWith(.none) },
         .{ "Reader: CdrReader, direct", readDirect },
         .{ "Reader: fast, dispatched per sample", readWith(.all) },

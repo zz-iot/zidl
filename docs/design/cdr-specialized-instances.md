@@ -5,8 +5,8 @@ generator, and the old Zig writers removed) are implemented: `Writer`,
 `RuntimeWriter`, `Reader` (with `CdrReader` as its run-time instance),
 `WriterFor`/`ReaderFor`, `readSample`, `serializeAlloc` and `zig build
 bench-cdr`. Step 3a (the C writer without growable output, and the C/C++ generators
-counting, then writing) is implemented; per-instance C entry points (3b) and zzdds
-have not moved yet.
+counting, then writing) and 3b (a faster run-time C ABI, in place of per-instance C
+entry points) are implemented; zzdds has not moved yet.
 
 This note follows the [shared native CDR core](shared-native-cdr.md). That
 consolidation gave Zig and C one set of primitive encoders. It did not give them
@@ -30,8 +30,8 @@ for a growable output mode.
   buffer of exactly that size. A convenience helper does both.
 - The reader parses the encapsulation header once per sample and dispatches to
   a fast instance or the run-time fallback.
-- C exports the same capabilities from the same Zig source. Native Zig never
-  routes through the C ABI.
+- C exports the same capabilities from the same Zig source, through the
+  run-time instance only. Native Zig never routes through the C ABI.
 
 ## Today
 
@@ -266,19 +266,28 @@ allocation-free path.
   there is no ABI promise before 1.0.
 - The existing `zidl_cdr_write_*` functions become the run-time instance's
   entry points.
-- The library exports specialized entry points for each fast instance, built
-  from the same Zig source.
+- Writes store their bytes in Zig, and a counting writer only does the
+  arithmetic, as the Zig writer does.
 - Generated C/C++ code uses count-then-fixed for writes and key-only payloads,
-  and a generated allocate-and-serialize helper where it needs owned bytes.
+  and `zidl_cdr_serialize_alloc` where it needs owned bytes.
+- There are no per-instance C entry points (see below).
 
-**Measured: per-instance entry points pay off even without inlining.** C calls
-into the library once per primitive, and nothing inlines across that boundary.
-Even so, the bench's C path through specialized fixed-instance exports runs the
-message in 1,117 ns against 2,669 ns through today's run-time C ABI (2.4×): the
-exports have no encoding, byte-order or output branches. So generated C
-serialize functions are emitted once per fast instance (step 3), calling that
-instance's exports, plus once for the run-time entry points. Capability parity
-(big-endian, both output modes, the streaming key hash) does not depend on this.
+**Measured: per-instance entry points are not worth their code.** C calls into
+the library once per primitive, and nothing inlines across that boundary. The
+first measurement favored per-instance exports (1,117 ns against 2,669 ns for a
+fixed write of the bench message), but most of that gap was the run-time C ABI
+calling back into C to store each write. With storage in Zig and arithmetic-only
+counting, count-then-fixed through the run-time ABI takes about 1,900–2,300 ns
+(4,300 ns before), against about 1,800–2,000 ns through per-instance exports
+(`zig build bench-cdr` keeps both rows). That 10–15% would cost a copy of every
+generated C/C++ serialize function per fast instance (five with the default set)
+and a larger library, so the C ABI keeps one run-time instance.
+
+The remaining cost is one library call per primitive. A whole-sample path would
+remove it: one C call per sample into compiled Zig (a generated Zig serializer
+over the C layouts, which needs Zig in the application's build and cannot read
+C++ standard containers), or into a descriptor-driven serializer in the prebuilt
+library. Either is a separate design.
 
 ### Code size
 
@@ -331,8 +340,9 @@ consumers move, then the old writers go.
    and `register_instance` use it, the loan writes check that both passes agree, and
    the key projection writes straight into zzdds's buffer. `ZidlCdrKeyHash` streams a
    key holder into MD5; a canonical key collection, whose DHEADER a stream cannot
-   patch, is counted first. (3b) The library exports per-fast-instance entry points
-   and C/C++ code is generated per instance.
+   patch, is counted first. (3b, done) Writes store their bytes in Zig and a
+   counting writer only does the arithmetic, which halves C count-then-fixed;
+   per-instance C entry points are dropped (see C ABI).
 4. **zidl release, then zzdds** (pin bump, internal call sites, examples), the
    zz0 repositories, and rmw_zzdds by its owner.
 
