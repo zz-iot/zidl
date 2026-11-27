@@ -156,6 +156,59 @@ sample whose view does not decode is returned failed, as `take` does, and the
 `ViewLoan` holds nothing. If the empty view cannot be allocated, `take_view`
 returns `DDS_RETCODE_OUT_OF_RESOURCES`.
 
+### Builder types
+
+`--generate-views` also generates a **builder type** per struct, `FooBuilder`,
+the write side of a view: a sample whose large members are filled in place in
+the writer's buffer rather than copied out of a struct (zzdds'
+`docs/design/loaned-builders.md`). It matches the C and Zig builders member by
+member.
+
+```cpp
+struct FooBuilder : ::BaseBuilder { ... };  // a builder of a derived struct derives from its base's
+/* Serializes the builder, reserving its primitive members; then commits
+   every present reservation. */
+int Foo_serialize_builder(ZidlCdrWriter *_w, FooBuilder *_v);
+int Foo_commit_builder(ZidlCdrWriter *_w, FooBuilder *_v);
+```
+
+| Member, as in the view | In the builder |
+|---|---|
+| Primitive sequence or array | `zidl::PrimitivesReservation<T>`. Set a sequence's count with `resize` (checked against its bound); an array reserves its declared length |
+| String | `std::string_view`, borrowed and copied in; a bounded string's bound is checked; a `@default` is kept |
+| Struct | Its builder type |
+| Anything else | As in the struct |
+| Any `@key` member | As in the struct, so the key hash comes from the builder (`FooBuilder_serialize_key_holder`, for keyed structs) |
+| `@optional` | `std::optional` of the above; an absent member reserves nothing |
+
+Once a builder is serialized into a fixed writer, each reservation's
+`data()` is where its elements go. They are not zeroed: fill every one, in
+host byte order, through `as_native()` (a `T *` when the address is aligned
+for `T`, otherwise `nullptr`) or `copy_from`. Committing puts them in the
+writer's byte order.
+
+With `--generate-zzdds-wrappers`, a typed writer also gets `loan_builder`,
+which counts the builder, takes a write loan of exactly that size and
+serializes the builder into it, in a move-only `FooDataWriter::BuilderLoan`.
+Fill the reservations through `builder()` while `active()`, then
+`publish_builder` commits and publishes the sample (`ALIVE`), ending the loan
+whatever it returns; `cancel_builder`, `reset()` or destruction returns it
+unpublished. A bound exceeded before the loan is `DDS_RETCODE_BAD_PARAMETER`,
+and any failure after it returns the loan.
+
+```cpp
+FooBuilder b;
+b.id = 7;
+b.points.resize(n);
+FooDataWriter::BuilderLoan loan;
+if (writer.loan_builder(std::move(b), loan) == DDS_RETCODE_OK) {
+    auto &pts = loan.builder().points;
+    if (float *p = pts.as_native()) fill_points(p, n);  // 4-byte elements are aligned in a loan
+    else pts.copy_from(staging);
+    rc = writer.publish_builder(loan);
+}
+```
+
 ---
 
 ## Key Serialization
@@ -224,7 +277,7 @@ wire codec, rather than compiling that C file alone.
 | `--c-export-macro <macro>` | DLL export macro prepended to CDR function declarations |
 | `--no-typesupport` | Suppress CDR serialize/deserialize output |
 | `--generate-zzdds-wrappers` | Emit typed zzdds TypeSupport/DataWriter/DataReader wrappers for keyed, non-mutable topic structs |
-| `--generate-views` | Also emit zero-copy view types (see View types) |
+| `--generate-views` | Also emit zero-copy view and builder types (see View types) |
 
 ---
 

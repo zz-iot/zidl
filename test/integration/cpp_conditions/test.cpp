@@ -272,7 +272,76 @@ static void key_value_keeps_the_holders_resource() {
     assert(reader.get_key_value(holder, 1) == DDS_RETCODE_ERROR);
 }
 
+// A builder is loaned, filled in place and published, or cancelled, through
+// the generated writer, and its loan is always ended.
+static void builder_loans() {
+    StubWriteLoans &loans = stub_write_loans();
+    int writer_handle = 0;
+    FrameDataWriter writer(&writer_handle, ZIDL_XCDR2);
+    const float points[3] = { 0.5f, -1.0f, 2.25f };
+    const double extra[2] = { 1e300, -0.125 };
+
+    FrameBuilder b;
+    b.id = 7;
+    b.label = "frame";
+    b.points.resize(3);
+    b.extra.emplace(2);
+    FrameDataWriter::BuilderLoan loan;
+    assert(writer.loan_builder(std::move(b), loan) == DDS_RETCODE_OK);
+    assert(loan.active() && loans.outstanding == 1);
+    // Four-byte elements are aligned in an 8-byte-aligned loan.
+    float *p = loan.builder().points.as_native();
+    assert(p != nullptr);
+    for (int i = 0; i < 3; ++i) p[i] = points[i];
+    loan.builder().extra->copy_from(extra);
+    assert(writer.publish_builder(loan) == DDS_RETCODE_OK);
+    assert(!loan.active() && loans.outstanding == 0 && loans.published == 1);
+    assert(loans.kind == DDS_WriteKind_ALIVE_WRITE_KIND);
+
+    // The same bytes and key hash as the struct.
+    Frame v;
+    v.id = 7;
+    v.label = "frame";
+    v.points.assign(points, points + 3);
+    v.extra.emplace(extra, extra + 2);
+    uint8_t expected[256];
+    ZidlCdrWriter w;
+    zidl_cdr_writer_init_fixed(&w, expected, sizeof expected, ZIDL_XCDR2);
+    assert(zidl_cdr_write_encap(&w) == 0 && Frame_serialize(&w, &v) == 0);
+    assert(loans.bytes.size() == w.len && std::memcmp(loans.bytes.data() + 4, expected + 4, w.len - 4) == 0);
+    uint8_t hash[16];
+    assert(Frame_compute_key_hash(&v, hash) == 0 && std::memcmp(hash, loans.hash, 16) == 0);
+    assert(writer.publish_builder(loan) == DDS_RETCODE_PRECONDITION_NOT_MET);
+
+    // Cancelled, explicitly or by destruction: returned, nothing published.
+    FrameBuilder c;
+    assert(writer.loan_builder(c, loan) == DDS_RETCODE_OK && loans.outstanding == 1);
+    assert(writer.cancel_builder(loan) == DDS_RETCODE_OK && loans.outstanding == 0 && loans.returned == 1);
+    assert(writer.cancel_builder(loan) == DDS_RETCODE_PRECONDITION_NOT_MET);
+    {
+        FrameDataWriter::BuilderLoan scoped;
+        assert(writer.loan_builder(c, scoped) == DDS_RETCODE_OK);
+        FrameDataWriter::BuilderLoan moved(std::move(scoped));
+        assert(!scoped.active() && moved.active());
+    }
+    assert(loans.outstanding == 0 && loans.returned == 2 && loans.published == 1);
+
+    // A count over its bound fails before any loan.
+    c.few.resize(5);
+    assert(writer.loan_builder(c, loan) == DDS_RETCODE_BAD_PARAMETER);
+    assert(!loan.active() && loans.outstanding == 0 && loans.returned == 2);
+
+    // A failed publish still ends the loan.
+    c.few.resize(4);
+    loans.publish_result = DDS_RETCODE_OUT_OF_RESOURCES;
+    assert(writer.loan_builder(c, loan) == DDS_RETCODE_OK);
+    assert(writer.publish_builder(loan) == DDS_RETCODE_OUT_OF_RESOURCES);
+    assert(!loan.active() && loans.outstanding == 0 && loans.published == 2);
+    loans.publish_result = DDS_RETCODE_OK;
+}
+
 int main() {
+    builder_loans();
     key_value_keeps_the_holders_resource();
     optional_selection();
     selected_frame_bounds();

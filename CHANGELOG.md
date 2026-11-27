@@ -18,6 +18,16 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- C++ builder types (`--generate-views`): `FooBuilder` mirrors `FooView` for writing,
+  as in C. Primitive sequences and arrays are `zidl::PrimitivesReservation<T>` (new in
+  `zidl_cdr_view.hpp`: `resize` sets a sequence's count, and once serialized
+  `as_native()`, `copy_from` and `data()` fill it in place), strings `std::string_view`,
+  nested structs builders and optionals `std::optional`; key members stay as declared.
+  With `--generate-zzdds-wrappers`, `FooDataWriter::loan_builder` serializes the builder
+  into a write loan held by a move-only `BuilderLoan`, filled through `builder()`, then
+  `publish_builder` commits and publishes (`ALIVE`); `cancel_builder`, `reset()` or
+  destruction returns the loan.
+
 - C builder types (`--generate-views`): `FooBuilder` mirrors `FooView` for writing.
   Primitive sequences and arrays are `ZidlCdrReservation`s (a sequence's `count` is
   set and checked against its bound), strings are borrowed and copied in, nested

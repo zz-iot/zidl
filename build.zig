@@ -1211,6 +1211,30 @@ pub fn build(b: *std.Build) void {
     }
 
     {
+        const builders_step = b.step("test-cpp-builders", "Check generated C++ builder types write the struct's bytes across encodings");
+        test_step.dependOn(builders_step);
+        const gen_views = gens.run();
+        gen_views.addArgs(&.{ "-b", "cpp", "--generate-views", "-o" });
+        const views = gen_views.addOutputDirectoryArg("cpp-builders-views");
+        gen_views.addFileArg(b.path("test/integration/c_views/views.idl"));
+        const gen = gens.run();
+        gen.addArgs(&.{ "-b", "cpp", "--generate-views", "-o" });
+        const generated = gen.addOutputDirectoryArg("cpp-builders");
+        gen.addFileArg(b.path("test/integration/c_builders/builders.idl"));
+        const consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = true });
+        const flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" };
+        consumer.addCSourceFile(.{ .file = b.path("test/integration/cpp_builders/test.cpp"), .flags = flags });
+        consumer.addCSourceFile(.{ .file = views.path(b, "views_cdr.cpp"), .flags = flags });
+        consumer.addCSourceFile(.{ .file = generated.path(b, "builders_cdr.cpp"), .flags = flags });
+        consumer.addIncludePath(views);
+        consumer.addIncludePath(generated);
+        consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
+        linkCdr(consumer, cdr_library);
+        const app = b.addExecutable(.{ .name = "cpp-builders", .root_module = consumer });
+        builders_step.dependOn(&b.addRunArtifact(app).step);
+    }
+
+    {
         const step = b.step("test-zig-wide-strings", "Check generated Zig structs own, clone and free wide strings");
         test_step.dependOn(step);
         const gen = gens.run();

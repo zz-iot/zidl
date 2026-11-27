@@ -2601,7 +2601,7 @@ const CdrGenerator = struct {
         if (structHasKeyC(s)) {
             const builder_type = try std.fmt.allocPrint(self.alloc, "{s}Builder", .{c_name});
             defer self.alloc.free(builder_type);
-            try canonical.emitCStruct(self, s, builder_type, builder_type, false, true);
+            try canonical.emitCStruct(self, s, builder_type, builder_type, false, true, "Builder");
         }
     }
 
@@ -3012,7 +3012,7 @@ const CdrGenerator = struct {
         const mutable = (ext == .mutable);
 
         const has_key = structHasKeyC(s);
-        try canonical.emitCStruct(self, s, c_name, c_name, false, has_key);
+        try canonical.emitCStruct(self, s, c_name, c_name, false, has_key, "");
 
         try self.emitStructValueFns(s, c_name, false);
         try self.emitStructValueFns(s, c_name, true);
