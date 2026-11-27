@@ -18,6 +18,14 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Zig: generated deserializers take any CDR reader (`reader: anytype`) and test the
+  encoding with `isXcdr2()`, a compile-time constant in a fast reader. The typed
+  DataReader decodes each sample through `zidl_cdr.readSample`, one header check per
+  sample, then a fast reader where there is one; the typed DataWriter and `keyCdr`
+  count, then write into one exact allocation (`zidl_cdr.serializeAlloc`), where they
+  grew a buffer. `--cdr-fast` (`xcdr1-le,xcdr2-le`, the default, or `none`) chooses the
+  encodings with fast instances; each generated file records it as `_cdr_fast`.
+  `serializePlCdr` takes any writer.
 - zidl-cdr: one generic CDR writer and reader, each parameter (encoding, byte order,
   and for the writer counting or fixed-buffer output) fixed at compile time or left to
   run time (`docs/design/cdr-specialized-instances.md`). `Writer`, `RuntimeWriter`,
