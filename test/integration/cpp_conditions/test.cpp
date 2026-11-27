@@ -245,15 +245,21 @@ static void key_value_keeps_the_holders_resource() {
     assert(holder.note == "kept");
 
     // A complete sample, projected to its key, decodes the same way.
+    uint8_t sample[512];
     ZidlCdrWriter w;
-    assert(zidl_cdr_writer_init(&w, ZIDL_XCDR2) == 0);
+    zidl_cdr_writer_init_fixed(&w, sample, sizeof sample, ZIDL_XCDR2);
     assert(zidl_cdr_write_encap_kind(&w, ZIDL_EXT_APPENDABLE) == 0);
     value.name = "another key, again long enough to need the heap";
     assert(KeyedNote_serialize(&w, &value) == 0);
     uint8_t key[256];
     size_t key_len = 0;
+    // Too small: the size it needs, and nothing written.
+    assert(stub_projection()(nullptr, w.buf, w.len, key, 8, &key_len) == DDS_RETCODE_PRECONDITION_NOT_MET);
+    assert(key_len > 8);
+    const size_t needed = key_len;
+    key_len = 0;
     assert(stub_projection()(nullptr, w.buf, w.len, key, sizeof key, &key_len) == DDS_RETCODE_OK);
-    zidl_cdr_writer_deinit(&w);
+    assert(key_len == needed);
     stub_key().bytes.assign(key, key + key_len);
     KeyedNoteDataReader reader(DDS_DataReader{});
     assert(reader.get_key_value(holder, 1) == DDS_RETCODE_OK);

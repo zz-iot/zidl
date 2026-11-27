@@ -13,81 +13,80 @@
 
 /* ── Writer ──────────────────────────────────────────────────────────────── */
 
-static int writer_grow_default(ZidlCdrWriter *w, size_t needed) {
-    if (needed > SIZE_MAX - w->len) return ZIDL_CDR_OVERFLOW;
-    size_t required = w->len + needed;
-    size_t new_cap = w->cap == 0 ? 64u : w->cap;
-    while (new_cap < required) {
-        if (new_cap > SIZE_MAX / 2u) { new_cap = required; break; }
-        new_cap *= 2u;
-    }
-    /* Buffer growth uses the same registered allocator as decoding. */
-    uint8_t *p = (uint8_t *)zidl_cdr_realloc(w->buf, w->cap, new_cap);
-    if (!p) return ZIDL_CDR_OVERFLOW;
-    w->buf = p;
-    w->cap = new_cap;
-    return ZIDL_CDR_OK;
-}
-
-int zidl_cdr_writer_init(ZidlCdrWriter *w, int xcdr_version) {
-    w->buf          = NULL;
-    w->cap          = 0;
-    w->len          = 0;
-    w->pos          = 0;
-    w->xcdr_version = xcdr_version;
-    w->byte_order   = ZIDL_CDR_LE;
-    w->grow_fn      = writer_grow_default;
-    return ZIDL_CDR_OK;
-}
-
-void zidl_cdr_writer_init_fixed(ZidlCdrWriter *w, uint8_t *buf, size_t cap, int xcdr_version) {
+static void writer_init(ZidlCdrWriter *w, uint8_t *buf, size_t cap, int xcdr_version) {
     w->buf          = buf;
     w->cap          = cap;
     w->len          = 0;
     w->pos          = 0;
     w->xcdr_version = xcdr_version;
     w->byte_order   = ZIDL_CDR_LE;
-    w->grow_fn      = NULL;
+    w->hash         = NULL;
+}
+
+void zidl_cdr_writer_init_fixed(ZidlCdrWriter *w, uint8_t *buf, size_t cap, int xcdr_version) {
+    writer_init(w, buf, cap, xcdr_version);
 }
 
 void zidl_cdr_writer_init_counting(ZidlCdrWriter *w, int xcdr_version) {
-    w->buf          = NULL;
-    w->cap          = 0;
-    w->len          = 0;
-    w->pos          = 0;
-    w->xcdr_version = xcdr_version;
-    w->byte_order   = ZIDL_CDR_LE;
-    w->grow_fn      = NULL;
-}
-
-void zidl_cdr_writer_deinit(ZidlCdrWriter *w) {
-    if (w->grow_fn == writer_grow_default) {
-        zidl_cdr_free(w->buf, w->cap);
-        w->buf = NULL;
-        w->cap = 0;
-        w->len = 0;
-    }
+    writer_init(w, NULL, 0, xcdr_version);
 }
 
 void zidl_cdr_writer_set_byte_order(ZidlCdrWriter *w, int byte_order) {
     w->byte_order = byte_order;
 }
 
+int zidl_cdr_writer_is_counting(const ZidlCdrWriter *w) {
+    return !w->buf && !w->hash;
+}
+
 static int writer_ensure(ZidlCdrWriter *w, size_t n) {
     if (n > SIZE_MAX - w->len || n > SIZE_MAX - w->pos) return ZIDL_CDR_OVERFLOW;
-    /* Counting mode only needs the counter bounds above. */
-    if (!w->buf && !w->grow_fn) return ZIDL_CDR_OK;
-    if (w->len + n <= w->cap) return ZIDL_CDR_OK;
-    if (!w->grow_fn) return ZIDL_CDR_OVERFLOW;
-    return w->grow_fn(w, n);
+    /* Counting and key hash writers only need the counter bounds above. */
+    if (!w->buf) return ZIDL_CDR_OK;
+    if (n > w->cap - w->len) return ZIDL_CDR_OVERFLOW;
+    return ZIDL_CDR_OK;
 }
+
+/* Feeds a key hash writer's bytes to its hash (shared_primitives.zig). */
+void zidl_cdr_shared_hash_bytes(ZidlCdrKeyHash *h, const uint8_t *bytes, size_t n);
 
 static int writer_write_bytes(ZidlCdrWriter *w, const uint8_t *bytes, size_t n) {
     int rc = writer_ensure(w, n);
     if (rc) return rc;
-    if (w->buf && n) memcpy(w->buf + w->len, bytes, n);
+    if (n) {
+        if (w->buf) memcpy(w->buf + w->len, bytes, n);
+        else if (w->hash) zidl_cdr_shared_hash_bytes(w->hash, bytes, n);
+    }
     w->len += n;
     w->pos += n;
+    return ZIDL_CDR_OK;
+}
+
+int zidl_cdr_serialize_alloc(int xcdr_version, int byte_order, ZidlCdrSerializeFn fn,
+                             const void *ctx, uint8_t **out, size_t *out_len) {
+    ZidlCdrWriter w;
+    zidl_cdr_writer_init_counting(&w, xcdr_version);
+    zidl_cdr_writer_set_byte_order(&w, byte_order);
+    int rc = fn(&w, ctx);
+    if (rc) return rc;
+    const size_t counted = w.len;
+    if (counted == 0) {
+        *out = NULL;
+        *out_len = 0;
+        return ZIDL_CDR_OK;
+    }
+    uint8_t *buf = (uint8_t *)zidl_cdr_alloc(counted);
+    if (!buf) return ZIDL_CDR_OVERFLOW;
+    zidl_cdr_writer_init_fixed(&w, buf, counted, xcdr_version);
+    zidl_cdr_writer_set_byte_order(&w, byte_order);
+    rc = fn(&w, ctx);
+    if (!rc && w.len != counted) rc = ZIDL_CDR_INVALID;
+    if (rc) {
+        zidl_cdr_free(buf, counted);
+        return rc;
+    }
+    *out = buf;
+    *out_len = counted;
     return ZIDL_CDR_OK;
 }
 
@@ -100,6 +99,8 @@ int zidl_cdr_shared_write_bytes(ZidlCdrWriter *w, const uint8_t *bytes, size_t n
 int zidl_cdr_shared_reserve_array(ZidlCdrWriter *w, size_t pad, size_t n,
                                   uint8_t **out) {
     if (n > SIZE_MAX - pad) return ZIDL_CDR_OVERFLOW;
+    /* Nothing to fill in place: key hash writers stream elements instead. */
+    if (w->hash) return ZIDL_CDR_INVALID;
     int rc = writer_ensure(w, pad + n);
     if (rc) return rc;
     *out = NULL;

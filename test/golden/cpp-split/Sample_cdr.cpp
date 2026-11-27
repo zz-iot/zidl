@@ -279,13 +279,10 @@ int Sample_deserialize_key(ZidlCdrReader *_r, ::Sample *_v) {
 }
 
 int Sample_compute_key_hash(const ::Sample *_v, uint8_t _hash[16]) {
-    ZidlCdrWriter _w;
-    int _rc = zidl_cdr_writer_init(&_w, ZIDL_XCDR2);
-    if (_rc) return _rc;
-    zidl_cdr_writer_set_byte_order(&_w, ZIDL_CDR_BE);
-    _rc = Sample_serialize_key_holder(&_w, _v);
-    if (!_rc) zidl_cdr_compute_key_hash_for_type(_w.buf, _w.len, false, _hash);
-    zidl_cdr_writer_deinit(&_w);
+    ZidlCdrKeyHash _h;
+    zidl_cdr_key_hash_init(&_h);
+    int _rc = Sample_serialize_key_holder(&_h.writer, _v);
+    if (!_rc) zidl_cdr_key_hash_finish(&_h, false, _hash);
     return _rc;
 }
 

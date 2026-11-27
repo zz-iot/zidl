@@ -4,7 +4,9 @@ Date: 2026-11-26. Status: agreed design. Steps 1 (the zidl-cdr core) and 2 (the 
 generator, and the old Zig writers removed) are implemented: `Writer`,
 `RuntimeWriter`, `Reader` (with `CdrReader` as its run-time instance),
 `WriterFor`/`ReaderFor`, `readSample`, `serializeAlloc` and `zig build
-bench-cdr`. The C ABI, the C/C++ generators and zzdds have not moved yet.
+bench-cdr`. Step 3a (the C writer without growable output, and the C/C++ generators
+counting, then writing) is implemented; per-instance C entry points (3b) and zzdds
+have not moved yet.
 
 This note follows the [shared native CDR core](shared-native-cdr.md). That
 consolidation gave Zig and C one set of primitive encoders. It did not give them
@@ -323,9 +325,14 @@ consumers move, then the old writers go.
    `CdrWriter`, `PlCdrWriter` and `PrimitiveWriter` are removed and zidl's own
    tests use fixed and counting writers; their byte-parity checks keep the removed
    writers' output as known answers.
-3. **C ABI and C/C++ generators.** `ZidlCdrWriter` drops growable output; the
-   library exports per-fast-instance entry points; C/C++ code is generated per
-   instance, counts then writes, and hashes keys with the streaming key hash.
+3. **C ABI and C/C++ generators.** (3a, done) `ZidlCdrWriter` drops growable
+   output (`zidl_cdr_writer_init`, `zidl_cdr_writer_deinit`); `zidl_cdr_serialize_alloc`
+   counts, allocates exactly and writes; generated `_write_w_timestamp`, `_key_cdr`
+   and `register_instance` use it, the loan writes check that both passes agree, and
+   the key projection writes straight into zzdds's buffer. `ZidlCdrKeyHash` streams a
+   key holder into MD5; a canonical key collection, whose DHEADER a stream cannot
+   patch, is counted first. (3b) The library exports per-fast-instance entry points
+   and C/C++ code is generated per instance.
 4. **zidl release, then zzdds** (pin bump, internal call sites, examples), the
    zz0 repositories, and rmw_zzdds by its owner.
 

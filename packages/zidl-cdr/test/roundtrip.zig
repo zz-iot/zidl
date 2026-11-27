@@ -35,8 +35,8 @@ fn crossVal2(
 
     // C side
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c_write_fn(&cw, value));
 
@@ -56,8 +56,8 @@ fn crossVal1(
     try rt_write_fn(&rt_w, value);
 
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR1);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR1);
     _ = c.zidl_cdr_write_encap(&cw);
     try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c_write_fn(&cw, value));
 
@@ -68,16 +68,16 @@ fn crossVal1(
 
 test "encap: XCDR2 LE header" {
     var w: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&w, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&w);
+    var w_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&w, &w_storage, w_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&w);
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x07, 0x00, 0x00 }, w.buf[0..w.len]);
 }
 
 test "encap: XCDR1 LE header" {
     var w: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&w, c.ZIDL_XCDR1);
-    defer c.zidl_cdr_writer_deinit(&w);
+    var w_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&w, &w_storage, w_storage.len, c.ZIDL_XCDR1);
     _ = c.zidl_cdr_write_encap(&w);
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x01, 0x00, 0x00 }, w.buf[0..w.len]);
 }
@@ -247,8 +247,8 @@ test "crossval xcdr2: u8 then u32 alignment" {
     try rt_w.writeU32(0x22334455);
 
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     _ = c.zidl_cdr_write_u8(&cw, 0x11);
     _ = c.zidl_cdr_write_u32(&cw, 0x22334455);
@@ -266,8 +266,8 @@ test "crossval xcdr2: string" {
     try rt_w.writeString(s);
 
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     _ = c.zidl_cdr_write_string(&cw, s.ptr, @intCast(s.len));
 
@@ -282,8 +282,8 @@ test "crossval xcdr2: empty string" {
     try rt_w.writeString(s);
 
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     _ = c.zidl_cdr_write_string(&cw, s.ptr, @intCast(s.len));
 
@@ -301,8 +301,8 @@ test "crossval xcdr2: reserve+patch dheader" {
     rt_w.patchDheader(rt_dh);
 
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     var c_dh: usize = undefined;
     _ = c.zidl_cdr_reserve_dheader(&cw, &c_dh);
@@ -314,8 +314,8 @@ test "crossval xcdr2: reserve+patch dheader" {
 
 test "reserve_dheader_maybe: no-op on xcdr1" {
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR1);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR1);
     _ = c.zidl_cdr_write_encap(&cw);
     var off: usize = 0;
     _ = c.zidl_cdr_reserve_dheader_maybe(&cw, &off);
@@ -329,8 +329,8 @@ test "reserve_dheader_maybe: no-op on xcdr1" {
 
 test "reader xcdr2: u32 roundtrip" {
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     _ = c.zidl_cdr_write_u32(&cw, 0x12345678);
 
@@ -343,8 +343,8 @@ test "reader xcdr2: u32 roundtrip" {
 
 test "reader xcdr2: i64 roundtrip" {
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     _ = c.zidl_cdr_write_i64(&cw, -1234567890123);
 
@@ -358,8 +358,8 @@ test "reader xcdr2: i64 roundtrip" {
 test "reader xcdr2: string roundtrip" {
     const src: []const u8 = "world";
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     _ = c.zidl_cdr_write_string(&cw, src.ptr, @intCast(src.len));
 
@@ -374,8 +374,8 @@ test "reader xcdr2: string roundtrip" {
 
 test "reader xcdr2: bool roundtrip" {
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     _ = c.zidl_cdr_write_bool(&cw, true);
     _ = c.zidl_cdr_write_bool(&cw, false);
@@ -392,8 +392,8 @@ test "reader xcdr2: bool roundtrip" {
 
 test "reader xcdr2: skip_dheader_if_xcdr2 skips" {
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     var dh_off: usize = 0;
     _ = c.zidl_cdr_reserve_dheader(&cw, &dh_off);
@@ -433,8 +433,8 @@ test "fixed writer: overflow returns OVERFLOW" {
 
 test "emheader: write_emheader (fixed LC=2) + read_emheader" {
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     // LC=2: 4-byte member, member_id=7, must_understand=true
     _ = c.zidl_cdr_write_emheader(&cw, 7, true, 2);
@@ -455,8 +455,8 @@ test "emheader: write_emheader (fixed LC=2) + read_emheader" {
 
 test "emheader: reserve_emheader + patch_emheader + read_emheader" {
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     // Reserve EMHEADER for a variable-length member (string), member_id=3
     var nextint_off: usize = 0;
@@ -485,8 +485,8 @@ test "emheader: reserve_emheader + patch_emheader + read_emheader" {
 
 test "emheader: read_mutable_dheader + mutable_has_more loop + skip_emheader_payload" {
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     var dh_off: usize = 0;
     _ = c.zidl_cdr_reserve_dheader(&cw, &dh_off);
@@ -522,8 +522,8 @@ test "emheader: read_mutable_dheader + mutable_has_more loop + skip_emheader_pay
 
 test "emheader: read_emheader LC=0..3 payload_bytes" {
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     // LC=0 → 1 byte, LC=1 → 2 bytes, LC=3 → 8 bytes
     _ = c.zidl_cdr_write_emheader(&cw, 10, false, 0);
@@ -551,8 +551,8 @@ test "crossval: fixed<5,2> positive value" {
     try rt_w.writeFixed(5, 2, 123.45);
 
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR1);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR1);
     _ = c.zidl_cdr_write_encap(&cw);
     try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c.zidl_cdr_write_fixed(&cw, 5, 2, 123.45));
 
@@ -573,8 +573,8 @@ test "crossval: fixed<5,2> negative value" {
     try rt_w.writeFixed(5, 2, -123.45);
 
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR1);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR1);
     _ = c.zidl_cdr_write_encap(&cw);
     _ = c.zidl_cdr_write_fixed(&cw, 5, 2, -123.45);
 
@@ -588,8 +588,8 @@ test "crossval: fixed<4,2> even-digit padding" {
     try rt_w.writeFixed(4, 2, 12.34);
 
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR1);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR1);
     _ = c.zidl_cdr_write_encap(&cw);
     _ = c.zidl_cdr_write_fixed(&cw, 4, 2, 12.34);
 
@@ -607,8 +607,8 @@ test "crossval: fixed<4,2> even-digit padding" {
 test "pl_cdr: C encap header matches the native Zig writer" {
     // C writer
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_PL_CDR);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_PL_CDR);
     _ = c.zidl_cdr_pl_write_encap(&cw);
 
     // Zig writer
@@ -632,8 +632,8 @@ test "pl_cdr: C reader init accepts PL_CDR_LE" {
 test "pl_cdr: C single i32 param roundtrip matches Zig" {
     // C side: encode pid=5, i32(42)
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_PL_CDR);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_PL_CDR);
     _ = c.zidl_cdr_pl_write_encap(&cw);
     var ch: c.ZidlPlParamHandle = undefined;
     _ = c.zidl_cdr_pl_reserve_param(&cw, 5, &ch);
@@ -669,8 +669,8 @@ test "pl_cdr: C single i32 param roundtrip matches Zig" {
 
 test "pl_cdr: C multiple params with u8 padding" {
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_PL_CDR);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_PL_CDR);
     _ = c.zidl_cdr_pl_write_encap(&cw);
     var h1: c.ZidlPlParamHandle = undefined;
     _ = c.zidl_cdr_pl_reserve_param(&cw, 0x10, &h1);
@@ -759,8 +759,8 @@ test "allocator: zidl_cdr_read_string routes through the registered allocator" {
     defer c.zidl_cdr_set_allocator(null);
 
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     const src = "hello allocator";
     _ = c.zidl_cdr_write_string(&cw, src.ptr, @intCast(src.len));
@@ -769,11 +769,8 @@ test "allocator: zidl_cdr_read_string routes through the registered allocator" {
     _ = c.zidl_cdr_reader_init(&r, cw.buf, cw.len);
     var out: [*c]u8 = null;
     try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c.zidl_cdr_read_string(&r, &out));
-    // 2, not 1: the writer above also routes its own buffer growth through
-    // the registered allocator now (writer_grow_default), so this counts
-    // both the writer's payload-construction allocation and the reader's
-    // decode allocation -- not just the latter, as before that fix.
-    try testing.expectEqual(@as(usize, 2), track.alloc_calls);
+    // Only the decode allocates: the writer has a fixed buffer.
+    try testing.expectEqual(@as(usize, 1), track.alloc_calls);
     try testing.expectEqualStrings(src, std.mem.span(out));
 
     c.zidl_cdr_free_str(out);
@@ -787,8 +784,8 @@ test "allocator: zidl_cdr_read_wstring routes through the registered allocator" 
     defer c.zidl_cdr_set_allocator(null);
 
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     const src = [_]u16{ 'h', 'i', 0 };
     _ = c.zidl_cdr_write_wstring(&cw, &src, 2);
@@ -798,9 +795,7 @@ test "allocator: zidl_cdr_read_wstring routes through the registered allocator" 
     var out: [*c]u16 = null;
     var out_len: u32 = 0;
     try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c.zidl_cdr_read_wstring(&r, &out, &out_len));
-    // 2, not 1: see the analogous comment in the read_string test above --
-    // the writer's own buffer growth is now also tracked.
-    try testing.expectEqual(@as(usize, 2), track.alloc_calls);
+    try testing.expectEqual(@as(usize, 1), track.alloc_calls);
     try testing.expectEqual(@as(u32, 2), out_len);
 
     c.zidl_cdr_free_wstr(out);
@@ -847,8 +842,8 @@ test "allocator: zidl_cdr_free/free_str/free_wstr accept NULL as a no-op" {
 
 test "allocator: zidl_cdr_read_string rejects an embedded NUL byte" {
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     const malformed = "ab\x00cd"; // embedded NUL before the final byte
     _ = c.zidl_cdr_write_string(&cw, malformed.ptr, @intCast(malformed.len));
@@ -866,8 +861,8 @@ test "allocator: zidl_cdr_read_string accepts a NUL exactly at the final byte (n
     // trailing NUL (already excluded from `len`/content by
     // zidl_cdr_read_string_zerocopy) must not trip this check.
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     const ok = "hello";
     _ = c.zidl_cdr_write_string(&cw, ok.ptr, @intCast(ok.len));
@@ -882,8 +877,8 @@ test "allocator: zidl_cdr_read_string accepts a NUL exactly at the final byte (n
 
 test "allocator: zidl_cdr_read_wstring rejects an embedded NUL wchar" {
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     const malformed = [_]u16{ 'a', 0, 'b' }; // embedded NUL wchar before the end
     _ = c.zidl_cdr_write_wstring(&cw, &malformed, malformed.len);
@@ -907,8 +902,8 @@ test "allocator: embedded-NUL rejection makes free_str's strlen reconstruction e
     defer c.zidl_cdr_set_allocator(null);
 
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     const ok = "no embedded nul here";
     _ = c.zidl_cdr_write_string(&cw, ok.ptr, @intCast(ok.len));
@@ -917,12 +912,7 @@ test "allocator: embedded-NUL rejection makes free_str's strlen reconstruction e
     _ = c.zidl_cdr_reader_init(&r, cw.buf, cw.len);
     var out: [*c]u8 = null;
     try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c.zidl_cdr_read_string(&r, &out));
-    // 2, not 1: see the analogous comment in the read_string test above --
-    // the writer's own buffer growth is now also tracked. last_alloc_len
-    // still correctly reflects the reader's own allocation, since it's the
-    // most recent of the two (the writer's happened earlier, during payload
-    // construction).
-    try testing.expectEqual(@as(usize, 2), track.alloc_calls);
+    try testing.expectEqual(@as(usize, 1), track.alloc_calls);
     try testing.expectEqual(@as(usize, ok.len + 1), track.last_alloc_len);
 
     c.zidl_cdr_free_str(out);
@@ -940,8 +930,8 @@ test "skip_primitives: empty sequence does not consume the next member's bytes (
     // 8-byte primitives / 4 for 4-byte ones; aligning during the skip would
     // eat bytes belonging to whatever follows. Regression for greptile PR #47.
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR1);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR1);
     _ = c.zidl_cdr_write_encap(&cw);
     _ = c.zidl_cdr_write_u32(&cw, 0); // empty sequence length
     _ = c.zidl_cdr_write_u8(&cw, 0xCD); // the next member, 1-byte aligned
@@ -961,8 +951,8 @@ test "skip_primitives: empty sequence does not consume the next member's bytes (
 
 test "skip_primitives: non-empty sequence still aligns then steps the whole run (XCDR1)" {
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR1);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR1);
     _ = c.zidl_cdr_write_encap(&cw);
     _ = c.zidl_cdr_write_u8(&cw, 0xAA); // pushes the cursor off 4-alignment
     _ = c.zidl_cdr_write_u32(&cw, 2); // sequence<u32> length
@@ -985,8 +975,8 @@ test "skip_primitives: non-empty sequence still aligns then steps the whole run 
 
 test "skip_primitives: oversized count is rejected, not skipped past the buffer" {
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     _ = c.zidl_cdr_write_u32(&cw, 8); // claims 8 elements, buffer has none
 
@@ -1007,8 +997,8 @@ test "zidl_cdr_skip: a byte count near SIZE_MAX is rejected without wrapping the
     // the latter wraps for a hostile n and moves the cursor backwards. Platform
     // independent -- exercises the addition-overflow path directly. (greptile PR #47)
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR2);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR2);
     _ = c.zidl_cdr_write_encap(&cw);
     _ = c.zidl_cdr_write_u32(&cw, 0);
 
@@ -1029,8 +1019,8 @@ test "align near a truncated buffer end keeps pos <= data_len (no bounds-check u
     // accepted -- letting a later selected-member read go out of bounds.
     // (greptile PR #47, security)
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR1);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR1);
     _ = c.zidl_cdr_write_encap(&cw);
     _ = c.zidl_cdr_write_u32(&cw, 1); // sequence<u64> length = 1; buffer ends here
 
@@ -1050,8 +1040,8 @@ test "align near a truncated buffer end keeps pos <= data_len (no bounds-check u
 
 test "a truncated aligned primitive read reports TRUNCATED, not an out-of-bounds slice" {
     var cw: c.ZidlCdrWriter = undefined;
-    _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_XCDR1);
-    defer c.zidl_cdr_writer_deinit(&cw);
+    var cw_storage: [4096]u8 = undefined;
+    c.zidl_cdr_writer_init_fixed(&cw, &cw_storage, cw_storage.len, c.ZIDL_XCDR1);
     _ = c.zidl_cdr_write_encap(&cw);
     _ = c.zidl_cdr_write_u32(&cw, 0xABCD); // buffer ends 4-aligned
 
@@ -1255,4 +1245,119 @@ test "optional member C ABI independent wire witnesses" {
 
 test "C reference fixed decimal contract" {
     try @import("fixed_contract.zig").check(c);
+}
+
+// ── Streaming key hash and key collections ───────────────────────────────────
+
+/// A key holder's fields, written the same way to any writer.
+fn keyHolder(w: *c.ZidlCdrWriter, name: []const u8) !void {
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_u8(w, 0x12));
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_u32(w, 0x01020304));
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_string(w, name.ptr, @intCast(name.len)));
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_u64(w, 0x1122334455667788));
+}
+
+test "key hash: streaming equals hashing the PLAIN_CDR2 big-endian bytes" {
+    for ([_][]const u8{ "", "BLUE", "a longer name than sixteen bytes" }) |name| {
+        var storage: [128]u8 = undefined;
+        var fixed: c.ZidlCdrWriter = undefined;
+        c.zidl_cdr_writer_init_fixed(&fixed, &storage, storage.len, c.ZIDL_XCDR2);
+        c.zidl_cdr_writer_set_byte_order(&fixed, c.ZIDL_CDR_BE);
+        try keyHolder(&fixed, name);
+        for ([_]bool{ false, true }) |force| {
+            var want: [16]u8 = undefined;
+            c.zidl_cdr_compute_key_hash_for_type(&storage, fixed.len, force, &want);
+            var h: c.ZidlCdrKeyHash = undefined;
+            c.zidl_cdr_key_hash_init(&h);
+            try testing.expect(c.zidl_cdr_writer_is_counting(&h.writer) == 0);
+            try keyHolder(&h.writer, name);
+            try testing.expectEqual(fixed.len, h.writer.len);
+            var got: [16]u8 = undefined;
+            c.zidl_cdr_key_hash_finish(&h, force, &got);
+            try testing.expectEqualSlices(u8, &want, &got);
+        }
+    }
+    // Short and unforced: the padded bytes themselves.
+    var h: c.ZidlCdrKeyHash = undefined;
+    c.zidl_cdr_key_hash_init(&h);
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_u16(&h.writer, 0xabcd));
+    var got: [16]u8 = undefined;
+    c.zidl_cdr_key_hash_finish(&h, false, &got);
+    try testing.expectEqualSlices(u8, &.{ 0xab, 0xcd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, &got);
+}
+
+test "key hash: a stream cannot be patched" {
+    var h: c.ZidlCdrKeyHash = undefined;
+    c.zidl_cdr_key_hash_init(&h);
+    var offset: usize = undefined;
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_INVALID), c.zidl_cdr_reserve_dheader(&h.writer, &offset));
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_u32(&h.writer, 0));
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_INVALID), c.zidl_cdr_patch_dheader_checked(&h.writer, 0));
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_INVALID), c.zidl_cdr_patch_emheader_checked(&h.writer, 0, 4));
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_u32(&h.writer, 0));
+    const handle = c.ZidlPlParamHandle{ .len_offset = 2, .buf_value_start = 4 };
+    try testing.expectEqual(@as(c_int, c.ZIDL_CDR_INVALID), c.zidl_cdr_pl_patch_param(&h.writer, handle));
+    try testing.expectEqual(@as(usize, 8), h.writer.len);
+}
+
+/// The generated canonical key collection: count the body, write the
+/// count as its DHEADER, then the body.
+fn keyCollection(outer: *c.ZidlCdrWriter, names: []const []const u8) !void {
+    var counter: c.ZidlCdrWriter = undefined;
+    var pass: usize = if (c.zidl_cdr_begin_key_collection(outer, &counter) != 0) 0 else 1;
+    while (pass < 2) : (pass += 1) {
+        const w = if (pass == 1) outer else &counter;
+        if (pass == 1) try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_key_collection_size(w, &counter));
+        try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_u32(w, @intCast(names.len)));
+        for (names) |n| try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_string(w, n.ptr, @intCast(n.len)));
+    }
+}
+
+test "key collection: counted DHEADER matches a patched one, in every mode" {
+    const names = [_][]const u8{ "a", "bcd", "" };
+    var patched_storage: [64]u8 = undefined;
+    var patched: c.ZidlCdrWriter = undefined;
+    c.zidl_cdr_writer_init_fixed(&patched, &patched_storage, patched_storage.len, c.ZIDL_XCDR2);
+    c.zidl_cdr_writer_set_byte_order(&patched, c.ZIDL_CDR_BE);
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_u8(&patched, 7));
+    var dh: usize = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_reserve_dheader(&patched, &dh));
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_u32(&patched, names.len));
+    for (names) |n| try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_string(&patched, n.ptr, @intCast(n.len)));
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_patch_dheader_checked(&patched, dh));
+
+    var storage: [64]u8 = undefined;
+    var fixed: c.ZidlCdrWriter = undefined;
+    c.zidl_cdr_writer_init_fixed(&fixed, &storage, storage.len, c.ZIDL_XCDR2);
+    c.zidl_cdr_writer_set_byte_order(&fixed, c.ZIDL_CDR_BE);
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_u8(&fixed, 7));
+    try keyCollection(&fixed, &names);
+    try testing.expectEqualSlices(u8, patched_storage[0..patched.len], storage[0..fixed.len]);
+
+    // Counting: no counting pass, the same length.
+    var counting: c.ZidlCdrWriter = undefined;
+    c.zidl_cdr_writer_init_counting(&counting, c.ZIDL_XCDR2);
+    var counter: c.ZidlCdrWriter = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_begin_key_collection(&counting, &counter));
+    try testing.expect(c.zidl_cdr_writer_is_counting(&counting) != 0);
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_u8(&counting, 7));
+    try keyCollection(&counting, &names);
+    try testing.expectEqual(patched.len, counting.len);
+
+    // Hashing: the same bytes go into the hash.
+    var h: c.ZidlCdrKeyHash = undefined;
+    c.zidl_cdr_key_hash_init(&h);
+    try testing.expectEqual(@as(c_int, 0), c.zidl_cdr_write_u8(&h.writer, 7));
+    try keyCollection(&h.writer, &names);
+    var want: [16]u8 = undefined;
+    var got: [16]u8 = undefined;
+    c.zidl_cdr_compute_key_hash_for_type(&patched_storage, patched.len, true, &want);
+    c.zidl_cdr_key_hash_finish(&h, true, &got);
+    try testing.expectEqualSlices(u8, &want, &got);
+
+    // A body too large for a DHEADER.
+    if (@sizeOf(usize) > 4) {
+        counter.len = @as(usize, std.math.maxInt(u32)) + 1;
+        try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OVERFLOW), c.zidl_cdr_write_key_collection_size(&fixed, &counter));
+    }
 }

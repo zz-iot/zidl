@@ -18,6 +18,13 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- C ABI: `ZidlCdrWriter` has no growable output (`zidl_cdr_writer_init` and
+  `zidl_cdr_writer_deinit` are removed): use `zidl_cdr_writer_init_fixed`,
+  `zidl_cdr_writer_init_counting`, or `zidl_cdr_serialize_alloc` (count, allocate
+  exactly with the registered allocator, write; a length mismatch is an error).
+  `ZidlCdrKeyHash` streams a key holder into the key hash without a buffer. Generated
+  C/C++ key hashes stream, writes count then write and check that both passes agree,
+  and the key projection writes straight into zzdds's buffer.
 - zidl-cdr: `CdrWriter`, `PlCdrWriter` and `PrimitiveWriter` are removed, with their
   growable output: use `Writer`/`RuntimeWriter` (`initFixed`, `initCounting`) or
   `serializeAlloc`, and an XCDR1 instance with `writePlEncapHeader` for parameter

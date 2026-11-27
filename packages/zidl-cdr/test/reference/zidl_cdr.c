@@ -31,85 +31,86 @@ static size_t align_cap(int xcdr_version, size_t wire_size) {
 
 /* ── Writer ──────────────────────────────────────────────────────────────── */
 
-static int writer_grow_default(ZidlCdrWriter *w, size_t needed) {
-    if (needed > SIZE_MAX - w->len) return ZIDL_CDR_OVERFLOW;
-    size_t required = w->len + needed;
-    size_t new_cap = w->cap == 0 ? 64u : w->cap;
-    while (new_cap < required) {
-        if (new_cap > SIZE_MAX / 2u) { new_cap = required; break; }
-        new_cap *= 2u;
-    }
-    // Routes through the registered allocator (zidl_cdr_set_allocator), same
-    // as the read/decode side -- falls back to libc realloc only if none is
-    // registered. It's the caller's responsibility to register an allocator
-    // whose backing store is large enough for whatever it serializes.
-    uint8_t *p = (uint8_t *)zidl_cdr_realloc(w->buf, w->cap, new_cap);
-    if (!p) return ZIDL_CDR_OVERFLOW;
-    w->buf = p;
-    w->cap = new_cap;
-    return ZIDL_CDR_OK;
-}
-
-int zidl_cdr_writer_init(ZidlCdrWriter *w, int xcdr_version) {
-    w->buf          = NULL;
-    w->cap          = 0;
-    w->len          = 0;
-    w->pos          = 0;
-    w->xcdr_version = xcdr_version;
-    w->byte_order   = ZIDL_CDR_LE;
-    w->grow_fn      = writer_grow_default;
-    return ZIDL_CDR_OK;
-}
-
-void zidl_cdr_writer_init_fixed(ZidlCdrWriter *w, uint8_t *buf, size_t cap, int xcdr_version) {
+static void writer_init(ZidlCdrWriter *w, uint8_t *buf, size_t cap, int xcdr_version) {
     w->buf          = buf;
     w->cap          = cap;
     w->len          = 0;
     w->pos          = 0;
     w->xcdr_version = xcdr_version;
     w->byte_order   = ZIDL_CDR_LE;
-    w->grow_fn      = NULL;
+    w->hash         = NULL;
+}
+
+void zidl_cdr_writer_init_fixed(ZidlCdrWriter *w, uint8_t *buf, size_t cap, int xcdr_version) {
+    writer_init(w, buf, cap, xcdr_version);
 }
 
 void zidl_cdr_writer_init_counting(ZidlCdrWriter *w, int xcdr_version) {
-    w->buf          = NULL;
-    w->cap          = 0;
-    w->len          = 0;
-    w->pos          = 0;
-    w->xcdr_version = xcdr_version;
-    w->byte_order   = ZIDL_CDR_LE;
-    w->grow_fn      = NULL;
-}
-
-void zidl_cdr_writer_deinit(ZidlCdrWriter *w) {
-    if (w->grow_fn == writer_grow_default) {
-        zidl_cdr_free(w->buf, w->cap);
-        w->buf = NULL;
-        w->cap = 0;
-        w->len = 0;
-    }
+    writer_init(w, NULL, 0, xcdr_version);
 }
 
 void zidl_cdr_writer_set_byte_order(ZidlCdrWriter *w, int byte_order) {
     w->byte_order = byte_order;
 }
 
+int zidl_cdr_writer_is_counting(const ZidlCdrWriter *w) {
+    return !w->buf && !w->hash;
+}
+
 static int writer_ensure(ZidlCdrWriter *w, size_t n) {
     if (n > SIZE_MAX - w->len || n > SIZE_MAX - w->pos) return ZIDL_CDR_OVERFLOW;
-    /* Counting mode only needs the counter bounds above. */
-    if (!w->buf && !w->grow_fn) return ZIDL_CDR_OK;
-    if (w->len + n <= w->cap) return ZIDL_CDR_OK;
-    if (!w->grow_fn) return ZIDL_CDR_OVERFLOW;
-    return w->grow_fn(w, n);
+    /* Counting and key hash writers only need the counter bounds above. */
+    if (!w->buf) return ZIDL_CDR_OK;
+    if (n > w->cap - w->len) return ZIDL_CDR_OVERFLOW;
+    return ZIDL_CDR_OK;
 }
+
+static void key_hash_bytes(ZidlCdrKeyHash *h, const uint8_t *bytes, size_t n);
 
 static int writer_write_bytes(ZidlCdrWriter *w, const uint8_t *bytes, size_t n) {
     int rc = writer_ensure(w, n);
     if (rc) return rc;
-    if (w->buf && n) memcpy(w->buf + w->len, bytes, n);
+    if (n) {
+        if (w->buf) memcpy(w->buf + w->len, bytes, n);
+        else if (w->hash) key_hash_bytes(w->hash, bytes, n);
+    }
     w->len += n;
     w->pos += n;
     return ZIDL_CDR_OK;
+}
+
+int zidl_cdr_serialize_alloc(int xcdr_version, int byte_order, ZidlCdrSerializeFn fn,
+                             const void *ctx, uint8_t **out, size_t *out_len) {
+    ZidlCdrWriter w;
+    zidl_cdr_writer_init_counting(&w, xcdr_version);
+    zidl_cdr_writer_set_byte_order(&w, byte_order);
+    int rc = fn(&w, ctx);
+    if (rc) return rc;
+    const size_t counted = w.len;
+    if (counted == 0) {
+        *out = NULL;
+        *out_len = 0;
+        return ZIDL_CDR_OK;
+    }
+    uint8_t *buf = (uint8_t *)zidl_cdr_alloc(counted);
+    if (!buf) return ZIDL_CDR_OVERFLOW;
+    zidl_cdr_writer_init_fixed(&w, buf, counted, xcdr_version);
+    zidl_cdr_writer_set_byte_order(&w, byte_order);
+    rc = fn(&w, ctx);
+    if (!rc && w.len != counted) rc = ZIDL_CDR_INVALID;
+    if (rc) {
+        zidl_cdr_free(buf, counted);
+        return rc;
+    }
+    *out = buf;
+    *out_len = counted;
+    return ZIDL_CDR_OK;
+}
+
+int zidl_cdr_begin_key_collection(const ZidlCdrWriter *outer, ZidlCdrWriter *counter) {
+    zidl_cdr_writer_init_counting(counter, ZIDL_XCDR2);
+    counter->byte_order = outer->byte_order;
+    return !zidl_cdr_writer_is_counting(outer);
 }
 
 #ifdef ZIDL_CDR_SHARED_PRIMITIVES
@@ -369,6 +370,7 @@ int zidl_cdr_write_dheader(ZidlCdrWriter *w, uint32_t payload_size) {
 }
 
 int zidl_cdr_reserve_dheader(ZidlCdrWriter *w, size_t *out_offset) {
+    if (w->hash) return ZIDL_CDR_INVALID;
     /* Align first: the offset must name the 4-byte placeholder itself, not
      * any padding written before it. */
     int rc = writer_pad(w, align_cap(w->xcdr_version, 4));
@@ -1070,6 +1072,51 @@ void zidl_cdr_compute_key_hash_for_type(const uint8_t *key, size_t len, bool for
     if (force_md5) zidl_md5(key, len, out);
     else zidl_cdr_compute_key_hash(key, len, out);
 }
+
+int zidl_cdr_write_key_collection_size(ZidlCdrWriter *outer, const ZidlCdrWriter *counter) {
+#if SIZE_MAX > UINT32_MAX
+    if (counter->len > UINT32_MAX) return ZIDL_CDR_OVERFLOW;
+#endif
+    return zidl_cdr_write_u32(outer, (uint32_t)counter->len);
+}
+#endif /* ZIDL_CDR_SHARED_PRIMITIVES */
+
+/* The streaming key hash keeps the first 16 bytes and an MD5 of them all. */
+typedef struct KeyHashState {
+    uint8_t    first16[16];
+    size_t     len;
+    ZidlMd5Ctx md5;
+} KeyHashState;
+typedef char key_hash_state_fits[sizeof(KeyHashState) <= sizeof(((ZidlCdrKeyHash *)0)->state) ? 1 : -1];
+
+static void key_hash_bytes(ZidlCdrKeyHash *h, const uint8_t *bytes, size_t n) {
+    KeyHashState *st = (KeyHashState *)(void *)h->state;
+    if (st->len < 16u) {
+        size_t copy = 16u - st->len < n ? 16u - st->len : n;
+        memcpy(st->first16 + st->len, bytes, copy);
+    }
+    st->len += n;
+    md5_update(&st->md5, bytes, n);
+}
+
+#ifndef ZIDL_CDR_SHARED_PRIMITIVES
+void zidl_cdr_key_hash_init(ZidlCdrKeyHash *h) {
+    KeyHashState *st = (KeyHashState *)(void *)h->state;
+    writer_init(&h->writer, NULL, 0, ZIDL_XCDR2);
+    h->writer.byte_order = ZIDL_CDR_BE;
+    h->writer.hash = h;
+    memset(st, 0, sizeof(*st));
+    md5_init(&st->md5);
+}
+
+void zidl_cdr_key_hash_finish(ZidlCdrKeyHash *h, bool force_md5, uint8_t out[16]) {
+    KeyHashState *st = (KeyHashState *)(void *)h->state;
+    if (force_md5 || st->len > 16u) {
+        md5_final(&st->md5, out);
+        return;
+    }
+    memcpy(out, st->first16, 16u);
+}
 int zidl_cdr_write_key_wstring_length(ZidlCdrWriter *w, uint32_t len) {
     if (len > UINT32_MAX / 2u) return ZIDL_CDR_OVERFLOW;
     return zidl_cdr_write_u32(w, len * 2u);
@@ -1116,6 +1163,7 @@ int zidl_cdr_pl_reserve_param(ZidlCdrWriter *w, uint16_t pid,
 }
 
 int zidl_cdr_pl_patch_param(ZidlCdrWriter *w, ZidlPlParamHandle handle) {
+    if (w->hash) return ZIDL_CDR_INVALID;
     size_t raw_bytes = w->len - handle.buf_value_start;
     size_t rem       = raw_bytes % 4u;
     size_t pad       = (rem == 0u) ? 0u : (4u - rem);
@@ -1163,6 +1211,7 @@ int zidl_cdr_pl_read_param(ZidlCdrReader *r, ZidlPlParam *out) {
 #ifndef ZIDL_CDR_SHARED_PRIMITIVES
 /* Additive checked APIs are also available with the independent C reference. */
 static int checked_patch(ZidlCdrWriter *w, size_t offset, size_t start) {
+    if (w->hash) return ZIDL_CDR_INVALID;
     if (offset > w->len || 4u > w->len - offset || start != offset + 4u)
         return ZIDL_CDR_INVALID;
     if (w->buf && w->len > w->cap) return ZIDL_CDR_INVALID;
@@ -1248,7 +1297,7 @@ void zidl_cdr_cancel_optional_write(ZidlCdrWriter *w, const ZidlCdrOptionalWrite
 int zidl_cdr_end_optional_write(ZidlCdrWriter *w, const ZidlCdrOptionalWrite *s) {
     uint32_t size;
     if (s->length_offset == SIZE_MAX) return ZIDL_CDR_OK;
-    if (!optional_write_valid(w, s)) return ZIDL_CDR_INVALID;
+    if (w->hash || !optional_write_valid(w, s)) return ZIDL_CDR_INVALID;
     zidl_cdr_cancel_optional_write(w, s);
     if (w->len - s->value_start > UINT32_MAX) return ZIDL_CDR_OVERFLOW;
     size = (uint32_t)(w->len - s->value_start);

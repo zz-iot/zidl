@@ -280,14 +280,22 @@ ZIDL_ENCAP_CDR2_BE = 0x0006
 ### Writer
 
 ```c
-// Initialize (two modes):
-int  zidl_cdr_writer_init(ZidlCdrWriter *w, int xcdr_version);
-     // malloc-backed; grows automatically
+// Initialize (two modes, neither allocates):
 void zidl_cdr_writer_init_fixed(ZidlCdrWriter *w, uint8_t *buf,
                                 size_t cap, int xcdr_version);
      // fixed buffer; returns ZIDL_CDR_OVERFLOW when full
-void zidl_cdr_writer_deinit(ZidlCdrWriter *w);
-     // frees malloc buffer (no-op for fixed)
+void zidl_cdr_writer_init_counting(ZidlCdrWriter *w, int xcdr_version);
+     // counts the bytes a fixed writer would need
+
+// Count, allocate exactly (registered allocator), write; the two passes
+// must agree. Free with zidl_cdr_free(*out, *out_len).
+int zidl_cdr_serialize_alloc(int xcdr_version, int byte_order,
+                             ZidlCdrSerializeFn fn, const void *ctx,
+                             uint8_t **out, size_t *out_len);
+
+// Streaming key hash: write a key holder into h.writer; no buffer.
+void zidl_cdr_key_hash_init(ZidlCdrKeyHash *h);
+void zidl_cdr_key_hash_finish(ZidlCdrKeyHash *h, bool force_md5, uint8_t out[16]);
 
 // Encapsulation (first call):
 int zidl_cdr_write_encap(ZidlCdrWriter *w);
@@ -513,11 +521,11 @@ See `docs/xtypes_typeobject.md` for full context.
 - DHEADER patching requires random-access into the buffer (no streaming writers).
 
 **zidl-cdr:**
-- The malloc-backed writer uses `realloc` for growth.
-- The fixed-buffer writer has zero allocation overhead; suitable for embedded.
+- Writers never allocate: count, then write into a fixed buffer, or use
+  `zidl_cdr_serialize_alloc` for one exact allocation. Key hashes stream into MD5.
 - Zero-copy string reader (`zidl_cdr_read_string_zerocopy`) avoids allocation
   for string fields when the caller can guarantee buffer lifetime.
-- Both writer modes produce identical CDR output for the same data.
+- Counting and fixed writers agree on every length for the same data.
 
 **Cross-validation:**
 Both libraries were cross-validated byte-for-byte for all primitive types,

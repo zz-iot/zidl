@@ -122,16 +122,14 @@ static void check_derived(const TYPE(Derived) *v, int present) {
             assert((key ? OptionalWire_##N##_serialize_key_value(&w,&value) : OptionalWire_##N##_serialize(&w,&value))==ZIDL_CDR_OVERFLOW); \
             assert(w.len<=cap && w.pos==w.len-4); \
         } \
-        for (int mode=0;mode<3;++mode) { \
+        for (int mode=1;mode<3;++mode) { \
             uint8_t actual[1024]; ZidlCdrWriter w; \
-            if (mode==0) assert(zidl_cdr_writer_init(&w,version)==0); \
-            else if (mode==1) zidl_cdr_writer_init_fixed(&w,actual,sizeof actual,version); \
+            if (mode==1) zidl_cdr_writer_init_fixed(&w,actual,sizeof actual,version); \
             else zidl_cdr_writer_init_counting(&w,version); \
             zidl_cdr_writer_set_byte_order(&w,order); \
             assert(zidl_cdr_write_encap_kind(&w,strcmp(name,"Derived")==0 ? ZIDL_EXT_APPENDABLE : ZIDL_EXT_FINAL)==0); \
             assert((key ? OptionalWire_##N##_serialize_key_value(&w,&value) : OptionalWire_##N##_serialize(&w,&value))==0); \
             assert(w.len==len); if (mode!=2) assert(memcmp(w.buf,bytes,len)==0); \
-            if (mode==0) zidl_cdr_writer_deinit(&w); \
         } \
         for (int compact=0;compact<2;++compact) { \
             const uint8_t *input=compact ? short_bytes : bytes; size_t size=compact ? short_len : len; \

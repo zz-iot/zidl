@@ -89,16 +89,14 @@ static void put_word(uint8_t *data, int order, uint32_t n) {
         for (int _key=0;_key<2;_key++) { \
             const uint8_t *_bytes=_key ? _e->key : _e->full; \
             size_t _len=_key ? _e->key_len : _e->full_len; \
-            for (int _mode=0;_mode<3;_mode++) { \
+            for (int _mode=1;_mode<3;_mode++) { \
                 ZidlCdrWriter _w; \
-                if (!_mode) assert(zidl_cdr_writer_init(&_w,_e->version)==0); \
-                else if (_mode==1) zidl_cdr_writer_init_fixed(&_w,_buffer,sizeof _buffer,_e->version); \
+                if (_mode==1) zidl_cdr_writer_init_fixed(&_w,_buffer,sizeof _buffer,_e->version); \
                 else zidl_cdr_writer_init_counting(&_w,_e->version); \
                 zidl_cdr_writer_set_byte_order(&_w,_e->order); \
                 assert(zidl_cdr_write_encap_kind(&_w,EXT_##NAME)==0); \
                 assert((_key ? Projection_##NAME##_serialize_key(&_w,&(VALUE)) : Projection_##NAME##_serialize(&_w,&(VALUE)))==0); \
                 assert(_w.len==_len); if (_mode!=2) assert(!memcmp(_w.buf,_bytes,_len)); \
-                zidl_cdr_writer_deinit(&_w); \
             } \
             TYPE(NAME) _out=INIT; ZidlCdrReader _r; \
             assert(zidl_cdr_reader_init(&_r,_bytes,_len)==0); \
