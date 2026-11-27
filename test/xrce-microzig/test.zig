@@ -16,14 +16,12 @@ test "XRCE fixture round-trips bounded data" {
 
     try std.testing.expect(types.CounterStatus.has_key);
 
-    var bytes = std.ArrayListUnmanaged(u8).empty;
-    defer bytes.deinit(allocator);
-
-    var writer = zidl_cdr.CdrWriter(.xcdr1).init(&bytes, allocator);
+    var bytes_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&bytes_fixed, .xcdr1, .little);
     try writer.writeEncapHeader();
     try types.CounterStatus.serialize(&writer, sample);
 
-    var reader = try zidl_cdr.CdrReader.init(bytes.items);
+    var reader = try zidl_cdr.CdrReader.init(writer.bytes());
     var decoded: types.CounterStatus = .{};
     try types.CounterStatus.deserializeInto(&decoded, &reader, allocator);
 
@@ -31,7 +29,7 @@ test "XRCE fixture round-trips bounded data" {
     try std.testing.expectEqualSlices(u8, "pico-wh", decoded.board.slice());
     try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 5 }, decoded.payload.slice());
 
-    var key_reader = try zidl_cdr.CdrReader.init(bytes.items);
+    var key_reader = try zidl_cdr.CdrReader.init(writer.bytes());
     var key_only: types.CounterStatus = .{};
     try types.CounterStatus.deserializeKeyInto(&key_only, &key_reader, allocator);
     try std.testing.expectEqual(@as(u32, 42), key_only.counter);
@@ -43,14 +41,13 @@ test "XRCE fixture round-trips bounded data" {
 test "allocated string sequences decode and deep clone" {
     const StringList = @import("allocations").StringList;
     const allocator = std.testing.allocator;
-    var bytes = std.ArrayListUnmanaged(u8).empty;
-    defer bytes.deinit(allocator);
-    var writer = zidl_cdr.CdrWriter(.xcdr1).init(&bytes, allocator);
+    var bytes_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&bytes_fixed, .xcdr1, .little);
     try writer.writeEncapHeader();
     try writer.writeU32(2);
     try writer.writeString("alpha");
     try writer.writeString("");
-    var reader = try zidl_cdr.CdrReader.init(bytes.items);
+    var reader = try zidl_cdr.CdrReader.init(writer.bytes());
     var decoded: StringList = .{};
     try StringList.deserializeInto(&decoded, &reader, allocator);
     defer decoded.deinit(allocator);

@@ -37,11 +37,10 @@ test "generated serializers propagate aggregate, member, key and collection patc
 }
 
 test "checked optional patches retain XCDR1 and key writer no-op behavior" {
-    var bytes = std.ArrayListUnmanaged(u8).empty;
-    defer bytes.deinit(std.testing.allocator);
-    var writer = zidl_cdr.CdrWriter(.xcdr1).init(&bytes, std.testing.allocator);
+    var bytes_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&bytes_fixed, .xcdr1, .little);
     try V.App.serialize(&writer, .{ .value = 42 });
-    try std.testing.expectEqual(@as(usize, 4), bytes.items.len);
+    try std.testing.expectEqual(@as(usize, 4), writer.bytes().len);
     var key = zidl_cdr.KeyHashWriter.init();
     try V.App.serializeKey(&key, .{ .value = 42 });
     try std.testing.expectEqual(@as(usize, 4), key.len);
@@ -151,9 +150,8 @@ test "mutable union windows bound both discriminant and active case" {
 
 test "mutable narrow enum windows match emitted widths in either byte order" {
     for ([_]zidl_cdr.ByteOrder{ .little, .big }) |order| {
-        var bytes = std.ArrayListUnmanaged(u8).empty;
-        defer bytes.deinit(std.testing.allocator);
-        var writer = zidl_cdr.PrimitiveWriter.initDynamic(&bytes, std.testing.allocator, .four, order);
+        var storage: [256]u8 = undefined;
+        var writer = zidl_cdr.RuntimeWriter.initFixed(&storage, .xcdr2, order);
         try writer.writeBytes(&.{ 0, if (order == .little) 11 else 10, 0, 0 });
         writer.resetPayload();
         try V.NarrowLast.serialize(&writer, .{ .only = .S1 });
@@ -161,30 +159,29 @@ test "mutable narrow enum windows match emitted widths in either byte order" {
             &[_]u8{ 0, 11, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 1 }
         else
             &[_]u8{ 0, 10, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 1 };
-        try std.testing.expectEqualSlices(u8, expected, bytes.items);
-        var reader = try zidl_cdr.CdrReader.init(bytes.items);
+        try std.testing.expectEqualSlices(u8, expected, writer.bytes());
+        var reader = try zidl_cdr.CdrReader.init(writer.bytes());
         var last: V.NarrowLast = .{};
         try V.NarrowLast.deserializeInto(&last, &reader, std.testing.allocator);
         try std.testing.expectEqual(V.Small.S1, last.only);
-        try std.testing.expectEqual(bytes.items.len, reader.pos);
-        reader = try zidl_cdr.CdrReader.init(bytes.items);
+        try std.testing.expectEqual(writer.bytes().len, reader.pos);
+        reader = try zidl_cdr.CdrReader.init(writer.bytes());
         try V.NarrowLast.skip(&reader);
-        try std.testing.expectEqual(bytes.items.len, reader.pos);
+        try std.testing.expectEqual(writer.bytes().len, reader.pos);
 
-        bytes.clearRetainingCapacity();
-        writer = zidl_cdr.PrimitiveWriter.initDynamic(&bytes, std.testing.allocator, .four, order);
+        writer = zidl_cdr.RuntimeWriter.initFixed(&storage, .xcdr2, order);
         try writer.writeBytes(&.{ 0, if (order == .little) 11 else 10, 0, 0 });
         writer.resetPayload();
         try V.Narrow.serialize(&writer, .{ .first = .S1, .second = .M1, .tail = 7 });
-        reader = try zidl_cdr.CdrReader.init(bytes.items);
+        reader = try zidl_cdr.CdrReader.init(writer.bytes());
         var out: V.Narrow = .{};
         try V.Narrow.deserializeInto(&out, &reader, std.testing.allocator);
         try std.testing.expectEqual(V.Small.S1, out.first);
         try std.testing.expectEqual(V.Medium.M1, out.second);
         try std.testing.expectEqual(@as(i32, 7), out.tail);
-        try std.testing.expectEqual(bytes.items.len, reader.pos);
-        reader = try zidl_cdr.CdrReader.init(bytes.items);
+        try std.testing.expectEqual(writer.bytes().len, reader.pos);
+        reader = try zidl_cdr.CdrReader.init(writer.bytes());
         try V.Narrow.skip(&reader);
-        try std.testing.expectEqual(bytes.items.len, reader.pos);
+        try std.testing.expectEqual(writer.bytes().len, reader.pos);
     }
 }

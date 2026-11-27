@@ -236,12 +236,11 @@ members with a `uint64_t _present` bitmask (max 64 optional members per struct);
 
 ## zidl-cdr (Zig) API Summary
 
-`packages/zidl-cdr/src/cdr.zig`:
+`packages/zidl-cdr/src/writer.zig` and `reader.zig`:
 
 ```zig
-// Writer
-var buf = std.ArrayListUnmanaged(u8).empty;
-var w = CdrWriter(.xcdr2).init(&buf, alloc);
+// Writer (a fixed buffer; initCounting to size it first)
+var w = RuntimeWriter.initFixed(&buf, .xcdr2, .little);
 try w.writeEncapHeader();   // writes encap header, resets pos
 try w.writeBool(v);
 try w.writeU8(v); try w.writeI8(v);

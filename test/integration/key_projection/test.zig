@@ -20,20 +20,16 @@ fn check(comptime T: type, value: T, name: []const u8) !void {
             var expected_buffer: [1024]u8 = undefined;
             const expected = try std.fmt.hexToBytes(&expected_buffer, hex);
             var fixed: [1024]u8 = undefined;
-            var dynamic = std.ArrayListUnmanaged(u8).empty;
-            defer dynamic.deinit(testing.allocator);
-            for (0..3) |mode| {
+            for (0..2) |mode| {
                 var writer = switch (mode) {
-                    0 => zidl_cdr.PrimitiveWriter.initFixed(&fixed, if (version == 1) .eight else .four, if (order == 0) .little else .big),
-                    1 => zidl_cdr.PrimitiveWriter.initCounting(if (version == 1) .eight else .four, if (order == 0) .little else .big),
-                    else => zidl_cdr.PrimitiveWriter.initDynamic(&dynamic, testing.allocator, if (version == 1) .eight else .four, if (order == 0) .little else .big),
+                    0 => zidl_cdr.RuntimeWriter.initFixed(&fixed, if (version == 1) .xcdr1 else .xcdr2, if (order == 0) .little else .big),
+                    else => zidl_cdr.RuntimeWriter.initCounting(if (version == 1) .xcdr1 else .xcdr2, if (order == 0) .little else .big),
                 };
                 try writer.writeBytes(expected[0..4]);
                 writer.resetPayload();
                 if (key == 1) try T.serializeKey(&writer, value) else try T.serialize(&writer, value);
                 try testing.expectEqual(expected.len, writer.len);
                 if (mode == 0) try testing.expectEqualSlices(u8, expected, fixed[0..writer.len]);
-                if (mode == 2) try testing.expectEqualSlices(u8, expected, dynamic.items);
             }
             var reader = try zidl_cdr.CdrReader.init(expected);
             var decoded: T = .{};

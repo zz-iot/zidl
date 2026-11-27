@@ -24,13 +24,12 @@ const c = @import("zidl_cdr");
 fn crossVal2(
     comptime T: type,
     value: T,
-    comptime rt_write_fn: fn (*native.CdrWriter(.xcdr2), T) anyerror!void,
+    comptime rt_write_fn: fn (*native.RuntimeWriter, T) anyerror!void,
     c_write_fn: *const fn (*c.ZidlCdrWriter, T) callconv(.c) c_int,
 ) !void {
     // Native Zig side
-    var rt_buf = std.ArrayListUnmanaged(u8).empty;
-    defer rt_buf.deinit(testing.allocator);
-    var rt_w = native.CdrWriter(.xcdr2).init(&rt_buf, testing.allocator);
+    var rt_buf_fixed: [1 << 16]u8 = undefined;
+    var rt_w = native.RuntimeWriter.initFixed(&rt_buf_fixed, .xcdr2, .little);
     try rt_w.writeEncapHeader();
     try rt_write_fn(&rt_w, value);
 
@@ -41,19 +40,18 @@ fn crossVal2(
     _ = c.zidl_cdr_write_encap(&cw);
     try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c_write_fn(&cw, value));
 
-    try testing.expectEqualSlices(u8, rt_buf.items, cw.buf[0..cw.len]);
+    try testing.expectEqualSlices(u8, rt_w.bytes(), cw.buf[0..cw.len]);
 }
 
 /// Assert C write produces the same bytes as the native Zig codec for XCDR1.
 fn crossVal1(
     comptime T: type,
     value: T,
-    comptime rt_write_fn: fn (*native.CdrWriter(.xcdr1), T) anyerror!void,
+    comptime rt_write_fn: fn (*native.RuntimeWriter, T) anyerror!void,
     c_write_fn: *const fn (*c.ZidlCdrWriter, T) callconv(.c) c_int,
 ) !void {
-    var rt_buf = std.ArrayListUnmanaged(u8).empty;
-    defer rt_buf.deinit(testing.allocator);
-    var rt_w = native.CdrWriter(.xcdr1).init(&rt_buf, testing.allocator);
+    var rt_buf_fixed: [1 << 16]u8 = undefined;
+    var rt_w = native.RuntimeWriter.initFixed(&rt_buf_fixed, .xcdr1, .little);
     try rt_w.writeEncapHeader();
     try rt_write_fn(&rt_w, value);
 
@@ -63,7 +61,7 @@ fn crossVal1(
     _ = c.zidl_cdr_write_encap(&cw);
     try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c_write_fn(&cw, value));
 
-    try testing.expectEqualSlices(u8, rt_buf.items, cw.buf[0..cw.len]);
+    try testing.expectEqualSlices(u8, rt_w.bytes(), cw.buf[0..cw.len]);
 }
 
 // ── Encapsulation header ──────────────────────────────────────────────────────
@@ -139,84 +137,84 @@ test "md5: known abc digest" {
 
 test "crossval xcdr2: u8" {
     try crossVal2(u8, 0xAB, struct {
-        fn f(w: *native.CdrWriter(.xcdr2), v: u8) !void {
+        fn f(w: *native.RuntimeWriter, v: u8) !void {
             try w.writeU8(v);
         }
     }.f, &c.zidl_cdr_write_u8);
 }
 test "crossval xcdr2: i8" {
     try crossVal2(i8, -42, struct {
-        fn f(w: *native.CdrWriter(.xcdr2), v: i8) !void {
+        fn f(w: *native.RuntimeWriter, v: i8) !void {
             try w.writeI8(v);
         }
     }.f, &c.zidl_cdr_write_i8);
 }
 test "crossval xcdr2: bool true" {
     try crossVal2(bool, true, struct {
-        fn f(w: *native.CdrWriter(.xcdr2), v: bool) !void {
+        fn f(w: *native.RuntimeWriter, v: bool) !void {
             try w.writeBool(v);
         }
     }.f, &c.zidl_cdr_write_bool);
 }
 test "crossval xcdr2: bool false" {
     try crossVal2(bool, false, struct {
-        fn f(w: *native.CdrWriter(.xcdr2), v: bool) !void {
+        fn f(w: *native.RuntimeWriter, v: bool) !void {
             try w.writeBool(v);
         }
     }.f, &c.zidl_cdr_write_bool);
 }
 test "crossval xcdr2: u16" {
     try crossVal2(u16, 0x1234, struct {
-        fn f(w: *native.CdrWriter(.xcdr2), v: u16) !void {
+        fn f(w: *native.RuntimeWriter, v: u16) !void {
             try w.writeU16(v);
         }
     }.f, &c.zidl_cdr_write_u16);
 }
 test "crossval xcdr2: i16" {
     try crossVal2(i16, -1000, struct {
-        fn f(w: *native.CdrWriter(.xcdr2), v: i16) !void {
+        fn f(w: *native.RuntimeWriter, v: i16) !void {
             try w.writeI16(v);
         }
     }.f, &c.zidl_cdr_write_i16);
 }
 test "crossval xcdr2: u32" {
     try crossVal2(u32, 0xDEADBEEF, struct {
-        fn f(w: *native.CdrWriter(.xcdr2), v: u32) !void {
+        fn f(w: *native.RuntimeWriter, v: u32) !void {
             try w.writeU32(v);
         }
     }.f, &c.zidl_cdr_write_u32);
 }
 test "crossval xcdr2: i32" {
     try crossVal2(i32, -123456, struct {
-        fn f(w: *native.CdrWriter(.xcdr2), v: i32) !void {
+        fn f(w: *native.RuntimeWriter, v: i32) !void {
             try w.writeI32(v);
         }
     }.f, &c.zidl_cdr_write_i32);
 }
 test "crossval xcdr2: f32" {
     try crossVal2(f32, 3.14159, struct {
-        fn f(w: *native.CdrWriter(.xcdr2), v: f32) !void {
+        fn f(w: *native.RuntimeWriter, v: f32) !void {
             try w.writeF32(v);
         }
     }.f, &c.zidl_cdr_write_f32);
 }
 test "crossval xcdr2: u64" {
     try crossVal2(u64, 0xCAFEBABE_DEADBEEF, struct {
-        fn f(w: *native.CdrWriter(.xcdr2), v: u64) !void {
+        fn f(w: *native.RuntimeWriter, v: u64) !void {
             try w.writeU64(v);
         }
     }.f, &c.zidl_cdr_write_u64);
 }
 test "crossval xcdr2: i64" {
     try crossVal2(i64, -9876543210, struct {
-        fn f(w: *native.CdrWriter(.xcdr2), v: i64) !void {
+        fn f(w: *native.RuntimeWriter, v: i64) !void {
             try w.writeI64(v);
         }
     }.f, &c.zidl_cdr_write_i64);
 }
 test "crossval xcdr2: f64" {
     try crossVal2(f64, 2.71828182845, struct {
-        fn f(w: *native.CdrWriter(.xcdr2), v: f64) !void {
+        fn f(w: *native.RuntimeWriter, v: f64) !void {
             try w.writeF64(v);
         }
     }.f, &c.zidl_cdr_write_f64);
@@ -226,14 +224,14 @@ test "crossval xcdr2: f64" {
 
 test "crossval xcdr1: u64 (8-byte alignment)" {
     try crossVal1(u64, 0x0102030405060708, struct {
-        fn f(w: *native.CdrWriter(.xcdr1), v: u64) !void {
+        fn f(w: *native.RuntimeWriter, v: u64) !void {
             try w.writeU64(v);
         }
     }.f, &c.zidl_cdr_write_u64);
 }
 test "crossval xcdr1: f64" {
     try crossVal1(f64, 1.0, struct {
-        fn f(w: *native.CdrWriter(.xcdr1), v: f64) !void {
+        fn f(w: *native.RuntimeWriter, v: f64) !void {
             try w.writeF64(v);
         }
     }.f, &c.zidl_cdr_write_f64);
@@ -242,9 +240,8 @@ test "crossval xcdr1: f64" {
 // ── Alignment padding: u8 then u32 ───────────────────────────────────────────
 
 test "crossval xcdr2: u8 then u32 alignment" {
-    var rt_buf = std.ArrayListUnmanaged(u8).empty;
-    defer rt_buf.deinit(testing.allocator);
-    var rt_w = native.CdrWriter(.xcdr2).init(&rt_buf, testing.allocator);
+    var rt_buf_fixed: [1 << 16]u8 = undefined;
+    var rt_w = native.RuntimeWriter.initFixed(&rt_buf_fixed, .xcdr2, .little);
     try rt_w.writeEncapHeader();
     try rt_w.writeU8(0x11);
     try rt_w.writeU32(0x22334455);
@@ -256,16 +253,15 @@ test "crossval xcdr2: u8 then u32 alignment" {
     _ = c.zidl_cdr_write_u8(&cw, 0x11);
     _ = c.zidl_cdr_write_u32(&cw, 0x22334455);
 
-    try testing.expectEqualSlices(u8, rt_buf.items, cw.buf[0..cw.len]);
+    try testing.expectEqualSlices(u8, rt_w.bytes(), cw.buf[0..cw.len]);
 }
 
 // ── String cross-validation ───────────────────────────────────────────────────
 
 test "crossval xcdr2: string" {
     const s: []const u8 = "hello";
-    var rt_buf = std.ArrayListUnmanaged(u8).empty;
-    defer rt_buf.deinit(testing.allocator);
-    var rt_w = native.CdrWriter(.xcdr2).init(&rt_buf, testing.allocator);
+    var rt_buf_fixed: [1 << 16]u8 = undefined;
+    var rt_w = native.RuntimeWriter.initFixed(&rt_buf_fixed, .xcdr2, .little);
     try rt_w.writeEncapHeader();
     try rt_w.writeString(s);
 
@@ -275,14 +271,13 @@ test "crossval xcdr2: string" {
     _ = c.zidl_cdr_write_encap(&cw);
     _ = c.zidl_cdr_write_string(&cw, s.ptr, @intCast(s.len));
 
-    try testing.expectEqualSlices(u8, rt_buf.items, cw.buf[0..cw.len]);
+    try testing.expectEqualSlices(u8, rt_w.bytes(), cw.buf[0..cw.len]);
 }
 
 test "crossval xcdr2: empty string" {
     const s: []const u8 = "";
-    var rt_buf = std.ArrayListUnmanaged(u8).empty;
-    defer rt_buf.deinit(testing.allocator);
-    var rt_w = native.CdrWriter(.xcdr2).init(&rt_buf, testing.allocator);
+    var rt_buf_fixed: [1 << 16]u8 = undefined;
+    var rt_w = native.RuntimeWriter.initFixed(&rt_buf_fixed, .xcdr2, .little);
     try rt_w.writeEncapHeader();
     try rt_w.writeString(s);
 
@@ -292,15 +287,14 @@ test "crossval xcdr2: empty string" {
     _ = c.zidl_cdr_write_encap(&cw);
     _ = c.zidl_cdr_write_string(&cw, s.ptr, @intCast(s.len));
 
-    try testing.expectEqualSlices(u8, rt_buf.items, cw.buf[0..cw.len]);
+    try testing.expectEqualSlices(u8, rt_w.bytes(), cw.buf[0..cw.len]);
 }
 
 // ── DHEADER cross-validation (XCDR2) ─────────────────────────────────────────
 
 test "crossval xcdr2: reserve+patch dheader" {
-    var rt_buf = std.ArrayListUnmanaged(u8).empty;
-    defer rt_buf.deinit(testing.allocator);
-    var rt_w = native.CdrWriter(.xcdr2).init(&rt_buf, testing.allocator);
+    var rt_buf_fixed: [1 << 16]u8 = undefined;
+    var rt_w = native.RuntimeWriter.initFixed(&rt_buf_fixed, .xcdr2, .little);
     try rt_w.writeEncapHeader();
     const rt_dh = try rt_w.reserveDheader();
     try rt_w.writeI32(42);
@@ -315,7 +309,7 @@ test "crossval xcdr2: reserve+patch dheader" {
     _ = c.zidl_cdr_write_i32(&cw, 42);
     c.zidl_cdr_patch_dheader(&cw, c_dh);
 
-    try testing.expectEqualSlices(u8, rt_buf.items, cw.buf[0..cw.len]);
+    try testing.expectEqualSlices(u8, rt_w.bytes(), cw.buf[0..cw.len]);
 }
 
 test "reserve_dheader_maybe: no-op on xcdr1" {
@@ -551,9 +545,8 @@ test "emheader: read_emheader LC=0..3 payload_bytes" {
 
 test "crossval: fixed<5,2> positive value" {
     // Zig: write fixed<5,2> = 123.45 → bytes [0x12, 0x34, 0x5C]
-    var rt_buf = std.ArrayListUnmanaged(u8).empty;
-    defer rt_buf.deinit(testing.allocator);
-    var rt_w = native.CdrWriter(.xcdr1).init(&rt_buf, testing.allocator);
+    var rt_buf_fixed: [1 << 16]u8 = undefined;
+    var rt_w = native.RuntimeWriter.initFixed(&rt_buf_fixed, .xcdr1, .little);
     try rt_w.writeEncapHeader();
     try rt_w.writeFixed(5, 2, 123.45);
 
@@ -563,20 +556,19 @@ test "crossval: fixed<5,2> positive value" {
     _ = c.zidl_cdr_write_encap(&cw);
     try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c.zidl_cdr_write_fixed(&cw, 5, 2, 123.45));
 
-    try testing.expectEqualSlices(u8, rt_buf.items, cw.buf[0..cw.len]);
+    try testing.expectEqualSlices(u8, rt_w.bytes(), cw.buf[0..cw.len]);
 
     // C reader reads back the Zig-written bytes.
     var cr: c.ZidlCdrReader = undefined;
-    _ = c.zidl_cdr_reader_init(&cr, rt_buf.items.ptr, rt_buf.items.len);
+    _ = c.zidl_cdr_reader_init(&cr, rt_w.bytes().ptr, rt_w.bytes().len);
     var out_c: f64 = 0.0;
     try testing.expectEqual(@as(c_int, c.ZIDL_CDR_OK), c.zidl_cdr_read_fixed(&cr, 5, 2, &out_c));
     try testing.expectApproxEqAbs(@as(f64, 123.45), out_c, 0.001);
 }
 
 test "crossval: fixed<5,2> negative value" {
-    var rt_buf = std.ArrayListUnmanaged(u8).empty;
-    defer rt_buf.deinit(testing.allocator);
-    var rt_w = native.CdrWriter(.xcdr1).init(&rt_buf, testing.allocator);
+    var rt_buf_fixed: [1 << 16]u8 = undefined;
+    var rt_w = native.RuntimeWriter.initFixed(&rt_buf_fixed, .xcdr1, .little);
     try rt_w.writeEncapHeader();
     try rt_w.writeFixed(5, 2, -123.45);
 
@@ -586,13 +578,12 @@ test "crossval: fixed<5,2> negative value" {
     _ = c.zidl_cdr_write_encap(&cw);
     _ = c.zidl_cdr_write_fixed(&cw, 5, 2, -123.45);
 
-    try testing.expectEqualSlices(u8, rt_buf.items, cw.buf[0..cw.len]);
+    try testing.expectEqualSlices(u8, rt_w.bytes(), cw.buf[0..cw.len]);
 }
 
 test "crossval: fixed<4,2> even-digit padding" {
-    var rt_buf = std.ArrayListUnmanaged(u8).empty;
-    defer rt_buf.deinit(testing.allocator);
-    var rt_w = native.CdrWriter(.xcdr1).init(&rt_buf, testing.allocator);
+    var rt_buf_fixed: [1 << 16]u8 = undefined;
+    var rt_w = native.RuntimeWriter.initFixed(&rt_buf_fixed, .xcdr1, .little);
     try rt_w.writeEncapHeader();
     try rt_w.writeFixed(4, 2, 12.34);
 
@@ -602,10 +593,10 @@ test "crossval: fixed<4,2> even-digit padding" {
     _ = c.zidl_cdr_write_encap(&cw);
     _ = c.zidl_cdr_write_fixed(&cw, 4, 2, 12.34);
 
-    try testing.expectEqualSlices(u8, rt_buf.items, cw.buf[0..cw.len]);
+    try testing.expectEqualSlices(u8, rt_w.bytes(), cw.buf[0..cw.len]);
 
     var cr: c.ZidlCdrReader = undefined;
-    _ = c.zidl_cdr_reader_init(&cr, rt_buf.items.ptr, rt_buf.items.len);
+    _ = c.zidl_cdr_reader_init(&cr, rt_w.bytes().ptr, rt_w.bytes().len);
     var out_c: f64 = 0.0;
     _ = c.zidl_cdr_read_fixed(&cr, 4, 2, &out_c);
     try testing.expectApproxEqAbs(@as(f64, 12.34), out_c, 0.001);
@@ -613,7 +604,7 @@ test "crossval: fixed<4,2> even-digit padding" {
 
 // ── PL_CDR cross-validation ───────────────────────────────────────────────────
 
-test "pl_cdr: C encap header matches the native Zig codec PlCdrWriter" {
+test "pl_cdr: C encap header matches the native Zig writer" {
     // C writer
     var cw: c.ZidlCdrWriter = undefined;
     _ = c.zidl_cdr_writer_init(&cw, c.ZIDL_PL_CDR);
@@ -621,12 +612,11 @@ test "pl_cdr: C encap header matches the native Zig codec PlCdrWriter" {
     _ = c.zidl_cdr_pl_write_encap(&cw);
 
     // Zig writer
-    var rt_buf = std.ArrayListUnmanaged(u8).empty;
-    defer rt_buf.deinit(testing.allocator);
-    var rt_w = native.PlCdrWriter.init(&rt_buf, testing.allocator);
-    try rt_w.writeEncapHeader();
+    var rt_buf_fixed: [1 << 16]u8 = undefined;
+    var rt_w = native.Writer(.{ .version = .xcdr1, .order = .little, .output = .fixed }).initFixed(&rt_buf_fixed, .xcdr1, .little);
+    try rt_w.writePlEncapHeader();
 
-    try testing.expectEqualSlices(u8, rt_buf.items, cw.buf[0..cw.len]);
+    try testing.expectEqualSlices(u8, rt_w.bytes(), cw.buf[0..cw.len]);
     try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x03, 0x00, 0x00 }, cw.buf[0..cw.len]);
 }
 
@@ -652,16 +642,15 @@ test "pl_cdr: C single i32 param roundtrip matches Zig" {
     _ = c.zidl_cdr_pl_write_sentinel(&cw);
 
     // Zig side: encode same
-    var rt_buf = std.ArrayListUnmanaged(u8).empty;
-    defer rt_buf.deinit(testing.allocator);
-    var rt_w = native.PlCdrWriter.init(&rt_buf, testing.allocator);
-    try rt_w.writeEncapHeader();
+    var rt_buf_fixed: [1 << 16]u8 = undefined;
+    var rt_w = native.Writer(.{ .version = .xcdr1, .order = .little, .output = .fixed }).initFixed(&rt_buf_fixed, .xcdr1, .little);
+    try rt_w.writePlEncapHeader();
     const h = try rt_w.reservePlParam(5);
     try rt_w.writeI32(42);
     try rt_w.patchPlParam(h);
     try rt_w.writePlSentinel();
 
-    try testing.expectEqualSlices(u8, rt_buf.items, cw.buf[0..cw.len]);
+    try testing.expectEqualSlices(u8, rt_w.bytes(), cw.buf[0..cw.len]);
 
     // C reader: decode
     var r: c.ZidlCdrReader = undefined;

@@ -40,7 +40,7 @@ test "C compiler and Zig adapter agree on every state offset" {
     try testing.expectEqualSlices(usize, &zig, &c);
 }
 
-fn sample(w: *rt.PrimitiveWriter) !void {
+fn sample(w: *rt.RuntimeWriter) !void {
     try w.writeU8(0xab);
     try w.writeI8(-2);
     try w.writeBool(true);
@@ -67,17 +67,12 @@ test "independent primitive vectors through native and C paths in all storage mo
     for (vectors) |v| {
         var expected_buf: [48]u8 = undefined;
         const expected = try std.fmt.hexToBytes(&expected_buf, v.hex);
-        const cap: @FieldType(rt.PrimitiveWriter, "alignment_cap") = if (v.version == 2) .four else .eight;
-        var native_buffer = std.ArrayListUnmanaged(u8).empty;
-        defer native_buffer.deinit(testing.allocator);
-        var native_dynamic = rt.PrimitiveWriter.initDynamic(&native_buffer, testing.allocator, cap, v.order);
-        try sample(&native_dynamic);
-        try testing.expectEqualSlices(u8, expected, native_buffer.items);
+        const cap: rt.XcdrVersion = if (v.version == 2) .xcdr2 else .xcdr1;
         var fixed: [48]u8 = undefined;
-        var native_fixed = rt.PrimitiveWriter.initFixed(fixed[0..expected.len], cap, v.order);
+        var native_fixed = rt.RuntimeWriter.initFixed(fixed[0..expected.len], cap, v.order);
         try sample(&native_fixed);
         try testing.expectEqualSlices(u8, expected, fixed[0..native_fixed.len]);
-        var native_counting = rt.PrimitiveWriter.initCounting(cap, v.order);
+        var native_counting = rt.RuntimeWriter.initCounting(cap, v.order);
         try sample(&native_counting);
         try testing.expectEqual(expected.len, native_counting.len);
         try testing.expectEqual(expected.len, native_counting.pos);
@@ -108,9 +103,9 @@ test "fixed overflow preserves consumed alignment padding" {
     try testing.expectEqual(@as(c_int, -1), zidl_cdr_write_u64(&w, 42));
     try testing.expectEqual(@as(usize, 8), w.len);
     try testing.expectEqualSlices(u8, &.{ 0xab, 0, 0, 0, 0, 0, 0, 0 }, &bytes);
-    var n = rt.PrimitiveWriter.initFixed(&bytes, .eight, .little);
-    try n.writeUnsigned(u8, 0xab);
-    try testing.expectError(error.Overflow, n.writeUnsigned(u64, 42));
+    var n = rt.RuntimeWriter.initFixed(&bytes, .xcdr1, .little);
+    try n.writeU8(0xab);
+    try testing.expectError(error.Overflow, n.writeU64(42));
     try testing.expectEqual(w.len, n.len);
     try testing.expectEqual(w.pos, n.pos);
 }
@@ -122,9 +117,9 @@ test "counting overflow is recoverable and does not wrap counters" {
     try testing.expectEqual(@as(c_int, -1), zidl_cdr_write_u8(&w, 1));
     try testing.expectEqual(std.math.maxInt(usize), w.len);
     try testing.expectEqual(@as(usize, 0), w.pos);
-    var n = rt.PrimitiveWriter.initCounting(.four, .little);
+    var n = rt.RuntimeWriter.initCounting(.xcdr2, .little);
     n.pos = std.math.maxInt(usize);
-    try testing.expectError(error.Overflow, n.writeUnsigned(u8, 1));
+    try testing.expectError(error.Overflow, n.writeU8(1));
     try testing.expectEqual(@as(usize, 0), n.len);
 }
 
@@ -141,16 +136,6 @@ test "remaining C framing uses shared primitives and patches BE or counting stor
         try testing.expectEqual(@as(usize, 5), w.len);
         if (!counting) try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 1, 0xab }, bytes[0..w.len]);
     }
-}
-
-test "native dynamic allocation failure leaves counters unchanged" {
-    var buffer = std.ArrayListUnmanaged(u8).empty;
-    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
-    var w = rt.PrimitiveWriter.initDynamic(&buffer, failing.allocator(), .four, .little);
-    try testing.expectError(error.OutOfMemory, w.writeUnsigned(u32, 42));
-    try testing.expectEqual(@as(usize, 0), w.len);
-    try testing.expectEqual(@as(usize, 0), w.pos);
-    try testing.expectEqual(@as(usize, 0), buffer.items.len);
 }
 
 fn failGrow(_: *Writer, _: usize) callconv(.c) c_int {

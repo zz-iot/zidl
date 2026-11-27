@@ -97,10 +97,8 @@ pub fn main(init: std.process.Init) !void {
     try ts.checkLibrary(&lib);
     // Nested fields, alias, enum and bounded collections: validate exact extent.
     const packet = try find(libraries[0], "ProjectA::Packet");
-    var buffer: std.ArrayList(u8) = .empty;
-    defer buffer.deinit(allocator);
-    try buffer.ensureTotalCapacity(allocator, 256);
-    var w = zidl_cdr.CdrWriter(.xcdr2).init(&buffer, allocator);
+    var buffer_fixed: [256]u8 = undefined;
+    var w = zidl_cdr.RuntimeWriter.initFixed(&buffer_fixed, .xcdr2, .little);
     try w.writeEncapHeader();
     try w.writeI32(1);
     try w.writeI32(2);
@@ -111,8 +109,9 @@ pub fn main(init: std.process.Init) !void {
     try w.writeU8(1);
     try w.writeU8(2);
     try w.writeU8(3);
-    const payload = buffer.items;
-    const storage = buffer.allocatedSlice();
+    const payload = w.bytes();
+    // The whole buffer: past the payload too, for the trailing-byte check.
+    const storage: []u8 = &buffer_fixed;
     try expect(packet.validate.?(payload.ptr, payload.len) == ts.ok);
     for (0..payload.len) |n| try expect(packet.validate.?(payload.ptr, n) != ts.ok);
     storage[payload.len] = 0;

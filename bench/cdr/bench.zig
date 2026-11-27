@@ -105,7 +105,6 @@ fn best(comptime run: fn (*Ctx) u64, ctx: *Ctx) f64 {
 
 const Ctx = struct {
     alloc: std.mem.Allocator,
-    list: std.ArrayListUnmanaged(u8) = .empty,
     buf: []u8,
     sample: []const u8 = &.{},
     state: []align(16) u8,
@@ -114,29 +113,6 @@ const Ctx = struct {
 
 fn seedOf(n: u64) u64 {
     return @as(*const volatile u64, &n).*;
-}
-
-fn cdrWriterReused(ctx: *Ctx) u64 {
-    var sum: u64 = 0;
-    for (0..iters) |n| {
-        ctx.list.clearRetainingCapacity();
-        var w = cdr.CdrWriter(.xcdr2).init(&ctx.list, ctx.alloc);
-        message(&w, seedOf(n)) catch unreachable;
-        sum +%= ctx.list.items.len;
-    }
-    return sum;
-}
-
-fn primitiveWriter(ctx: *Ctx) u64 {
-    var sum: u64 = 0;
-    for (0..iters) |n| {
-        var c = cdr.PrimitiveWriter.initCounting(.four, .little);
-        message(&c, seedOf(n)) catch unreachable;
-        var w = cdr.PrimitiveWriter.initFixed(ctx.buf[0..c.len], .four, .little);
-        message(&w, seedOf(n)) catch unreachable;
-        sum +%= w.len;
-    }
-    return sum;
 }
 
 fn countFixed(comptime fast: cdr.FastSet, comptime order: cdr.ByteOrder) fn (*Ctx) u64 {
@@ -193,7 +169,6 @@ fn cSpecial(ctx: *Ctx) u64 {
 pub fn main() !void {
     const alloc = std.heap.smp_allocator;
     var ctx: Ctx = .{ .alloc = alloc, .buf = try alloc.alloc(u8, 4096), .state = try alloc.alignedAlloc(u8, .@"16", 256) };
-    try ctx.list.ensureTotalCapacity(alloc, 4096);
     std.debug.assert(bench_x2le_size() <= ctx.state.len);
     var sample_w = cdr.RuntimeWriter.initFixed(ctx.buf, .xcdr2, .little);
     try sample_w.writeEncapHeader();
@@ -202,9 +177,7 @@ pub fn main() !void {
     ctx.sample = sample;
 
     const rows = .{
-        .{ "CdrWriter, growable, reused buffer", cdrWriterReused },
         .{ "Fast: count, then fixed", countFixed(.all, .little) },
-        .{ "PrimitiveWriter: count, then fixed", primitiveWriter },
         .{ "Run-time: count, then fixed (LE)", countFixed(.none, .little) },
         .{ "Run-time: count, then fixed (BE)", countFixed(.none, .big) },
         .{ "C: today's ABI, fixed (no count)", cRuntime },

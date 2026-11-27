@@ -34,44 +34,41 @@ test "a view frees a wide string member only once it no longer holds its static 
     try t.expectEqualSlices(u16, units("dflt"), empty.fallback);
     empty.deinit(t.allocator);
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(t.allocator);
-    var w = cdr.CdrWriter(.xcdr2).init(&buf, t.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var w = cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try w.writeEncapHeaderDelimited();
     try Wide.serialize(&w, .{ .text = units("hi"), .fallback = units("decoded") });
 
     // Decoded: the view owns it, and deinit frees it.
-    var r = try cdr.CdrReader.init(buf.items);
+    var r = try cdr.CdrReader.init(w.bytes());
     var view: Wide.View = .{};
     try Wide.deserializeView(&view, &r, t.allocator);
     try t.expectEqualSlices(u16, units("decoded"), view.fallback);
     view.deinit(t.allocator);
 
     // A decode that fails before reaching it leaves the default alone too.
-    r = try cdr.CdrReader.init(buf.items[0..6]);
+    r = try cdr.CdrReader.init(w.bytes()[0..6]);
     var failed: Wide.View = .{};
     if (Wide.deserializeView(&failed, &r, t.allocator)) |_| return error.DecodedTruncatedSample else |_| {}
 }
 
 test "a key hash that fails to decode leaves a static default alone" {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(t.allocator);
-    var w = cdr.CdrWriter(.xcdr2).init(&buf, t.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var w = cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try w.writeEncapHeader();
     try fixture.Keyed.serialize(&w, .{ .id = units("abc"), .value = 1 });
     var alloc: std.mem.Allocator = t.allocator;
     // Whole, it hashes; cut inside the key, it does not, and frees nothing static.
-    _ = fixture.Keyed.computeKeyHashFromCdr(@ptrCast(&alloc), buf.items);
-    _ = fixture.Keyed.computeKeyHashFromCdr(@ptrCast(&alloc), buf.items[0..6]);
+    _ = fixture.Keyed.computeKeyHashFromCdr(@ptrCast(&alloc), w.bytes());
+    _ = fixture.Keyed.computeKeyHashFromCdr(@ptrCast(&alloc), w.bytes()[0..6]);
 }
 
 test "a sequence element with a zero unit inside is refused, not truncated" {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(t.allocator);
-    var w = cdr.CdrWriter(.xcdr1).init(&buf, t.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var w = cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr1, .little);
     try w.writeEncapHeader();
     try fixture.OneLine.serialize(&w, .{ .count = 1, .item = &.{ 'a', 0, 'b' } });
-    var r = try cdr.CdrReader.init(buf.items);
+    var r = try cdr.CdrReader.init(w.bytes());
     var out: fixture.Lines = .{};
     try t.expectError(error.InvalidString, fixture.Lines.deserializeInto(&out, &r, t.allocator));
     out.deinit(t.allocator);
@@ -85,13 +82,12 @@ test "wide strings round-trip, clone and free, in both XCDR versions" {
         var lines = [_][*:0]const u16{ &first, &second };
         const value: Wide = .{ .text = units("hello"), .lines = .{ ._length = 2, ._maximum = 2, ._buffer = &lines }, .note = units("note") };
 
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer buf.deinit(t.allocator);
-        var w = cdr.CdrWriter(version).init(&buf, t.allocator);
+        var buf_fixed: [1 << 16]u8 = undefined;
+        var w = cdr.RuntimeWriter.initFixed(&buf_fixed, version, .little);
         try w.writeEncapHeaderDelimited();
         try Wide.serialize(&w, value);
 
-        var r = try cdr.CdrReader.init(buf.items);
+        var r = try cdr.CdrReader.init(w.bytes());
         var out: Wide = .{};
         try Wide.deserializeInto(&out, &r, t.allocator);
         defer out.deinit(t.allocator);
@@ -110,7 +106,7 @@ test "wide strings round-trip, clone and free, in both XCDR versions" {
         try t.expectEqualSlices(u16, &second, std.mem.span(copy.lines._buffer.?[1]));
 
         // A failed decode leaves nothing allocated.
-        r = try cdr.CdrReader.init(buf.items[0 .. buf.items.len - 1]);
+        r = try cdr.CdrReader.init(w.bytes()[0 .. w.bytes().len - 1]);
         var failed: Wide = .{};
         if (Wide.deserializeInto(&failed, &r, t.allocator)) |_| return error.DecodedTruncatedSample else |_| {}
     }

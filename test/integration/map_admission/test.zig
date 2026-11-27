@@ -19,12 +19,11 @@ test "map bytes, truncations, duplicates and allocation cleanup" {
     var out: M.Owned = .{};
     try M.Owned.deserializeInto(&out, &r, t.allocator);
     defer out.deinit(t.allocator);
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(t.allocator);
-    var w = cdr.CdrWriter(.xcdr2).init(&buf, t.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var w = cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try w.writeEncapHeader();
     try M.Owned.serialize(&w, out);
-    try t.expectEqualSlices(u8, &owned, buf.items);
+    try t.expectEqualSlices(u8, &owned, w.bytes());
     for (4..owned.len) |cut| {
         var rr = try cdr.CdrReader.init(owned[0..cut]);
         var value: M.Owned = .{};
@@ -59,12 +58,11 @@ fn decodeNested(alloc: std.mem.Allocator, bytes: []const u8) !void {
     var copy = try out.clone(alloc);
     defer copy.deinit(alloc);
     try t.expect(out.values.getPtr(9).?.keys()[0].ptr != copy.values.getPtr(9).?.keys()[0].ptr);
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(alloc);
-    var w = cdr.CdrWriter(.xcdr2).init(&buf, alloc);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var w = cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try w.writeEncapHeader();
     try M.Nested.serialize(&w, out);
-    try t.expectEqualSlices(u8, bytes, buf.items);
+    try t.expectEqualSlices(u8, bytes, w.bytes());
 }
 test "nested map ownership and cloning" {
     try decodeNested(t.allocator, &nested);
@@ -85,12 +83,11 @@ test "primitive map no delimiter and big endian owning map" {
     try M.Numeric.deserializeInto(&out, &r, t.allocator);
     defer out.deinit(t.allocator);
     try t.expectEqual(@as(i32, 42), out.values.get(1).?);
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(t.allocator);
-    var w = cdr.CdrWriter(.xcdr2).init(&buf, t.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var w = cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try w.writeEncapHeader();
     try M.Numeric.serialize(&w, out);
-    try t.expectEqualSlices(u8, &numeric, buf.items);
+    try t.expectEqualSlices(u8, &numeric, w.bytes());
     var be = owned;
     be[1] = 6;
     for ([_]usize{ 4, 8, 12, 20, 28 }) |offset| {
@@ -115,11 +112,10 @@ test "aggregate map values initialize untouched owning fields before failure" {
     try holder.a.put(t.allocator, 1, try t.allocator.dupe(u8, "a"));
     try holder.b.put(t.allocator, 2, try t.allocator.dupe(u8, "b"));
     try value.values.put(t.allocator, 7, holder);
-    var bytes: std.ArrayList(u8) = .empty;
-    defer bytes.deinit(t.allocator);
-    var writer = cdr.CdrWriter(.xcdr2).init(&bytes, t.allocator);
+    var bytes_fixed: [1 << 16]u8 = undefined;
+    var writer = cdr.RuntimeWriter.initFixed(&bytes_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
     try M.Holders.serialize(&writer, value);
-    try decodeHolders(t.allocator, bytes.items);
-    try t.checkAllAllocationFailures(t.allocator, decodeHolders, .{bytes.items});
+    try decodeHolders(t.allocator, writer.bytes());
+    try t.checkAllAllocationFailures(t.allocator, decodeHolders, .{writer.bytes()});
 }

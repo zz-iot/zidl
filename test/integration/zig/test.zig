@@ -10,10 +10,8 @@ const stub = @import("stub_impl");
 // ── CDR round-trip: Sample (@final, with @key) ────────────────────────────────
 
 test "roundtrip: Sample @final fields" {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(testing.allocator);
-
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
 
     const src = types.Sample{
@@ -38,7 +36,7 @@ test "roundtrip: Sample @final fields" {
 
     try types.Sample.serialize(&writer, src);
 
-    var reader = try zidl_cdr.CdrReader.init(buf.items);
+    var reader = try zidl_cdr.CdrReader.init(writer.bytes());
     var dst: types.Sample = .{};
     try types.Sample.deserializeInto(&dst, &reader, testing.allocator);
     defer testing.allocator.free(dst.str);
@@ -63,17 +61,15 @@ test "roundtrip: Sample @final fields" {
 }
 
 test "roundtrip: Sample key serialization" {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(testing.allocator);
-
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
 
     const src = types.Sample{ .id = 99 };
     try types.Sample.serializeKey(&writer, src);
 
     // 4 encap + 4 bytes for the u32 key field
-    try testing.expectEqual(@as(usize, 8), buf.items.len);
+    try testing.expectEqual(@as(usize, 8), writer.bytes().len);
     try testing.expect(types.Sample.has_key);
     try testing.expect(!types.Frame.has_key);
 }
@@ -88,9 +84,6 @@ test "roundtrip: Sample key serialization" {
 // contract is "the wire bytes are a key-only payload", not "the leading
 // bytes of a full one".
 test "roundtrip: Sample deserializeKeyInto from full sample (key field is leading)" {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(testing.allocator);
-
     const nums_items = try testing.allocator.dupe(i32, &.{ 11, 22, 33 });
     defer testing.allocator.free(nums_items);
 
@@ -103,11 +96,12 @@ test "roundtrip: Sample deserializeKeyInto from full sample (key field is leadin
         .nested = .{ .x = 10, .y = 20 },
     };
 
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
     try types.Sample.serialize(&writer, src);
 
-    var reader = try zidl_cdr.CdrReader.init(buf.items);
+    var reader = try zidl_cdr.CdrReader.init(writer.bytes());
     var key: types.Sample = .{};
     try types.Sample.deserializeKeyInto(&key, &reader, testing.allocator);
 
@@ -121,14 +115,12 @@ test "roundtrip: Sample deserializeKeyInto from full sample (key field is leadin
 }
 
 test "roundtrip: Sample deserializeKeyInto from key-only payload" {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(testing.allocator);
-
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
     try types.Sample.serializeKey(&writer, .{ .id = 0xDEADBEEF });
 
-    var reader = try zidl_cdr.CdrReader.init(buf.items);
+    var reader = try zidl_cdr.CdrReader.init(writer.bytes());
     var key: types.Sample = .{};
     try types.Sample.deserializeKeyInto(&key, &reader, testing.allocator);
 
@@ -149,20 +141,18 @@ test "roundtrip: Sample computeKeyHash pads short PLAIN_CDR2 BE key" {
 }
 
 test "roundtrip: Sample with sequence" {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(testing.allocator);
-
     const nums_items = try testing.allocator.dupe(i32, &.{ 1, 2, 3, 4, 5 });
     defer testing.allocator.free(nums_items);
 
     var src = types.Sample{};
     src.nums = .{ ._length = 5, ._maximum = 5, ._buffer = nums_items.ptr, ._release = false };
 
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
     try types.Sample.serialize(&writer, src);
 
-    var reader = try zidl_cdr.CdrReader.init(buf.items);
+    var reader = try zidl_cdr.CdrReader.init(writer.bytes());
     var dst = types.Sample{};
     try types.Sample.deserializeInto(&dst, &reader, testing.allocator);
     defer {
@@ -180,20 +170,18 @@ test "roundtrip: Sample with sequence" {
 // ── deinit idempotency / self-cleaning deserializeInto ────────────────────────
 
 test "idempotency: Sample.deinit can be called twice safely" {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(testing.allocator);
-
     const nums_items = try testing.allocator.dupe(i32, &.{ 1, 2, 3 });
     defer testing.allocator.free(nums_items);
 
     var src = types.Sample{ .str = "hello" };
     src.nums = .{ ._length = 3, ._maximum = 3, ._buffer = nums_items.ptr, ._release = false };
 
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
     try types.Sample.serialize(&writer, src);
 
-    var reader = try zidl_cdr.CdrReader.init(buf.items);
+    var reader = try zidl_cdr.CdrReader.init(writer.bytes());
     var dst = types.Sample{};
     try types.Sample.deserializeInto(&dst, &reader, testing.allocator);
 
@@ -205,22 +193,20 @@ test "idempotency: Sample.deinit can be called twice safely" {
 }
 
 test "deserializeInto self-cleans on a mid-decode error, no caller cleanup needed" {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(testing.allocator);
-
     const nums_items = try testing.allocator.dupe(i32, &.{ 1, 2, 3 });
     defer testing.allocator.free(nums_items);
 
     var src = types.Sample{ .str = "hello world" };
     src.nums = .{ ._length = 3, ._maximum = 3, ._buffer = nums_items.ptr, ._release = false };
 
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
     try types.Sample.serialize(&writer, src);
 
     // Truncate the tail (`nested.y`, the last field written) so `str` and
     // `nums` are already heap-allocated by the time the read fails.
-    var reader = try zidl_cdr.CdrReader.init(buf.items[0 .. buf.items.len - 4]);
+    var reader = try zidl_cdr.CdrReader.init(writer.bytes()[0 .. writer.bytes().len - 4]);
     var dst = types.Sample{};
     try testing.expectError(
         error.EndOfStream,
@@ -238,16 +224,14 @@ test "deserializeInto self-cleans on a mid-decode error, no caller cleanup neede
 // ── CDR round-trip: Frame (@appendable, DHEADER) ──────────────────────────────
 
 test "roundtrip: Frame @appendable DHEADER" {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(testing.allocator);
-
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
 
     const src = types.Frame{ .seq_num = 7, .topic = "/sensors/imu" };
     try types.Frame.serialize(&writer, src);
 
-    var reader = try zidl_cdr.CdrReader.init(buf.items);
+    var reader = try zidl_cdr.CdrReader.init(writer.bytes());
     var dst: types.Frame = .{};
     try types.Frame.deserializeInto(&dst, &reader, testing.allocator);
     defer testing.allocator.free(dst.topic);
@@ -271,10 +255,8 @@ test "roundtrip: Frame @appendable DHEADER" {
 //   computeKeyHash → id-BE(00 00 00 07) padded to 16
 
 test "wire-bytes: Sample serialize_key / deserialize_key" {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(testing.allocator);
-
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
     try types.Sample.serializeKey(&writer, .{ .id = 0x01020304 });
 
@@ -282,9 +264,9 @@ test "wire-bytes: Sample serialize_key / deserialize_key" {
         0x00, 0x07, 0x00, 0x00, // encap: XCDR2 LE
         0x04, 0x03, 0x02, 0x01, // id = 0x01020304, u32 LE
     };
-    try testing.expectEqualSlices(u8, &expected, buf.items);
+    try testing.expectEqualSlices(u8, &expected, writer.bytes());
 
-    var reader = try zidl_cdr.CdrReader.init(buf.items);
+    var reader = try zidl_cdr.CdrReader.init(writer.bytes());
     var key: types.Sample = .{};
     try types.Sample.deserializeKeyInto(&key, &reader, testing.allocator);
     try testing.expectEqual(@as(u32, 0x01020304), key.id);
@@ -292,10 +274,8 @@ test "wire-bytes: Sample serialize_key / deserialize_key" {
 }
 
 test "wire-bytes: Beacon serialize_key / deserialize_key / computeKeyHash" {
-    var buf = std.ArrayListUnmanaged(u8).empty;
-    defer buf.deinit(testing.allocator);
-
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
     try types.Beacon.serializeKey(&writer, .{ .id = 7 });
 
@@ -304,9 +284,9 @@ test "wire-bytes: Beacon serialize_key / deserialize_key / computeKeyHash" {
         0x04, 0x00, 0x00, 0x00, // DHEADER = 4 (one u32 key field follows)
         0x07, 0x00, 0x00, 0x00, // id = 7, u32 LE
     };
-    try testing.expectEqualSlices(u8, &expected, buf.items);
+    try testing.expectEqualSlices(u8, &expected, writer.bytes());
 
-    var reader = try zidl_cdr.CdrReader.init(buf.items);
+    var reader = try zidl_cdr.CdrReader.init(writer.bytes());
     var key: types.Beacon = .{};
     try types.Beacon.deserializeKeyInto(&key, &reader, testing.allocator);
     try testing.expectEqual(@as(u32, 7), key.id);

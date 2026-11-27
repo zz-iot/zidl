@@ -18,12 +18,11 @@ const zidl_cdr = @import("zidl_cdr");
 const fixture = @import("fixture");
 
 fn truncatedEncoding(comptime T: type, value: T, chop: usize) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(testing.allocator);
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
     try T.serialize(&writer, value);
-    const full = try buf.toOwnedSlice(testing.allocator);
+    const full = try testing.allocator.dupe(u8, writer.bytes());
     errdefer testing.allocator.free(full);
     try testing.expect(full.len > chop);
     const truncated = try testing.allocator.dupe(u8, full[0 .. full.len - chop]);
@@ -72,9 +71,8 @@ test "MutableStrUnion: a payload published earlier in the EMHEADER loop survives
     // through whatever case the stale discriminant happened to select). The
     // fix commits `out._d` atomically with `out._u`, inside the same case
     // arm, so it never lags behind a real publish.
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
     try fixture.MutableStrUnion.serialize(&writer, .{ ._d = 1, ._u = .{ .s = "hello world" } });
 
@@ -85,12 +83,12 @@ test "MutableStrUnion: a payload published earlier in the EMHEADER loop survives
     // the input. This forces a THIRD loop iteration to fail *after* the real discriminant
     // and case-value EMHEADERs (iterations 1-2) already ran and published to
     // out._d/out._u.
-    var declared: u32 = std.mem.readInt(u32, buf.items[4..8], .little);
+    var declared: u32 = std.mem.readInt(u32, writer.bytes()[4..8], .little);
     declared += 4;
-    std.mem.writeInt(u32, buf.items[4..8], declared, .little);
-    try buf.appendSlice(testing.allocator, &[_]u8{ 0xFF, 0xFF, 0xFF, 0xFF });
+    std.mem.writeInt(u32, writer.bytes()[4..8], declared, .little);
+    try writer.writeBytes(&[_]u8{ 0xFF, 0xFF, 0xFF, 0xFF });
 
-    var reader = try zidl_cdr.CdrReader.init(buf.items);
+    var reader = try zidl_cdr.CdrReader.init(writer.bytes());
     var out: fixture.MutableStrUnion = .{};
     try testing.expectError(
         error.EndOfStream,
@@ -114,13 +112,12 @@ test "MutableStrUnion: a payload published earlier in the EMHEADER loop survives
 }
 
 test "FinalStrUnion: successful decode of the string case still round-trips and deinits cleanly" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
     try fixture.FinalStrUnion.serialize(&writer, .{ ._d = 99, ._u = .{ .s = "hello world" } });
 
-    var reader = try zidl_cdr.CdrReader.init(buf.items);
+    var reader = try zidl_cdr.CdrReader.init(writer.bytes());
     var out: fixture.FinalStrUnion = .{};
     try fixture.FinalStrUnion.deserializeInto(&out, &reader, testing.allocator);
     defer out.deinit(testing.allocator);
@@ -172,13 +169,12 @@ test "MutableOwningDefaultUnion: a failure before the DHEADER is ever read leave
 }
 
 test "OwningDefaultUnion: successful decode of the default owning case still round-trips and deinits cleanly" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
     try fixture.OwningDefaultUnion.serialize(&writer, .{ ._d = 0, ._u = .{ .s = "hello world" } });
 
-    var reader = try zidl_cdr.CdrReader.init(buf.items);
+    var reader = try zidl_cdr.CdrReader.init(writer.bytes());
     var out: fixture.OwningDefaultUnion = .{};
     try fixture.OwningDefaultUnion.deserializeInto(&out, &reader, testing.allocator);
     defer out.deinit(testing.allocator);
@@ -209,12 +205,11 @@ fn checkStringDefault(comptime T: type, member_id: u32) !void {
     var be = string_default_be;
     std.mem.writeInt(u32, le[16..20], 0x40000000 | member_id, .little);
     std.mem.writeInt(u32, be[16..20], 0x40000000 | member_id, .big);
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+    var buf_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
     try writer.writeEncapHeaderMutable();
     try T.serialize(&writer, .{ ._d = 99, ._u = .{ .s = "A" } });
-    try testing.expectEqualSlices(u8, &le, buf.items);
+    try testing.expectEqualSlices(u8, &le, writer.bytes());
     for ([_][]const u8{ &le, &be }) |bytes| {
         var reader = try zidl_cdr.CdrReader.init(bytes);
         var out: T = .{};
@@ -265,12 +260,11 @@ test "mutable fixed default declared first uses its own member ID" {
             .{ ._d = 7, ._u = .{ .known = 42 } }
         else
             .{ ._d = 99, ._u = .{ .fallback = 42 } };
-        var buf: std.ArrayList(u8) = .empty;
-        defer buf.deinit(testing.allocator);
-        var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+        var buf_fixed: [1 << 16]u8 = undefined;
+        var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
         try writer.writeEncapHeaderMutable();
         try fixture.DefaultFirst.serialize(&writer, value);
-        try testing.expectEqualSlices(u8, &expected, buf.items);
+        try testing.expectEqualSlices(u8, &expected, writer.bytes());
         var reader = try zidl_cdr.CdrReader.init(&expected);
         var out: fixture.DefaultFirst = .{};
         try fixture.DefaultFirst.deserializeInto(&out, &reader, testing.allocator);
@@ -402,9 +396,8 @@ test "fresh unions initialize the default-selected owning payload recursively" {
         copy.deinit(testing.allocator);
         value.deinit(testing.allocator);
         value.deinit(testing.allocator);
-        var buf: std.ArrayList(u8) = .empty;
-        defer buf.deinit(testing.allocator);
-        var writer = zidl_cdr.CdrWriter(.xcdr2).init(&buf, testing.allocator);
+        var buf_fixed: [1 << 16]u8 = undefined;
+        var writer = zidl_cdr.RuntimeWriter.initFixed(&buf_fixed, .xcdr2, .little);
         try writer.writeEncapHeader();
         try T.serialize(&writer, value);
     }
@@ -425,13 +418,12 @@ test "omitted locally selected mutable payload takes a safe default" {
 }
 
 test "optional nested owning union failure cleanup starts from initialized payloads" {
-    var bytes: std.ArrayList(u8) = .empty;
-    defer bytes.deinit(testing.allocator);
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&bytes, testing.allocator);
+    var bytes_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&bytes_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
     try fixture.OptionalOwner.serialize(&writer, .{ .value = .{} });
-    for (4..bytes.items.len) |cut| {
-        var reader = try zidl_cdr.CdrReader.init(bytes.items[0..cut]);
+    for (4..writer.bytes().len) |cut| {
+        var reader = try zidl_cdr.CdrReader.init(writer.bytes()[0..cut]);
         var value: fixture.OptionalOwner = .{};
         try testing.expectError(error.EndOfStream, fixture.OptionalOwner.deserializeInto(&value, &reader, testing.allocator));
         value.deinit(testing.allocator);
@@ -445,12 +437,11 @@ test "exhaustive boolean union has a valid fresh payload" {
 }
 
 test "exhaustive boolean union aliases round-trip ordinary codecs" {
-    var bytes: std.ArrayList(u8) = .empty;
-    defer bytes.deinit(testing.allocator);
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&bytes, testing.allocator);
+    var bytes_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&bytes_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
     try fixture.ExhaustiveBool.serialize(&writer, .{ ._d = true, ._u = .{ .yes = 17 } });
-    var reader = try zidl_cdr.CdrReader.init(bytes.items);
+    var reader = try zidl_cdr.CdrReader.init(writer.bytes());
     var result: fixture.ExhaustiveBool = .{};
     try fixture.ExhaustiveBool.deserializeInto(&result, &reader, testing.allocator);
     try testing.expect(result._d);
@@ -459,12 +450,11 @@ test "exhaustive boolean union aliases round-trip ordinary codecs" {
 
 test "grouped exhaustive boolean labels admit both discriminator values" {
     inline for (.{ false, true }) |disc| {
-        var bytes: std.ArrayList(u8) = .empty;
-        defer bytes.deinit(testing.allocator);
-        var writer = zidl_cdr.CdrWriter(.xcdr2).init(&bytes, testing.allocator);
+        var bytes_fixed: [1 << 16]u8 = undefined;
+        var writer = zidl_cdr.RuntimeWriter.initFixed(&bytes_fixed, .xcdr2, .little);
         try writer.writeEncapHeader();
         try fixture.GroupedBool.serialize(&writer, .{ ._d = disc, ._u = .{ .value = 17 } });
-        var reader = try zidl_cdr.CdrReader.init(bytes.items);
+        var reader = try zidl_cdr.CdrReader.init(writer.bytes());
         var result: fixture.GroupedBool = .{};
         try fixture.GroupedBool.deserializeInto(&result, &reader, testing.allocator);
         try testing.expectEqual(disc, result._d);
@@ -473,12 +463,11 @@ test "grouped exhaustive boolean labels admit both discriminator values" {
 }
 
 test "grouped owning boolean payloads support clone and cleanup" {
-    var bytes: std.ArrayList(u8) = .empty;
-    defer bytes.deinit(testing.allocator);
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&bytes, testing.allocator);
+    var bytes_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&bytes_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
     try fixture.GroupedBoolOwned.serialize(&writer, .{ ._d = true, ._u = .{ .text = "owned" } });
-    var reader = try zidl_cdr.CdrReader.init(bytes.items);
+    var reader = try zidl_cdr.CdrReader.init(writer.bytes());
     var result: fixture.GroupedBoolOwned = .{};
     try fixture.GroupedBoolOwned.deserializeInto(&result, &reader, testing.allocator);
     defer result.deinit(testing.allocator);
@@ -613,20 +602,18 @@ test "validated literal defaults release rejected decoded strings and retain fre
     optional.deinit(testing.allocator);
     var collision: fixture.LiteralCollision = .{};
     collision.deinit(testing.allocator);
-    var bytes: std.ArrayList(u8) = .empty;
-    defer bytes.deinit(testing.allocator);
-    var writer = zidl_cdr.CdrWriter(.xcdr2).init(&bytes, testing.allocator);
+    var bytes_fixed: [1 << 16]u8 = undefined;
+    var writer = zidl_cdr.RuntimeWriter.initFixed(&bytes_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
     try fixture.LiteralDefault.serialize(&writer, .{});
     try writer.writeU8(1);
-    try literalRejected(testing.allocator, bytes.items);
-    try testing.checkAllAllocationFailures(testing.allocator, literalRejected, .{bytes.items});
-    bytes.clearRetainingCapacity();
-    writer = zidl_cdr.CdrWriter(.xcdr2).init(&bytes, testing.allocator);
+    try literalRejected(testing.allocator, writer.bytes());
+    try testing.checkAllAllocationFailures(testing.allocator, literalRejected, .{writer.bytes()});
+    writer = zidl_cdr.RuntimeWriter.initFixed(&bytes_fixed, .xcdr2, .little);
     try writer.writeEncapHeader();
     try writer.writeString("decoded");
-    try literalPartial(testing.allocator, bytes.items);
-    try testing.checkAllAllocationFailures(testing.allocator, literalPartial, .{bytes.items});
+    try literalPartial(testing.allocator, writer.bytes());
+    try testing.checkAllAllocationFailures(testing.allocator, literalPartial, .{writer.bytes()});
 }
 
 fn literalClone(alloc: std.mem.Allocator) !void {

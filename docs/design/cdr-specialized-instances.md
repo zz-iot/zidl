@@ -1,9 +1,10 @@
 # Specialized CDR writer and reader instances
 
-Date: 2026-11-26. Status: agreed design. Steps 1 (the zidl-cdr core) and 2a (the Zig
-generator) are implemented: `Writer`, `RuntimeWriter`, `Reader` (with `CdrReader` as its
-run-time instance), `WriterFor`/`ReaderFor`, `readSample`, `serializeAlloc` and
-`zig build bench-cdr`. The generators and consumers have not moved yet.
+Date: 2026-11-26. Status: agreed design. Steps 1 (the zidl-cdr core) and 2 (the Zig
+generator, and the old Zig writers removed) are implemented: `Writer`,
+`RuntimeWriter`, `Reader` (with `CdrReader` as its run-time instance),
+`WriterFor`/`ReaderFor`, `readSample`, `serializeAlloc` and `zig build
+bench-cdr`. The C ABI, the C/C++ generators and zzdds have not moved yet.
 
 This note follows the [shared native CDR core](shared-native-cdr.md). That
 consolidation gave Zig and C one set of primitive encoders. It did not give them
@@ -110,7 +111,8 @@ a buffer and keeps its bounds checks.
 The checked-in benchmark (`bench/cdr/`), same message, one binary, 2026-11-26.
 Rows within one binary compare; the run-time rows in particular depend on how
 much the compiler inlines in that binary (the reader's run-time instance runs
-380 ns in a smaller one).
+380 ns in a smaller one). The `CdrWriter` and `PrimitiveWriter` rows were
+measured before those writers were removed; the benchmark no longer has them.
 
 | Variant | ns per message |
 | --- | --- |
@@ -152,9 +154,10 @@ parameter plumbing is new.
 `ReaderConfig` has `version` and `order` and works the same way. All instances
 keep their bounds checks, because input is untrusted.
 
-`CdrWriter`, `PrimitiveWriter` and the growable C writer are removed, not
-deprecated. `PlCdrWriter` becomes a thin wrapper over a PL_CDR-LE instance
-(XCDR1 alignment), keeping its parameter framing.
+`CdrWriter`, `PlCdrWriter`, `PrimitiveWriter` and the growable C writer are
+removed, not deprecated. PL_CDR is an XCDR1 instance with the parameter methods
+(`writePlEncapHeader`, `reservePlParam`, `patchPlParam`, `writePlSentinel`,
+`writeRawParam`).
 
 ### Output modes: counting and fixed only
 
@@ -316,9 +319,10 @@ consumers move, then the old writers go.
    count, then write (`serializeAlloc`); generated deserializers take `reader:
    anytype` and use `isXcdr2()`, and the typed DataReader enters them through
    `readSample`. A reader window's variable is typed (`?@TypeOf(reader.*).Window`),
-   since a fast reader makes `isXcdr2()` compile-time known. Then (2b) `CdrWriter`,
-   `PlCdrWriter` and `PrimitiveWriter` are removed and zidl's own tests move to the
-   new writer.
+   since a fast reader makes `isXcdr2()` compile-time known. Then (2b, done)
+   `CdrWriter`, `PlCdrWriter` and `PrimitiveWriter` are removed and zidl's own
+   tests use fixed and counting writers; their byte-parity checks keep the removed
+   writers' output as known answers.
 3. **C ABI and C/C++ generators.** `ZidlCdrWriter` drops growable output; the
    library exports per-fast-instance entry points; C/C++ code is generated per
    instance, counts then writes, and hashes keys with the streaming key hash.
