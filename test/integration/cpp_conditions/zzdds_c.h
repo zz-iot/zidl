@@ -1,6 +1,7 @@
 #pragma once
 // Synthetic middleware contract for compiling the complete generated topic
-// wrapper. Only reader operations are exercised; unrelated calls fail loudly.
+// wrapper. Reader operations and write loans are exercised; unrelated calls
+// fail loudly.
 #include "dcps.h"
 #include <cstdlib>
 #include <cstddef>
@@ -39,12 +40,53 @@ extern "C" DDS_ReturnCode_t DDS_DataReader_return_loan_raw_failed(
 // implement writer/type-registration behavior in this reader-only fixture.
 #define UNUSED_SUPPORT(name) template<class... Args> inline int name(Args...) { std::abort(); }
 UNUSED_SUPPORT(DDS_DataWriter_write_raw)
-UNUSED_SUPPORT(DDS_DataWriter_loan_raw)
-UNUSED_SUPPORT(DDS_DataWriter_return_loan_raw)
-UNUSED_SUPPORT(DDS_DataWriter_publish_loan_raw)
 UNUSED_SUPPORT(zzdds_lookup_instance_writer)
 UNUSED_SUPPORT(zzdds_lookup_instance_reader)
 #undef UNUSED_SUPPORT
+
+// Write loans, as zzdds gives them: 8-byte aligned, and ended by publishing
+// (which keeps the published bytes and key hash here) or returning.
+struct StubWriteLoans {
+    int outstanding = 0;
+    int published = 0;
+    int returned = 0;
+    DDS_ReturnCode_t publish_result = DDS_RETCODE_OK;
+    std::vector<uint8_t> bytes;
+    uint8_t hash[16] = {};
+    DDS_WriteKind kind = DDS_WriteKind_DISPOSE_WRITE_KIND;
+};
+inline StubWriteLoans &stub_write_loans() {
+    static StubWriteLoans loans;
+    return loans;
+}
+inline DDS_ReturnCode_t DDS_DataWriter_loan_raw(DDS_DataWriter, uint32_t size, DDS_OctetSeq *out) {
+    uint64_t *words = new uint64_t[size / 8 + 1];
+    out->_buffer = reinterpret_cast<uint8_t *>(words);
+    out->_length = size;
+    out->_maximum = size;
+    out->_release = false;
+    stub_write_loans().outstanding++;
+    return DDS_RETCODE_OK;
+}
+inline void stub_end_write_loan(DDS_OctetSeq *loan) {
+    delete[] reinterpret_cast<uint64_t *>(loan->_buffer);
+    loan->_buffer = nullptr;
+    stub_write_loans().outstanding--;
+}
+inline DDS_ReturnCode_t DDS_DataWriter_return_loan_raw(DDS_DataWriter, DDS_OctetSeq *loan) {
+    stub_end_write_loan(loan);
+    stub_write_loans().returned++;
+    return DDS_RETCODE_OK;
+}
+inline DDS_ReturnCode_t DDS_DataWriter_publish_loan_raw(DDS_DataWriter, DDS_OctetSeq *loan, DDS_OctetSeq *hash, DDS_InstanceHandle_t, DDS_WriteKind kind) {
+    StubWriteLoans &loans = stub_write_loans();
+    loans.bytes.assign(loan->_buffer, loan->_buffer + loan->_length);
+    std::memcpy(loans.hash, hash->_buffer, 16);
+    loans.kind = kind;
+    stub_end_write_loan(loan);
+    loans.published++;
+    return loans.publish_result;
+}
 
 // get_key_value support: the key "zzdds" keeps is the one register_instance
 // passed, or one the test sets; the registered key projection is kept for

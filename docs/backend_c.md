@@ -195,6 +195,60 @@ returned. A sample without valid data leaves the view zeroed; its key comes
 from `get_key_value`. Views are not generated under `--c-no-free`, because a
 view's owned members rely on the generated `_free` functions.
 
+### Builder types
+
+`--generate-views` also generates a **builder type** per struct, the write
+side of a view: a sample whose large members are filled in place in the
+writer's buffer rather than copied out of a struct (zzdds'
+`docs/design/loaned-builders.md`).
+
+```c
+typedef struct FooBuilder_s { ... } FooBuilder;
+/* Serializes the builder, reserving its primitive members. */
+int Foo_serialize_builder(ZidlCdrWriter *w, FooBuilder *b);
+/* Commits every present reservation. */
+int Foo_commit_builder(ZidlCdrWriter *w, FooBuilder *b);
+```
+
+A builder mirrors the view, member by member, except that key members are
+always as declared, so a key hash can be computed from the builder alone
+(`FooBuilder_serialize_key_holder`, for keyed structs):
+
+| Member, as in the view | In the builder |
+|---|---|
+| Primitive sequence or array | A `ZidlCdrReservation`. Set a sequence's `count` (checked against its bound); an array reserves its declared length |
+| String | `const char *`, borrowed and copied in; `NULL` is the empty string, and a bounded string's bound is checked |
+| Struct | Its builder type |
+| Anything else | As in the struct |
+| Any `@key` member | As in the struct |
+
+Serializing a builder records where each reservation's elements are in the
+writer (`zidl_cdr_reservation_data`) and leaves them to fill: count it first,
+then serialize into a fixed buffer of that size, fill every element in host
+byte order, and commit, which puts them in the writer's byte order. Elements
+are not zeroed. An absent `@optional` member reserves nothing, and its
+reservation is zeroed.
+
+With `--generate-zzdds-wrappers`, a typed writer also gets
+`FooDataWriter_loan_builder`, `_publish_builder` and `_cancel_builder` over a
+`FooWriteLoan`. `loan_builder` hashes the key, counts the builder, takes a
+write loan of exactly that size and serializes into it; a bound exceeded
+before the loan is `DDS_RETCODE_BAD_PARAMETER`, and any failure after it
+returns the loan. Fill each reservation at `FooWriteLoan_data(&loan,
+&builder.member)`, then `publish_builder` commits and publishes the sample
+(`ALIVE`), ending the loan whatever it returns; `cancel_builder` ends it
+unpublished.
+
+```c
+FooBuilder b = { .id = 7, .points = { .count = n } };
+FooWriteLoan loan;
+if (FooDataWriter_loan_builder(&writer, &b, &loan) == DDS_RETCODE_OK) {
+    float *pts = FooWriteLoan_data(&loan, &b.points);
+    fill_points(pts, n);   /* elements up to 4 bytes are aligned in a loan */
+    rc = FooDataWriter_publish_builder(&writer, &b, &loan);
+}
+```
+
 ---
 
 ## `zidl-cdr` Dependency
@@ -238,7 +292,7 @@ provide the wire functions.
 | `--c-extern-c` | Wrap header in `extern "C" {}` |
 | `--c-export-macro <macro>` | DLL export macro prepended to CDR function declarations |
 | `--no-typesupport` | Suppress CDR serialize/deserialize output |
-| `--generate-views` | Also emit zero-copy view types (see View types) |
+| `--generate-views` | Also emit zero-copy view and builder types (see View types) |
 
 ---
 

@@ -18,6 +18,39 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- Zig builder types (`--generate-views`): `Foo.Builder` mirrors `Foo.View` for writing,
+  as in C and C++. Primitive sequences and arrays are
+  `zidl_cdr.cdr_primitives.ReservedPrimitives` (new: a sequence's `count` is set, and
+  serializing into a fixed writer binds `bytes`, filled through `asNative(T)` or
+  `copyFrom`), strings `[]const u8`, nested structs builders; key members stay as
+  declared. `Builder.serialize` takes any writer, `commit` commits every present
+  reservation and `computeKeyHash` hashes the builder's key. With
+  `--generate-zzdds-wrappers`, the typed DataWriter's `loan_builder` counts the builder,
+  loans exactly that (`loanRaw`) and serializes into it, returning a `BuilderLoan`
+  whose `publish` commits and publishes (`ALIVE`) and whose `deinit` returns an
+  unpublished loan.
+
+- C++ builder types (`--generate-views`): `FooBuilder` mirrors `FooView` for writing,
+  as in C. Primitive sequences and arrays are `zidl::PrimitivesReservation<T>` (new in
+  `zidl_cdr_view.hpp`: `resize` sets a sequence's count, and once serialized
+  `as_native()`, `copy_from` and `data()` fill it in place), strings `std::string_view`,
+  nested structs builders and optionals `std::optional`; key members stay as declared.
+  With `--generate-zzdds-wrappers`, `FooDataWriter::loan_builder` serializes the builder
+  into a write loan held by a move-only `BuilderLoan`, filled through `builder()`, then
+  `publish_builder` commits and publishes (`ALIVE`); `cancel_builder`, `reset()` or
+  destruction returns the loan.
+
+- C builder types (`--generate-views`): `FooBuilder` mirrors `FooView` for writing.
+  Primitive sequences and arrays are `ZidlCdrReservation`s (a sequence's `count` is
+  set and checked against its bound), strings are borrowed and copied in, nested
+  structs are builders, and key members stay as declared, so the key hash comes from
+  the builder (`FooBuilder_serialize_key_holder`). `Foo_serialize_builder` reserves
+  in place of writing and `Foo_commit_builder` commits every present reservation. With
+  `--generate-zzdds-wrappers`, `FooDataWriter_loan_builder` counts the builder, loans
+  exactly that and serializes into the loan, the application fills each reservation at
+  `FooWriteLoan_data`, and `publish_builder` commits and publishes (`ALIVE`), or
+  `cancel_builder` returns the loan (zzdds `docs/design/loaned-builders.md`).
+
 - C ABI: writes store their bytes in Zig rather than calling back into C, and a
   counting writer only does the alignment arithmetic. Count-then-fixed through the C
   ABI takes about half as long (bench message: about 2,100 ns, from 4,300).

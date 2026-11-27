@@ -1157,6 +1157,30 @@ pub fn build(b: *std.Build) void {
     }
 
     {
+        const builders_step = b.step("test-c-builders", "Check generated C builder types write the struct's bytes across encodings");
+        test_step.dependOn(builders_step);
+        const gen_views = gens.run();
+        gen_views.addArgs(&.{ "-b", "c", "--generate-views", "-o" });
+        const views = gen_views.addOutputDirectoryArg("c-builders-views");
+        gen_views.addFileArg(b.path("test/integration/c_views/views.idl"));
+        const gen = gens.run();
+        gen.addArgs(&.{ "-b", "c", "--generate-views", "-o" });
+        const generated = gen.addOutputDirectoryArg("c-builders");
+        gen.addFileArg(b.path("test/integration/c_builders/builders.idl"));
+        const consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true });
+        const flags = &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" };
+        consumer.addCSourceFile(.{ .file = b.path("test/integration/c_builders/test.c"), .flags = flags });
+        consumer.addCSourceFile(.{ .file = views.path(b, "views_cdr.c"), .flags = flags });
+        consumer.addCSourceFile(.{ .file = generated.path(b, "builders_cdr.c"), .flags = flags });
+        consumer.addIncludePath(views);
+        consumer.addIncludePath(generated);
+        consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
+        linkCdr(consumer, cdr_library);
+        const app = b.addExecutable(.{ .name = "c-builders", .root_module = consumer });
+        builders_step.dependOn(&b.addRunArtifact(app).step);
+    }
+
+    {
         const views_step = b.step("test-cpp-views", "Check generated C++ view types decode in place across encodings");
         test_step.dependOn(views_step);
         const gen = gens.run();
@@ -1187,6 +1211,30 @@ pub fn build(b: *std.Build) void {
     }
 
     {
+        const builders_step = b.step("test-cpp-builders", "Check generated C++ builder types write the struct's bytes across encodings");
+        test_step.dependOn(builders_step);
+        const gen_views = gens.run();
+        gen_views.addArgs(&.{ "-b", "cpp", "--generate-views", "-o" });
+        const views = gen_views.addOutputDirectoryArg("cpp-builders-views");
+        gen_views.addFileArg(b.path("test/integration/c_views/views.idl"));
+        const gen = gens.run();
+        gen.addArgs(&.{ "-b", "cpp", "--generate-views", "-o" });
+        const generated = gen.addOutputDirectoryArg("cpp-builders");
+        gen.addFileArg(b.path("test/integration/c_builders/builders.idl"));
+        const consumer = b.createModule(.{ .root_source_file = null, .target = target, .optimize = .Debug, .link_libc = true, .link_libcpp = true });
+        const flags = &.{ "-std=c++17", "-Wall", "-Wextra", "-Werror" };
+        consumer.addCSourceFile(.{ .file = b.path("test/integration/cpp_builders/test.cpp"), .flags = flags });
+        consumer.addCSourceFile(.{ .file = views.path(b, "views_cdr.cpp"), .flags = flags });
+        consumer.addCSourceFile(.{ .file = generated.path(b, "builders_cdr.cpp"), .flags = flags });
+        consumer.addIncludePath(views);
+        consumer.addIncludePath(generated);
+        consumer.addIncludePath(b.path("packages/zidl-cdr/include"));
+        linkCdr(consumer, cdr_library);
+        const app = b.addExecutable(.{ .name = "cpp-builders", .root_module = consumer });
+        builders_step.dependOn(&b.addRunArtifact(app).step);
+    }
+
+    {
         const step = b.step("test-zig-wide-strings", "Check generated Zig structs own, clone and free wide strings");
         test_step.dependOn(step);
         const gen = gens.run();
@@ -1209,6 +1257,24 @@ pub fn build(b: *std.Build) void {
         const middleware = b.createModule(.{ .root_source_file = b.path("test/integration/zig_wrapper_contract/fake_middleware.zig"), .target = target });
         const fixture = b.createModule(.{ .root_source_file = out.path(b, "views.zig"), .target = target, .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings }, .{ .name = "zzdds", .module = middleware } } });
         const tests = b.addTest(.{ .name = "zig-views", .root_module = b.createModule(.{ .root_source_file = b.path("test/integration/zig_views/test.zig"), .target = target, .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zzdds", .module = middleware }, .{ .name = "fixture", .module = fixture } } }) });
+        step.dependOn(&b.addRunArtifact(tests).step);
+    }
+
+    {
+        const step = b.step("test-zig-builders", "Check generated Zig builder types write the struct's bytes, and loan_builder ends its loan");
+        test_step.dependOn(step);
+        const middleware = b.createModule(.{ .root_source_file = b.path("test/integration/zig_wrapper_contract/fake_middleware.zig"), .target = target });
+        const gen_views = gens.run();
+        gen_views.addArgs(&.{ "-b", "zig", "--generate-views", "-o" });
+        const views_out = gen_views.addOutputDirectoryArg("zig-builders-views");
+        gen_views.addFileArg(b.path("test/integration/c_views/views.idl"));
+        const views = b.createModule(.{ .root_source_file = views_out.path(b, "views.zig"), .target = target, .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings } } });
+        const gen = gens.run();
+        gen.addArgs(&.{ "-b", "zig", "--generate-views", "--generate-zzdds-wrappers", "-o" });
+        const out = gen.addOutputDirectoryArg("zig-builders");
+        gen.addFileArg(b.path("test/integration/c_builders/builders.idl"));
+        const builders = b.createModule(.{ .root_source_file = out.path(b, "builders.zig"), .target = target, .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zidl_bindings", .module = runtimes.bindings }, .{ .name = "zzdds", .module = middleware } } });
+        const tests = b.addTest(.{ .name = "zig-builders", .root_module = b.createModule(.{ .root_source_file = b.path("test/integration/zig_builders/test.zig"), .target = target, .imports = &.{ .{ .name = "zidl_cdr", .module = runtimes.codec }, .{ .name = "zzdds", .module = middleware }, .{ .name = "views", .module = views }, .{ .name = "builders", .module = builders } } }) });
         step.dependOn(&b.addRunArtifact(tests).step);
     }
 

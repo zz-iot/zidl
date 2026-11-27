@@ -381,6 +381,9 @@ const Generator = struct {
                     defer self.alloc.free(c_name);
                     const em = self.opts.export_macro;
                     try self.print("{s}{s}int {s}_deserialize_view(ZidlCdrReader *_r, ::{s}View *_v);\n", .{ em, if (em.len > 0) " " else "", c_name, s.qualified_name });
+                    const cpp_qname = try std.fmt.allocPrint(self.alloc, "::{s}", .{s.qualified_name});
+                    defer self.alloc.free(cpp_qname);
+                    try self.emitBuilderProtos(s, c_name, cpp_qname);
                 },
                 else => {},
             },
@@ -445,6 +448,16 @@ const Generator = struct {
         return interface.prefixedCNameFromQualified(self.alloc, qname, self.opts.type_prefix);
     }
 
+    /// A builder's serializer, commit and (keyed structs) key holder.
+    fn emitBuilderProtos(self: *Generator, s: *const ir.Struct, c_name: []const u8, cpp_qname: []const u8) !void {
+        const em = self.opts.export_macro;
+        const sp: []const u8 = if (em.len > 0) " " else "";
+        try self.write("/* Serializes a builder, reserving its primitive members; then commits every\n   present reservation. */\n");
+        try self.print("{s}{s}int {s}_serialize_builder(ZidlCdrWriter *_w, {s}Builder *_v);\n", .{ em, sp, c_name, cpp_qname });
+        try self.print("{s}{s}int {s}_commit_builder(ZidlCdrWriter *_w, {s}Builder *_v);\n", .{ em, sp, c_name, cpp_qname });
+        if (structHasKeyCpp(s)) try self.print("{s}{s}int {s}Builder_serialize_key_holder(ZidlCdrWriter *_w, const {s}Builder *_v);\n", .{ em, sp, c_name, cpp_qname });
+    }
+
     fn emitStructCdrProtos(self: *Generator, s: *const ir.Struct) !void {
         const c_name = try self.prefixedCName(s.qualified_name);
         defer self.alloc.free(c_name);
@@ -465,6 +478,7 @@ const Generator = struct {
         if (viewsEnabledCpp(self.opts)) {
             try self.write("/* Decodes a view of the sample at _r, valid while _r's input is; on failure\n   *_v is reset. */\n");
             try self.print("{s}{s}int {s}_deserialize_view(ZidlCdrReader *_r, {s}View *_v);\n", .{ em, sp, c_name, cpp_qname });
+            try self.emitBuilderProtos(s, c_name, cpp_qname);
         }
         try self.write("/* Structural traversal only; success is not sample admission. */\n");
         try self.print("{s}{s}int {s}_skip(ZidlCdrReader *_r);\n", .{ em, sp, c_name });
@@ -567,6 +581,45 @@ const Generator = struct {
         try self.print("    int write_w_handle(const {s}& value, DDS_InstanceHandle_t handle);\n", .{cpp_qname});
         try self.print("    int dispose_w_handle(const {s}& key, DDS_InstanceHandle_t handle);\n", .{cpp_qname});
         try self.print("    int unregister_instance_w_handle(const {s}& key, DDS_InstanceHandle_t handle);\n", .{cpp_qname});
+        if (viewsEnabledCpp(self.opts)) {
+            // A builder and the write loan it is serialized into: the
+            // reservations point into the loan while it is active, which
+            // publish_builder or cancel_builder ends, and destruction or
+            // reset() cancels.
+            try self.write("    class BuilderLoan {\n");
+            try self.write("    public:\n");
+            try self.write("        BuilderLoan() = default;\n");
+            try self.write("        BuilderLoan(const BuilderLoan&) = delete;\n");
+            try self.write("        BuilderLoan& operator=(const BuilderLoan&) = delete;\n");
+            try self.print("        BuilderLoan(BuilderLoan&& other) noexcept(std::is_nothrow_move_constructible<{s}Builder>::value) : writer_(other.writer_), builder_(std::move(other.builder_)), payload_(other.payload_), w_(other.w_), hash_(other.hash_), active_(other.active_) {{ other.active_ = false; }}\n", .{cpp_qname});
+            try self.print("        BuilderLoan& operator=(BuilderLoan&& other) noexcept(std::is_nothrow_move_assignable<{s}Builder>::value) {{ if (this != &other) {{ reset(); writer_ = other.writer_; builder_ = std::move(other.builder_); payload_ = other.payload_; w_ = other.w_; hash_ = other.hash_; active_ = other.active_; other.active_ = false; }} return *this; }}\n", .{cpp_qname});
+            try self.write("        ~BuilderLoan() { reset(); }\n");
+            try self.write("        /* The builder: fill its reservations while active(). */\n");
+            try self.print("        {s}Builder& builder() {{ return builder_; }}\n", .{cpp_qname});
+            try self.print("        const {s}Builder& builder() const {{ return builder_; }}\n", .{cpp_qname});
+            try self.write("        bool active() const { return active_; }\n");
+            try self.write("        /* Cancels an active loan: returns it unpublished. */\n");
+            try self.write("        void reset() noexcept;\n");
+            try self.write("    private:\n");
+            try self.print("        friend class {s}DataWriter;\n", .{class_name});
+            try self.write("        DDS_DataWriter writer_{};\n");
+            try self.print("        {s}Builder builder_{{}};\n", .{cpp_qname});
+            try self.write("        DDS_OctetSeq payload_{};\n");
+            try self.write("        ZidlCdrWriter w_{};\n");
+            try self.write("        std::array<uint8_t, 16> hash_{};\n");
+            try self.write("        bool active_ = false;\n");
+            try self.write("    };\n");
+            try self.write("    /* Takes a write loan of the builder's size and serializes the builder into\n");
+            try self.write("       it, in out (reset first): fill its reservations through out.builder(),\n");
+            try self.write("       then publish_builder. The key hash is taken from the builder now. A bound\n");
+            try self.write("       exceeded is BAD_PARAMETER; on any failure out is inactive. */\n");
+            try self.print("    DDS_ReturnCode_t loan_builder({s}Builder builder, BuilderLoan& out);\n", .{cpp_qname});
+            try self.write("    /* Commits the reservations and publishes the sample (ALIVE). Ends the loan\n");
+            try self.write("       whatever it returns; PRECONDITION_NOT_MET if this writer has no such loan. */\n");
+            try self.write("    DDS_ReturnCode_t publish_builder(BuilderLoan& loan);\n");
+            try self.write("    /* Ends the loan unpublished. */\n");
+            try self.write("    DDS_ReturnCode_t cancel_builder(BuilderLoan& loan);\n");
+        }
         try self.write("private:\n");
         try self.write("    DDS_DataWriter writer_;\n");
         try self.write("    int xcdr_version_;\n");
@@ -775,7 +828,58 @@ const Generator = struct {
         try self.print("\n    static {s} default_value() {{ return {s}{{}}; }}\n", .{ s.name, s.name });
         try self.print("}}; // struct {s}\n\n", .{s.name});
         try self.emitVerbatimForPlacement(s.annotations.raw, "after-declaration");
-        if (viewsEnabledCpp(self.opts)) try self.emitStructView(s);
+        if (viewsEnabledCpp(self.opts)) {
+            try self.emitStructView(s);
+            try self.emitStructBuilder(s);
+        }
+    }
+
+    /// `{Name}Builder`, the struct as written in place in a write loan
+    /// (zzdds's docs/design/loaned-builders.md). It mirrors the view: a
+    /// member the view decodes in place is reserved, borrowed or nested here,
+    /// and key members are always as declared. A builder of a derived struct
+    /// derives from its base's builder.
+    fn emitStructBuilder(self: *Generator, s: *const ir.Struct) !void {
+        try self.write("// This struct written in place: primitive sequences and arrays are\n");
+        try self.write("// reservations to fill once serialized (set a sequence's count with\n");
+        try self.write("// resize), strings are borrowed and copied in, and nested structs are\n");
+        try self.write("// builders. Key members, and the other members, are as in the struct.\n");
+        try self.print("struct {s}Builder", .{s.name});
+        if (s.base) |base| try self.print(" : ::{s}Builder", .{ir.typeDeclQualifiedName(base)});
+        try self.write(" {\n");
+        for (s.members) |m| {
+            const optional = m.annotations.is_optional;
+            const kind = if (m.annotations.is_key) .owned else cdr_skip.viewKind(m.type_ref, m.dimensions);
+            switch (kind) {
+                .owned => try self.emitMemberDecl(m.type_ref, m.name, m.dimensions, optional, memberDefaultCpp(m), "    "),
+                .primitives => {
+                    const elem = if (m.dimensions.len > 0) m.type_ref else cdr_skip.resolveAlias(m.type_ref).sequence.element.*;
+                    const t = baseToCppType(cdr_skip.bulkBase(elem).?);
+                    if (optional) {
+                        try self.print("    std::optional<::zidl::PrimitivesReservation<{s}>> {s}{{}};\n", .{ t, m.name });
+                    } else {
+                        try self.print("    ::zidl::PrimitivesReservation<{s}> {s}{{}};\n", .{ t, m.name });
+                    }
+                },
+                .string => {
+                    const initial: []u8 = if (m.annotations.default_value) |dv|
+                        try self.formatDefaultValueCpp(dv, m.type_ref)
+                    else
+                        try self.alloc.dupe(u8, "");
+                    defer self.alloc.free(initial);
+                    try self.print("    {s}{s}{s} {s}{{{s}}};\n", .{ if (optional) "std::optional<" else "", "std::string_view", if (optional) ">" else "", m.name, initial });
+                },
+                .struct_view => {
+                    const nested = cdr_skip.viewStructQname(m.type_ref);
+                    if (optional) {
+                        try self.print("    std::optional<::{s}Builder> {s}{{}};\n", .{ nested, m.name });
+                    } else {
+                        try self.print("    ::{s}Builder {s}{{}};\n", .{ nested, m.name });
+                    }
+                },
+            }
+        }
+        try self.print("}}; // struct {s}Builder\n\n", .{s.name});
     }
 
     /// `{Name}View`, the struct decoded in place (`cdr_skip.viewKind`). A
@@ -1783,6 +1887,10 @@ const CdrGenerator = struct {
     wire_key: bool = false,
     /// Inherited fields are read through the base's view type.
     view_owner: bool = false,
+    /// Serializing a builder type: members are written as the builder has
+    /// them (`emitStructMemberWrite`), and a base type's fields are reached
+    /// through its builder.
+    builder_owner: bool = false,
     alloc: std.mem.Allocator,
     opts: interface.Options,
     out: *std.ArrayList(u8),
@@ -1955,22 +2063,14 @@ const CdrGenerator = struct {
                 if (lcForCppTypeRef(m.type_ref, m.dimensions)) |lc| {
                     try self.printI("_rc = zidl_cdr_write_emheader(_w, {d}, {d}, {d});\n", .{ member_id, mu, lc });
                     try self.writeI("if (_rc) return _rc;\n");
-                    if (m.dimensions.len > 0) {
-                        try self.emitWriteArray(m.type_ref, deref, m.dimensions, 0);
-                    } else {
-                        try self.emitWriteForTypeRef(m.type_ref, m.name, deref);
-                    }
+                    try self.emitStructMemberWrite(m, deref);
                 } else {
                     try self.printI("{{ size_t _em{d} = 0, _es{d} = 0;\n", .{ idx, idx });
                     self.indent_depth += 1;
                     try self.printI("_rc = zidl_cdr_reserve_emheader(_w, {d}, {d}, &_em{d});\n", .{ member_id, mu, idx });
                     try self.writeI("if (_rc) return _rc;\n");
                     try self.printI("_es{d} = _w->len;\n", .{idx});
-                    if (m.dimensions.len > 0) {
-                        try self.emitWriteArray(m.type_ref, deref, m.dimensions, 0);
-                    } else {
-                        try self.emitWriteForTypeRef(m.type_ref, m.name, deref);
-                    }
+                    try self.emitStructMemberWrite(m, deref);
                     try self.printI("_rc = zidl_cdr_patch_emheader_checked(_w, _em{d}, _es{d}); if (_rc) return _rc; }}\n", .{ idx, idx });
                     self.indent_depth -= 1;
                 }
@@ -1985,22 +2085,14 @@ const CdrGenerator = struct {
             if (lcForCppTypeRef(m.type_ref, m.dimensions)) |lc| {
                 try self.printI("_rc = zidl_cdr_write_emheader(_w, {d}, {d}, {d});\n", .{ member_id, mu, lc });
                 try self.writeI("if (_rc) return _rc;\n");
-                if (m.dimensions.len > 0) {
-                    try self.emitWriteArray(m.type_ref, access, m.dimensions, 0);
-                } else {
-                    try self.emitWriteForTypeRef(m.type_ref, m.name, access);
-                }
+                try self.emitStructMemberWrite(m, access);
             } else {
                 try self.printI("{{ size_t _em{d} = 0, _es{d} = 0;\n", .{ idx, idx });
                 self.indent_depth += 1;
                 try self.printI("_rc = zidl_cdr_reserve_emheader(_w, {d}, {d}, &_em{d});\n", .{ member_id, mu, idx });
                 try self.writeI("if (_rc) return _rc;\n");
                 try self.printI("_es{d} = _w->len;\n", .{idx});
-                if (m.dimensions.len > 0) {
-                    try self.emitWriteArray(m.type_ref, access, m.dimensions, 0);
-                } else {
-                    try self.emitWriteForTypeRef(m.type_ref, m.name, access);
-                }
+                try self.emitStructMemberWrite(m, access);
                 try self.printI("_rc = zidl_cdr_patch_emheader_checked(_w, _em{d}, _es{d}); if (_rc) return _rc; }}\n", .{ idx, idx });
                 self.indent_depth -= 1;
             }
@@ -2016,7 +2108,9 @@ const CdrGenerator = struct {
             try self.writeI("{\n");
             self.indent_depth += 1;
         }
-        try self.printI("auto *_base_value = static_cast<{s}::{s}{s} *>(_v);\n", .{ if (read_only) "const " else "", field.owner_name, if (self.view_owner) "View" else "" });
+        const qualifier: []const u8 = if (read_only and !self.builder_owner) "const " else "";
+        const suffix: []const u8 = if (self.view_owner) "View" else if (self.builder_owner) "Builder" else "";
+        try self.printI("auto *_base_value = static_cast<{s}::{s}{s} *>(_v);\n", .{ qualifier, field.owner_name, suffix });
         try self.writeI("auto *_v = _base_value;\n");
     }
 
@@ -2031,23 +2125,7 @@ const CdrGenerator = struct {
         const id = m.annotations.memberId(@intCast(field.index));
         const owner = try std.fmt.allocPrint(self.alloc, "::{s}", .{field.owner_name});
         defer self.alloc.free(owner);
-        const access = try std.fmt.allocPrint(self.alloc, "(*_v->{s})", .{m.name});
-        defer self.alloc.free(access);
-        try self.print("static int {s}_optional_write_value_{d}{s}(ZidlCdrWriter *_w, const {s} *_v) {{\n", .{ c_name, id, suffix, owner });
-        try self.writeI("int _rc = 0; (void)_rc;\n");
-        if (m.dimensions.len > 0) try self.emitWriteArray(m.type_ref, access, m.dimensions, 0) else try self.emitWriteForTypeRef(m.type_ref, m.name, access);
-        try self.writeI("return 0;\n");
-        try self.write("}\n\n");
-        try self.print("static int {s}_optional_write_{d}{s}(ZidlCdrWriter *_w, const {s} *_v) {{\n", .{ c_name, id, suffix, owner });
-        try self.writeI("ZidlCdrOptionalWrite _scope;\n");
-        try self.printI("bool _present = _v->{s}.has_value();\n", .{m.name});
-        try self.printI("int _rc = zidl_cdr_begin_optional_write(_w, {d}, {d}, _present, &_scope);\n", .{ id, @intFromBool(m.annotations.must_understand) });
-        try self.writeI("if (_rc) return _rc;\n");
-        try self.writeI("struct _restore { ZidlCdrWriter *w; const ZidlCdrOptionalWrite *s; ~_restore() { zidl_cdr_cancel_optional_write(w, s); } } _guard{_w, &_scope};\n");
-        try self.printI("if (_present) _rc = {s}_optional_write_value_{d}{s}(_w, _v);\n", .{ c_name, id, suffix });
-        try self.writeI("if (_rc) { zidl_cdr_cancel_optional_write(_w, &_scope); return _rc; }\n");
-        try self.writeI("return zidl_cdr_end_optional_write(_w, &_scope);\n");
-        try self.write("}\n\n");
+        try self.emitOptionalWriteFns(c_name, suffix, field);
         try self.print("static int {s}_optional_read_value_{d}{s}(ZidlCdrReader *_r, {s} *_v) {{\n", .{ c_name, id, suffix, owner });
         try self.writeI("int _rc = 0; (void)_rc;\n");
         try self.emitReadPresentMember(m);
@@ -2063,6 +2141,130 @@ const CdrGenerator = struct {
 
         try self.writeI("return _rc;\n");
         try self.write("}\n\n");
+    }
+
+    /// `_optional_write_value_{id}{suffix}` and `_optional_write_{id}{suffix}`
+    /// for an optional member of a non-mutable struct, or of its builder.
+    fn emitOptionalWriteFns(self: *CdrGenerator, c_name: []const u8, suffix: []const u8, field: canonical.Field) !void {
+        const m = field.member.*;
+        const id = m.annotations.memberId(@intCast(field.index));
+        const owner_type = if (self.builder_owner)
+            try std.fmt.allocPrint(self.alloc, "::{s}Builder", .{field.owner_name})
+        else
+            try std.fmt.allocPrint(self.alloc, "const ::{s}", .{field.owner_name});
+        defer self.alloc.free(owner_type);
+        const access = try std.fmt.allocPrint(self.alloc, "(*_v->{s})", .{m.name});
+        defer self.alloc.free(access);
+        try self.print("static int {s}_optional_write_value_{d}{s}(ZidlCdrWriter *_w, {s} *_v) {{\n", .{ c_name, id, suffix, owner_type });
+        try self.writeI("int _rc = 0; (void)_rc;\n");
+        try self.emitStructMemberWrite(m, access);
+        try self.writeI("return 0;\n");
+        try self.write("}\n\n");
+        try self.print("static int {s}_optional_write_{d}{s}(ZidlCdrWriter *_w, {s} *_v) {{\n", .{ c_name, id, suffix, owner_type });
+        try self.writeI("ZidlCdrOptionalWrite _scope;\n");
+        try self.printI("bool _present = _v->{s}.has_value();\n", .{m.name});
+        try self.printI("int _rc = zidl_cdr_begin_optional_write(_w, {d}, {d}, _present, &_scope);\n", .{ id, @intFromBool(m.annotations.must_understand) });
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.writeI("struct _restore { ZidlCdrWriter *w; const ZidlCdrOptionalWrite *s; ~_restore() { zidl_cdr_cancel_optional_write(w, s); } } _guard{_w, &_scope};\n");
+        try self.printI("if (_present) _rc = {s}_optional_write_value_{d}{s}(_w, _v);\n", .{ c_name, id, suffix });
+        try self.writeI("if (_rc) { zidl_cdr_cancel_optional_write(_w, &_scope); return _rc; }\n");
+        try self.writeI("return zidl_cdr_end_optional_write(_w, &_scope);\n");
+        try self.write("}\n\n");
+    }
+
+    /// Writes member `m` at `access`: as the struct has it, or as its builder
+    /// has it (`builder_owner`), where a key member is still as declared.
+    fn emitStructMemberWrite(self: *CdrGenerator, m: ir.StructMember, access: []const u8) !void {
+        const kind = if (self.builder_owner and !m.annotations.is_key) cdr_skip.viewKind(m.type_ref, m.dimensions) else .owned;
+        switch (kind) {
+            .owned => if (m.dimensions.len > 0) {
+                try self.emitWriteArray(m.type_ref, access, m.dimensions, 0);
+            } else {
+                try self.emitWriteForTypeRef(m.type_ref, m.name, access);
+            },
+            // Padded and counted as written elements would be; the elements
+            // are left to fill. XCDR2 gives a primitive collection no DHEADER.
+            .primitives => if (m.dimensions.len > 0) {
+                var total: u64 = 1;
+                for (m.dimensions) |d| total *= d;
+                try self.printI("_rc = {s}.reserve(_w, {d}u);\n", .{ access, total });
+                try self.writeI("if (_rc) return _rc;\n");
+            } else {
+                if (cdr_skip.resolveAlias(m.type_ref).sequence.bound) |n| try self.printI("if ({s}.size() > {d}u) return ZIDL_CDR_INVALID;\n", .{ access, n });
+                try self.printI("if ((uint64_t){s}.size() > UINT32_MAX) return ZIDL_CDR_OVERFLOW;\n", .{access});
+                try self.printI("_rc = zidl_cdr_write_u32(_w, (uint32_t){s}.size());\n", .{access});
+                try self.writeI("if (_rc) return _rc;\n");
+                try self.printI("_rc = {s}.reserve(_w, {s}.size());\n", .{ access, access });
+                try self.writeI("if (_rc) return _rc;\n");
+            },
+            .string => {
+                if (cdr_skip.resolveAlias(m.type_ref).string) |n| try self.printI("if ({s}.size() > {d}u) return ZIDL_CDR_INVALID;\n", .{ access, n });
+                try self.printI("if ((uint64_t){s}.size() >= UINT32_MAX) return ZIDL_CDR_OVERFLOW;\n", .{access});
+                try self.printI("_rc = zidl_cdr_write_string(_w, {s}.data() ? {s}.data() : \"\", (uint32_t){s}.size());\n", .{ access, access, access });
+                try self.writeI("if (_rc) return _rc;\n");
+            },
+            .struct_view => {
+                const nested = try self.prefixedCName(cdr_skip.viewStructQname(m.type_ref));
+                defer self.alloc.free(nested);
+                try self.printI("_rc = {s}_serialize_builder(_w, &{s});\n", .{ nested, access });
+                try self.writeI("if (_rc) return _rc;\n");
+            },
+        }
+    }
+
+    /// `{Type}_serialize_builder`, `{Type}_commit_builder` and, for a keyed
+    /// struct, `{Type}Builder_serialize_key_holder` for the builder type the
+    /// header declares (`Generator.emitStructBuilder`).
+    fn emitStructBuilderFns(self: *CdrGenerator, s: *const ir.Struct, c_name: []const u8, cpp_qname: []const u8) !void {
+        const previous = self.builder_owner;
+        self.builder_owner = true;
+        defer self.builder_owner = previous;
+        const builder_type = try std.fmt.allocPrint(self.alloc, "{s}Builder", .{cpp_qname});
+        defer self.alloc.free(builder_type);
+        if (s.annotations.extensibility != .mutable) {
+            const wire_fields = try canonical.wireFields(self.alloc, s, false);
+            defer self.alloc.free(wire_fields);
+            for (wire_fields) |field| {
+                if (field.member.annotations.is_optional) try self.emitOptionalWriteFns(c_name, "_builder", field);
+            }
+        }
+        try self.emitStructSerializeFn(s, c_name, builder_type, "_builder", false);
+
+        try self.print("int {s}_commit_builder(ZidlCdrWriter *_w, {s} *_v) {{\n", .{ c_name, builder_type });
+        try self.writeI("int _rc = ZIDL_CDR_OK; (void)_rc; (void)_w; (void)_v;\n");
+        if (s.base) |base| {
+            const base_c = try self.prefixedCName(ir.typeDeclQualifiedName(base));
+            defer self.alloc.free(base_c);
+            try self.printI("_rc = {s}_commit_builder(_w, static_cast<::{s}Builder *>(_v));\n", .{ base_c, ir.typeDeclQualifiedName(base) });
+            try self.writeI("if (_rc) return _rc;\n");
+        }
+        for (s.members) |m| {
+            if (m.annotations.is_key) continue;
+            const kind = cdr_skip.viewKind(m.type_ref, m.dimensions);
+            if (kind != .primitives and kind != .struct_view) continue;
+            const optional = m.annotations.is_optional;
+            const guard = if (optional)
+                try std.fmt.allocPrint(self.alloc, "if (_v->{s}.has_value()) ", .{m.name})
+            else
+                try self.alloc.dupe(u8, "");
+            defer self.alloc.free(guard);
+            if (kind == .primitives) {
+                try self.printI("{s}_rc = _v->{s}{s}commit(_w);\n", .{ guard, m.name, if (optional) "->" else "." });
+            } else {
+                const nested = try self.prefixedCName(cdr_skip.viewStructQname(m.type_ref));
+                defer self.alloc.free(nested);
+                try self.printI("{s}_rc = {s}_commit_builder(_w, &{s}_v->{s});\n", .{ guard, nested, if (optional) "*" else "", m.name });
+            }
+            try self.writeI("if (_rc) return _rc;\n");
+        }
+        try self.writeI("return ZIDL_CDR_OK;\n");
+        try self.write("}\n\n");
+
+        if (structHasKeyCpp(s)) {
+            const name = try std.fmt.allocPrint(self.alloc, "{s}Builder", .{c_name});
+            defer self.alloc.free(name);
+            try canonical.emitCStruct(self, s, name, builder_type, true, true, "Builder");
+        }
     }
 
     /// Reads member `m` into `lval` as its view type has it (`cdr_skip.viewKind`).
@@ -2245,6 +2447,52 @@ const CdrGenerator = struct {
         try self.write("}\n\n");
     }
 
+    /// `{Type}_serialize{suffix}(ZidlCdrWriter *, {value_type} *)`: the
+    /// struct's, its key projection's, or (`builder_owner`) its builder's.
+    fn emitStructSerializeFn(self: *CdrGenerator, s: *const ir.Struct, c_name: []const u8, value_type: []const u8, suffix: []const u8, projection: bool) !void {
+        const mutable = s.annotations.extensibility == .mutable;
+        const appendable = s.annotations.extensibility != .final;
+        const wire_fields = try canonical.wireFields(self.alloc, s, projection);
+        defer self.alloc.free(wire_fields);
+        const previous = self.wire_key;
+        self.wire_key = projection;
+        defer self.wire_key = previous;
+        try self.print("int {s}_serialize{s}(ZidlCdrWriter *_w, {s} *_v) {{\n", .{ c_name, suffix, value_type });
+        try self.writeI("int _rc = ZIDL_CDR_OK; (void)_rc;\n");
+        if (mutable) {
+            try self.emitMutableStructWrite(s, projection);
+            try self.writeI("return ZIDL_CDR_OK;\n");
+            try self.write("}\n\n");
+            return;
+        }
+        if (appendable) {
+            try self.writeI("size_t _dh;\n");
+            try self.writeI("_rc = zidl_cdr_reserve_dheader_maybe(_w, &_dh);\n");
+            try self.writeI("if (_rc) return _rc;\n");
+        }
+
+        for (wire_fields) |field| {
+            const m = field.member.*;
+            try self.openWireField(field, true, true);
+            if (m.annotations.is_optional) {
+                try self.printI("_rc = {s}_optional_write_{d}{s}(_w, _v);\n", .{ c_name, m.annotations.memberId(@intCast(field.index)), suffix });
+                try self.writeI("if (_rc) return _rc;\n");
+                try self.closeWireField(field, true);
+                continue;
+            }
+            const access = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
+            defer self.alloc.free(access);
+            try self.emitStructMemberWrite(m, access);
+
+            try self.closeWireField(field, true);
+        }
+        if (appendable) {
+            try self.writeI("if (_dh != (size_t)-1) { _rc = zidl_cdr_patch_dheader_checked(_w, _dh); if (_rc) return _rc; }\n");
+        }
+        try self.writeI("return ZIDL_CDR_OK;\n");
+        try self.write("}\n\n");
+    }
+
     fn emitStructValueFns(self: *CdrGenerator, s: *const ir.Struct, c_name: []const u8, cpp_qname: []const u8, projection: bool) !void {
         const mutable = s.annotations.extensibility == .mutable;
         const appendable = s.annotations.extensibility != .final;
@@ -2257,45 +2505,10 @@ const CdrGenerator = struct {
         if (!mutable) for (wire_fields) |field| {
             if (field.member.annotations.is_optional) try self.emitOptionalValueFns(c_name, suffix, field);
         };
-        // ── serialize ────────────────────────────────────────────────────────
-
-        try self.print("int {s}_serialize{s}(ZidlCdrWriter *_w, const {s} *_v) {{\n", .{ c_name, suffix, cpp_qname });
-        try self.writeI("int _rc = ZIDL_CDR_OK; (void)_rc;\n");
-        if (mutable) {
-            try self.emitMutableStructWrite(s, projection);
-            try self.writeI("return ZIDL_CDR_OK;\n");
-            try self.write("}\n\n");
-        } else {
-            if (appendable) {
-                try self.writeI("size_t _dh;\n");
-                try self.writeI("_rc = zidl_cdr_reserve_dheader_maybe(_w, &_dh);\n");
-                try self.writeI("if (_rc) return _rc;\n");
-            }
-
-            for (wire_fields) |field| {
-                const m = field.member.*;
-                try self.openWireField(field, true, true);
-                if (m.annotations.is_optional) {
-                    try self.printI("_rc = {s}_optional_write_{d}{s}(_w, _v);\n", .{ c_name, m.annotations.memberId(@intCast(field.index)), suffix });
-                    try self.writeI("if (_rc) return _rc;\n");
-                    try self.closeWireField(field, true);
-                    continue;
-                }
-                const access = try std.fmt.allocPrint(self.alloc, "_v->{s}", .{m.name});
-                defer self.alloc.free(access);
-                if (m.dimensions.len > 0) {
-                    try self.emitWriteArray(m.type_ref, access, m.dimensions, 0);
-                } else {
-                    try self.emitWriteForTypeRef(m.type_ref, m.name, access);
-                }
-
-                try self.closeWireField(field, true);
-            }
-            if (appendable) {
-                try self.writeI("if (_dh != (size_t)-1) { _rc = zidl_cdr_patch_dheader_checked(_w, _dh); if (_rc) return _rc; }\n");
-            }
-            try self.writeI("return ZIDL_CDR_OK;\n");
-            try self.write("}\n\n");
+        {
+            const value_type = try std.fmt.allocPrint(self.alloc, "const {s}", .{cpp_qname});
+            defer self.alloc.free(value_type);
+            try self.emitStructSerializeFn(s, c_name, value_type, suffix, projection);
         }
 
         // ── deserialize ──────────────────────────────────────────────────────
@@ -2421,10 +2634,13 @@ const CdrGenerator = struct {
         const mutable = (ext == .mutable);
 
         const has_key = structHasKeyCpp(s);
-        try canonical.emitCStruct(self, s, c_name, cpp_qname, true, has_key);
+        try canonical.emitCStruct(self, s, c_name, cpp_qname, true, has_key, "");
 
         try self.emitStructValueFns(s, c_name, cpp_qname, false);
-        if (viewsEnabledCpp(self.opts)) try self.emitStructViewFns(s, c_name, cpp_qname);
+        if (viewsEnabledCpp(self.opts)) {
+            try self.emitStructViewFns(s, c_name, cpp_qname);
+            try self.emitStructBuilderFns(s, c_name, cpp_qname);
+        }
         try self.emitStructValueFns(s, c_name, cpp_qname, true);
         try cdr_skip.emitKeyValueSkip(self, s, c_name);
 
@@ -2810,6 +3026,90 @@ const CdrGenerator = struct {
         }
         try self.writeI("}\n");
         try self.write("#endif\n");
+    }
+
+    /// `loan_builder`, `publish_builder` and `cancel_builder`
+    /// (zzdds's docs/design/loaned-builders.md): count the builder, loan
+    /// exactly that, write it into the loan, and publish or return the loan.
+    fn emitBuilderWrappers(self: *CdrGenerator, s: *const ir.Struct, c_name: []const u8, cpp_qname: []const u8) !void {
+        const class_name = s.name;
+        // The key hash from the builder's key members, streamed as
+        // _compute_key_hash streams the struct's.
+        try self.print("static int {s}_builder_key_hash(const {s}Builder& _b, uint8_t *_hash) {{\n", .{ class_name, cpp_qname });
+        if (structHasKeyCpp(s)) {
+            try self.writeI("ZidlCdrKeyHash _h;\n");
+            try self.writeI("zidl_cdr_key_hash_init(&_h);\n");
+            try self.printI("int _rc = {s}Builder_serialize_key_holder(&_h.writer, &_b);\n", .{c_name});
+            try self.printI("if (!_rc) zidl_cdr_key_hash_finish(&_h, {s}, _hash);\n", .{if (try canonical.forceMd5(self.alloc, s)) "true" else "false"});
+            try self.writeI("return _rc;\n");
+        } else {
+            try self.writeI("(void)_b;\n");
+            try self.writeI("for (int _i = 0; _i < 16; ++_i) _hash[_i] = 0;\n");
+            try self.writeI("return ZIDL_CDR_OK;\n");
+        }
+        try self.write("}\n\n");
+
+        try self.print("static int {s}_builder_payload(ZidlCdrWriter *_w, {s}Builder *_b) {{\n", .{ class_name, cpp_qname });
+        try self.printI("int _rc = zidl_cdr_write_encap_kind(_w, {s});\n", .{encapKindC(s)});
+        try self.printI("if (!_rc) _rc = {s}_serialize_builder(_w, _b);\n", .{c_name});
+        try self.writeI("return _rc;\n");
+        try self.write("}\n\n");
+
+        try self.print("DDS_ReturnCode_t {s}DataWriter::loan_builder({s}Builder builder, BuilderLoan& out) {{\n", .{ class_name, cpp_qname });
+        try self.writeI("out.reset();\n");
+        try self.writeI("BuilderLoan _loan;\n");
+        try self.writeI("_loan.builder_ = std::move(builder);\n");
+        try self.printI("int _rc = {s}_builder_key_hash(_loan.builder_, _loan.hash_.data());\n", .{class_name});
+        try self.writeI("ZidlCdrWriter _cw;\n");
+        try self.writeI("zidl_cdr_writer_init_counting(&_cw, xcdr_version_);\n");
+        try self.printI("if (!_rc) _rc = {s}_builder_payload(&_cw, &_loan.builder_);\n", .{class_name});
+        // Nothing is loaned yet: a count or string over its bound, or an
+        // invalid key, is the caller's to fix.
+        try self.writeI("if (_rc) return _rc == ZIDL_CDR_INVALID ? (DDS_ReturnCode_t)DDS_RETCODE_BAD_PARAMETER : (DDS_ReturnCode_t)_rc;\n");
+        try self.writeI("if ((uint64_t)_cw.len > UINT32_MAX) return ZIDL_CDR_OVERFLOW;\n");
+        try self.writeI("_rc = DDS_DataWriter_loan_raw(writer_, (uint32_t)_cw.len, &_loan.payload_);\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        // From here _loan's destructor returns the loan on any failure.
+        try self.writeI("_loan.writer_ = writer_;\n");
+        try self.writeI("_loan.active_ = true;\n");
+        try self.writeI("zidl_cdr_writer_init_fixed(&_loan.w_, _loan.payload_._buffer, _loan.payload_._maximum, xcdr_version_);\n");
+        try self.printI("_rc = {s}_builder_payload(&_loan.w_, &_loan.builder_);\n", .{class_name});
+        // A builder changed between the passes is an error, not a torn write.
+        try self.writeI("if (!_rc && _loan.w_.len != _cw.len) _rc = ZIDL_CDR_INVALID;\n");
+        try self.writeI("if (_rc) return _rc;\n");
+        try self.writeI("_loan.payload_._length = (uint32_t)_cw.len;\n");
+        try self.writeI("out = std::move(_loan);\n");
+        try self.writeI("return DDS_RETCODE_OK;\n");
+        try self.write("}\n\n");
+
+        try self.print("DDS_ReturnCode_t {s}DataWriter::publish_builder(BuilderLoan& loan) {{\n", .{class_name});
+        try self.writeI("if (!loan.active_ || loan.writer_ != writer_) return DDS_RETCODE_PRECONDITION_NOT_MET;\n");
+        try self.writeI("loan.active_ = false;\n");
+        try self.printI("int _rc = {s}_commit_builder(&loan.w_, &loan.builder_);\n", .{c_name});
+        try self.writeI("if (_rc) {\n");
+        self.indent_depth += 1;
+        try self.writeI("DDS_DataWriter_return_loan_raw(writer_, &loan.payload_);\n");
+        try self.writeI("return _rc;\n");
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.writeI("DDS_OctetSeq _c_hash = { 16, 16, loan.hash_.data(), false };\n");
+        try self.writeI("return DDS_DataWriter_publish_loan_raw(writer_, &loan.payload_, &_c_hash, DDS_HANDLE_NIL, DDS_WriteKind_ALIVE_WRITE_KIND);\n");
+        try self.write("}\n\n");
+
+        try self.print("DDS_ReturnCode_t {s}DataWriter::cancel_builder(BuilderLoan& loan) {{\n", .{class_name});
+        try self.writeI("if (!loan.active_ || loan.writer_ != writer_) return DDS_RETCODE_PRECONDITION_NOT_MET;\n");
+        try self.writeI("loan.active_ = false;\n");
+        try self.writeI("return DDS_DataWriter_return_loan_raw(writer_, &loan.payload_);\n");
+        try self.write("}\n\n");
+
+        try self.print("void {s}DataWriter::BuilderLoan::reset() noexcept {{\n", .{class_name});
+        try self.writeI("if (active_) {\n");
+        self.indent_depth += 1;
+        try self.writeI("DDS_DataWriter_return_loan_raw(writer_, &payload_);\n");
+        try self.writeI("active_ = false;\n");
+        self.indent_depth -= 1;
+        try self.writeI("}\n");
+        try self.write("}\n\n");
     }
 
     fn emitStructZzddsWrappers(self: *CdrGenerator, s: *const ir.Struct, c_name: []const u8, cpp_qname: []const u8) !void {
@@ -3438,6 +3738,8 @@ const CdrGenerator = struct {
             self.indent_depth -= 1;
             try self.writeI("}\n");
             try self.write("}\n\n");
+
+            try self.emitBuilderWrappers(s, c_name, cpp_qname);
         }
 
         // A2: close namespace opened above
@@ -12395,6 +12697,97 @@ test "cpp_backend: take_view and ViewLoan in the zzdds wrappers" {
     try testing.expect(has(src.items, "if (!_rc) _rc = Frame_deserialize_view(&_r, &*_loan.view_);"));
     try testing.expect(has(src.items, "DDS_DataReader_return_loan_raw_failed(reader_, &_loan_payloads, &_c_no_hashes, &_loan_infos, &_failed);"));
     try testing.expect(has(src.items, "void FrameDataReader::ViewLoan::reset() noexcept {\n    view_.reset();"));
+}
+
+// ── Builder types (--generate-views) ──────────────────────────────────────────
+
+test "cpp_backend: builder members mirror the view, with keys as declared" {
+    var out = try testGenOpts(
+        \\module M { struct Inner { long id; };
+        \\struct Base { @key string id; sequence<long> stamps; };
+        \\struct S : Base { @key long k; sequence<double, 4> v; short grid[2][3]; string<5> name; Inner nested;
+        \\  sequence<boolean> flags; @optional sequence<octet> extra; @optional Inner maybe;
+        \\  @default("x") string d; @optional string o; }; };
+    , "s", .{ .generate_views = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    try testing.expect(has(s, "struct SBuilder : ::M::BaseBuilder {"));
+    try testing.expect(has(s, "struct BaseBuilder {\n    std::string id{};\n    ::zidl::PrimitivesReservation<int32_t> stamps{};"));
+    try testing.expect(has(s, "    int32_t k{};"));
+    try testing.expect(has(s, "    ::zidl::PrimitivesReservation<double> v{};"));
+    try testing.expect(has(s, "    ::zidl::PrimitivesReservation<int16_t> grid{};"));
+    try testing.expect(has(s, "    ::M::InnerBuilder nested{};"));
+    try testing.expect(has(generatedSection(s, "struct SBuilder"), "    std::vector<bool> flags{};"));
+    try testing.expect(has(s, "    std::optional<::zidl::PrimitivesReservation<uint8_t>> extra{};"));
+    try testing.expect(has(s, "    std::optional<::M::InnerBuilder> maybe{};"));
+    try testing.expect(has(generatedSection(s, "struct SBuilder"), "    std::string_view d{\"x\"};"));
+    try testing.expect(has(s, "int M_S_serialize_builder(ZidlCdrWriter *_w, ::M::SBuilder *_v);"));
+    try testing.expect(has(s, "int M_S_commit_builder(ZidlCdrWriter *_w, ::M::SBuilder *_v);"));
+    try testing.expect(has(s, "int M_SBuilder_serialize_key_holder(ZidlCdrWriter *_w, const ::M::SBuilder *_v);"));
+    try testing.expect(!has(s, "M_InnerBuilder_serialize_key_holder"));
+}
+
+test "cpp_backend: a builder reserves, borrows and nests, and commits each reservation" {
+    var out = try testGenCdrOpts(
+        \\struct Inner { long id; };
+        \\struct Base { @key string id; sequence<long> stamps; };
+        \\struct S : Base { sequence<double, 4> v; short grid[2][3]; string<5> name; Inner nested; @optional sequence<octet> extra; };
+    , "s", .{ .generate_views = true });
+    defer out.deinit(testing.allocator);
+    const s = out.items;
+    const ser = generatedSection(s, "int S_serialize_builder(ZidlCdrWriter *_w, ::SBuilder *_v) {");
+    try testing.expect(has(ser, "auto *_base_value = static_cast<::BaseBuilder *>(_v);"));
+    try testing.expect(has(ser, "if (_v->v.size() > 4u) return ZIDL_CDR_INVALID;"));
+    try testing.expect(has(ser, "_rc = zidl_cdr_write_u32(_w, (uint32_t)_v->v.size());"));
+    try testing.expect(has(ser, "_rc = _v->v.reserve(_w, _v->v.size());"));
+    try testing.expect(has(ser, "_rc = _v->grid.reserve(_w, 6u);"));
+    try testing.expect(has(ser, "if (_v->name.size() > 5u) return ZIDL_CDR_INVALID;"));
+    try testing.expect(has(ser, "_rc = zidl_cdr_write_string(_w, _v->name.data() ? _v->name.data() : \"\", (uint32_t)_v->name.size());"));
+    try testing.expect(has(ser, "_rc = Inner_serialize_builder(_w, &_v->nested);"));
+    try testing.expect(has(s, "static int S_optional_write_value_6_builder(ZidlCdrWriter *_w, ::SBuilder *_v) {"));
+    try testing.expect(has(s, "_rc = (*_v->extra).reserve(_w, (*_v->extra).size());"));
+    const commit = generatedSection(s, "int S_commit_builder(ZidlCdrWriter *_w, ::SBuilder *_v) {");
+    try testing.expect(has(commit, "_rc = Base_commit_builder(_w, static_cast<::BaseBuilder *>(_v));"));
+    try testing.expect(has(commit, "_rc = _v->v.commit(_w);"));
+    try testing.expect(has(commit, "_rc = Inner_commit_builder(_w, &_v->nested);"));
+    try testing.expect(has(commit, "if (_v->extra.has_value()) _rc = _v->extra->commit(_w);"));
+    try testing.expect(has(generatedSection(s, "int SBuilder_serialize_key_holder(ZidlCdrWriter *_w, const ::SBuilder *_v) {"), "static_cast<const ::BaseBuilder *>(_v)->id"));
+}
+
+test "cpp_backend: BuilderLoan, loan_builder, publish_builder and cancel_builder in the zzdds wrappers" {
+    var h = try testGenOpts("struct Frame { @key long id; sequence<float> v; };", "frame", .{ .generate_views = true, .generate_zzdds_wrappers = true });
+    defer h.deinit(testing.allocator);
+    try testing.expect(has(h.items, "    class BuilderLoan {"));
+    try testing.expect(has(h.items, "BuilderLoan(BuilderLoan&& other) noexcept(std::is_nothrow_move_constructible<::FrameBuilder>::value)"));
+    try testing.expect(has(h.items, "        ::FrameBuilder& builder() { return builder_; }"));
+    try testing.expect(has(h.items, "        friend class FrameDataWriter;"));
+    try testing.expect(has(h.items, "    DDS_ReturnCode_t loan_builder(::FrameBuilder builder, BuilderLoan& out);"));
+    try testing.expect(has(h.items, "    DDS_ReturnCode_t publish_builder(BuilderLoan& loan);"));
+    try testing.expect(has(h.items, "    DDS_ReturnCode_t cancel_builder(BuilderLoan& loan);"));
+    var src = try testGenCdrOpts("struct Frame { @key long id; sequence<float> v; };", "frame", .{ .generate_views = true, .generate_zzdds_wrappers = true });
+    defer src.deinit(testing.allocator);
+    const s = src.items;
+    try testing.expect(has(generatedSection(s, "static int Frame_builder_key_hash(const ::FrameBuilder& _b, uint8_t *_hash) {"), "int _rc = FrameBuilder_serialize_key_holder(&_h.writer, &_b);"));
+    const loan = generatedSection(s, "DDS_ReturnCode_t FrameDataWriter::loan_builder(::FrameBuilder builder, BuilderLoan& out) {");
+    try testing.expect(has(loan, "_loan.builder_ = std::move(builder);"));
+    try testing.expect(has(loan, "if (_rc) return _rc == ZIDL_CDR_INVALID ? (DDS_ReturnCode_t)DDS_RETCODE_BAD_PARAMETER : (DDS_ReturnCode_t)_rc;"));
+    try testing.expect(has(loan, "_rc = DDS_DataWriter_loan_raw(writer_, (uint32_t)_cw.len, &_loan.payload_);"));
+    try testing.expect(has(loan, "if (!_rc && _loan.w_.len != _cw.len) _rc = ZIDL_CDR_INVALID;"));
+    try testing.expect(has(loan, "out = std::move(_loan);"));
+    const publish = generatedSection(s, "DDS_ReturnCode_t FrameDataWriter::publish_builder(BuilderLoan& loan) {");
+    try testing.expect(has(publish, "int _rc = Frame_commit_builder(&loan.w_, &loan.builder_);"));
+    try testing.expect(has(publish, "return DDS_DataWriter_publish_loan_raw(writer_, &loan.payload_, &_c_hash, DDS_HANDLE_NIL, DDS_WriteKind_ALIVE_WRITE_KIND);"));
+    try testing.expect(has(s, "void FrameDataWriter::BuilderLoan::reset() noexcept {\n    if (active_) {\n        DDS_DataWriter_return_loan_raw(writer_, &payload_);"));
+    var plain = try testGenOpts("struct Frame { @key long id; sequence<float> v; };", "frame", .{ .generate_zzdds_wrappers = true });
+    defer plain.deinit(testing.allocator);
+    try testing.expect(!has(plain.items, "BuilderLoan"));
+}
+
+/// The generated text from `header` through the next top-level `}`.
+fn generatedSection(s: []const u8, header: []const u8) []const u8 {
+    const start = std.mem.indexOf(u8, s, header) orelse return "";
+    const end = std.mem.indexOfPos(u8, s, start, "\n}") orelse return s[start..];
+    return s[start .. end + 2];
 }
 
 test "cpp_backend: wide string units, and their allocation failure" {

@@ -632,6 +632,45 @@ test "reservations fill in place, and counting writers have nothing to fill" {
     try testing.expectEqual(@as(usize, 24), c.len);
 }
 
+test "a reservation bound for a builder fills in place and commits once" {
+    var out: [32]u8 = undefined;
+    inline for (.{ ByteOrder.little, ByteOrder.big }) |order| {
+        var w = RuntimeWriter.initFixed(&out, .xcdr2, order);
+        try w.writeU8(1);
+        var rp: primitives.ReservedPrimitives = .{ .count = 2 };
+        const res = try w.reservePrimitives(2, rp.count);
+        rp.bind(w.reservedBytes(res), res);
+        try testing.expect(rp.asNative(u32) == null);
+        const elems = rp.asNative(u16).?;
+        try testing.expectEqual(@as(usize, 2), elems.len);
+        elems[0] = 0x0102;
+        elems[1] = 0x0304;
+        rp.commit();
+        rp.commit(); // once: a repeat changes nothing
+        const expected: []const u8 = if (order == .little) &.{ 1, 0, 2, 1, 4, 3 } else &.{ 1, 0, 1, 2, 3, 4 };
+        try testing.expectEqualSlices(u8, expected, w.bytes());
+
+        var w2 = RuntimeWriter.initFixed(&out, .xcdr2, order);
+        var rp2: primitives.ReservedPrimitives = .{ .count = 2 };
+        const res2 = try w2.reservePrimitives(4, rp2.count);
+        rp2.bind(w2.reservedBytes(res2), res2);
+        try testing.expectError(error.LengthMismatch, rp2.copyFrom(u32, &[_]u32{1}));
+        try testing.expectError(error.InvalidPrimitiveSize, rp2.copyFrom(u16, &[_]u16{ 1, 2 }));
+        try rp2.copyFrom(u32, &[_]u32{ 0x01020304, 0x05060708 });
+        rp2.commit();
+        const expected2: []const u8 = if (order == .little) &.{ 4, 3, 2, 1, 8, 7, 6, 5 } else &.{ 1, 2, 3, 4, 5, 6, 7, 8 };
+        try testing.expectEqualSlices(u8, expected2, w2.bytes());
+    }
+
+    // Counting: nothing to fill.
+    var c = Writer(.{ .version = .xcdr2, .order = .little, .output = .counting }).initCounting(.xcdr2, .little);
+    var rp: primitives.ReservedPrimitives = .{ .count = 3 };
+    const res = try c.reservePrimitives(8, rp.count);
+    rp.bind(c.reservedBytes(res), res);
+    try testing.expectEqual(@as(usize, 0), rp.asNative(u64).?.len);
+    try testing.expectEqual(@as(usize, 3), rp.count);
+}
+
 test "parameter lists are written with padded lengths and a sentinel" {
     var out: [64]u8 = undefined;
     var w = Writer(.{ .version = .xcdr1, .order = .little, .output = .fixed }).initFixed(&out, .xcdr1, .little);

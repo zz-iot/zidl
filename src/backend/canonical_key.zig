@@ -246,7 +246,9 @@ pub fn forceMd5(alloc: std.mem.Allocator, s: *const ir.Struct) !bool {
 
 /// Common C/C++ key-holder emitter. Language mappings supply their existing
 /// primitive/container accessors; this path never emits aggregate headers.
-pub fn emitCStruct(self: anytype, s: *const ir.Struct, name: []const u8, value_type: []const u8, comptime cpp: bool, has_key: bool) !void {
+/// `owner_suffix` names a base type's counterpart (`Builder` for a builder's
+/// key holder), through which a C++ base member is reached.
+pub fn emitCStruct(self: anytype, s: *const ir.Struct, name: []const u8, value_type: []const u8, comptime cpp: bool, has_key: bool, owner_suffix: []const u8) !void {
     if (has_key) _ = try forceMd5(self.alloc, s);
     try self.print("int {s}_serialize_key_holder(ZidlCdrWriter *_w, const {s} *_v) {{\n", .{ name, value_type });
     try self.writeI("(void)_w; (void)_v;\n");
@@ -264,7 +266,7 @@ pub fn emitCStruct(self: anytype, s: *const ir.Struct, name: []const u8, value_t
                 break :blk if (field.base_depth == 0)
                     try std.fmt.allocPrint(self.alloc, "_v->{s}", .{field.member.name})
                 else
-                    try std.fmt.allocPrint(self.alloc, "static_cast<const ::{s} *>(_v)->{s}", .{ field.owner_name, field.member.name });
+                    try std.fmt.allocPrint(self.alloc, "static_cast<const ::{s}{s} *>(_v)->{s}", .{ field.owner_name, owner_suffix, field.member.name });
             } else blk: {
                 var path = std.ArrayList(u8).empty;
                 defer path.deinit(self.alloc);

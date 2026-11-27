@@ -622,6 +622,58 @@ sample without valid data has an empty view; its key comes from
 `get_key_value`. A sample whose view does not decode is ended failed, for the
 reader's policy, as `take` does.
 
+### Builder types
+
+`--generate-views` also generates a **builder type** per struct, `Builder`,
+the write side of a view: a sample whose large members are filled in place in
+the writer's buffer rather than copied out of a struct (zzdds'
+`docs/design/loaned-builders.md`). It matches the C and C++ builders member by
+member.
+
+```zig
+pub const Foo = struct {
+    pub const Builder = struct {
+        // members, as below
+        /// Serializes the builder, reserving its primitive members.
+        pub fn serialize(writer: anytype, value: *@This()) !void { ... }
+        /// Puts every present reservation's elements in the writer's byte order.
+        pub fn commit(self: *@This()) void { ... }
+        pub fn computeKeyHash(self: *const @This()) ![16]u8 { ... }
+    };
+};
+```
+
+| Member, as in the view | In the builder |
+|---|---|
+| Primitive sequence or array | `zidl_cdr.cdr_primitives.ReservedPrimitives`. Set a sequence's `count` (checked against its bound); an array reserves its declared length |
+| String | `[]const u8`, borrowed and copied in; a bounded string's bound is checked |
+| Struct | Its `Builder` |
+| Anything else | As in the struct |
+| Any `@key` member | As in the struct, so `computeKeyHash` needs only the builder |
+
+`serialize` works with any writer. In a fixed writer, it binds each
+reservation to where its elements go (`bytes`); a counting writer only counts
+them. The elements are not zeroed: fill every one in host byte order, through
+`asNative(T)` (a `[]align(1) T`, or null when `T` is not the element width)
+or `copyFrom(T, values)`. `commit` puts them in the writer's byte order. Base
+types (`_base: Base.Builder`), `@optional` members (`?` of the builder member;
+an absent one reserves nothing) and all extensibilities are supported.
+
+With `--generate-zzdds-wrappers`, a typed writer also gets `loan_builder`,
+which hashes the key, counts the builder, takes a write loan of exactly that
+size (`loanRaw`) and serializes the builder into it, returning a
+`BuilderLoan`. Fill the reservations through its `builder`; `publish` commits
+and publishes the sample (`ALIVE`), ending the loan whatever it returns, and
+`deinit` returns the loan unless it was published, so `defer loan.deinit()`
+is always safe. A bound exceeded fails before any loan.
+
+```zig
+var loan = try writer.loan_builder(.{ .id = 7, .points = .{ .count = n } });
+defer loan.deinit();
+fillPoints(loan.builder.points.asNative(f32).?);
+try loan.publish();
+```
+
 ---
 
 ## TypeObject Constants
