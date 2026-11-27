@@ -20,7 +20,10 @@ instances and one run-time instance.** Encoding, byte order and output mode are
 each fixed at compile time or chosen at run time. A compile-time `FastSet` at
 each use selects the fast set (default XCDR1-LE and XCDR2-LE); the run-time instance is always
 built. Output is counting or fixed-buffer only: callers count, then write into
-an exact-size buffer, and treat a length mismatch as an error. See
+an exact-size buffer, and treat a length mismatch as an error. The C ABI
+exposes only the run-time instance: per-instance C entry points measured 10–15%
+faster than a run-time ABI that stores in Zig, not enough for a copy of every
+generated C/C++ serializer per instance. See
 [Specialized CDR instances](design/cdr-specialized-instances.md) for the
 measurements and rationale.
 

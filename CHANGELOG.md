@@ -18,6 +18,9 @@ Versions are the `vX.Y.Z-zig.0.16.0` release tags.
 
 ## Unreleased
 
+- C ABI: writes store their bytes in Zig rather than calling back into C, and a
+  counting writer only does the alignment arithmetic. Count-then-fixed through the C
+  ABI takes about half as long (bench message: about 2,100 ns, from 4,300).
 - C ABI: `ZidlCdrWriter` has no growable output (`zidl_cdr_writer_init` and
   `zidl_cdr_writer_deinit` are removed): use `zidl_cdr_writer_init_fixed`,
   `zidl_cdr_writer_init_counting`, or `zidl_cdr_serialize_alloc` (count, allocate
